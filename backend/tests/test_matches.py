@@ -31,3 +31,117 @@ def test_start_match(test_client, auth_headers):
     response = test_client.post(f"/api/matches/{match_id}/start", headers=auth_headers)
     assert response.status_code == 200
     assert response.json()["status"] == "active"
+
+# ── Close room tests ──────────────────────────────────────────────────────────
+
+def test_creator_can_close_match(test_client, auth_headers):
+    """The match creator can archive (close) their own match."""
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+    response = test_client.delete(f"/api/matches/{match_id}", headers=auth_headers)
+    assert response.status_code == 204
+    # Match should now be archived
+    get_resp = test_client.get(f"/api/matches/{match_id}")
+    assert get_resp.json()["status"] == "archived"
+
+def test_non_creator_cannot_close_match(test_client, auth_headers):
+    """A regular user who is not the creator cannot close someone else's match."""
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+    # Register a second user
+    test_client.post("/api/auth/register", json={
+        "username": "other_user", "email": "other@example.com", "password": "pass123"
+    })
+    login_resp = test_client.post("/api/auth/login", data={"username": "other_user", "password": "pass123"})
+    headers2 = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
+    response = test_client.delete(f"/api/matches/{match_id}", headers=headers2)
+    assert response.status_code == 403
+
+def test_admin_can_close_any_match(test_client, auth_headers, db_session):
+    """A superuser (admin) can close a match even if they are not the creator."""
+    # Create a match as the regular test user
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+
+    # Register + promote an admin
+    test_client.post("/api/auth/register", json={
+        "username": "adminclose", "email": "adminclose@example.com", "password": "adminpass"
+    })
+    from app.core.auth.models import User as UserModel
+    admin = db_session.query(UserModel).filter(UserModel.username == "adminclose").first()
+    admin.is_superuser = True
+    db_session.commit()
+    login_resp = test_client.post("/api/auth/login", data={"username": "adminclose", "password": "adminpass"})
+    admin_headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
+
+    # Admin deletes the match created by someone else
+    response = test_client.delete(f"/api/matches/{match_id}", headers=admin_headers)
+    assert response.status_code == 204
+    get_resp = test_client.get(f"/api/matches/{match_id}")
+    assert get_resp.json()["status"] == "archived"
+
+# ── Purge (hard delete) tests ─────────────────────────────────────────────────
+
+def test_non_admin_cannot_purge_match(test_client, auth_headers):
+    """A regular user cannot permanently delete a match."""
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+    response = test_client.delete(f"/api/matches/{match_id}/purge", headers=auth_headers)
+    assert response.status_code == 403
+
+def test_admin_can_purge_match(test_client, auth_headers, db_session):
+    """An admin can permanently delete a match; it disappears from the DB."""
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+
+    # Register + promote an admin
+    test_client.post("/api/auth/register", json={
+        "username": "adminpurge", "email": "adminpurge@example.com", "password": "adminpass"
+    })
+    from app.core.auth.models import User as UserModel
+    admin = db_session.query(UserModel).filter(UserModel.username == "adminpurge").first()
+    admin.is_superuser = True
+    db_session.commit()
+    login_resp = test_client.post("/api/auth/login", data={"username": "adminpurge", "password": "adminpass"})
+    admin_headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
+
+    response = test_client.delete(f"/api/matches/{match_id}/purge", headers=admin_headers)
+    assert response.status_code == 204
+    # Match should be completely gone — 404 on subsequent GET
+    get_resp = test_client.get(f"/api/matches/{match_id}")
+    assert get_resp.status_code == 404
+
+def test_purge_match_with_context_and_turn(test_client, auth_headers, db_session):
+    """Purge must succeed even when the match has contexts and turn_states."""
+    from app.core.matches.models import Match as MatchModel
+    from app.core.contexts.models import GameContext
+    from app.core.turns.models import TurnState
+
+    # Create a match
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+
+    # Manually attach a context + turn_state to exercise the FK paths
+    import uuid as _uuid
+    ctx_id = _uuid.uuid4()
+    ctx = GameContext(id=ctx_id, match_id=match_id, context_type="root", status="active")
+    db_session.add(ctx)
+    db_session.flush()
+    turn = TurnState(context_id=ctx_id)
+    db_session.add(turn)
+    db_session.commit()
+
+    # Register + promote an admin
+    test_client.post("/api/auth/register", json={
+        "username": "adminpurge2", "email": "adminpurge2@example.com", "password": "adminpass"
+    })
+    from app.core.auth.models import User as UserModel
+    admin = db_session.query(UserModel).filter(UserModel.username == "adminpurge2").first()
+    admin.is_superuser = True
+    db_session.commit()
+    login_resp = test_client.post("/api/auth/login", data={"username": "adminpurge2", "password": "adminpass"})
+    admin_headers = {"Authorization": "Bearer " + login_resp.json()["access_token"]}
+
+    response = test_client.delete(f"/api/matches/{match_id}/purge", headers=admin_headers)
+    assert response.status_code == 204
+    assert test_client.get(f"/api/matches/{match_id}").status_code == 404

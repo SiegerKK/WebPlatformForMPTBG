@@ -33,9 +33,17 @@ services:
     environment:
       DATABASE_URL: postgresql://mptbg:mptbg_secret@db:5432/mptbg
       REDIS_URL: redis://redis:6379/0
+      # Admin credentials (override via .env or environment)
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      # Test player credentials (gamer1 / gamer2)
+      GAMER1_USERNAME: ${GAMER1_USERNAME:-gamer1}
+      GAMER1_EMAIL: ${GAMER1_EMAIL:-gamer1@example.com}
+      GAMER1_PASSWORD: ${GAMER1_PASSWORD:-gamer1}
+      GAMER2_USERNAME: ${GAMER2_USERNAME:-gamer2}
+      GAMER2_EMAIL: ${GAMER2_EMAIL:-gamer2@example.com}
+      GAMER2_PASSWORD: ${GAMER2_PASSWORD:-gamer2}
     ports:
       - "8000:8000"
     depends_on:

@@ -24,11 +24,14 @@ export const authApi = {
 
 export const matchesApi = {
   list: () => apiClient.get('/matches'),
-  create: (data: { game_id: string; config?: Record<string, unknown> }) =>
+  create: (data: { game_id: string; title?: string; config?: Record<string, unknown> }) =>
     apiClient.post('/matches', data),
   get: (id: string) => apiClient.get(`/matches/${id}`),
-  join: (id: string) => apiClient.post(`/matches/${id}/join`),
+  join: (id: string) => apiClient.post(`/matches/${id}/join`, {}),
   start: (id: string) => apiClient.post(`/matches/${id}/start`),
+  delete: (id: string) => apiClient.delete(`/matches/${id}`),
+  purge: (id: string) => apiClient.delete(`/matches/${id}/purge`),
+  participants: (id: string) => apiClient.get(`/matches/${id}/participants`),
 };
 
 export const contextsApi = {
@@ -71,6 +74,20 @@ export const eventsApi = {
 export const turnsApi = {
   getCurrent: (contextId: string) => apiClient.get(`/contexts/${contextId}/turn`),
   submit: (contextId: string) => apiClient.post(`/contexts/${contextId}/turn/submit`),
+};
+
+export const usersApi = {
+  /** Admin: list all users */
+  list: () => apiClient.get('/admin/users'),
+  /** Admin: get user profile with stats */
+  getProfile: (userId: string) => apiClient.get(`/admin/users/${userId}`),
+  /** Admin: update user (toggle is_active / is_superuser) */
+  update: (userId: string, data: { is_active?: boolean; is_superuser?: boolean }) =>
+    apiClient.patch(`/admin/users/${userId}`, data),
+  /** Admin: delete user */
+  delete: (userId: string) => apiClient.delete(`/admin/users/${userId}`),
+  /** Public: get any user's profile (needs auth) */
+  publicProfile: (userId: string) => apiClient.get(`/admin/profile/${userId}`),
 };
 
 export default apiClient;

@@ -1,20 +1,47 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAppState } from './store';
-import { authApi, eventsApi, contextsApi } from './api/client';
+import { authApi, matchesApi } from './api/client';
 import Login from './components/Login/Login';
 import Layout from './components/Layout/Layout';
 import MatchList from './components/MatchList/MatchList';
-import ContextTree from './components/ContextTree/ContextTree';
-import EventLog from './components/EventLog/EventLog';
-import type { User, GameContext, GameEvent } from './types';
+import TicTacToeGame from './components/TicTacToeGame';
+import AdminPanel from './components/AdminPanel/AdminPanel';
+import UserProfile from './components/UserProfile/UserProfile';
+import type { User, Match } from './types';
 
-type View = 'matches' | 'match';
+type View = 'matches' | 'match' | 'admin' | 'profile';
+
+/** Extract a match UUID from a URL hash like `#/match/uuid`. */
+function parseHashMatchId(): string | null {
+  const m = window.location.hash.match(/^#\/match\/([0-9a-f-]{36})$/i);
+  return m ? m[1] : null;
+}
+
+/** Extract a user UUID from a URL hash like `#/profile/uuid`. */
+function parseHashProfileId(): string | null {
+  const m = window.location.hash.match(/^#\/profile\/([0-9a-f-]{36})$/i);
+  return m ? m[1] : null;
+}
+
+/** Determine view from current hash without state. */
+function viewFromHash(): View {
+  if (parseHashMatchId()) return 'match';
+  if (parseHashProfileId()) return 'profile';
+  if (window.location.hash === '#/admin') return 'admin';
+  return 'matches';
+}
 
 export default function App() {
   const { state, dispatch } = useAppState();
-  const [view, setView] = useState<View>('matches');
 
-  // Restore user session on mount if token exists
+  const [view, setView] = useState<View>(() => viewFromHash());
+  const [profileUserId, setProfileUserId] = useState<string | null>(
+    () => parseHashProfileId(),
+  );
+
+  const currentMatchIdRef = useRef<string | null>(null);
+
+  // ── Restore user session on mount ─────────────────────────────────────────
   useEffect(() => {
     if (state.token && !state.user) {
       authApi
@@ -22,38 +49,130 @@ export default function App() {
         .then((res) => dispatch({ type: 'SET_USER', payload: res.data as User }))
         .catch(() => dispatch({ type: 'LOGOUT' }));
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load contexts & events when a match is selected
+  // ── Restore match from URL hash after login ───────────────────────────────
   useEffect(() => {
-    if (!state.currentMatch) return;
+    if (!state.token) return;
+    const matchId = parseHashMatchId();
+    if (matchId && !state.currentMatch) {
+      matchesApi
+        .get(matchId)
+        .then((res) => dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }))
+        .catch(() => { window.location.hash = ''; });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.token]);
 
-    contextsApi
-      .getTree(state.currentMatch.id)
-      .then((res) => dispatch({ type: 'SET_CONTEXTS', payload: res.data as GameContext[] }))
-      .catch(() => dispatch({ type: 'SET_CONTEXTS', payload: [] }));
-
-    eventsApi
-      .listForMatch(state.currentMatch.id)
-      .then((res) => dispatch({ type: 'SET_EVENTS', payload: res.data as GameEvent[] }))
-      .catch(() => dispatch({ type: 'SET_EVENTS', payload: [] }));
-
-    setView('match');
+  // ── Keep ref in sync with store ────────────────────────────────────────────
+  useEffect(() => {
+    currentMatchIdRef.current = state.currentMatch?.id ?? null;
   }, [state.currentMatch?.id]);
 
-  if (!state.token) {
-    return <Login />;
-  }
+  // ── Sync store → URL hash and view ────────────────────────────────────────
+  useEffect(() => {
+    if (!state.currentMatch) {
+      if (view === 'match') {
+        setView('matches');
+        if (window.location.hash.startsWith('#/match/')) window.location.hash = '';
+      }
+      return;
+    }
+    setView('match');
+    const newHash = `#/match/${state.currentMatch.id}`;
+    if (window.location.hash !== newHash) window.location.hash = newHash;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.currentMatch?.id]);
+
+  // ── Sync URL hash → store (browser back / forward) ────────────────────────
+  useEffect(() => {
+    const handleHashChange = () => {
+      const matchId = parseHashMatchId();
+      const profileId = parseHashProfileId();
+      const isAdmin = window.location.hash === '#/admin';
+
+      if (matchId) {
+        if (matchId !== currentMatchIdRef.current) {
+          matchesApi
+            .get(matchId)
+            .then((res) =>
+              dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }),
+            )
+            .catch(() => { window.location.hash = ''; });
+        }
+        setView('match');
+      } else if (profileId) {
+        setProfileUserId(profileId);
+        setView('profile');
+      } else if (isAdmin) {
+        setView('admin');
+      } else {
+        if (currentMatchIdRef.current !== null) {
+          dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+        }
+        setView('matches');
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [dispatch]);
+
+  if (!state.token) return <Login />;
+
+  const isTicTacToe = state.currentMatch?.game_id === 'tictactoe';
+  const isAdmin = state.user?.is_superuser ?? false;
+
+  const handleMatchDeleted = (deletedId: string) => {
+    dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+    dispatch({
+      type: 'SET_MATCHES',
+      payload: state.matches.filter((m) => m.id !== deletedId),
+    });
+  };
+
+  const handleNavSelect = (v: string) => {
+    if (v === 'matches') {
+      dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+      window.location.hash = '';
+      setView('matches');
+    } else if (v === 'admin') {
+      window.location.hash = '#/admin';
+      setView('admin');
+    } else {
+      setView(v as View);
+    }
+  };
+
+  const handleViewProfile = (userId: string) => {
+    window.location.hash = `#/profile/${userId}`;
+    setProfileUserId(userId);
+    setView('profile');
+  };
+
+  const handleProfileBack = () => {
+    window.history.back();
+  };
 
   return (
-    <Layout onNavSelect={(v) => setView(v as View)} activeView={view}>
+    <Layout onNavSelect={handleNavSelect} activeView={view}>
       {view === 'matches' && <MatchList />}
+
       {view === 'match' && (
-        <div style={styles.matchView}>
+        <div>
           {!state.currentMatch ? (
             <p style={styles.hint}>Select a match from the Matches list.</p>
+          ) : isTicTacToe && state.user ? (
+            <TicTacToeGame
+              match={state.currentMatch}
+              user={state.user}
+              onMatchUpdated={(updated: Match) =>
+                dispatch({ type: 'SET_CURRENT_MATCH', payload: updated })
+              }
+              onMatchDeleted={handleMatchDeleted}
+            />
           ) : (
-            <>
+            <div style={styles.matchView}>
               <div style={styles.matchHeader}>
                 <h2 style={styles.matchTitle}>
                   {state.currentMatch.game_id}
@@ -61,27 +180,28 @@ export default function App() {
                 </h2>
                 <p style={styles.matchId}>Match ID: {state.currentMatch.id}</p>
               </div>
-
-              <div style={styles.columns}>
-                <div style={styles.column}>
-                  <h3 style={styles.sectionTitle}>Context Tree</h3>
-                  <ContextTree
-                    contexts={state.contexts}
-                    onSelect={(_ctx) => {
-                      // Context selection is a no-op at match-level view;
-                      // individual game UIs can extend this as needed.
-                    }}
-                  />
-                </div>
-
-                <div style={{ ...styles.column, flex: 2 }}>
-                  <h3 style={styles.sectionTitle}>Event Log</h3>
-                  <EventLog events={state.events} maxHeight={400} />
-                </div>
-              </div>
-            </>
+              <p style={styles.hint}>
+                No dedicated UI for game <strong>{state.currentMatch.game_id}</strong> yet.
+              </p>
+            </div>
           )}
         </div>
+      )}
+
+      {view === 'admin' && isAdmin && state.user && (
+        <AdminPanel
+          currentUserId={state.user.id}
+          onViewProfile={handleViewProfile}
+        />
+      )}
+
+      {view === 'profile' && profileUserId && state.user && (
+        <UserProfile
+          userId={profileUserId}
+          isSelf={profileUserId === state.user.id}
+          isAdmin={isAdmin}
+          onBack={handleProfileBack}
+        />
       )}
     </Layout>
   );
@@ -94,7 +214,5 @@ const styles: Record<string, React.CSSProperties> = {
   matchTitle: { color: '#f8fafc', margin: 0, fontSize: '1.3rem' },
   matchStatus: { color: '#94a3b8', fontWeight: 400 },
   matchId: { color: '#475569', fontSize: '0.8rem', margin: '0.25rem 0 0' },
-  columns: { display: 'flex', gap: '1.5rem', alignItems: 'flex-start' },
-  column: { flex: 1, display: 'flex', flexDirection: 'column', gap: 8 },
-  sectionTitle: { color: '#94a3b8', fontSize: '0.85rem', textTransform: 'uppercase', margin: 0, letterSpacing: '0.06em' },
 };
+
