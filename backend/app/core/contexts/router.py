@@ -45,6 +45,43 @@ def _tictactoe_initial_state(match_id: uuid.UUID, db: Session) -> dict | None:
     }
 
 
+def _zone_stalkers_initial_state(match_id: uuid.UUID, db: Session) -> dict | None:
+    """
+    Generate a deterministic zone_map state for a Zone Stalkers match.
+
+    Uses the match's seed for deterministic world generation.
+    Assigns player agents to human participants.
+    """
+    from app.core.matches.models import Match, Participant
+    from app.games.zone_stalkers.generators.zone_generator import generate_zone
+
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        return None
+
+    parts = (
+        db.query(Participant)
+        .filter(Participant.match_id == match_id)
+        .order_by(Participant.joined_at, Participant.id)
+        .all()
+    )
+    user_parts = [p for p in parts if p.user_id is not None]
+    num_players = max(1, len(user_parts))
+
+    seed = match.seed if match.seed is not None else 42
+    state = generate_zone(seed=seed, num_players=num_players)
+
+    # Bind human participant IDs to pre-generated player agent slots
+    for i, part in enumerate(user_parts):
+        agent_id = f"agent_p{i}"
+        participant_id = str(part.user_id)
+        if agent_id in state["agents"]:
+            state["agents"][agent_id]["controller"]["participant_id"] = participant_id
+            state["player_agents"][participant_id] = agent_id
+
+    return state
+
+
 @router.post("/contexts", response_model=GameContextRead)
 def create(data: GameContextCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # For tictactoe games: auto-initialize state so turn order is set from
@@ -53,6 +90,13 @@ def create(data: GameContextCreate, current_user: User = Depends(get_current_use
         initial = _tictactoe_initial_state(data.match_id, db)
         if initial:
             data = data.model_copy(update={"state_blob": initial})
+
+    # For zone_stalkers: generate the world deterministically from the match seed.
+    if data.context_type == "zone_map" and not data.state_blob:
+        initial = _zone_stalkers_initial_state(data.match_id, db)
+        if initial:
+            data = data.model_copy(update={"state_blob": initial})
+
     return create_context(data, db)
 
 

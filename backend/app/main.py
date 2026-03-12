@@ -9,6 +9,7 @@ from app.core.events.router import router as events_router
 from app.core.admin.router import router as admin_router
 from app.core.commands.pipeline import register_ruleset
 from app.games.tictactoe.rules import TicTacToeRuleSet
+from app.games.zone_stalkers.ruleset import ZoneStalkerRuleSet
 
 app = FastAPI(
     title="WebPlatformForMPTBG",
@@ -26,6 +27,7 @@ app.include_router(admin_router, prefix="/api")
 
 # Register game rulesets
 register_ruleset("tictactoe", TicTacToeRuleSet())
+register_ruleset("zone_stalkers", ZoneStalkerRuleSet())
 
 @app.get("/")
 def root():
