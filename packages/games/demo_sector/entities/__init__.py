@@ -1,0 +1,75 @@
+ENTITY_ARCHETYPES = [
+    {
+        "archetype_id": "group",
+        "description": "Strategic unit group",
+        "default_components": {
+            "hp_pool": 30,
+            "move_range": 1,
+            "units_on_deploy": 3,
+            "position": {"x": 0, "y": 0},
+        },
+        "default_tags": ["strategic", "group"],
+        "visibility_scope": "public",
+    },
+    {
+        "archetype_id": "unit",
+        "description": "Tactical unit",
+        "default_components": {
+            "hp": 10,
+            "damage": 4,
+            "move_range": 3,
+            "attack_range": 3,
+            "initiative": 10,
+            "position": {"x": 0, "y": 0},
+            "has_moved": False,
+            "has_attacked": False,
+        },
+        "default_tags": ["tactical", "unit"],
+        "visibility_scope": "public",
+    },
+    {
+        "archetype_id": "sector_tile",
+        "description": "Strategic map cell",
+        "default_components": {
+            "position": {"x": 0, "y": 0},
+            "terrain": "plain",
+            "resource_node": False,
+            "fog_state": "hidden",
+            "occupancy": None,
+        },
+        "default_tags": ["tile"],
+        "visibility_scope": "public",
+    },
+    {
+        "archetype_id": "resource_node",
+        "description": "Strategic resource node",
+        "default_components": {
+            "position": {"x": 0, "y": 0},
+            "resource_type": "ore",
+            "controller": None,
+            "value": 1,
+        },
+        "default_tags": ["resource"],
+        "visibility_scope": "public",
+    },
+    {
+        "archetype_id": "obstacle",
+        "description": "Tactical map blocker",
+        "default_components": {
+            "position": {"x": 0, "y": 0},
+            "blocking": True,
+        },
+        "default_tags": ["obstacle"],
+        "visibility_scope": "public",
+    },
+    {
+        "archetype_id": "cover",
+        "description": "Tactical cover cell",
+        "default_components": {
+            "position": {"x": 0, "y": 0},
+            "cover_bonus": 1,
+        },
+        "default_tags": ["cover"],
+        "visibility_scope": "public",
+    },
+]
