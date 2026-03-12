@@ -74,9 +74,9 @@ def start_match(match_id: uuid.UUID, user_id: uuid.UUID, db: Session) -> Match:
     db.refresh(match)
     return match
 
-def delete_match(match_id: uuid.UUID, user_id: uuid.UUID, db: Session):
+def delete_match(match_id: uuid.UUID, user_id: uuid.UUID, db: Session, is_superuser: bool = False):
     match = get_match(match_id, db)
-    if str(match.created_by_user_id) != str(user_id):
-        raise HTTPException(status_code=403, detail="Only the creator can delete the match")
+    if not is_superuser and str(match.created_by_user_id) != str(user_id):
+        raise HTTPException(status_code=403, detail="Only the creator or an admin can close this match")
     match.status = MatchStatus.ARCHIVED
     db.commit()

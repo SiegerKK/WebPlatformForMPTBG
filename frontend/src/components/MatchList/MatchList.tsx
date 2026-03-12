@@ -14,12 +14,24 @@ const STATUS_COLORS: Record<string, string> = {
   failed: '#ef4444',
 };
 
+/** Statuses that are considered "closeable" (not already finished/archived) */
+const CLOSEABLE_STATUSES = new Set([
+  'draft',
+  'waiting_for_players',
+  'initializing',
+  'active',
+  'paused',
+]);
+
 export default function MatchList() {
   const { state, dispatch } = useAppState();
   const [gameId, setGameId] = useState('');
   const [creating, setCreating] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [closingId, setClosingId] = useState<string | null>(null);
+
+  const isAdmin = state.user?.is_superuser ?? false;
 
   useEffect(() => {
     loadMatches();
@@ -70,6 +82,31 @@ export default function MatchList() {
     }
   };
 
+  const handleClose = async (e: React.MouseEvent, match: Match) => {
+    e.stopPropagation(); // don't open the match
+    if (!window.confirm(`Close room "${match.game_id}" (${match.id.slice(0, 8)}…)? This will archive the match.`)) return;
+    setClosingId(match.id);
+    try {
+      await matchesApi.delete(match.id);
+      // Update the match status in the list to 'archived'
+      dispatch({
+        type: 'SET_MATCHES',
+        payload: state.matches.map((m) =>
+          m.id === match.id ? { ...m, status: 'archived' as const } : m,
+        ),
+      });
+      // If this was the currently viewed match, clear it
+      if (state.currentMatch?.id === match.id) {
+        dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+      }
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail ?? 'Failed to close the room.');
+    } finally {
+      setClosingId(null);
+    }
+  };
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
@@ -116,34 +153,51 @@ export default function MatchList() {
       )}
 
       <div style={styles.list}>
-        {state.matches.map((match) => (
-          <div
-            key={match.id}
-            style={{
-              ...styles.matchCard,
-              ...(state.currentMatch?.id === match.id ? styles.matchCardSelected : {}),
-            }}
-            onClick={() => dispatch({ type: 'SET_CURRENT_MATCH', payload: match })}
-          >
-            <div style={styles.matchRow}>
-              <span style={styles.gameId}>{match.game_id}</span>
-              <span
-                style={{
-                  ...styles.statusBadge,
-                  background: STATUS_COLORS[match.status] ?? '#64748b',
-                }}
-              >
-                {match.status}
-              </span>
+        {state.matches.map((match) => {
+          const isCreator = match.created_by_user_id === state.user?.id;
+          const canClose = (isCreator || isAdmin) && CLOSEABLE_STATUSES.has(match.status);
+
+          return (
+            <div
+              key={match.id}
+              style={{
+                ...styles.matchCard,
+                ...(state.currentMatch?.id === match.id ? styles.matchCardSelected : {}),
+              }}
+              onClick={() => dispatch({ type: 'SET_CURRENT_MATCH', payload: match })}
+            >
+              <div style={styles.matchRow}>
+                <span style={styles.gameId}>{match.game_id}</span>
+                <div style={styles.rightGroup}>
+                  <span
+                    style={{
+                      ...styles.statusBadge,
+                      background: STATUS_COLORS[match.status] ?? '#64748b',
+                    }}
+                  >
+                    {match.status}
+                  </span>
+                  {canClose && (
+                    <button
+                      style={styles.closeBtn}
+                      onClick={(e) => handleClose(e, match)}
+                      disabled={closingId === match.id}
+                      title={isAdmin && !isCreator ? 'Close room (admin)' : 'Close room'}
+                    >
+                      {closingId === match.id ? '…' : '🔒 Close'}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div style={styles.matchMeta}>
+                <span style={styles.metaText}>ID: {match.id.slice(0, 8)}…</span>
+                <span style={styles.metaText}>
+                  {new Date(match.created_at).toLocaleString()}
+                </span>
+              </div>
             </div>
-            <div style={styles.matchMeta}>
-              <span style={styles.metaText}>ID: {match.id.slice(0, 8)}…</span>
-              <span style={styles.metaText}>
-                {new Date(match.created_at).toLocaleString()}
-              </span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -219,7 +273,13 @@ const styles: Record<string, React.CSSProperties> = {
     transition: 'border-color 0.15s',
   },
   matchCardSelected: { border: '1px solid #3b82f6' },
-  matchRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  matchRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  rightGroup: { display: 'flex', alignItems: 'center', gap: 8 },
   gameId: { color: '#f8fafc', fontWeight: 600, fontSize: '0.95rem' },
   statusBadge: {
     padding: '0.15rem 0.5rem',
@@ -227,6 +287,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     fontSize: '0.75rem',
     fontWeight: 600,
+    flexShrink: 0,
+  },
+  closeBtn: {
+    padding: '0.18rem 0.55rem',
+    background: '#7f1d1d',
+    border: '1px solid #ef4444',
+    borderRadius: 5,
+    color: '#fca5a5',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+    flexShrink: 0,
   },
   matchMeta: { display: 'flex', justifyContent: 'space-between', marginTop: 4 },
   metaText: { color: '#64748b', fontSize: '0.75rem' },
