@@ -33,6 +33,9 @@ services:
     environment:
       DATABASE_URL: postgresql://mptbg:mptbg_secret@db:5432/mptbg
       REDIS_URL: redis://redis:6379/0
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
     ports:
       - "8000:8000"
     depends_on:
@@ -43,7 +46,7 @@ services:
     volumes:
       - ./backend:/app
     command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+      sh -c "alembic upgrade head && python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
       interval: 10s

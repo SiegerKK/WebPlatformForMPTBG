@@ -42,28 +42,90 @@ bash setup.sh
 
 ---
 
-## Управление
+## Первый вход (admin-аккаунт)
+
+При первом старте бэкенд **автоматически создаёт** аккаунт администратора.  
+По умолчанию используются значения из `.env`:
+
+| Поле | Значение по умолчанию |
+|------|-----------------------|
+| Логин (`username`) | `admin` |
+| E-mail | `admin@example.com` |
+| Пароль | `admin` |
+
+⚠ **Обязательно смени пароль** перед тем как открывать доступ в интернет:
+```bash
+# Отредактируй .env и установи свои значения:
+ADMIN_USERNAME=myadmin
+ADMIN_EMAIL=me@mycompany.com
+ADMIN_PASSWORD=ВашНадёжныйПароль
+
+# Затем пересоздай контейнеры:
+make down && make up
+```
+
+Войти можно через Swagger UI (<http://localhost:8000/docs>):
+1. Нажми **Authorize** (кнопка замочка вверху)
+2. Введи логин и пароль из `.env`
+3. Или отправь POST-запрос:
+```bash
+curl -X POST http://localhost:8000/api/auth/login \
+  -d "username=admin&password=admin"
+```
+
+---
+
+## Управление (жизненный цикл)
+
+```
+Запустить  →  bash setup.sh   (первый раз)
+             make up          (повторные запуски)
+
+Остановить →  make down
+
+Рестарт    →  make restart
+
+Логи       →  make logs
+             docker compose logs -f backend   # только бэкенд
+
+Статус     →  make status
+
+Пересобрать (после изменений в коде):
+             make build && make restart
+```
+
+Полный список команд:
 
 ```bash
-# Остановить всё
-make down
-# или
-docker compose down
+# Первый старт (устанавливает Docker если нужно, собирает образы, создаёт admin)
+bash setup.sh
 
-# Запустить снова (без пересборки)
+# Запустить уже собранные контейнеры
 make up
 
-# Посмотреть логи всех сервисов в реальном времени
-make logs
+# Остановить все контейнеры (данные БД сохраняются)
+make down
 
-# Посмотреть статус контейнеров
-make status
+# Остановить и удалить данные БД (полная очистка)
+docker compose down -v
 
-# Перезапустить все сервисы
+# Рестартовать все сервисы
 make restart
 
+# Логи в реальном времени
+make logs
+
+# Статус контейнеров
+make status
+
 # Пересобрать образы (после изменений в коде)
-make build && make up
+make build && make restart
+
+# Накатить миграции БД вручную (bare-metal)
+make migrate
+
+# Создать admin-пользователя вручную (bare-metal)
+make seed-admin
 ```
 
 ---
@@ -182,3 +244,6 @@ docker compose down -v   # -v удаляет volume с данными PostgreSQL
 | `REDIS_URL` | `redis://redis:6379` | Адрес Redis |
 | `CORS_ORIGINS` | `http://localhost:3000` | Разрешённые CORS-источники |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | Время жизни JWT-токена |
+| `ADMIN_USERNAME` | `admin` | Логин первого admin-аккаунта |
+| `ADMIN_EMAIL` | `admin@example.com` | E-mail первого admin-аккаунта |
+| `ADMIN_PASSWORD` | `admin` | Пароль первого admin-аккаунта (**смени!**) |

@@ -1,4 +1,4 @@
-.PHONY: setup up down restart logs status test migrate dev build lint
+.PHONY: setup up down restart logs status test migrate seed-admin dev build lint
 
 # ── One-click setup (installs Docker if needed, builds & starts everything) ──
 setup:
@@ -30,6 +30,9 @@ dev:
 # ── Database ──────────────────────────────────────────────────────────────────
 migrate:
 	cd backend && alembic upgrade head
+
+seed-admin:
+	cd backend && python -m app.seed
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 test:
