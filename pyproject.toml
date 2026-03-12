@@ -1,0 +1,24 @@
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.flake8]
+max-line-length = 120
+exclude = [
+    "__pycache__",
+    ".git",
+    "*.egg-info",
+    "alembic/versions",
+    "frontend",
+    "infra",
+]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+
+[tool.black]
+line-length = 120
+target-version = ["py311", "py312"]
