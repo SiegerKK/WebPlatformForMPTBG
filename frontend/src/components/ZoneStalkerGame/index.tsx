@@ -141,7 +141,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [travelTarget, setTravelTarget] = useState<string | null>(null);
   const [sleepHours, setSleepHours] = useState(6);
-  const [showMemory, setShowMemory] = useState(false);
   const [showTravelPanel, setShowTravelPanel] = useState(false);
   const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory'>('map');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
