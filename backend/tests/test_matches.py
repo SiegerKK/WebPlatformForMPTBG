@@ -110,3 +110,38 @@ def test_admin_can_purge_match(test_client, auth_headers, db_session):
     # Match should be completely gone — 404 on subsequent GET
     get_resp = test_client.get(f"/api/matches/{match_id}")
     assert get_resp.status_code == 404
+
+def test_purge_match_with_context_and_turn(test_client, auth_headers, db_session):
+    """Purge must succeed even when the match has contexts and turn_states."""
+    from app.core.matches.models import Match as MatchModel
+    from app.core.contexts.models import GameContext
+    from app.core.turns.models import TurnState
+
+    # Create a match
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+
+    # Manually attach a context + turn_state to exercise the FK paths
+    import uuid as _uuid
+    ctx_id = _uuid.uuid4()
+    ctx = GameContext(id=ctx_id, match_id=match_id, context_type="root", status="active")
+    db_session.add(ctx)
+    db_session.flush()
+    turn = TurnState(context_id=ctx_id)
+    db_session.add(turn)
+    db_session.commit()
+
+    # Register + promote an admin
+    test_client.post("/api/auth/register", json={
+        "username": "adminpurge2", "email": "adminpurge2@example.com", "password": "adminpass"
+    })
+    from app.core.auth.models import User as UserModel
+    admin = db_session.query(UserModel).filter(UserModel.username == "adminpurge2").first()
+    admin.is_superuser = True
+    db_session.commit()
+    login_resp = test_client.post("/api/auth/login", data={"username": "adminpurge2", "password": "adminpass"})
+    admin_headers = {"Authorization": "Bearer " + login_resp.json()["access_token"]}
+
+    response = test_client.delete(f"/api/matches/{match_id}/purge", headers=admin_headers)
+    assert response.status_code == 204
+    assert test_client.get(f"/api/matches/{match_id}").status_code == 404
