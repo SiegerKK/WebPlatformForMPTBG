@@ -8,10 +8,10 @@ from .schemas import GameContextCreate
 def create_context(data: GameContextCreate, db: Session) -> GameContext:
     ctx = GameContext(
         match_id=data.match_id,
-        parent_id=data.parent_id,
+        parent_context_id=data.get_parent_context_id(),
         context_type=data.context_type,
-        config=data.config,
-        state=data.state,
+        label=data.label,
+        state_blob=data.state_blob,
         status=ContextStatus.ACTIVE,
     )
     db.add(ctx)

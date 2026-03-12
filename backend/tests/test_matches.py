@@ -6,7 +6,7 @@ def test_create_match(test_client, auth_headers):
     assert response.status_code == 200
     data = response.json()
     assert data["game_id"] == "test_game"
-    assert data["status"] == "waiting"
+    assert data["status"] == "waiting_for_players"
 
 def test_list_matches(test_client, auth_headers):
     test_client.post("/api/matches", json={"game_id": "game1"}, headers=auth_headers)

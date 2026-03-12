@@ -29,10 +29,10 @@ class CommandPipeline:
         command = Command(
             match_id=envelope.match_id,
             context_id=envelope.context_id,
-            player_id=player.id,
+            participant_id=player.id,
             command_type=envelope.command_type,
             payload=envelope.payload,
-            status=CommandStatus.PENDING,
+            status=CommandStatus.RECEIVED,
         )
         db.add(command)
         db.flush()
@@ -54,19 +54,19 @@ class CommandPipeline:
 
             # 5. Load entities in context
             from app.core.entities.models import Entity
-            entities = db.query(Entity).filter(Entity.context_id == envelope.context_id, Entity.is_active == True).all()
-            entities_data = [{"id": str(e.id), "archetype": e.archetype, "components": e.components, "tags": e.tags, "owner_id": str(e.owner_id) if e.owner_id else None} for e in entities]
+            entities = db.query(Entity).filter(Entity.context_id == envelope.context_id, Entity.alive == True).all()
+            entities_data = [{"id": str(e.id), "archetype": e.archetype_id, "components": e.components, "tags": e.tags, "owner_id": str(e.owner_participant_id) if e.owner_participant_id else None} for e in entities]
 
             # 6. RuleCheck - delegate to game's RuleSet if registered
             ruleset = get_ruleset(match.game_id)
             new_events = []
-            new_state = context.state or {}
+            new_state = context.state_blob or {}
 
             if ruleset:
                 result = ruleset.validate_command(
                     envelope.command_type,
                     envelope.payload,
-                    context.state or {},
+                    context.state_blob or {},
                     entities_data,
                     str(player.id)
                 )
@@ -80,7 +80,7 @@ class CommandPipeline:
                 new_state, new_events = ruleset.resolve_command(
                     envelope.command_type,
                     envelope.payload,
-                    context.state or {},
+                    context.state_blob or {},
                     entities_data,
                     str(player.id)
                 )
@@ -92,7 +92,7 @@ class CommandPipeline:
                     new_events = [{"event_type": f"{envelope.command_type}_executed", "payload": envelope.payload}]
 
             # 8. Optimistic lock + update state
-            context.state = new_state
+            context.state_blob = new_state
             context.state_version += 1
 
             # 9. Emit events
@@ -104,17 +104,17 @@ class CommandPipeline:
                     context_id=envelope.context_id,
                     event_type=ev_data.get("event_type", "unknown"),
                     payload=ev_data.get("payload", {}),
-                    caused_by_command_id=command.id,
-                    sequence_number=seq,
+                    causation_command_id=command.id,
+                    sequence_no=seq,
                 )
                 db.add(event)
                 emitted.append(ev_data)
 
-            command.status = CommandStatus.EXECUTED
+            command.status = CommandStatus.RESOLVED
             command.executed_at = datetime.utcnow()
             db.commit()
 
-            return CommandResult(command_id=command.id, status=CommandStatus.EXECUTED, events=emitted)
+            return CommandResult(command_id=command.id, status=CommandStatus.RESOLVED, events=emitted)
 
         except HTTPException:
             command.status = CommandStatus.FAILED

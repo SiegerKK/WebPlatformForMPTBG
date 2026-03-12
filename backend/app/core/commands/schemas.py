@@ -20,7 +20,7 @@ class CommandRead(BaseModel):
     id: uuid.UUID
     match_id: uuid.UUID
     context_id: uuid.UUID
-    player_id: uuid.UUID
+    participant_id: uuid.UUID
     command_type: str
     payload: dict
     status: CommandStatus

@@ -11,7 +11,7 @@ def test_submit_command(test_client, auth_headers):
     }, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "executed"
+    assert data["status"] == "resolved"
 
 def test_command_auth_check(test_client):
     response = test_client.post("/api/commands", json={

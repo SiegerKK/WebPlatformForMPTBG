@@ -22,7 +22,7 @@ class TurnScheduler:
         except HTTPException:
             return False
         if turn.mode == TurnMode.STRICT:
-            return str(turn.active_player_id) == str(player_id)
+            return str(turn.active_side_id) == str(player_id)
         return True
 
     def submit_turn(self, context_id: uuid.UUID, player_id: uuid.UUID, db: Session) -> TurnState:
@@ -60,7 +60,7 @@ class TurnScheduler:
     def check_deadlines(self, db: Session) -> List[TurnState]:
         now = datetime.utcnow()
         return db.query(TurnState).filter(
-            TurnState.deadline <= now,
+            TurnState.deadline_at <= now,
             TurnState.status == TurnStatus.WAITING_FOR_PLAYERS
         ).all()
 
