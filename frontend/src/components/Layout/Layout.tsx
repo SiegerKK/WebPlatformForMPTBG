@@ -7,9 +7,13 @@ interface LayoutProps {
   activeView: string;
 }
 
-const NAV_ITEMS = [
+const BASE_NAV_ITEMS = [
   { id: 'matches', label: '🎮 Matches' },
   { id: 'match', label: '⚔️ Current Match' },
+];
+
+const ADMIN_NAV_ITEMS = [
+  { id: 'admin', label: '🛡 Admin Panel' },
 ];
 
 export default function Layout({ children, onNavSelect, activeView }: LayoutProps) {
@@ -19,13 +23,19 @@ export default function Layout({ children, onNavSelect, activeView }: LayoutProp
     dispatch({ type: 'LOGOUT' });
   };
 
+  const isAdmin = state.user?.is_superuser ?? false;
+  const navItems = isAdmin ? [...BASE_NAV_ITEMS, ...ADMIN_NAV_ITEMS] : BASE_NAV_ITEMS;
+
   return (
     <div style={styles.root}>
       <header style={styles.header}>
         <span style={styles.appName}>WebPlatformForMPTBG</span>
         <div style={styles.userInfo}>
           {state.user && (
-            <span style={styles.username}>{state.user.username}</span>
+            <>
+              <span style={styles.username}>{state.user.username}</span>
+              {isAdmin && <span style={styles.adminBadge}>Admin</span>}
+            </>
           )}
           <button style={styles.logoutBtn} onClick={handleLogout}>
             Logout
@@ -35,7 +45,7 @@ export default function Layout({ children, onNavSelect, activeView }: LayoutProp
 
       <div style={styles.body}>
         <nav style={styles.sidebar}>
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             <button
               key={item.id}
               style={{
@@ -89,8 +99,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '1rem',
     letterSpacing: '0.03em',
   },
-  userInfo: { display: 'flex', alignItems: 'center', gap: 12 },
+  userInfo: { display: 'flex', alignItems: 'center', gap: 10 },
   username: { color: '#94a3b8', fontSize: '0.875rem' },
+  adminBadge: {
+    padding: '0.1rem 0.45rem',
+    background: '#1e3a5f',
+    color: '#60a5fa',
+    borderRadius: 6,
+    fontSize: '0.7rem',
+    fontWeight: 700,
+    letterSpacing: '0.04em',
+  },
   logoutBtn: {
     padding: '0.3rem 0.7rem',
     background: 'transparent',

@@ -6,6 +6,7 @@ from app.core.entities.router import router as entities_router
 from app.core.commands.router import router as commands_router
 from app.core.turns.router import router as turns_router
 from app.core.events.router import router as events_router
+from app.core.admin.router import router as admin_router
 from app.core.commands.pipeline import register_ruleset
 from app.games.tictactoe.rules import TicTacToeRuleSet
 
@@ -21,6 +22,7 @@ app.include_router(entities_router, prefix="/api")
 app.include_router(commands_router, prefix="/api")
 app.include_router(turns_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 # Register game rulesets
 register_ruleset("tictactoe", TicTacToeRuleSet())

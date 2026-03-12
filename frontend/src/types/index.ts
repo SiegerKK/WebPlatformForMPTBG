@@ -4,6 +4,7 @@ export interface User {
   email: string;
   is_active: boolean;
   is_bot: boolean;
+  is_superuser: boolean;
   created_at: string;
 }
 
@@ -123,6 +124,18 @@ export interface CommandResult {
   status: string;
   events: Array<{ event_type: string; payload: Record<string, unknown> }>;
   error?: string;
+}
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  email: string;
+  is_active: boolean;
+  is_bot: boolean;
+  is_superuser: boolean;
+  created_at: string;
+  matches_created: number;
+  matches_played: number;
 }
 
 /** Shape of state_blob for a Tic-Tac-Toe context */

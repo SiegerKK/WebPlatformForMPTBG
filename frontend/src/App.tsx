@@ -5,9 +5,11 @@ import Login from './components/Login/Login';
 import Layout from './components/Layout/Layout';
 import MatchList from './components/MatchList/MatchList';
 import TicTacToeGame from './components/TicTacToeGame';
+import AdminPanel from './components/AdminPanel/AdminPanel';
+import UserProfile from './components/UserProfile/UserProfile';
 import type { User, Match } from './types';
 
-type View = 'matches' | 'match';
+type View = 'matches' | 'match' | 'admin' | 'profile';
 
 /** Extract a match UUID from a URL hash like `#/match/uuid`. */
 function parseHashMatchId(): string | null {
@@ -15,16 +17,28 @@ function parseHashMatchId(): string | null {
   return m ? m[1] : null;
 }
 
+/** Extract a user UUID from a URL hash like `#/profile/uuid`. */
+function parseHashProfileId(): string | null {
+  const m = window.location.hash.match(/^#\/profile\/([0-9a-f-]{36})$/i);
+  return m ? m[1] : null;
+}
+
+/** Determine view from current hash without state. */
+function viewFromHash(): View {
+  if (parseHashMatchId()) return 'match';
+  if (parseHashProfileId()) return 'profile';
+  if (window.location.hash === '#/admin') return 'admin';
+  return 'matches';
+}
+
 export default function App() {
   const { state, dispatch } = useAppState();
 
-  // Initialise the view from the URL hash so there is no flash on refresh.
-  const [view, setView] = useState<View>(() =>
-    parseHashMatchId() ? 'match' : 'matches',
+  const [view, setView] = useState<View>(() => viewFromHash());
+  const [profileUserId, setProfileUserId] = useState<string | null>(
+    () => parseHashProfileId(),
   );
 
-  // Keep a ref that is always current so the hashchange handler never closes
-  // over a stale currentMatch id.
   const currentMatchIdRef = useRef<string | null>(null);
 
   // ── Restore user session on mount ─────────────────────────────────────────
@@ -38,7 +52,7 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Restore match from URL hash after login / on first load ───────────────
+  // ── Restore match from URL hash after login ───────────────────────────────
   useEffect(() => {
     if (!state.token) return;
     const matchId = parseHashMatchId();
@@ -46,14 +60,12 @@ export default function App() {
       matchesApi
         .get(matchId)
         .then((res) => dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }))
-        .catch(() => {
-          window.location.hash = '';
-        });
+        .catch(() => { window.location.hash = ''; });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.token]);
 
-  // ── Keep ref in sync with store (must run before hash-sync effect) ─────────
+  // ── Keep ref in sync with store ────────────────────────────────────────────
   useEffect(() => {
     currentMatchIdRef.current = state.currentMatch?.id ?? null;
   }, [state.currentMatch?.id]);
@@ -61,45 +73,55 @@ export default function App() {
   // ── Sync store → URL hash and view ────────────────────────────────────────
   useEffect(() => {
     if (!state.currentMatch) {
-      setView('matches');
-      if (window.location.hash) window.location.hash = '';
+      if (view === 'match') {
+        setView('matches');
+        if (window.location.hash.startsWith('#/match/')) window.location.hash = '';
+      }
       return;
     }
     setView('match');
     const newHash = `#/match/${state.currentMatch.id}`;
-    if (window.location.hash !== newHash) {
-      window.location.hash = newHash;
-    }
+    if (window.location.hash !== newHash) window.location.hash = newHash;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.currentMatch?.id]);
 
   // ── Sync URL hash → store (browser back / forward) ────────────────────────
   useEffect(() => {
     const handleHashChange = () => {
       const matchId = parseHashMatchId();
-      if (!matchId) {
+      const profileId = parseHashProfileId();
+      const isAdmin = window.location.hash === '#/admin';
+
+      if (matchId) {
+        if (matchId !== currentMatchIdRef.current) {
+          matchesApi
+            .get(matchId)
+            .then((res) =>
+              dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }),
+            )
+            .catch(() => { window.location.hash = ''; });
+        }
+        setView('match');
+      } else if (profileId) {
+        setProfileUserId(profileId);
+        setView('profile');
+      } else if (isAdmin) {
+        setView('admin');
+      } else {
         if (currentMatchIdRef.current !== null) {
           dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
         }
-      } else if (matchId !== currentMatchIdRef.current) {
-        matchesApi
-          .get(matchId)
-          .then((res) =>
-            dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }),
-          )
-          .catch(() => {
-            window.location.hash = '';
-          });
+        setView('matches');
       }
     };
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [dispatch]);
 
-  if (!state.token) {
-    return <Login />;
-  }
+  if (!state.token) return <Login />;
 
   const isTicTacToe = state.currentMatch?.game_id === 'tictactoe';
+  const isAdmin = state.user?.is_superuser ?? false;
 
   const handleMatchDeleted = (deletedId: string) => {
     dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
@@ -109,15 +131,33 @@ export default function App() {
     });
   };
 
+  const handleNavSelect = (v: string) => {
+    if (v === 'matches') {
+      dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+      window.location.hash = '';
+      setView('matches');
+    } else if (v === 'admin') {
+      window.location.hash = '#/admin';
+      setView('admin');
+    } else {
+      setView(v as View);
+    }
+  };
+
+  const handleViewProfile = (userId: string) => {
+    window.location.hash = `#/profile/${userId}`;
+    setProfileUserId(userId);
+    setView('profile');
+  };
+
+  const handleProfileBack = () => {
+    window.history.back();
+  };
+
   return (
-    <Layout
-      onNavSelect={(v) => {
-        if (v === 'matches') dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
-        setView(v as View);
-      }}
-      activeView={view}
-    >
+    <Layout onNavSelect={handleNavSelect} activeView={view}>
       {view === 'matches' && <MatchList />}
+
       {view === 'match' && (
         <div>
           {!state.currentMatch ? (
@@ -147,6 +187,22 @@ export default function App() {
           )}
         </div>
       )}
+
+      {view === 'admin' && isAdmin && state.user && (
+        <AdminPanel
+          currentUserId={state.user.id}
+          onViewProfile={handleViewProfile}
+        />
+      )}
+
+      {view === 'profile' && profileUserId && state.user && (
+        <UserProfile
+          userId={profileUserId}
+          isSelf={profileUserId === state.user.id}
+          isAdmin={isAdmin}
+          onBack={handleProfileBack}
+        />
+      )}
     </Layout>
   );
 }
@@ -159,3 +215,4 @@ const styles: Record<string, React.CSSProperties> = {
   matchStatus: { color: '#94a3b8', fontWeight: 400 },
   matchId: { color: '#475569', fontSize: '0.8rem', margin: '0.25rem 0 0' },
 };
+

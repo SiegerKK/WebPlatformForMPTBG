@@ -37,10 +37,17 @@ GAMER2_EMAIL    = os.environ.get("GAMER2_EMAIL",    "gamer2@example.com")
 GAMER2_PASSWORD = os.environ.get("GAMER2_PASSWORD", "gamer2")
 
 
-def _ensure_user(db, username: str, email: str, password: str) -> None:
+def _ensure_user(db, username: str, email: str, password: str, is_superuser: bool = False) -> None:
     """Create a user if one with the given username does not exist yet."""
-    if db.query(User).filter(User.username == username).first():
-        print(f"[seed] User '{username}' already exists — skipping.")
+    existing = db.query(User).filter(User.username == username).first()
+    if existing:
+        # Ensure superuser flag is up to date for admin
+        if is_superuser and not existing.is_superuser:
+            existing.is_superuser = True
+            db.commit()
+            print(f"[seed] Updated user '{username}' to superuser.")
+        else:
+            print(f"[seed] User '{username}' already exists — skipping.")
         return
     user = User(
         username=username,
@@ -48,6 +55,7 @@ def _ensure_user(db, username: str, email: str, password: str) -> None:
         hashed_password=hash_password(password),
         is_active=True,
         is_bot=False,
+        is_superuser=is_superuser,
     )
     db.add(user)
     db.commit()
@@ -57,7 +65,7 @@ def _ensure_user(db, username: str, email: str, password: str) -> None:
 def seed() -> None:
     db = SessionLocal()
     try:
-        _ensure_user(db, ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD)
+        _ensure_user(db, ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD, is_superuser=True)
         _ensure_user(db, GAMER1_USERNAME, GAMER1_EMAIL, GAMER1_PASSWORD)
         _ensure_user(db, GAMER2_USERNAME, GAMER2_EMAIL, GAMER2_PASSWORD)
         print("[seed] ⚠  Change default passwords before exposing to the internet!")

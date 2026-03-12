@@ -75,4 +75,18 @@ export const turnsApi = {
   submit: (contextId: string) => apiClient.post(`/contexts/${contextId}/turn/submit`),
 };
 
+export const usersApi = {
+  /** Admin: list all users */
+  list: () => apiClient.get('/admin/users'),
+  /** Admin: get user profile with stats */
+  getProfile: (userId: string) => apiClient.get(`/admin/users/${userId}`),
+  /** Admin: update user (toggle is_active / is_superuser) */
+  update: (userId: string, data: { is_active?: boolean; is_superuser?: boolean }) =>
+    apiClient.patch(`/admin/users/${userId}`, data),
+  /** Admin: delete user */
+  delete: (userId: string) => apiClient.delete(`/admin/users/${userId}`),
+  /** Public: get any user's profile (needs auth) */
+  publicProfile: (userId: string) => apiClient.get(`/admin/profile/${userId}`),
+};
+
 export default apiClient;
