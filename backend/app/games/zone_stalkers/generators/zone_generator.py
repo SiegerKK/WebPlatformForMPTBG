@@ -223,6 +223,8 @@ def generate_zone(
     return {
         "context_type": "zone_map",
         "world_turn": 1,
+        "world_hour": 6,    # Game starts at 06:00
+        "world_day": 1,
         "max_turns": 50,
         "seed": seed,
         "locations": locations,
@@ -230,6 +232,7 @@ def generate_zone(
         "mutants": mutants,
         "traders": traders,
         "player_agents": player_agents,
+        "active_events": [],  # list of zone_event context IDs currently running
         "game_over": False,
         "winner": None,
         "scores": {},
@@ -290,6 +293,8 @@ def _make_stalker_agent(
         "is_alive": True,
         "action_used": False,
         "reputation": 0,
+        "scheduled_action": None,  # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
+        "memory": [],              # list of {world_turn, world_day, type, title, summary, effects}
     }
 
 

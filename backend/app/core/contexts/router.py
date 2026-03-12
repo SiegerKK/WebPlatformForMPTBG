@@ -1,6 +1,7 @@
 import uuid
 from typing import List
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from .schemas import GameContextCreate, GameContextRead
 from .service import create_context, get_context, get_match_contexts, get_context_tree
@@ -116,3 +117,72 @@ def get_projection(context_id: uuid.UUID, current_user: User = Depends(get_curre
     policy = VisibilityPolicy()
     fog = FogProjection()
     return fog.project(ctx, current_user.id, policy, db)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Zone event creation
+# ─────────────────────────────────────────────────────────────────
+
+class ZoneEventCreate(BaseModel):
+    match_id: uuid.UUID
+    zone_map_context_id: uuid.UUID
+    title: str
+    description: str = ""
+    max_turns: int = 5
+    participant_ids: List[str] = []   # player IDs to auto-add (empty = open join)
+
+
+@router.post("/contexts/zone-event", response_model=GameContextRead, tags=["zone_event"])
+def create_zone_event(
+    data: ZoneEventCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Create a new zone_event context (text quest) as a child of a zone_map context.
+
+    Any match participant or admin can create an event.
+    The event appears in the zone_map's `active_events` list so players can join.
+    """
+    from app.core.contexts.models import GameContext, ContextStatus
+    from app.games.zone_stalkers.rules.event_rules import create_zone_event_state
+
+    # Validate zone_map context belongs to the match
+    zone_ctx = db.query(GameContext).filter(
+        GameContext.id == data.zone_map_context_id,
+        GameContext.match_id == data.match_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not zone_ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found in this match")
+
+    import uuid as _uuid
+    event_id = str(_uuid.uuid4())
+    event_state = create_zone_event_state(
+        event_id=event_id,
+        title=data.title,
+        description=data.description,
+        location_id="",    # set when a player joins from a location
+        participant_ids=data.participant_ids,
+        max_turns=data.max_turns,
+    )
+
+    ctx_data = GameContextCreate(
+        match_id=data.match_id,
+        parent_context_id=data.zone_map_context_id,
+        context_type="zone_event",
+        label=data.title,
+        state_blob=event_state,
+    )
+    event_ctx = create_context(ctx_data, db)
+
+    # Register the event in the zone_map's active_events list
+    # Reassign state_blob entirely so SQLAlchemy tracks the mutation
+    import copy as _copy
+    zone_state = _copy.deepcopy(zone_ctx.state_blob or {})
+    zone_state.setdefault("active_events", []).append(str(event_ctx.id))
+    zone_ctx.state_blob = zone_state
+    zone_ctx.state_version += 1
+    db.commit()
+
+    return event_ctx

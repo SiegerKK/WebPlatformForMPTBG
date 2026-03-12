@@ -23,6 +23,10 @@ from app.games.zone_stalkers.rules.exploration_rules import (
     validate_exploration_command,
     resolve_exploration_command,
 )
+from app.games.zone_stalkers.rules.event_rules import (
+    validate_event_command,
+    resolve_event_command,
+)
 
 
 class ZoneStalkerRuleSet(RuleSet):
@@ -47,6 +51,8 @@ class ZoneStalkerRuleSet(RuleSet):
             return validate_trade_command(command_type, payload, state, player_id)
         if ctx_type == "location_exploration":
             return validate_exploration_command(command_type, payload, state, player_id)
+        if ctx_type == "zone_event":
+            return validate_event_command(command_type, payload, state, player_id)
 
         # Fallback: always allow end_turn
         if command_type == "end_turn":
@@ -72,6 +78,8 @@ class ZoneStalkerRuleSet(RuleSet):
             return resolve_trade_command(command_type, payload, state, player_id)
         if ctx_type == "location_exploration":
             return resolve_exploration_command(command_type, payload, state, player_id)
+        if ctx_type == "zone_event":
+            return resolve_event_command(command_type, payload, state, player_id)
 
         # Fallback
         return state, [{"event_type": f"{command_type}_executed", "payload": payload}]

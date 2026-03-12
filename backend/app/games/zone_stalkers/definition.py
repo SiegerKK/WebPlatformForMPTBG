@@ -37,6 +37,10 @@ class ZoneStalkersGame(GameDefinition):
                 display_name="Zone Map",
                 allowed_actions=[
                     "move_agent",
+                    "travel",
+                    "explore_location",
+                    "sleep",
+                    "join_event",
                     "pick_up_artifact",
                     "pick_up_item",
                     "end_turn",
@@ -47,6 +51,7 @@ class ZoneStalkersGame(GameDefinition):
                     "location_exploration",
                     "encounter_combat",
                     "trade_session",
+                    "zone_event",
                 ],
                 ui_schema_ref="zone_map_ui",
             ),
@@ -88,6 +93,17 @@ class ZoneStalkersGame(GameDefinition):
                 turn_mode=TurnMode.STRICT,
                 deadline_hours=1,
                 ui_schema_ref="trade_session_ui",
+            ),
+            ContextDefinition(
+                context_type="zone_event",
+                display_name="Zone Event",
+                allowed_actions=[
+                    "choose_option",
+                    "leave_event",
+                ],
+                turn_mode=TurnMode.SIMULTANEOUS,
+                deadline_hours=24,
+                ui_schema_ref="zone_event_ui",
             ),
         ]
 
@@ -195,12 +211,45 @@ class ZoneStalkersGame(GameDefinition):
 
     def register_actions(self) -> List[ActionDefinition]:
         return [
-            # Zone map actions
+            # Zone map actions — instant
             ActionDefinition(
                 action_type="move_agent",
-                display_name="Move",
-                description="Move your stalker to an adjacent location",
+                display_name="Move (instant)",
+                description="Move your stalker to an adjacent location (costs 1 action)",
                 payload_schema={"target_location_id": {"type": "string"}},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_map"],
+            ),
+            # Zone map actions — scheduled (multi-turn)
+            ActionDefinition(
+                action_type="travel",
+                display_name="Travel",
+                description="Plan a multi-hour journey to any reachable location",
+                payload_schema={"target_location_id": {"type": "string"}},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_map"],
+            ),
+            ActionDefinition(
+                action_type="explore_location",
+                display_name="Explore (1 hr)",
+                description="Spend 1 hour searching the current location for loot",
+                payload_schema={},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_map"],
+            ),
+            ActionDefinition(
+                action_type="sleep",
+                display_name="Sleep",
+                description="Rest for several hours to recover HP and reduce radiation",
+                payload_schema={"hours": {"type": "integer", "minimum": 2, "maximum": 10}},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_map"],
+            ),
+            ActionDefinition(
+                action_type="join_event",
+                display_name="Join Event",
+                description="Enter an active zone event (text quest) in your location",
+                payload_schema={"event_context_id": {"type": "string"}},
                 applicable_archetypes=["stalker_agent"],
                 context_types=["zone_map"],
             ),
@@ -223,10 +272,27 @@ class ZoneStalkersGame(GameDefinition):
             ActionDefinition(
                 action_type="end_turn",
                 display_name="End Turn",
-                description="Submit your action and wait for other agents",
+                description="Submit your action and wait for the next hour",
                 payload_schema={},
                 applicable_archetypes=["stalker_agent"],
                 context_types=["zone_map", "location_exploration", "encounter_combat"],
+            ),
+            # Zone event actions
+            ActionDefinition(
+                action_type="choose_option",
+                display_name="Choose",
+                description="Choose one of the GM-provided options in the current event",
+                payload_schema={"option_index": {"type": "integer"}},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_event"],
+            ),
+            ActionDefinition(
+                action_type="leave_event",
+                display_name="Leave Event",
+                description="Leave the event early",
+                payload_schema={},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_event"],
             ),
             # Exploration actions
             ActionDefinition(

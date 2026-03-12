@@ -2,13 +2,35 @@
 Rules for the zone_map context (world-level movement and interactions).
 
 Supported commands:
-- move_agent(target_location_id)
-- pick_up_artifact(artifact_id, location_id)
-- pick_up_item(item_id, location_id)
+- move_agent(target_location_id)      — instant adjacent move (1 action)
+- travel(target_location_id)          — scheduled multi-turn travel (queues route)
+- explore_location()                  — schedule 1-turn location exploration
+- sleep(hours)                        — schedule multi-turn rest
+- join_event(event_context_id)        — join an active zone_event
+- pick_up_artifact(artifact_id)
+- pick_up_item(item_id)
 - end_turn
 """
+import collections
 from typing import List, Tuple, Dict, Any
 from sdk.rule_set import RuleCheckResult
+
+# How many game-turns travel takes per hop based on danger_level
+_TRAVEL_TURNS_PER_HOP: Dict[int, int] = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3}
+# Default sleep duration when the player just calls sleep with no hours argument
+_DEFAULT_SLEEP_HOURS = 6
+_MAX_SLEEP_HOURS = 10
+_MIN_SLEEP_HOURS = 2
+
+# Exploration rewards by location type (probability keys)
+_EXPLORE_LOOT_CHANCE: Dict[str, float] = {
+    "safe_hub": 0.15,
+    "wild_area": 0.40,
+    "ruins": 0.45,
+    "military_zone": 0.35,
+    "anomaly_cluster": 0.60,
+    "underground": 0.50,
+}
 
 
 def validate_world_command(
@@ -31,11 +53,27 @@ def validate_world_command(
     if command_type == "end_turn":
         return RuleCheckResult(valid=True)
 
+    # Agents with an active scheduled_action can only end_turn
+    if agent.get("scheduled_action"):
+        return RuleCheckResult(valid=False, error="You already have an action in progress. Use end_turn to wait.")
+
     if agent.get("action_used"):
         return RuleCheckResult(valid=False, error="You have already acted this turn")
 
     if command_type == "move_agent":
         return _validate_move(payload, state, agent)
+
+    if command_type == "travel":
+        return _validate_travel(payload, state, agent)
+
+    if command_type == "explore_location":
+        return RuleCheckResult(valid=True)  # always valid if alive and no current action
+
+    if command_type == "sleep":
+        return _validate_sleep(payload, state, agent)
+
+    if command_type == "join_event":
+        return _validate_join_event(payload, state, agent)
 
     if command_type == "pick_up_artifact":
         return _validate_pick_up_artifact(payload, state, agent)
@@ -58,7 +96,6 @@ def resolve_world_command(
     events: List[Dict[str, Any]] = []
 
     if command_type == "end_turn":
-        # Advance world turn when all players have submitted
         events.append({"event_type": "turn_submitted", "payload": {"participant_id": player_id}})
         return state, events
 
@@ -68,11 +105,9 @@ def resolve_world_command(
     if command_type == "move_agent":
         target_loc_id = payload["target_location_id"]
         old_loc = agent["location_id"]
-        # Remove from old location
         old_loc_data = state["locations"].get(old_loc, {})
         if agent_id in old_loc_data.get("agents", []):
             old_loc_data["agents"].remove(agent_id)
-        # Add to new location
         agent["location_id"] = target_loc_id
         new_loc_data = state["locations"].get(target_loc_id, {})
         if agent_id not in new_loc_data.get("agents", []):
@@ -86,13 +121,12 @@ def resolve_world_command(
                 "to": target_loc_id,
             },
         })
-        # Apply anomaly damage for entering a location
         loc_anomalies = new_loc_data.get("anomalies", [])
         if loc_anomalies:
             from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
             for anom in loc_anomalies:
                 anom_info = ANOMALY_TYPES.get(anom["type"], {})
-                dmg = anom_info.get("damage", 0) // 2  # half damage on passing through
+                dmg = anom_info.get("damage", 0) // 2
                 if dmg > 0:
                     agent["hp"] = max(0, agent["hp"] - dmg)
                     events.append({
@@ -107,6 +141,88 @@ def resolve_world_command(
             if agent["hp"] <= 0:
                 agent["is_alive"] = False
                 events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
+
+    elif command_type == "travel":
+        target_loc_id = payload["target_location_id"]
+        route = _bfs_route(state["locations"], agent["location_id"], target_loc_id)
+        if not route:
+            events.append({"event_type": "travel_failed", "payload": {"agent_id": agent_id, "reason": "no_route"}})
+        else:
+            turns = _route_travel_turns(route, state["locations"])
+            agent["scheduled_action"] = {
+                "type": "travel",
+                "turns_remaining": turns,
+                "turns_total": turns,
+                "target_id": target_loc_id,
+                "route": route,  # ordered list of loc IDs (excluding start)
+                "started_turn": state.get("world_turn", 1),
+            }
+            events.append({
+                "event_type": "travel_started",
+                "payload": {
+                    "agent_id": agent_id,
+                    "player_id": player_id,
+                    "destination": target_loc_id,
+                    "turns_required": turns,
+                    "route": route,
+                },
+            })
+
+    elif command_type == "explore_location":
+        loc_id = agent["location_id"]
+        loc = state["locations"].get(loc_id, {})
+        agent["scheduled_action"] = {
+            "type": "explore",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": loc_id,
+            "started_turn": state.get("world_turn", 1),
+        }
+        events.append({
+            "event_type": "exploration_started",
+            "payload": {
+                "agent_id": agent_id,
+                "player_id": player_id,
+                "location_id": loc_id,
+                "location_name": loc.get("name", loc_id),
+            },
+        })
+
+    elif command_type == "sleep":
+        hours = max(_MIN_SLEEP_HOURS, min(_MAX_SLEEP_HOURS, int(payload.get("hours", _DEFAULT_SLEEP_HOURS))))
+        agent["scheduled_action"] = {
+            "type": "sleep",
+            "turns_remaining": hours,
+            "turns_total": hours,
+            "target_id": agent["location_id"],
+            "started_turn": state.get("world_turn", 1),
+        }
+        events.append({
+            "event_type": "sleep_started",
+            "payload": {
+                "agent_id": agent_id,
+                "player_id": player_id,
+                "hours": hours,
+            },
+        })
+
+    elif command_type == "join_event":
+        event_ctx_id = payload.get("event_context_id", "")
+        agent["scheduled_action"] = {
+            "type": "event",
+            "turns_remaining": 1,     # updated once inside the event
+            "turns_total": 1,
+            "target_id": event_ctx_id,
+            "started_turn": state.get("world_turn", 1),
+        }
+        events.append({
+            "event_type": "event_joined",
+            "payload": {
+                "agent_id": agent_id,
+                "player_id": player_id,
+                "event_context_id": event_ctx_id,
+            },
+        })
 
     elif command_type == "pick_up_artifact":
         artifact_id = payload["artifact_id"]
@@ -160,6 +276,39 @@ def _validate_move(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[s
     return RuleCheckResult(valid=True)
 
 
+def _validate_travel(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
+    target_loc_id = payload.get("target_location_id")
+    if not target_loc_id:
+        return RuleCheckResult(valid=False, error="target_location_id is required")
+    locations = state.get("locations", {})
+    if target_loc_id not in locations:
+        return RuleCheckResult(valid=False, error=f"Location '{target_loc_id}' does not exist")
+    if target_loc_id == agent.get("location_id"):
+        return RuleCheckResult(valid=False, error="Already at destination")
+    route = _bfs_route(locations, agent["location_id"], target_loc_id)
+    if not route:
+        return RuleCheckResult(valid=False, error=f"Location '{target_loc_id}' is unreachable")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_sleep(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
+    loc_id = agent.get("location_id")
+    loc = state.get("locations", {}).get(loc_id, {})
+    if loc.get("type") not in ("safe_hub", "ruins"):
+        return RuleCheckResult(valid=False, error="You can only sleep in a safe hub or ruins")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_join_event(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
+    event_ctx_id = payload.get("event_context_id")
+    if not event_ctx_id:
+        return RuleCheckResult(valid=False, error="event_context_id is required")
+    active_events = state.get("active_events", [])
+    if event_ctx_id not in active_events:
+        return RuleCheckResult(valid=False, error="This event is not active")
+    return RuleCheckResult(valid=True)
+
+
 def _validate_pick_up_artifact(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
     artifact_id = payload.get("artifact_id")
     if not artifact_id:
@@ -182,3 +331,31 @@ def _validate_pick_up_item(payload: Dict[str, Any], state: Dict[str, Any], agent
     if not item:
         return RuleCheckResult(valid=False, error="Item not found in current location")
     return RuleCheckResult(valid=True)
+
+
+def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
+    """Return ordered list of location IDs from start (exclusive) to goal (inclusive), or [] if unreachable."""
+    if start == goal:
+        return []
+    visited = {start}
+    queue: collections.deque = collections.deque([(start, [])])
+    while queue:
+        current, path = queue.popleft()
+        for conn in locations.get(current, {}).get("connections", []):
+            nxt = conn["to"]
+            if nxt not in visited:
+                new_path = path + [nxt]
+                if nxt == goal:
+                    return new_path
+                visited.add(nxt)
+                queue.append((nxt, new_path))
+    return []
+
+
+def _route_travel_turns(route: List[str], locations: Dict[str, Any]) -> int:
+    """Sum up travel turns for each hop in the route."""
+    total = 0
+    for loc_id in route:
+        danger = locations.get(loc_id, {}).get("danger_level", 2)
+        total += _TRAVEL_TURNS_PER_HOP.get(danger, 2)
+    return max(1, total)
