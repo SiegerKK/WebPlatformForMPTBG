@@ -99,7 +99,26 @@ def resolve_world_command(
     events: List[Dict[str, Any]] = []
 
     if command_type == "end_turn":
+        # Mark this player's agent as having acted
+        if agent_id and agent_id in state.get("agents", {}):
+            state["agents"][agent_id]["action_used"] = True
         events.append({"event_type": "turn_submitted", "payload": {"participant_id": player_id}})
+
+        # Check whether all alive human agents have now ended their turns.
+        # If so, auto-advance the world by one tick.
+        player_agents = state.get("player_agents", {})  # {user_id: agent_id}
+        all_human_acted = True
+        for _uid, aid in player_agents.items():
+            agent_data = state.get("agents", {}).get(aid)
+            if agent_data and agent_data.get("is_alive", True) and not agent_data.get("action_used"):
+                all_human_acted = False
+                break
+
+        if all_human_acted:
+            from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+            state, tick_events = tick_zone_map(state)
+            events.extend(tick_events)
+
         return state, events
 
     agent = state["agents"][agent_id]

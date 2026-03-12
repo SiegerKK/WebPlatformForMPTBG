@@ -537,7 +537,41 @@ def test_zone_stalkers_end_turn(test_client):
     assert resp.json()["status"] == "resolved"
 
 
-def test_zone_stalkers_second_action_rejected(test_client):
+def test_zone_stalkers_end_turn_advances_world_clock(test_client):
+    """end_turn by the sole human player should trigger a tick and advance world_turn by 1."""
+    p1 = _register_and_login(test_client, "zs_et_adv1", "zs_et_adv1@test.com", "pass1234")
+
+    match = test_client.post(
+        "/api/matches", json={"game_id": "zone_stalkers"}, headers=p1
+    ).json()
+    match_id = match["id"]
+    test_client.post(f"/api/matches/{match_id}/start", headers=p1)
+
+    ctx = test_client.post(
+        "/api/contexts", json={"match_id": match_id, "context_type": "zone_map"}, headers=p1
+    ).json()
+    ctx_id = ctx["id"]
+    turn_before = ctx["state_blob"]["world_turn"]
+
+    resp = test_client.post("/api/commands", json={
+        "match_id": match_id,
+        "context_id": ctx_id,
+        "command_type": "end_turn",
+        "payload": {},
+    }, headers=p1)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "resolved"
+
+    # Confirm world_turn advanced
+    new_state = test_client.get(f"/api/contexts/{ctx_id}", headers=p1).json()["state_blob"]
+    assert new_state["world_turn"] == turn_before + 1
+
+    # Confirm at least one world_turn_advanced event was emitted
+    events = resp.json().get("events", [])
+    assert any(e.get("event_type") == "world_turn_advanced" for e in events)
+
+
+
     p1 = _register_and_login(test_client, "zs_sa1", "zs_sa1@test.com", "pass1234")
 
     match = test_client.post(
