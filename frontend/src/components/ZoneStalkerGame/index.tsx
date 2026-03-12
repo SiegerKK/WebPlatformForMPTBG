@@ -74,7 +74,18 @@ interface StalkerAgent {
   action_used: boolean;
   scheduled_action: ScheduledAction | null;
   memory: MemoryEntry[];
-  controller: { kind: string };
+  controller: { kind: string; participant_id?: string | null };
+  // development / psychology (may be absent on older saves)
+  experience?: number;
+  skill_combat?: number;
+  skill_stalker?: number;
+  skill_trade?: number;
+  skill_medicine?: number;
+  skill_social?: number;
+  global_goal?: string;
+  current_goal?: string | null;
+  risk_tolerance?: number;
+  reputation?: number;
 }
 
 interface ZoneMapState {
@@ -146,6 +157,16 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [sleepHours, setSleepHours] = useState(6);
   const [showTravelPanel, setShowTravelPanel] = useState(false);
   const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory'>('map');
+  // ── Roster state ─────────────────────────────────────────────────────────
+  // Show roster on first load; persist "entered" status per match so a page
+  // refresh doesn't force the player back to the roster screen mid-game.
+  const rosterKey = `roster_seen_${match.id}`;
+  const [showRoster, setShowRoster] = useState<boolean>(
+    () => !sessionStorage.getItem(rosterKey)
+  );
+  const enterGame = () => { sessionStorage.setItem(rosterKey, '1'); setShowRoster(false); };
+  // Agent whose profile modal is open (null = list view)
+  const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lobbyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -589,6 +610,385 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     );
   };
 
+  // ─── render: agent profile (full detail view) ───────────────────────────
+  const renderAgentProfile = (agentId: string) => {
+    if (!zoneState) return null;
+
+    // Find the entity — could be stalker, mutant, or trader
+    const stalker = zoneState.agents[agentId];
+    const mutant = !stalker ? zoneState.mutants[agentId] : null;
+    const trader = !stalker && !mutant
+      ? Object.values(zoneState.traders).find((t) => t.id === agentId) ?? null
+      : null;
+
+    const locName = (locId: string) => zoneState.locations[locId]?.name ?? locId;
+
+    return (
+      <div style={styles.profileOverlay}>
+        <div style={styles.profileModal}>
+          {/* ── Header ── */}
+          <div style={styles.profileHeader}>
+            <button style={styles.profileBackBtn} onClick={() => setProfileAgentId(null)}>
+              ← Back to Roster
+            </button>
+            {profileAgentId === myAgentId && (
+              <button style={styles.profileEnterBtn} onClick={() => { enterGame(); setProfileAgentId(null); }}>
+                ▶ Play as this Stalker
+              </button>
+            )}
+          </div>
+
+          {stalker && (
+            <>
+              <div style={styles.profileTitle}>
+                <span style={styles.profileAvatar}>{stalker.controller.kind === 'human' ? '👤' : '🤖'}</span>
+                <div>
+                  <div style={styles.profileName}>{stalker.name}</div>
+                  <div style={styles.profileSubtitle}>
+                    {stalker.faction} · {stalker.controller.kind === 'human' ? 'Player' : 'NPC'} ·
+                    {' '}{stalker.is_alive ? '🟢 Alive' : '💀 Dead'}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── Location ── */}
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>📍 Location</div>
+                <div style={styles.profileSectionVal}>{locName(stalker.location_id)}</div>
+                {stalker.scheduled_action && (
+                  <div style={styles.profileSched}>
+                    {SCHED_ICONS[stalker.scheduled_action.type] ?? '⏳'} {stalker.scheduled_action.type}
+                    {' '}— {stalker.scheduled_action.turns_remaining}h remaining
+                  </div>
+                )}
+              </div>
+
+              {/* ── Vital Stats ── */}
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>📊 Vital Stats</div>
+                {[
+                  { label: '❤️ HP', val: stalker.hp, max: stalker.max_hp, pct: stalker.max_hp > 0 ? stalker.hp / stalker.max_hp : 0, color: stalker.hp > 50 ? '#22c55e' : stalker.hp > 25 ? '#f59e0b' : '#ef4444' },
+                  { label: '☢ Rad', val: stalker.radiation, max: 100, pct: Math.min(stalker.radiation, 100) / 100, color: '#a855f7' },
+                  { label: '⚡ Stamina', val: stalker.stamina, max: 100, pct: stalker.stamina / 100, color: '#facc15' },
+                  { label: '🍖 Hunger', val: stalker.hunger ?? 0, max: 100, pct: (stalker.hunger ?? 0) / 100, color: (stalker.hunger ?? 0) > 75 ? '#ef4444' : '#22c55e' },
+                  { label: '💧 Thirst', val: stalker.thirst ?? 0, max: 100, pct: (stalker.thirst ?? 0) / 100, color: (stalker.thirst ?? 0) > 75 ? '#ef4444' : '#3b82f6' },
+                  { label: '😴 Sleep', val: stalker.sleepiness ?? 0, max: 100, pct: (stalker.sleepiness ?? 0) / 100, color: (stalker.sleepiness ?? 0) > 75 ? '#ef4444' : '#64748b' },
+                ].map(({ label, val, max, pct, color }) => (
+                  <div key={label} style={styles.profileStatRow}>
+                    <span style={styles.profileStatLabel}>{label}</span>
+                    <div style={styles.barBg}>
+                      <div style={{ ...styles.barFill, width: `${max > 0 ? pct * 100 : 0}%`, background: color }} />
+                    </div>
+                    <span style={styles.profileStatVal}>{val}/{max}</span>
+                  </div>
+                ))}
+                <div style={styles.profileMoney}>💰 {stalker.money} RU</div>
+                {stalker.reputation != null && <div style={styles.profileRep}>⭐ Reputation: {stalker.reputation}</div>}
+              </div>
+
+              {/* ── Skills ── */}
+              {(stalker.skill_combat != null) && (
+                <div style={styles.profileSection}>
+                  <div style={styles.profileSectionLabel}>🎯 Skills</div>
+                  <div style={styles.profileSkillGrid}>
+                    {[
+                      { label: '⚔ Combat', val: stalker.skill_combat ?? 1 },
+                      { label: '🔭 Stalker', val: stalker.skill_stalker ?? 1 },
+                      { label: '💼 Trade', val: stalker.skill_trade ?? 1 },
+                      { label: '💊 Medicine', val: stalker.skill_medicine ?? 1 },
+                      { label: '🗣 Social', val: stalker.skill_social ?? 1 },
+                    ].map(({ label, val }) => (
+                      <div key={label} style={styles.profileSkillChip}>
+                        <span style={styles.profileSkillLabel}>{label}</span>
+                        <span style={styles.profileSkillVal}>Lv {val}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {stalker.global_goal && (
+                    <div style={styles.profileGoal}>
+                      🎯 Goal: <strong>{stalker.global_goal}</strong>
+                      {stalker.current_goal && <span style={styles.profileSubgoal}> → {stalker.current_goal}</span>}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Equipment ── */}
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>🔫 Equipment</div>
+                {Object.entries(stalker.equipment).map(([slot, item]) => (
+                  <div key={slot} style={styles.profileEquipRow}>
+                    <span style={styles.profileEquipSlot}>{slot}</span>
+                    <span style={item ? styles.profileEquipItem : styles.profileEquipEmpty}>
+                      {item ? item.name : '—'}
+                    </span>
+                    {item?.value != null && <span style={styles.itemVal}>{item.value} RU</span>}
+                  </div>
+                ))}
+              </div>
+
+              {/* ── Inventory ── */}
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>🎒 Inventory ({stalker.inventory.length} items)</div>
+                {stalker.inventory.length === 0
+                  ? <div style={styles.emptyText}>Empty</div>
+                  : stalker.inventory.map((item) => (
+                    <div key={item.id} style={styles.profileInvRow}>
+                      <span style={styles.itemName}>{item.name}</span>
+                      {item.weight != null && <span style={styles.profileInvWeight}>{item.weight}kg</span>}
+                      {item.value != null && <span style={styles.itemVal}>{item.value} RU</span>}
+                    </div>
+                  ))}
+              </div>
+
+              {/* ── Memory ── */}
+              {stalker.memory.length > 0 && (
+                <div style={styles.profileSection}>
+                  <div style={styles.profileSectionLabel}>🧠 Memory ({stalker.memory.length} entries)</div>
+                  <div style={styles.profileMemoryList}>
+                    {[...stalker.memory].reverse().slice(0, 10).map((m, i) => (
+                      <div key={i} style={styles.memoryEntry}>
+                        <div style={styles.memoryHeader}>
+                          <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
+                          <span style={styles.memoryWhen}>Day {m.world_day} · {HOUR_LABEL(m.world_hour)}</span>
+                        </div>
+                        <div style={styles.memoryTitle}>{m.title}</div>
+                        <div style={styles.memorySummary}>{m.summary}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {mutant && (
+            <>
+              <div style={styles.profileTitle}>
+                <span style={styles.profileAvatar}>☣️</span>
+                <div>
+                  <div style={styles.profileName}>{mutant.name}</div>
+                  <div style={styles.profileSubtitle}>Mutant · {mutant.is_alive ? '🟢 Alive' : '💀 Dead'}</div>
+                </div>
+              </div>
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>📍 Location</div>
+                <div style={styles.profileSectionVal}>{locName(mutant.location_id)}</div>
+              </div>
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>📊 Stats</div>
+                <div style={styles.profileStatRow}>
+                  <span style={styles.profileStatLabel}>❤️ HP</span>
+                  <div style={styles.barBg}>
+                    <div style={{ ...styles.barFill, width: `${mutant.max_hp > 0 ? (mutant.hp / mutant.max_hp) * 100 : 0}%`, background: '#ef4444' }} />
+                  </div>
+                  <span style={styles.profileStatVal}>{mutant.hp}/{mutant.max_hp}</span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {trader && (
+            <>
+              <div style={styles.profileTitle}>
+                <span style={styles.profileAvatar}>🏪</span>
+                <div>
+                  <div style={styles.profileName}>{(trader as { name: string }).name}</div>
+                  <div style={styles.profileSubtitle}>Trader</div>
+                </div>
+              </div>
+              <div style={styles.profileSection}>
+                <div style={styles.profileSectionLabel}>📍 Location</div>
+                <div style={styles.profileSectionVal}>{locName((trader as { location_id: string }).location_id)}</div>
+              </div>
+            </>
+          )}
+
+          {!stalker && !mutant && !trader && (
+            <div style={styles.emptyText}>Character data not found.</div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── render: character roster ────────────────────────────────────────────
+  const renderRoster = () => {
+    if (!zoneState) return <p style={styles.loadingText}>Loading roster…</p>;
+
+    const allStalkers = Object.values(zoneState.agents);
+    const allMutants = Object.values(zoneState.mutants);
+    const allTraders = Object.values(zoneState.traders);
+
+    const locName = (locId: string) => zoneState.locations[locId]?.name ?? locId;
+
+    const renderStatBar = (val: number, max: number, color: string) => (
+      <div style={styles.barBg}>
+        <div style={{ ...styles.barFill, width: `${max > 0 ? (val / max) * 100 : 0}%`, background: color }} />
+      </div>
+    );
+
+    return (
+      <div style={styles.rosterPage}>
+        {/* Profile modal */}
+        {profileAgentId && renderAgentProfile(profileAgentId)}
+
+        {/* Header */}
+        <div style={styles.rosterHeader}>
+          <div>
+            <h3 style={styles.rosterTitle}>☢️ Zone Stalkers — Character Roster</h3>
+            <p style={styles.rosterSubtitle}>
+              Day {zoneState.world_day} · {HOUR_LABEL(zoneState.world_hour)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
+            </p>
+          </div>
+          {myAgentId && (
+            <button style={styles.rosterEnterBtn} onClick={enterGame}>
+              ▶ Enter Game as {zoneState.agents[myAgentId]?.name ?? 'Stalker'}
+            </button>
+          )}
+        </div>
+
+        {/* ── Stalkers ── */}
+        {allStalkers.length > 0 && (
+          <div style={styles.rosterSection}>
+            <div style={styles.rosterSectionTitle}>👤 Stalkers ({allStalkers.length})</div>
+            <div style={styles.rosterGrid}>
+              {allStalkers.map((agent) => {
+                const isMe = agent.id === myAgentId;
+                return (
+                  <div
+                    key={agent.id}
+                    style={{ ...styles.rosterCard, ...(isMe ? styles.rosterCardMe : {}) }}
+                  >
+                    <div style={styles.rosterCardTop}>
+                      <span style={styles.rosterCardAvatar}>
+                        {isMe ? '⭐' : agent.controller.kind === 'human' ? '👤' : '🤖'}
+                      </span>
+                      <div style={styles.rosterCardInfo}>
+                        <div style={styles.rosterCardName}>{agent.name}</div>
+                        <div style={styles.rosterCardSub}>
+                          {agent.faction} · {isMe ? 'You' : agent.controller.kind === 'human' ? 'Player' : 'NPC'}
+                        </div>
+                      </div>
+                      <span style={{
+                        ...styles.rosterAliveTag,
+                        background: agent.is_alive ? '#166534' : '#7f1d1d',
+                        color: agent.is_alive ? '#86efac' : '#fca5a5',
+                      }}>
+                        {agent.is_alive ? '🟢' : '💀'}
+                      </span>
+                    </div>
+
+                    <div style={styles.rosterStatRow}>
+                      <span style={styles.rosterStatLabel}>❤️</span>
+                      {renderStatBar(agent.hp, agent.max_hp, agent.hp > 50 ? '#22c55e' : agent.hp > 25 ? '#f59e0b' : '#ef4444')}
+                      <span style={styles.rosterStatVal}>{agent.hp}</span>
+                    </div>
+                    {agent.radiation > 0 && (
+                      <div style={styles.rosterStatRow}>
+                        <span style={styles.rosterStatLabel}>☢</span>
+                        {renderStatBar(Math.min(agent.radiation, 100), 100, '#a855f7')}
+                        <span style={styles.rosterStatVal}>{agent.radiation}</span>
+                      </div>
+                    )}
+
+                    <div style={styles.rosterLocation}>📍 {locName(agent.location_id)}</div>
+                    {agent.scheduled_action && (
+                      <div style={styles.rosterSched}>
+                        {SCHED_ICONS[agent.scheduled_action.type] ?? '⏳'} {agent.scheduled_action.type} ({agent.scheduled_action.turns_remaining}h)
+                      </div>
+                    )}
+                    <div style={styles.rosterCardFooter}>
+                      <span style={styles.rosterMoney}>💰 {agent.money} RU</span>
+                      <button
+                        style={styles.rosterViewBtn}
+                        onClick={() => setProfileAgentId(agent.id)}
+                      >
+                        View Profile
+                      </button>
+                      {isMe && (
+                        <button
+                          style={styles.rosterPlayBtn}
+                          onClick={enterGame}
+                        >
+                          ▶ Play
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Mutants ── */}
+        {allMutants.length > 0 && (
+          <div style={styles.rosterSection}>
+            <div style={styles.rosterSectionTitle}>☣️ Mutants ({allMutants.length})</div>
+            <div style={styles.rosterGrid}>
+              {allMutants.map((mutant) => (
+                <div key={mutant.id} style={styles.rosterCard}>
+                  <div style={styles.rosterCardTop}>
+                    <span style={styles.rosterCardAvatar}>☣️</span>
+                    <div style={styles.rosterCardInfo}>
+                      <div style={styles.rosterCardName}>{mutant.name}</div>
+                      <div style={styles.rosterCardSub}>Mutant</div>
+                    </div>
+                    <span style={{
+                      ...styles.rosterAliveTag,
+                      background: mutant.is_alive ? '#7f1d1d' : '#1e293b',
+                      color: mutant.is_alive ? '#fca5a5' : '#475569',
+                    }}>
+                      {mutant.is_alive ? '🔴' : '💀'}
+                    </span>
+                  </div>
+                  <div style={styles.rosterStatRow}>
+                    <span style={styles.rosterStatLabel}>❤️</span>
+                    {renderStatBar(mutant.hp, mutant.max_hp, '#ef4444')}
+                    <span style={styles.rosterStatVal}>{mutant.hp}</span>
+                  </div>
+                  <div style={styles.rosterLocation}>📍 {locName(mutant.location_id)}</div>
+                  <div style={styles.rosterCardFooter}>
+                    <button style={styles.rosterViewBtn} onClick={() => setProfileAgentId(mutant.id)}>
+                      View Profile
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Traders ── */}
+        {allTraders.length > 0 && (
+          <div style={styles.rosterSection}>
+            <div style={styles.rosterSectionTitle}>🏪 Traders ({allTraders.length})</div>
+            <div style={styles.rosterGrid}>
+              {allTraders.map((trader) => (
+                <div key={trader.id} style={styles.rosterCard}>
+                  <div style={styles.rosterCardTop}>
+                    <span style={styles.rosterCardAvatar}>🏪</span>
+                    <div style={styles.rosterCardInfo}>
+                      <div style={styles.rosterCardName}>{trader.name}</div>
+                      <div style={styles.rosterCardSub}>Trader</div>
+                    </div>
+                  </div>
+                  <div style={styles.rosterLocation}>📍 {locName(trader.location_id)}</div>
+                  <div style={styles.rosterCardFooter}>
+                    <button style={styles.rosterViewBtn} onClick={() => setProfileAgentId(trader.id)}>
+                      View Profile
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ─── render: zone map ────────────────────────────────────────────────────
   const renderZoneMap = () => {
     if (!zoneState) return <p style={styles.loadingText}>Generating the Zone…</p>;
@@ -698,6 +1098,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 {tab === 'map' ? '🗺 Map' : tab === 'event' ? `📖 Event${eventState?.phase === 'active' ? ' ●' : ''}` : '🧠 Memory'}
               </button>
             ))}
+            <button
+              style={{ ...styles.tabBtn, ...styles.rosterTabBtn }}
+              onClick={() => setShowRoster(true)}
+              title="View all characters in the Zone"
+            >
+              👥 Roster
+            </button>
           </div>
 
           {activeTab === 'map' && (
@@ -971,7 +1378,8 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
       </div>
       {isWaiting && renderLobby()}
-      {isActive && renderZoneMap()}
+      {isActive && showRoster && renderRoster()}
+      {isActive && !showRoster && renderZoneMap()}
       {!isWaiting && !isActive && <p style={styles.loadingText}>Match status: {match.status}</p>}
     </div>
   );
@@ -1129,5 +1537,66 @@ const styles: Record<string, React.CSSProperties> = {
   emptyText: { color: '#475569', fontSize: '0.8rem' },
   loadingText: { color: '#94a3b8' },
   error: { color: '#f87171', fontSize: '0.85rem', margin: 0 },
+
+  // ── Roster page ───────────────────────────────────────────────────────────
+  rosterPage: { display: 'flex', flexDirection: 'column' as const, gap: '1.5rem' },
+  rosterHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' as const },
+  rosterTitle: { color: '#f8fafc', fontSize: '1.1rem', margin: 0 },
+  rosterSubtitle: { color: '#64748b', fontSize: '0.8rem', margin: '2px 0 0' },
+  rosterEnterBtn: { padding: '0.55rem 1.4rem', background: '#166534', color: '#86efac', border: '1px solid #22c55e', borderRadius: 10, cursor: 'pointer', fontWeight: 700, fontSize: '0.95rem' },
+  rosterSection: { display: 'flex', flexDirection: 'column' as const, gap: 10 },
+  rosterSectionTitle: { color: '#94a3b8', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em' },
+  rosterGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 },
+  rosterCard: { background: '#1e293b', borderRadius: 10, padding: '0.85rem', border: '1px solid #334155', display: 'flex', flexDirection: 'column' as const, gap: '0.5rem' },
+  rosterCardMe: { border: '1px solid #22c55e', background: '#0d2a1a' },
+  rosterCardTop: { display: 'flex', alignItems: 'flex-start', gap: 8 },
+  rosterCardAvatar: { fontSize: '1.5rem', flexShrink: 0 },
+  rosterCardInfo: { flex: 1 },
+  rosterCardName: { color: '#f8fafc', fontWeight: 700, fontSize: '0.9rem' },
+  rosterCardSub: { color: '#64748b', fontSize: '0.72rem', marginTop: 1 },
+  rosterAliveTag: { borderRadius: 6, padding: '0.1rem 0.4rem', fontSize: '0.68rem', fontWeight: 700, flexShrink: 0 },
+  rosterStatRow: { display: 'flex', alignItems: 'center', gap: 5 },
+  rosterStatLabel: { color: '#94a3b8', fontSize: '0.68rem', width: 18, flexShrink: 0 },
+  rosterStatVal: { color: '#64748b', fontSize: '0.68rem', width: 28, textAlign: 'right' as const },
+  rosterLocation: { color: '#60a5fa', fontSize: '0.75rem' },
+  rosterSched: { color: '#a78bfa', fontSize: '0.7rem', fontStyle: 'italic' },
+  rosterMoney: { color: '#fbbf24', fontSize: '0.78rem', fontWeight: 600 },
+  rosterCardFooter: { display: 'flex', gap: 6, marginTop: 2, flexWrap: 'wrap' as const, alignItems: 'center' },
+  rosterViewBtn: { padding: '0.2rem 0.65rem', background: '#0f172a', color: '#94a3b8', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: '0.72rem' },
+  rosterPlayBtn: { padding: '0.2rem 0.65rem', background: '#166534', color: '#86efac', border: '1px solid #22c55e', borderRadius: 6, cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700 },
+  rosterTabBtn: { color: '#a78bfa', borderColor: '#312e81' },
+
+  // ── Agent profile overlay ─────────────────────────────────────────────────
+  profileOverlay: { position: 'fixed' as const, inset: 0, background: 'rgba(0,0,0,0.75)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '1.5rem', overflowY: 'auto' as const },
+  profileModal: { background: '#0f172a', borderRadius: 14, border: '1px solid #334155', padding: '1.5rem', width: '100%', maxWidth: 560, display: 'flex', flexDirection: 'column' as const, gap: '1rem' },
+  profileHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
+  profileBackBtn: { padding: '0.3rem 0.8rem', background: 'transparent', color: '#94a3b8', border: '1px solid #334155', borderRadius: 7, cursor: 'pointer', fontSize: '0.8rem' },
+  profileEnterBtn: { padding: '0.4rem 1rem', background: '#166534', color: '#86efac', border: '1px solid #22c55e', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: '0.9rem' },
+  profileTitle: { display: 'flex', gap: 12, alignItems: 'flex-start' },
+  profileAvatar: { fontSize: '2.5rem', flexShrink: 0 },
+  profileName: { color: '#f8fafc', fontWeight: 700, fontSize: '1.15rem' },
+  profileSubtitle: { color: '#64748b', fontSize: '0.8rem', marginTop: 2 },
+  profileSection: { background: '#1e293b', borderRadius: 8, padding: '0.75rem', border: '1px solid #334155', display: 'flex', flexDirection: 'column' as const, gap: '0.45rem' },
+  profileSectionLabel: { color: '#94a3b8', fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em', marginBottom: 2 },
+  profileSectionVal: { color: '#cbd5e1', fontSize: '0.9rem' },
+  profileSched: { color: '#a78bfa', fontSize: '0.8rem', fontStyle: 'italic' },
+  profileStatRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  profileStatLabel: { color: '#94a3b8', fontSize: '0.72rem', width: 70, flexShrink: 0 },
+  profileStatVal: { color: '#94a3b8', fontSize: '0.7rem', width: 42, textAlign: 'right' as const },
+  profileMoney: { color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem', marginTop: 4 },
+  profileRep: { color: '#a78bfa', fontSize: '0.8rem' },
+  profileSkillGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 6 },
+  profileSkillChip: { background: '#0f172a', borderRadius: 6, padding: '0.3rem 0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  profileSkillLabel: { color: '#94a3b8', fontSize: '0.72rem' },
+  profileSkillVal: { color: '#f8fafc', fontWeight: 700, fontSize: '0.75rem' },
+  profileGoal: { color: '#94a3b8', fontSize: '0.8rem', marginTop: 4 },
+  profileSubgoal: { color: '#60a5fa', fontSize: '0.78rem' },
+  profileEquipRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem' },
+  profileEquipSlot: { color: '#64748b', fontSize: '0.7rem', width: 56, flexShrink: 0, textTransform: 'capitalize' as const },
+  profileEquipItem: { color: '#cbd5e1', flex: 1 },
+  profileEquipEmpty: { color: '#334155', flex: 1 },
+  profileInvRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', borderBottom: '1px solid #0f172a', paddingBottom: 3 },
+  profileInvWeight: { color: '#475569', fontSize: '0.7rem' },
+  profileMemoryList: { display: 'flex', flexDirection: 'column' as const, gap: 6, maxHeight: 260, overflowY: 'auto' as const },
 };
 
