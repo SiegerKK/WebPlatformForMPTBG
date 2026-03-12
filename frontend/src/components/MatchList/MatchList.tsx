@@ -1,0 +1,192 @@
+import React, { useEffect, useState } from 'react';
+import { matchesApi } from '../../api/client';
+import { useAppState } from '../../store';
+import type { Match } from '../../types';
+
+const STATUS_COLORS: Record<string, string> = {
+  waiting: '#f59e0b',
+  active: '#22c55e',
+  paused: '#94a3b8',
+  finished: '#3b82f6',
+  cancelled: '#ef4444',
+};
+
+export default function MatchList() {
+  const { state, dispatch } = useAppState();
+  const [gameId, setGameId] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadMatches();
+  }, []);
+
+  const loadMatches = async () => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    try {
+      const res = await matchesApi.list();
+      dispatch({ type: 'SET_MATCHES', payload: res.data as Match[] });
+    } catch {
+      dispatch({ type: 'SET_ERROR', payload: 'Failed to load matches.' });
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gameId.trim()) return;
+    setError(null);
+    setCreating(true);
+    try {
+      const res = await matchesApi.create({ game_id: gameId.trim() });
+      dispatch({ type: 'SET_MATCHES', payload: [res.data as Match, ...state.matches] });
+      setShowCreate(false);
+      setGameId('');
+    } catch {
+      setError('Failed to create match.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div style={styles.container}>
+      <div style={styles.header}>
+        <h2 style={styles.title}>Matches</h2>
+        <div style={styles.headerActions}>
+          <button style={styles.refreshBtn} onClick={loadMatches}>↻ Refresh</button>
+          <button style={styles.createBtn} onClick={() => setShowCreate(!showCreate)}>
+            {showCreate ? 'Cancel' : '+ New Match'}
+          </button>
+        </div>
+      </div>
+
+      {showCreate && (
+        <form onSubmit={handleCreate} style={styles.createForm}>
+          <input
+            style={styles.input}
+            type="text"
+            placeholder="Game ID (e.g. chess, tictactoe)"
+            value={gameId}
+            onChange={(e) => setGameId(e.target.value)}
+            required
+          />
+          {error && <p style={styles.error}>{error}</p>}
+          <button style={styles.createBtn} type="submit" disabled={creating}>
+            {creating ? 'Creating…' : 'Create'}
+          </button>
+        </form>
+      )}
+
+      {state.loading && <p style={styles.loading}>Loading…</p>}
+
+      {state.matches.length === 0 && !state.loading && (
+        <p style={styles.empty}>No matches found. Create one to get started.</p>
+      )}
+
+      <div style={styles.list}>
+        {state.matches.map((match) => (
+          <div
+            key={match.id}
+            style={{
+              ...styles.matchCard,
+              ...(state.currentMatch?.id === match.id ? styles.matchCardSelected : {}),
+            }}
+            onClick={() => dispatch({ type: 'SET_CURRENT_MATCH', payload: match })}
+          >
+            <div style={styles.matchRow}>
+              <span style={styles.gameId}>{match.game_id}</span>
+              <span
+                style={{
+                  ...styles.statusBadge,
+                  background: STATUS_COLORS[match.status] ?? '#64748b',
+                }}
+              >
+                {match.status}
+              </span>
+            </div>
+            <div style={styles.matchMeta}>
+              <span style={styles.metaText}>ID: {match.id.slice(0, 8)}…</span>
+              <span style={styles.metaText}>
+                {new Date(match.created_at).toLocaleString()}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const styles: Record<string, React.CSSProperties> = {
+  container: { padding: '1rem' },
+  header: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: '1rem',
+  },
+  headerActions: { display: 'flex', gap: 8 },
+  title: { color: '#f8fafc', margin: 0, fontSize: '1.2rem' },
+  refreshBtn: {
+    padding: '0.35rem 0.75rem',
+    background: '#334155',
+    border: 'none',
+    borderRadius: 6,
+    color: '#94a3b8',
+    cursor: 'pointer',
+    fontSize: '0.85rem',
+  },
+  createBtn: {
+    padding: '0.35rem 0.75rem',
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: 6,
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '0.85rem',
+  },
+  createForm: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    marginBottom: '1rem',
+    padding: '1rem',
+    background: '#1e293b',
+    borderRadius: 8,
+  },
+  input: {
+    padding: '0.5rem 0.75rem',
+    borderRadius: 6,
+    border: '1px solid #475569',
+    background: '#0f172a',
+    color: '#f8fafc',
+    fontSize: '0.95rem',
+  },
+  error: { color: '#f87171', fontSize: '0.85rem', margin: 0 },
+  loading: { color: '#94a3b8', textAlign: 'center' },
+  empty: { color: '#64748b', textAlign: 'center', padding: '2rem 0' },
+  list: { display: 'flex', flexDirection: 'column', gap: 8 },
+  matchCard: {
+    background: '#1e293b',
+    borderRadius: 8,
+    padding: '0.75rem 1rem',
+    cursor: 'pointer',
+    border: '1px solid #334155',
+    transition: 'border-color 0.15s',
+  },
+  matchCardSelected: { border: '1px solid #3b82f6' },
+  matchRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+  gameId: { color: '#f8fafc', fontWeight: 600, fontSize: '0.95rem' },
+  statusBadge: {
+    padding: '0.15rem 0.5rem',
+    borderRadius: 12,
+    color: '#fff',
+    fontSize: '0.75rem',
+    fontWeight: 600,
+  },
+  matchMeta: { display: 'flex', justifyContent: 'space-between', marginTop: 4 },
+  metaText: { color: '#64748b', fontSize: '0.75rem' },
+};

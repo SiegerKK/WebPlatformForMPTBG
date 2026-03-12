@@ -1,0 +1,31 @@
+import uuid
+from typing import List
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from .schemas import GameContextCreate, GameContextRead
+from .service import create_context, get_context, get_match_contexts, get_context_tree
+from app.core.auth.service import get_current_user
+from app.core.auth.models import User
+from app.core.visibility.service import FogProjection, VisibilityPolicy
+from app.database import get_db
+
+router = APIRouter(tags=["contexts"])
+
+@router.post("/contexts", response_model=GameContextRead)
+def create(data: GameContextCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return create_context(data, db)
+
+@router.get("/contexts/{context_id}", response_model=GameContextRead)
+def get(context_id: uuid.UUID, db: Session = Depends(get_db)):
+    return get_context(context_id, db)
+
+@router.get("/matches/{match_id}/contexts", response_model=List[GameContextRead])
+def get_tree(match_id: uuid.UUID, db: Session = Depends(get_db)):
+    return get_context_tree(match_id, db)
+
+@router.get("/contexts/{context_id}/projection")
+def get_projection(context_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ctx = get_context(context_id, db)
+    policy = VisibilityPolicy()
+    fog = FogProjection()
+    return fog.project(ctx, current_user.id, policy, db)
