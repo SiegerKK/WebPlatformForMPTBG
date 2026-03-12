@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-from .models import TurnState, TurnMode, TurnStatus
+from .models import TurnState, TurnMode, TurnStatus, TurnPhase
 from .schemas import TurnStateCreate
 
 class TurnScheduler:
@@ -49,8 +49,10 @@ class TurnScheduler:
             context_id=context_id,
             turn_number=turn_number,
             mode=TurnMode.STRICT,
+            phase=TurnPhase.COLLECTING,
             status=TurnStatus.WAITING_FOR_PLAYERS,
             submitted_players=[],
+            opened_at=datetime.utcnow(),
         )
         db.add(new_turn)
         db.commit()

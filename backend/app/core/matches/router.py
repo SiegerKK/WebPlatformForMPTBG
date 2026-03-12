@@ -2,7 +2,7 @@ import uuid
 from typing import List
 from fastapi import APIRouter, Depends, Body
 from sqlalchemy.orm import Session
-from .schemas import MatchCreate, MatchRead, MatchParticipantCreate, MatchParticipantRead
+from .schemas import MatchCreate, MatchRead, ParticipantCreate, ParticipantRead
 from .service import create_match, list_matches, get_match, join_match, start_match, delete_match
 from app.core.auth.service import get_current_user
 from app.core.auth.models import User
@@ -22,8 +22,8 @@ def list_all(db: Session = Depends(get_db)):
 def get(match_id: uuid.UUID, db: Session = Depends(get_db)):
     return get_match(match_id, db)
 
-@router.post("/{match_id}/join", response_model=MatchParticipantRead)
-def join(match_id: uuid.UUID, data: MatchParticipantCreate = Body(default=MatchParticipantCreate()), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.post("/{match_id}/join", response_model=ParticipantRead)
+def join(match_id: uuid.UUID, data: ParticipantCreate = Body(default=ParticipantCreate()), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return join_match(match_id, current_user.id, data, db)
 
 @router.post("/{match_id}/start", response_model=MatchRead)

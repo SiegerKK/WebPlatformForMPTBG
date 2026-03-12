@@ -54,8 +54,20 @@ class CommandPipeline:
 
             # 5. Load entities in context
             from app.core.entities.models import Entity
-            entities = db.query(Entity).filter(Entity.context_id == envelope.context_id, Entity.alive == True).all()
-            entities_data = [{"id": str(e.id), "archetype": e.archetype_id, "components": e.components, "tags": e.tags, "owner_id": str(e.owner_participant_id) if e.owner_participant_id else None} for e in entities]
+            entities = db.query(Entity).filter(
+                Entity.context_id == envelope.context_id,
+                Entity.alive == True,
+            ).all()
+            entities_data = [
+                {
+                    "id": str(e.id),
+                    "archetype_id": e.archetype_id,
+                    "components": e.components,
+                    "tags": e.tags,
+                    "owner_participant_id": str(e.owner_participant_id) if e.owner_participant_id else None,
+                }
+                for e in entities
+            ]
 
             # 6. RuleCheck - delegate to game's RuleSet if registered
             ruleset = get_ruleset(match.game_id)
@@ -87,7 +99,7 @@ class CommandPipeline:
             else:
                 # Default handler for end_turn
                 if envelope.command_type == "end_turn":
-                    new_events = [{"event_type": "turn_submitted", "payload": {"player_id": str(player.id)}}]
+                    new_events = [{"event_type": "turn_submitted", "payload": {"participant_id": str(player.id)}}]
                 else:
                     new_events = [{"event_type": f"{envelope.command_type}_executed", "payload": envelope.payload}]
 

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import Base
 from app.core.auth.models import User
-from app.core.matches.models import Match, MatchParticipant
+from app.core.matches.models import Match, Participant
 from app.core.contexts.models import GameContext
 from app.core.entities.models import Entity
 from app.core.commands.models import Command

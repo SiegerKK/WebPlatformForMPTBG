@@ -5,15 +5,15 @@ from sqlalchemy.orm import Session
 class VisibilityPolicy:
     """Base class for visibility rules"""
     def can_see_entity(self, entity, viewer_id: uuid.UUID) -> bool:
-        if entity.visibility == "public":
+        if entity.visibility_scope == "public":
             return True
-        if entity.visibility == "owner_only":
-            return str(entity.owner_id) == str(viewer_id)
+        if entity.visibility_scope == "owner_only":
+            return str(entity.owner_participant_id) == str(viewer_id)
         return True
 
     def get_visible_entities(self, context_id: uuid.UUID, viewer_id: uuid.UUID, db: Session) -> list:
         from app.core.entities.models import Entity
-        entities = db.query(Entity).filter(Entity.context_id == context_id, Entity.is_active == True).all()
+        entities = db.query(Entity).filter(Entity.context_id == context_id, Entity.alive == True).all()
         return [e for e in entities if self.can_see_entity(e, viewer_id)]
 
 
@@ -24,15 +24,15 @@ class FogProjection:
         return {
             "context_id": str(context.id),
             "context_type": context.context_type,
-            "state": context.state,
+            "state_blob": context.state_blob,
             "state_version": context.state_version,
             "visible_entities": [
                 {
                     "id": str(e.id),
-                    "archetype": e.archetype,
+                    "archetype_id": e.archetype_id,
                     "components": e.components,
                     "tags": e.tags,
-                    "owner_id": str(e.owner_id) if e.owner_id else None,
+                    "owner_participant_id": str(e.owner_participant_id) if e.owner_participant_id else None,
                 }
                 for e in visible_entities
             ],
