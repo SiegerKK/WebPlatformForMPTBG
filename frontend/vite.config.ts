@@ -7,7 +7,9 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
+        // In local dev (npm run dev), the API runs on localhost:8000.
+        // Inside Docker the nginx conf handles the /api proxy to the backend container.
+        target: 'http://localhost:8000',
         changeOrigin: true,
       }
     }
