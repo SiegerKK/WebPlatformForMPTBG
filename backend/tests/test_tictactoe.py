@@ -185,3 +185,67 @@ def test_tictactoe_occupied_cell_rejected(test_client):
     cmd(p1, 4)  # p1 places in centre
     r = cmd(p2, 4)  # p2 tries same cell
     assert r.json()["status"] == "rejected"
+
+
+# ──────────────────────────────────────────────────────
+# Tests for pre-initialized context state (bug fix for
+# "both players see waiting for opponent")
+# ──────────────────────────────────────────────────────
+
+def test_tictactoe_context_preinitialized(test_client):
+    """Context created for a 2-player match should have player_marks and
+    current_player_id set immediately — no moves required first."""
+    p1 = _register_and_login(test_client, "ttt_pi1", "ttt_pi1@test.com", "pass1234")
+    p2 = _register_and_login(test_client, "ttt_pi2", "ttt_pi2@test.com", "pass1234")
+
+    match = test_client.post("/api/matches", json={"game_id": "tictactoe"}, headers=p1).json()
+    match_id = match["id"]
+    test_client.post(f"/api/matches/{match_id}/join", json={}, headers=p2)
+    test_client.post(f"/api/matches/{match_id}/start", headers=p1)
+
+    ctx = test_client.post(
+        "/api/contexts",
+        json={"match_id": match_id, "context_type": "tictactoe"},
+        headers=p1,
+    ).json()
+
+    state = ctx["state_blob"]
+    assert len(state["player_marks"]) == 2, "Both players should be pre-assigned marks"
+    assert state["current_player_id"] is not None, "current_player_id should be set from the start"
+    marks = list(state["player_marks"].values())
+    assert "X" in marks and "O" in marks, "One player is X, the other is O"
+
+    # The player with the first turn (X) should be able to place immediately
+    r = test_client.post("/api/commands", json={
+        "match_id": match_id,
+        "context_id": ctx["id"],
+        "command_type": "place_mark",
+        "payload": {"cell": 4},
+    }, headers=p1)  # p1 created the match, so p1 is assigned X and goes first
+    assert r.status_code == 200
+    assert r.json()["status"] == "resolved"
+
+
+def test_tictactoe_second_player_cannot_go_first(test_client):
+    """With pre-initialized state, p2 (second joiner) cannot make the first move."""
+    p1 = _register_and_login(test_client, "ttt_sg1", "ttt_sg1@test.com", "pass1234")
+    p2 = _register_and_login(test_client, "ttt_sg2", "ttt_sg2@test.com", "pass1234")
+
+    match = test_client.post("/api/matches", json={"game_id": "tictactoe"}, headers=p1).json()
+    match_id = match["id"]
+    test_client.post(f"/api/matches/{match_id}/join", json={}, headers=p2)
+    test_client.post(f"/api/matches/{match_id}/start", headers=p1)
+    ctx = test_client.post(
+        "/api/contexts",
+        json={"match_id": match_id, "context_type": "tictactoe"},
+        headers=p1,
+    ).json()
+
+    # p2 attempts to play before p1 — must be rejected
+    r = test_client.post("/api/commands", json={
+        "match_id": match_id,
+        "context_id": ctx["id"],
+        "command_type": "place_mark",
+        "payload": {"cell": 0},
+    }, headers=p2)
+    assert r.json()["status"] == "rejected"
