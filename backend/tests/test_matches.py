@@ -79,3 +79,34 @@ def test_admin_can_close_any_match(test_client, auth_headers, db_session):
     assert response.status_code == 204
     get_resp = test_client.get(f"/api/matches/{match_id}")
     assert get_resp.json()["status"] == "archived"
+
+# ── Purge (hard delete) tests ─────────────────────────────────────────────────
+
+def test_non_admin_cannot_purge_match(test_client, auth_headers):
+    """A regular user cannot permanently delete a match."""
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+    response = test_client.delete(f"/api/matches/{match_id}/purge", headers=auth_headers)
+    assert response.status_code == 403
+
+def test_admin_can_purge_match(test_client, auth_headers, db_session):
+    """An admin can permanently delete a match; it disappears from the DB."""
+    create_resp = test_client.post("/api/matches", json={"game_id": "test_game"}, headers=auth_headers)
+    match_id = create_resp.json()["id"]
+
+    # Register + promote an admin
+    test_client.post("/api/auth/register", json={
+        "username": "adminpurge", "email": "adminpurge@example.com", "password": "adminpass"
+    })
+    from app.core.auth.models import User as UserModel
+    admin = db_session.query(UserModel).filter(UserModel.username == "adminpurge").first()
+    admin.is_superuser = True
+    db_session.commit()
+    login_resp = test_client.post("/api/auth/login", data={"username": "adminpurge", "password": "adminpass"})
+    admin_headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
+
+    response = test_client.delete(f"/api/matches/{match_id}/purge", headers=admin_headers)
+    assert response.status_code == 204
+    # Match should be completely gone — 404 on subsequent GET
+    get_resp = test_client.get(f"/api/matches/{match_id}")
+    assert get_resp.status_code == 404

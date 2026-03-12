@@ -30,6 +30,8 @@ export default function MatchList() {
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [closingId, setClosingId] = useState<string | null>(null);
+  const [purgingId, setPurgingId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
 
   const isAdmin = state.user?.is_superuser ?? false;
 
@@ -83,19 +85,17 @@ export default function MatchList() {
   };
 
   const handleClose = async (e: React.MouseEvent, match: Match) => {
-    e.stopPropagation(); // don't open the match
+    e.stopPropagation();
     if (!window.confirm(`Close room "${match.game_id}" (${match.id.slice(0, 8)}…)? This will archive the match.`)) return;
     setClosingId(match.id);
     try {
       await matchesApi.delete(match.id);
-      // Update the match status in the list to 'archived'
       dispatch({
         type: 'SET_MATCHES',
         payload: state.matches.map((m) =>
           m.id === match.id ? { ...m, status: 'archived' as const } : m,
         ),
       });
-      // If this was the currently viewed match, clear it
       if (state.currentMatch?.id === match.id) {
         dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
       }
@@ -106,6 +106,35 @@ export default function MatchList() {
       setClosingId(null);
     }
   };
+
+  const handlePurge = async (e: React.MouseEvent, match: Match) => {
+    e.stopPropagation();
+    if (!window.confirm(
+      `⚠️ Permanently delete room "${match.game_id}" (${match.id.slice(0, 8)}…)?\n\nThis action CANNOT be undone.`,
+    )) return;
+    setPurgingId(match.id);
+    try {
+      await matchesApi.purge(match.id);
+      dispatch({
+        type: 'SET_MATCHES',
+        payload: state.matches.filter((m) => m.id !== match.id),
+      });
+      if (state.currentMatch?.id === match.id) {
+        dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+      }
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail ?? 'Failed to delete the match.');
+    } finally {
+      setPurgingId(null);
+    }
+  };
+
+  const visibleMatches = showArchived
+    ? state.matches
+    : state.matches.filter((m) => m.status !== 'archived');
+
+  const archivedCount = state.matches.filter((m) => m.status === 'archived').length;
 
   return (
     <div style={styles.container}>
@@ -125,6 +154,22 @@ export default function MatchList() {
             {showCreate ? 'Cancel' : '+ Other Game'}
           </button>
         </div>
+      </div>
+
+      {/* Archive filter toggle */}
+      <div style={styles.filterRow}>
+        <label style={styles.filterLabel}>
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => setShowArchived(e.target.checked)}
+            style={{ marginRight: 6 }}
+          />
+          Show archived
+          {archivedCount > 0 && (
+            <span style={styles.archiveBadge}>{archivedCount}</span>
+          )}
+        </label>
       </div>
 
       {showCreate && (
@@ -148,26 +193,34 @@ export default function MatchList() {
 
       {state.loading && <p style={styles.loading}>Loading…</p>}
 
-      {state.matches.length === 0 && !state.loading && (
-        <p style={styles.empty}>No matches found. Create one to get started.</p>
+      {visibleMatches.length === 0 && !state.loading && (
+        <p style={styles.empty}>
+          {state.matches.length > 0 && !showArchived
+            ? 'No active matches. Toggle "Show archived" to see all.'
+            : 'No matches found. Create one to get started.'}
+        </p>
       )}
 
       <div style={styles.list}>
-        {state.matches.map((match) => {
+        {visibleMatches.map((match) => {
           const isCreator = match.created_by_user_id === state.user?.id;
           const canClose = (isCreator || isAdmin) && CLOSEABLE_STATUSES.has(match.status);
+          const isArchived = match.status === 'archived';
 
           return (
             <div
               key={match.id}
               style={{
                 ...styles.matchCard,
+                ...(isArchived ? styles.matchCardArchived : {}),
                 ...(state.currentMatch?.id === match.id ? styles.matchCardSelected : {}),
               }}
               onClick={() => dispatch({ type: 'SET_CURRENT_MATCH', payload: match })}
             >
               <div style={styles.matchRow}>
-                <span style={styles.gameId}>{match.game_id}</span>
+                <span style={{ ...styles.gameId, ...(isArchived ? styles.gameIdArchived : {}) }}>
+                  {match.game_id}
+                </span>
                 <div style={styles.rightGroup}>
                   <span
                     style={{
@@ -185,6 +238,16 @@ export default function MatchList() {
                       title={isAdmin && !isCreator ? 'Close room (admin)' : 'Close room'}
                     >
                       {closingId === match.id ? '…' : '🔒 Close'}
+                    </button>
+                  )}
+                  {isAdmin && (
+                    <button
+                      style={styles.purgeBtn}
+                      onClick={(e) => handlePurge(e, match)}
+                      disabled={purgingId === match.id}
+                      title="Permanently delete (admin)"
+                    >
+                      {purgingId === match.id ? '…' : '🗑️ Delete'}
                     </button>
                   )}
                 </div>
@@ -209,12 +272,34 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: '1rem',
+    marginBottom: '0.5rem',
     flexWrap: 'wrap',
     gap: 8,
   },
   headerActions: { display: 'flex', gap: 8, flexWrap: 'wrap' },
   title: { color: '#f8fafc', margin: 0, fontSize: '1.2rem' },
+  filterRow: {
+    display: 'flex',
+    alignItems: 'center',
+    marginBottom: '0.75rem',
+  },
+  filterLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    color: '#94a3b8',
+    fontSize: '0.82rem',
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  archiveBadge: {
+    marginLeft: 6,
+    background: '#334155',
+    color: '#94a3b8',
+    borderRadius: 10,
+    padding: '0 6px',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+  },
   refreshBtn: {
     padding: '0.35rem 0.75rem',
     background: '#334155',
@@ -272,6 +357,9 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #334155',
     transition: 'border-color 0.15s',
   },
+  matchCardArchived: {
+    opacity: 0.55,
+  },
   matchCardSelected: { border: '1px solid #3b82f6' },
   matchRow: {
     display: 'flex',
@@ -279,8 +367,9 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     gap: 8,
   },
-  rightGroup: { display: 'flex', alignItems: 'center', gap: 8 },
+  rightGroup: { display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 },
   gameId: { color: '#f8fafc', fontWeight: 600, fontSize: '0.95rem' },
+  gameIdArchived: { color: '#64748b' },
   statusBadge: {
     padding: '0.15rem 0.5rem',
     borderRadius: 12,
@@ -295,6 +384,17 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #ef4444',
     borderRadius: 5,
     color: '#fca5a5',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+    flexShrink: 0,
+  },
+  purgeBtn: {
+    padding: '0.18rem 0.55rem',
+    background: '#1c1917',
+    border: '1px solid #78716c',
+    borderRadius: 5,
+    color: '#a8a29e',
     cursor: 'pointer',
     fontSize: '0.72rem',
     fontWeight: 600,

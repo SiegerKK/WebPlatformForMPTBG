@@ -30,6 +30,7 @@ export const matchesApi = {
   join: (id: string) => apiClient.post(`/matches/${id}/join`, {}),
   start: (id: string) => apiClient.post(`/matches/${id}/start`),
   delete: (id: string) => apiClient.delete(`/matches/${id}`),
+  purge: (id: string) => apiClient.delete(`/matches/${id}/purge`),
   participants: (id: string) => apiClient.get(`/matches/${id}/participants`),
 };
 

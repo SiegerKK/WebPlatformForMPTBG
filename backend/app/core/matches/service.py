@@ -5,6 +5,13 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from .models import Match, Participant, MatchStatus, ParticipantStatus
 from .schemas import MatchCreate, ParticipantCreate
+from app.core.commands.models import Command
+from app.core.events.models import GameEvent
+from app.core.contexts.models import GameContext
+from app.core.entities.models import Entity
+from app.core.projections.models import Projection
+from app.core.snapshots.models import Snapshot
+from app.core.notifications.models import Notification
 
 def create_match(data: MatchCreate, user_id: uuid.UUID, db: Session) -> Match:
     match = Match(
@@ -79,4 +86,21 @@ def delete_match(match_id: uuid.UUID, user_id: uuid.UUID, db: Session, is_superu
     if not is_superuser and str(match.created_by_user_id) != str(user_id):
         raise HTTPException(status_code=403, detail="Only the creator or an admin can close this match")
     match.status = MatchStatus.ARCHIVED
+    db.commit()
+
+def purge_match(match_id: uuid.UUID, db: Session, is_superuser: bool = False):
+    """Permanently delete a match and all its related records. Admin only."""
+    if not is_superuser:
+        raise HTTPException(status_code=403, detail="Only admins can permanently delete a match")
+    match = get_match(match_id, db)
+    # Delete all child records in dependency order to satisfy FK constraints
+    db.query(Notification).filter(Notification.match_id == match_id).delete()
+    db.query(Command).filter(Command.match_id == match_id).delete()
+    db.query(GameEvent).filter(GameEvent.match_id == match_id).delete()
+    db.query(Projection).filter(Projection.match_id == match_id).delete()
+    db.query(Entity).filter(Entity.match_id == match_id).delete()
+    db.query(Snapshot).filter(Snapshot.match_id == match_id).delete()
+    db.query(GameContext).filter(GameContext.match_id == match_id).delete()
+    db.query(Participant).filter(Participant.match_id == match_id).delete()
+    db.delete(match)
     db.commit()
