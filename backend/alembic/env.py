@@ -21,6 +21,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# Allow DATABASE_URL environment variable to override the static URL in alembic.ini.
+# This is required when running inside Docker where the database host is a service name.
+_db_url = os.environ.get("DATABASE_URL")
+if _db_url:
+    config.set_main_option("sqlalchemy.url", _db_url)
+
 target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
