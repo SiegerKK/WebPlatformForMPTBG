@@ -28,8 +28,12 @@ def _tictactoe_initial_state(match_id: uuid.UUID, db: Session) -> dict | None:
     )
     if len(parts) < 2:
         return None
-    p1 = str(parts[0].user_id)
-    p2 = str(parts[1].user_id)
+    # Skip bot/system participants that have no user_id
+    user_parts = [p for p in parts if p.user_id is not None]
+    if len(user_parts) < 2:
+        return None
+    p1 = str(user_parts[0].user_id)
+    p2 = str(user_parts[1].user_id)
     return {
         "board": [None] * 9,
         "player_marks": {p1: "X", p2: "O"},

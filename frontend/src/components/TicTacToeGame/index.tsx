@@ -13,17 +13,19 @@ interface Props {
   match: Match;
   user: User;
   onMatchUpdated: (match: Match) => void;
+  onMatchDeleted: (matchId: string) => void;
 }
 
 const MARK_COLORS: Record<string, string> = { X: '#60a5fa', O: '#f87171' };
 
-export default function TicTacToeGame({ match, user, onMatchUpdated }: Props) {
+export default function TicTacToeGame({ match, user, onMatchUpdated, onMatchDeleted }: Props) {
   const [context, setContext] = useState<GameContext | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [participants, setParticipants] = useState<MatchParticipant[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lobbyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const ttt: TicTacToeState | null = context
     ? (context.state_blob as unknown as TicTacToeState)
@@ -89,20 +91,58 @@ export default function TicTacToeGame({ match, user, onMatchUpdated }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match.id, match.status]);
 
-  // ─── polling ──────────────────────────────────────────────────────────────
+  // ─── lobby polling — updates participants + detects game start ────────────
+  useEffect(() => {
+    if (lobbyPollRef.current) clearInterval(lobbyPollRef.current);
+
+    if (!isWaiting) return;
+
+    lobbyPollRef.current = setInterval(async () => {
+      await loadParticipants();
+      try {
+        const mRes = await matchesApi.get(match.id);
+        const updated = mRes.data as Match;
+        if (updated.status === 'archived') {
+          onMatchDeleted(match.id);
+          return;
+        }
+        if (updated.status !== match.status) {
+          onMatchUpdated(updated);
+        }
+      } catch (e: unknown) {
+        // 404 means match was deleted by the creator
+        if ((e as { response?: { status?: number } })?.response?.status === 404) {
+          onMatchDeleted(match.id);
+        }
+      }
+    }, 2500);
+
+    return () => {
+      if (lobbyPollRef.current) clearInterval(lobbyPollRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isWaiting, match.id, match.status, loadParticipants, onMatchUpdated, onMatchDeleted]);
+
+  // ─── active-game polling ──────────────────────────────────────────────────
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
 
     if (isActive && !ttt?.game_over) {
       pollRef.current = setInterval(async () => {
-        // Also refresh match status
         try {
           const mRes = await matchesApi.get(match.id);
-          if (mRes.data.status !== match.status) {
-            onMatchUpdated(mRes.data as Match);
+          const updated = mRes.data as Match;
+          if (updated.status === 'archived') {
+            onMatchDeleted(match.id);
+            return;
           }
-        } catch {
-          /* ignore */
+          if (updated.status !== match.status) {
+            onMatchUpdated(updated);
+          }
+        } catch (e: unknown) {
+          if ((e as { response?: { status?: number } })?.response?.status === 404) {
+            onMatchDeleted(match.id);
+          }
         }
         await refresh();
         await loadParticipants();
@@ -113,7 +153,7 @@ export default function TicTacToeGame({ match, user, onMatchUpdated }: Props) {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, ttt?.game_over, match.id, refresh, loadParticipants, onMatchUpdated]);
+  }, [isActive, ttt?.game_over, match.id, refresh, loadParticipants, onMatchUpdated, onMatchDeleted]);
 
   // ─── actions ──────────────────────────────────────────────────────────────
   const handleJoin = async () => {
@@ -142,6 +182,20 @@ export default function TicTacToeGame({ match, user, onMatchUpdated }: Props) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(msg ?? 'Failed to start match.');
     } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteMatch = async () => {
+    if (!window.confirm('Close this room? This cannot be undone.')) return;
+    setActionLoading(true);
+    setError(null);
+    try {
+      await matchesApi.delete(match.id);
+      onMatchDeleted(match.id);
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg ?? 'Failed to close room.');
       setActionLoading(false);
     }
   };
@@ -201,6 +255,16 @@ export default function TicTacToeGame({ match, user, onMatchUpdated }: Props) {
               title={canStart ? 'Start the game' : 'Need at least 2 players'}
             >
               {actionLoading ? '…' : 'Start Game'}
+            </button>
+          )}
+          {isCreator && (
+            <button
+              style={styles.btnDanger}
+              onClick={handleDeleteMatch}
+              disabled={actionLoading}
+              title="Close and delete this room"
+            >
+              {actionLoading ? '…' : 'Close Room'}
             </button>
           )}
         </div>
@@ -312,14 +376,26 @@ export default function TicTacToeGame({ match, user, onMatchUpdated }: Props) {
           Tic-Tac-Toe
           <span style={styles.matchIdBadge}>{match.id.slice(0, 8)}…</span>
         </h2>
-        <span
-          style={{
-            ...styles.statusPill,
-            background: isActive ? '#166534' : '#334155',
-          }}
-        >
-          {match.status}
-        </span>
+        <div style={styles.headerRight}>
+          <span
+            style={{
+              ...styles.statusPill,
+              background: isActive ? '#166534' : '#334155',
+            }}
+          >
+            {match.status}
+          </span>
+          {isCreator && !isWaiting && (
+            <button
+              style={styles.btnDangerSmall}
+              onClick={handleDeleteMatch}
+              disabled={actionLoading}
+              title="Close and delete this match"
+            >
+              ✕ Close Room
+            </button>
+          )}
+        </div>
       </div>
 
       {isWaiting && renderLobby()}
@@ -351,7 +427,13 @@ const styles: Record<string, React.CSSProperties> = {
   header: {
     display: 'flex',
     alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 12,
+  },
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
   },
   title: {
     color: '#f8fafc',
@@ -395,7 +477,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0.3rem 0.7rem',
     fontSize: '0.85rem',
   },
-  lobbyActions: { display: 'flex', gap: 10 },
+  lobbyActions: { display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' },
   btnPrimary: {
     padding: '0.5rem 1.2rem',
     background: '#3b82f6',
@@ -407,6 +489,26 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.95rem',
   },
   btnDisabled: { background: '#334155', color: '#64748b', cursor: 'not-allowed' },
+  btnDanger: {
+    padding: '0.5rem 1.2rem',
+    background: '#7f1d1d',
+    color: '#fca5a5',
+    border: '1px solid #ef4444',
+    borderRadius: 8,
+    cursor: 'pointer',
+    fontWeight: 600,
+    fontSize: '0.95rem',
+  },
+  btnDangerSmall: {
+    padding: '0.25rem 0.7rem',
+    background: '#7f1d1d',
+    color: '#fca5a5',
+    border: '1px solid #ef4444',
+    borderRadius: 6,
+    cursor: 'pointer',
+    fontWeight: 600,
+    fontSize: '0.78rem',
+  },
   twoCol: {
     display: 'flex',
     gap: '2rem',
@@ -487,3 +589,4 @@ const styles: Record<string, React.CSSProperties> = {
   loadingText: { color: '#94a3b8' },
   error: { color: '#f87171', margin: '0.25rem 0', fontSize: '0.85rem' },
 };
+

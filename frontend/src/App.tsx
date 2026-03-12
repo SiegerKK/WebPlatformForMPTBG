@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAppState } from './store';
-import { authApi } from './api/client';
+import { authApi, matchesApi } from './api/client';
 import Login from './components/Login/Login';
 import Layout from './components/Layout/Layout';
 import MatchList from './components/MatchList/MatchList';
@@ -9,11 +9,25 @@ import type { User, Match } from './types';
 
 type View = 'matches' | 'match';
 
+/** Extract a match UUID from a URL hash like `#/match/uuid`. */
+function parseHashMatchId(): string | null {
+  const m = window.location.hash.match(/^#\/match\/([0-9a-f-]{36})$/i);
+  return m ? m[1] : null;
+}
+
 export default function App() {
   const { state, dispatch } = useAppState();
-  const [view, setView] = useState<View>('matches');
 
-  // Restore user session on mount if token exists
+  // Initialise the view from the URL hash so there is no flash on refresh.
+  const [view, setView] = useState<View>(() =>
+    parseHashMatchId() ? 'match' : 'matches',
+  );
+
+  // Keep a ref that is always current so the hashchange handler never closes
+  // over a stale currentMatch id.
+  const currentMatchIdRef = useRef<string | null>(null);
+
+  // ── Restore user session on mount ─────────────────────────────────────────
   useEffect(() => {
     if (state.token && !state.user) {
       authApi
@@ -21,13 +35,65 @@ export default function App() {
         .then((res) => dispatch({ type: 'SET_USER', payload: res.data as User }))
         .catch(() => dispatch({ type: 'LOGOUT' }));
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Switch to match view when a match is selected
+  // ── Restore match from URL hash after login / on first load ───────────────
   useEffect(() => {
-    if (!state.currentMatch) return;
-    setView('match');
+    if (!state.token) return;
+    const matchId = parseHashMatchId();
+    if (matchId && !state.currentMatch) {
+      matchesApi
+        .get(matchId)
+        .then((res) => dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }))
+        .catch(() => {
+          window.location.hash = '';
+        });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.token]);
+
+  // ── Keep ref in sync with store (must run before hash-sync effect) ─────────
+  useEffect(() => {
+    currentMatchIdRef.current = state.currentMatch?.id ?? null;
   }, [state.currentMatch?.id]);
+
+  // ── Sync store → URL hash and view ────────────────────────────────────────
+  useEffect(() => {
+    if (!state.currentMatch) {
+      setView('matches');
+      if (window.location.hash) window.location.hash = '';
+      return;
+    }
+    setView('match');
+    const newHash = `#/match/${state.currentMatch.id}`;
+    if (window.location.hash !== newHash) {
+      window.location.hash = newHash;
+    }
+  }, [state.currentMatch?.id]);
+
+  // ── Sync URL hash → store (browser back / forward) ────────────────────────
+  useEffect(() => {
+    const handleHashChange = () => {
+      const matchId = parseHashMatchId();
+      if (!matchId) {
+        if (currentMatchIdRef.current !== null) {
+          dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+        }
+      } else if (matchId !== currentMatchIdRef.current) {
+        matchesApi
+          .get(matchId)
+          .then((res) =>
+            dispatch({ type: 'SET_CURRENT_MATCH', payload: res.data as Match }),
+          )
+          .catch(() => {
+            window.location.hash = '';
+          });
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [dispatch]);
 
   if (!state.token) {
     return <Login />;
@@ -35,8 +101,22 @@ export default function App() {
 
   const isTicTacToe = state.currentMatch?.game_id === 'tictactoe';
 
+  const handleMatchDeleted = (deletedId: string) => {
+    dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+    dispatch({
+      type: 'SET_MATCHES',
+      payload: state.matches.filter((m) => m.id !== deletedId),
+    });
+  };
+
   return (
-    <Layout onNavSelect={(v) => setView(v as View)} activeView={view}>
+    <Layout
+      onNavSelect={(v) => {
+        if (v === 'matches') dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+        setView(v as View);
+      }}
+      activeView={view}
+    >
       {view === 'matches' && <MatchList />}
       {view === 'match' && (
         <div>
@@ -49,6 +129,7 @@ export default function App() {
               onMatchUpdated={(updated: Match) =>
                 dispatch({ type: 'SET_CURRENT_MATCH', payload: updated })
               }
+              onMatchDeleted={handleMatchDeleted}
             />
           ) : (
             <div style={styles.matchView}>
