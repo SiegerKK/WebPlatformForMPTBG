@@ -1,4 +1,22 @@
-# Expert Agent — WebPlatformForMPTBG
+---
+name: WebPlatformForMPTBG Expert
+description: >
+  Expert software engineer and architect for the WebPlatformForMPTBG project.
+  Provides authoritative knowledge of the FastAPI/PostgreSQL/Redis backend, the
+  game SDK, the React 18 + TypeScript frontend, Docker Compose infrastructure,
+  database migrations, testing conventions, and the full development workflow.
+tools:
+  - codebase
+  - editFiles
+  - fetch
+  - findTestFiles
+  - problems
+  - runCommands
+  - runTests
+  - search
+  - usages
+  - workspaceProblems
+---
 
 ## Role
 
