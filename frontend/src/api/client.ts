@@ -24,11 +24,12 @@ export const authApi = {
 
 export const matchesApi = {
   list: () => apiClient.get('/matches'),
-  create: (data: { game_id: string; config?: Record<string, unknown> }) =>
+  create: (data: { game_id: string; title?: string; config?: Record<string, unknown> }) =>
     apiClient.post('/matches', data),
   get: (id: string) => apiClient.get(`/matches/${id}`),
-  join: (id: string) => apiClient.post(`/matches/${id}/join`),
+  join: (id: string) => apiClient.post(`/matches/${id}/join`, {}),
   start: (id: string) => apiClient.post(`/matches/${id}/start`),
+  participants: (id: string) => apiClient.get(`/matches/${id}/participants`),
 };
 
 export const contextsApi = {

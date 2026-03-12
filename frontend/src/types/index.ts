@@ -12,14 +12,24 @@ export interface Token {
   token_type: string;
 }
 
-export type MatchStatus = 'waiting' | 'active' | 'paused' | 'finished' | 'cancelled';
+export type MatchStatus =
+  | 'draft'
+  | 'waiting_for_players'
+  | 'initializing'
+  | 'active'
+  | 'paused'
+  | 'finished'
+  | 'archived'
+  | 'failed';
 
 export interface Match {
   id: string;
   game_id: string;
+  title?: string;
   status: MatchStatus;
-  created_by: string;
-  config: Record<string, unknown>;
+  /** user id of the creator — matches backend field `created_by_user_id` */
+  created_by_user_id: string;
+  settings: Record<string, unknown>;
   seed: string;
   created_at: string;
   started_at?: string;
@@ -29,26 +39,42 @@ export interface Match {
 export interface MatchParticipant {
   id: string;
   match_id: string;
-  user_id: string;
+  user_id?: string;
   role: string;
-  faction?: string;
-  is_active: boolean;
+  side_id?: string;
+  kind: 'human' | 'bot' | 'neutral' | 'system';
+  status: string;
+  display_name?: string;
+  is_ready: boolean;
   joined_at: string;
 }
 
-export type ContextStatus = 'pending' | 'active' | 'resolved' | 'archived';
+export type ContextStatus =
+  | 'created'
+  | 'initializing'
+  | 'active'
+  | 'resolving'
+  | 'suspended'
+  | 'finished'
+  | 'failed'
+  | 'archived';
 
 export interface GameContext {
   id: string;
   match_id: string;
   parent_id?: string;
+  parent_context_id?: string;
   context_type: string;
+  label?: string;
   status: ContextStatus;
-  state: Record<string, unknown>;
+  /** The JSON game state object stored in the context (backend field: state_blob) */
+  state_blob: Record<string, unknown>;
   state_version: number;
-  config: Record<string, unknown>;
+  depth: number;
   created_at: string;
-  resolved_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  result_blob?: Record<string, unknown>;
 }
 
 export interface Entity {
@@ -70,12 +96,13 @@ export interface GameEvent {
   context_id: string;
   event_type: string;
   payload: Record<string, unknown>;
-  caused_by_command_id?: string;
-  sequence_number: number;
+  causation_command_id?: string;
+  /** Sequence number — backend field: sequence_no */
+  sequence_no: number;
   created_at: string;
 }
 
-export type TurnMode = 'strict' | 'simultaneous' | 'async_window';
+export type TurnMode = 'strict' | 'simultaneous' | 'wego' | 'hybrid';
 export type TurnStatus = 'waiting_for_players' | 'resolving' | 'resolved';
 
 export interface TurnState {
@@ -84,16 +111,27 @@ export interface TurnState {
   turn_number: number;
   mode: TurnMode;
   status: TurnStatus;
-  active_player_id?: string;
-  deadline?: string;
+  active_side_id?: string;
+  deadline_at?: string;
   submitted_players: string[];
-  created_at: string;
+  opened_at?: string;
   resolved_at?: string;
 }
 
 export interface CommandResult {
-  success: boolean;
   command_id: string;
-  events: GameEvent[];
+  status: string;
+  events: Array<{ event_type: string; payload: Record<string, unknown> }>;
   error?: string;
+}
+
+/** Shape of state_blob for a Tic-Tac-Toe context */
+export interface TicTacToeState {
+  board: Array<'X' | 'O' | null>;
+  player_marks: Record<string, 'X' | 'O'>;
+  current_player_id: string | null;
+  winner: string | null;
+  winner_mark: 'X' | 'O' | null;
+  game_over: boolean;
+  turn_count: number;
 }

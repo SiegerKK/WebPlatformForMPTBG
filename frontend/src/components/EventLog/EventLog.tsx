@@ -13,7 +13,7 @@ export default function EventLog({ events, maxHeight = 300 }: EventLogProps) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events]);
 
-  const sortedEvents = [...events].sort((a, b) => a.sequence_number - b.sequence_number);
+  const sortedEvents = [...events].sort((a, b) => a.sequence_no - b.sequence_no);
 
   return (
     <div style={{ ...styles.container, maxHeight }}>
@@ -23,7 +23,7 @@ export default function EventLog({ events, maxHeight = 300 }: EventLogProps) {
       {sortedEvents.map((ev) => (
         <div key={ev.id} style={styles.entry}>
           <div style={styles.entryHeader}>
-            <span style={styles.seqNum}>#{ev.sequence_number}</span>
+            <span style={styles.seqNum}>#{ev.sequence_no}</span>
             <span style={styles.eventType}>{ev.event_type}</span>
             <span style={styles.timestamp}>
               {new Date(ev.created_at).toLocaleTimeString()}

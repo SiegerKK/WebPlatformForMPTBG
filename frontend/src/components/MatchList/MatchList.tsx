@@ -4,11 +4,14 @@ import { useAppState } from '../../store';
 import type { Match } from '../../types';
 
 const STATUS_COLORS: Record<string, string> = {
-  waiting: '#f59e0b',
+  draft: '#94a3b8',
+  waiting_for_players: '#f59e0b',
+  initializing: '#f59e0b',
   active: '#22c55e',
-  paused: '#94a3b8',
+  paused: '#64748b',
   finished: '#3b82f6',
-  cancelled: '#ef4444',
+  archived: '#334155',
+  failed: '#ef4444',
 };
 
 export default function MatchList() {
@@ -34,18 +37,34 @@ export default function MatchList() {
     }
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent, overrideGameId?: string) => {
     e.preventDefault();
-    if (!gameId.trim()) return;
+    const id = overrideGameId ?? gameId.trim();
+    if (!id) return;
     setError(null);
     setCreating(true);
     try {
-      const res = await matchesApi.create({ game_id: gameId.trim() });
+      const res = await matchesApi.create({ game_id: id });
       dispatch({ type: 'SET_MATCHES', payload: [res.data as Match, ...state.matches] });
       setShowCreate(false);
       setGameId('');
     } catch {
       setError('Failed to create match.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleQuickCreate = async () => {
+    setCreating(true);
+    setError(null);
+    try {
+      const res = await matchesApi.create({ game_id: 'tictactoe' });
+      const newMatch = res.data as Match;
+      dispatch({ type: 'SET_MATCHES', payload: [newMatch, ...state.matches] });
+      dispatch({ type: 'SET_CURRENT_MATCH', payload: newMatch });
+    } catch {
+      setError('Failed to create Tic-Tac-Toe match.');
     } finally {
       setCreating(false);
     }
@@ -57,8 +76,16 @@ export default function MatchList() {
         <h2 style={styles.title}>Matches</h2>
         <div style={styles.headerActions}>
           <button style={styles.refreshBtn} onClick={loadMatches}>↻ Refresh</button>
+          <button
+            style={styles.tttBtn}
+            onClick={handleQuickCreate}
+            disabled={creating}
+            title="Create a new Tic-Tac-Toe match"
+          >
+            ✕ New Tic-Tac-Toe
+          </button>
           <button style={styles.createBtn} onClick={() => setShowCreate(!showCreate)}>
-            {showCreate ? 'Cancel' : '+ New Match'}
+            {showCreate ? 'Cancel' : '+ Other Game'}
           </button>
         </div>
       </div>
@@ -79,6 +106,8 @@ export default function MatchList() {
           </button>
         </form>
       )}
+
+      {!showCreate && error && <p style={styles.error}>{error}</p>}
 
       {state.loading && <p style={styles.loading}>Loading…</p>}
 
@@ -127,8 +156,10 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: '1rem',
+    flexWrap: 'wrap',
+    gap: 8,
   },
-  headerActions: { display: 'flex', gap: 8 },
+  headerActions: { display: 'flex', gap: 8, flexWrap: 'wrap' },
   title: { color: '#f8fafc', margin: 0, fontSize: '1.2rem' },
   refreshBtn: {
     padding: '0.35rem 0.75rem',
@@ -138,6 +169,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#94a3b8',
     cursor: 'pointer',
     fontSize: '0.85rem',
+  },
+  tttBtn: {
+    padding: '0.35rem 0.85rem',
+    background: '#7c3aed',
+    border: 'none',
+    borderRadius: 6,
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '0.85rem',
+    fontWeight: 600,
   },
   createBtn: {
     padding: '0.35rem 0.75rem',

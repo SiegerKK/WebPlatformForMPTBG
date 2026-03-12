@@ -9,6 +9,7 @@ WINNING_LINES = [
 
 
 def _check_winner(board: List) -> str | None:
+    """Check all winning lines and return the winning mark ('X' or 'O'), or None."""
     for a, b, c in WINNING_LINES:
         if board[a] and board[a] == board[b] == board[c]:
             return board[a]
@@ -16,6 +17,7 @@ def _check_winner(board: List) -> str | None:
 
 
 def _init_state() -> dict:
+    """Return a fresh, empty Tic-Tac-Toe game state."""
     return {
         "board": [None] * 9,
         "player_marks": {},

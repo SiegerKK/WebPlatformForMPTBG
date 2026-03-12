@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { useAppState } from './store';
-import { authApi, eventsApi, contextsApi } from './api/client';
+import { authApi } from './api/client';
 import Login from './components/Login/Login';
 import Layout from './components/Layout/Layout';
 import MatchList from './components/MatchList/MatchList';
-import ContextTree from './components/ContextTree/ContextTree';
-import EventLog from './components/EventLog/EventLog';
-import type { User, GameContext, GameEvent } from './types';
+import TicTacToeGame from './components/TicTacToeGame';
+import type { User, Match } from './types';
 
 type View = 'matches' | 'match';
 
@@ -24,20 +23,9 @@ export default function App() {
     }
   }, []);
 
-  // Load contexts & events when a match is selected
+  // Switch to match view when a match is selected
   useEffect(() => {
     if (!state.currentMatch) return;
-
-    contextsApi
-      .getTree(state.currentMatch.id)
-      .then((res) => dispatch({ type: 'SET_CONTEXTS', payload: res.data as GameContext[] }))
-      .catch(() => dispatch({ type: 'SET_CONTEXTS', payload: [] }));
-
-    eventsApi
-      .listForMatch(state.currentMatch.id)
-      .then((res) => dispatch({ type: 'SET_EVENTS', payload: res.data as GameEvent[] }))
-      .catch(() => dispatch({ type: 'SET_EVENTS', payload: [] }));
-
     setView('match');
   }, [state.currentMatch?.id]);
 
@@ -45,15 +33,25 @@ export default function App() {
     return <Login />;
   }
 
+  const isTicTacToe = state.currentMatch?.game_id === 'tictactoe';
+
   return (
     <Layout onNavSelect={(v) => setView(v as View)} activeView={view}>
       {view === 'matches' && <MatchList />}
       {view === 'match' && (
-        <div style={styles.matchView}>
+        <div>
           {!state.currentMatch ? (
             <p style={styles.hint}>Select a match from the Matches list.</p>
+          ) : isTicTacToe && state.user ? (
+            <TicTacToeGame
+              match={state.currentMatch}
+              user={state.user}
+              onMatchUpdated={(updated: Match) =>
+                dispatch({ type: 'SET_CURRENT_MATCH', payload: updated })
+              }
+            />
           ) : (
-            <>
+            <div style={styles.matchView}>
               <div style={styles.matchHeader}>
                 <h2 style={styles.matchTitle}>
                   {state.currentMatch.game_id}
@@ -61,25 +59,10 @@ export default function App() {
                 </h2>
                 <p style={styles.matchId}>Match ID: {state.currentMatch.id}</p>
               </div>
-
-              <div style={styles.columns}>
-                <div style={styles.column}>
-                  <h3 style={styles.sectionTitle}>Context Tree</h3>
-                  <ContextTree
-                    contexts={state.contexts}
-                    onSelect={(_ctx) => {
-                      // Context selection is a no-op at match-level view;
-                      // individual game UIs can extend this as needed.
-                    }}
-                  />
-                </div>
-
-                <div style={{ ...styles.column, flex: 2 }}>
-                  <h3 style={styles.sectionTitle}>Event Log</h3>
-                  <EventLog events={state.events} maxHeight={400} />
-                </div>
-              </div>
-            </>
+              <p style={styles.hint}>
+                No dedicated UI for game <strong>{state.currentMatch.game_id}</strong> yet.
+              </p>
+            </div>
           )}
         </div>
       )}
@@ -94,7 +77,4 @@ const styles: Record<string, React.CSSProperties> = {
   matchTitle: { color: '#f8fafc', margin: 0, fontSize: '1.3rem' },
   matchStatus: { color: '#94a3b8', fontWeight: 400 },
   matchId: { color: '#475569', fontSize: '0.8rem', margin: '0.25rem 0 0' },
-  columns: { display: 'flex', gap: '1.5rem', alignItems: 'flex-start' },
-  column: { flex: 1, display: 'flex', flexDirection: 'column', gap: 8 },
-  sectionTitle: { color: '#94a3b8', fontSize: '0.85rem', textTransform: 'uppercase', margin: 0, letterSpacing: '0.06em' },
 };
