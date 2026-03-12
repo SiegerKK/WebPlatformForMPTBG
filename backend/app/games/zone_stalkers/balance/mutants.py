@@ -48,8 +48,8 @@ MUTANT_TYPES: dict = {
         "move_range": 3,
         "money_drop": 200,
     },
-    "controller": {
-        "name": "Controller",
+    "psi_controller": {
+        "name": "Psi-Controller",
         "hp": 100, "max_hp": 100,
         "damage": 20, "defense": 5,
         "loot_table": [

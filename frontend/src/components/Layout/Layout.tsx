@@ -8,6 +8,7 @@ interface LayoutProps {
 }
 
 const BASE_NAV_ITEMS = [
+  { id: 'games', label: '🕹️ Games' },
   { id: 'matches', label: '🎮 Matches' },
   { id: 'match', label: '⚔️ Current Match' },
 ];
