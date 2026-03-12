@@ -66,17 +66,17 @@ ITEM_TYPES: dict = {
     "vodka": {
         "name": "Vodka", "type": "consumable",
         "weight": 0.5, "value": 50,
-        "effects": {"radiation": -10, "hp": -5},
+        "effects": {"radiation": -10, "hp": -5, "thirst": -20},
     },
     "bread": {
         "name": "Bread", "type": "consumable",
         "weight": 0.3, "value": 20,
-        "effects": {"stamina": 20},
+        "effects": {"stamina": 20, "hunger": -35},
     },
     "energy_drink": {
         "name": "Energy Drink", "type": "consumable",
         "weight": 0.3, "value": 80,
-        "effects": {"stamina": 50},
+        "effects": {"stamina": 50, "thirst": -40, "hunger": -10},
     },
     # Detectors
     "echo_detector": {
@@ -90,3 +90,28 @@ ITEM_TYPES: dict = {
         "detection_radius": 4,
     },
 }
+
+# ── Derived item-type sets (single source of truth used by rules & bots) ─────
+
+# Items that can be consumed (medical + consumable categories)
+CONSUMABLE_ITEM_TYPES: frozenset = frozenset(
+    k for k, v in ITEM_TYPES.items() if v["type"] in ("medical", "consumable")
+)
+
+# Items that restore HP (medkit, bandage)
+HEAL_ITEM_TYPES: frozenset = frozenset(
+    k for k, v in ITEM_TYPES.items()
+    if v["type"] == "medical" and v.get("effects", {}).get("hp", 0) > 0
+)
+
+# Items that reduce hunger
+FOOD_ITEM_TYPES: frozenset = frozenset(
+    k for k, v in ITEM_TYPES.items()
+    if "hunger" in v.get("effects", {})
+)
+
+# Items that reduce thirst
+DRINK_ITEM_TYPES: frozenset = frozenset(
+    k for k, v in ITEM_TYPES.items()
+    if "thirst" in v.get("effects", {})
+)

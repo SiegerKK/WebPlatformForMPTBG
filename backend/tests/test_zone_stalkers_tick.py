@@ -517,3 +517,127 @@ class TestTickerAPIEndpoint:
         ctxs = resp.json()
         zone_ctx = next(c for c in ctxs if c["context_type"] == "zone_map")
         assert event_ctx_id in zone_ctx["state_blob"]["active_events"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Needs degradation tests
+# ─────────────────────────────────────────────────────────────────
+
+class TestNeedsDegradation:
+    """Verify hunger/thirst/sleepiness increase each tick."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def test_hunger_increases_each_tick(self):
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        initial_hunger = agent.get("hunger", 0)
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["hunger"] > initial_hunger
+
+    def test_thirst_increases_each_tick(self):
+        state = _make_world()
+        initial_thirst = state["agents"]["agent_p0"].get("thirst", 0)
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["thirst"] > initial_thirst
+
+    def test_sleepiness_increases_each_tick(self):
+        state = _make_world()
+        initial_sleep = state["agents"]["agent_p0"].get("sleepiness", 0)
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["sleepiness"] > initial_sleep
+
+    def test_hunger_capped_at_100(self):
+        state = _make_world()
+        state["agents"]["agent_p0"]["hunger"] = 99
+        state["agents"]["agent_p0"]["hp"] = 50  # avoid death from thirst
+        state["agents"]["agent_p0"]["thirst"] = 0
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["hunger"] <= 100
+
+    def test_thirst_critical_damages_hp(self):
+        state = _make_world()
+        state["agents"]["agent_p0"]["thirst"] = 80
+        state["agents"]["agent_p0"]["hunger"] = 0
+        initial_hp = state["agents"]["agent_p0"]["hp"]
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["hp"] < initial_hp
+
+    def test_hunger_critical_damages_hp(self):
+        state = _make_world()
+        state["agents"]["agent_p0"]["hunger"] = 80
+        state["agents"]["agent_p0"]["thirst"] = 0
+        initial_hp = state["agents"]["agent_p0"]["hp"]
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["hp"] < initial_hp
+
+    def test_sleep_resets_sleepiness(self):
+        from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
+        agent = {"hp": 60, "max_hp": 100, "radiation": 10, "stamina": 40, "sleepiness": 90}
+        sched = {"turns_total": 6}
+        _resolve_sleep(agent, sched, 5, {})
+        assert agent["sleepiness"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# Action queue tests
+# ─────────────────────────────────────────────────────────────────
+
+class TestActionQueue:
+    """Verify action_queue pops next action when scheduled_action completes."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def test_queue_pops_after_sleep_completes(self):
+        state = _make_world()
+        locs = _loc_ids(state)
+        agent = state["agents"]["agent_p0"]
+        agent_loc = agent["location_id"]
+        target = next(l for l in locs if l != agent_loc)
+
+        # Schedule a 1-turn sleep that completes next tick
+        agent["scheduled_action"] = {
+            "type": "sleep",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": agent_loc,
+            "started_turn": 1,
+        }
+        # Queue a travel action next
+        agent["action_queue"] = [{
+            "type": "travel",
+            "turns_remaining": 2,
+            "turns_total": 2,
+            "target_id": target,
+            "route": [target],
+            "started_turn": 1,
+        }]
+
+        new_state, events = self._tick(state)
+        new_agent = new_state["agents"]["agent_p0"]
+        # Sleep should be done; travel should now be the scheduled action
+        assert new_agent["scheduled_action"] is not None
+        assert new_agent["scheduled_action"]["type"] == "travel"
+        assert new_agent["action_queue"] == []
+        assert any(e["event_type"] == "queue_action_started" for e in events)
+
+    def test_empty_queue_leaves_scheduled_action_none(self):
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        agent_loc = agent["location_id"]
+        # Single sleep that completes; empty queue
+        agent["scheduled_action"] = {
+            "type": "sleep",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": agent_loc,
+            "started_turn": 1,
+        }
+        agent["action_queue"] = []
+
+        new_state, _ = self._tick(state)
+        assert new_state["agents"]["agent_p0"]["scheduled_action"] is None

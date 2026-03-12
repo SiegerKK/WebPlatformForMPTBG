@@ -81,6 +81,9 @@ def validate_world_command(
     if command_type == "pick_up_item":
         return _validate_pick_up_item(payload, state, agent)
 
+    if command_type == "consume_item":
+        return _validate_consume_item(payload, state, agent)
+
     return RuleCheckResult(valid=False, error=f"Unknown command for zone_map: {command_type}")
 
 
@@ -250,6 +253,26 @@ def resolve_world_command(
                 "payload": {"agent_id": agent_id, "item_id": item_id, "item_type": item["type"]},
             })
 
+    elif command_type == "consume_item":
+        item_id = payload["item_id"]
+        item = next((i for i in agent.get("inventory", []) if i["id"] == item_id), None)
+        if item:
+            from app.games.zone_stalkers.balance.items import ITEM_TYPES
+            item_info = ITEM_TYPES.get(item["type"], {})
+            effects = item_info.get("effects", {})
+            _apply_item_effects(agent, effects)
+            agent["inventory"] = [i for i in agent["inventory"] if i["id"] != item_id]
+            events.append({
+                "event_type": "item_consumed",
+                "payload": {
+                    "agent_id": agent_id,
+                    "player_id": player_id,
+                    "item_id": item_id,
+                    "item_type": item["type"],
+                    "effects": effects,
+                },
+            })
+
     return state, events
 
 
@@ -331,6 +354,33 @@ def _validate_pick_up_item(payload: Dict[str, Any], state: Dict[str, Any], agent
     if not item:
         return RuleCheckResult(valid=False, error="Item not found in current location")
     return RuleCheckResult(valid=True)
+
+
+def _validate_consume_item(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
+    item_id = payload.get("item_id")
+    if not item_id:
+        return RuleCheckResult(valid=False, error="item_id is required")
+    item = next((i for i in agent.get("inventory", []) if i["id"] == item_id), None)
+    if not item:
+        return RuleCheckResult(valid=False, error="Item not found in inventory")
+    from app.games.zone_stalkers.balance.items import CONSUMABLE_ITEM_TYPES
+    if item["type"] not in CONSUMABLE_ITEM_TYPES:
+        return RuleCheckResult(valid=False, error="This item cannot be consumed")
+    return RuleCheckResult(valid=True)
+
+
+def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
+    """Apply item effect dict to agent stats (hp, radiation, stamina, hunger, thirst)."""
+    if "hp" in effects:
+        agent["hp"] = max(0, min(agent.get("max_hp", 100), agent.get("hp", 100) + effects["hp"]))
+    if "radiation" in effects:
+        agent["radiation"] = max(0, agent.get("radiation", 0) + effects["radiation"])
+    if "stamina" in effects:
+        agent["stamina"] = min(100, agent.get("stamina", 100) + effects["stamina"])
+    if "hunger" in effects:
+        agent["hunger"] = max(0, agent.get("hunger", 0) + effects["hunger"])
+    if "thirst" in effects:
+        agent["thirst"] = max(0, agent.get("thirst", 0) + effects["thirst"])
 
 
 def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:

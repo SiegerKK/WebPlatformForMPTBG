@@ -63,6 +63,9 @@ interface StalkerAgent {
   max_hp: number;
   radiation: number;
   stamina: number;
+  hunger: number;
+  thirst: number;
+  sleepiness: number;
   money: number;
   faction: string;
   inventory: AgentInventoryItem[];
@@ -308,6 +311,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   const handlePickUpItem = async (itemId: string) =>
     sendCommand('pick_up_item', { item_id: itemId });
+
+  const handleConsumeItem = async (itemId: string) =>
+    sendCommand('consume_item', { item_id: itemId });
 
   const handleEndTurn = async () => sendCommand('end_turn', {});
 
@@ -611,6 +617,28 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 </div>
                 <span style={styles.statVal}>{myAgent.radiation}</span>
               </div>
+              {/* Survival needs */}
+              <div style={styles.statRow}>
+                <span style={styles.statLabel}>🍖</span>
+                <div style={styles.barBg}>
+                  <div style={{ ...styles.barFill, width: `${myAgent.hunger ?? 0}%`, background: (myAgent.hunger ?? 0) > 75 ? '#ef4444' : (myAgent.hunger ?? 0) > 50 ? '#f59e0b' : '#22c55e' }} />
+                </div>
+                <span style={styles.statVal}>{myAgent.hunger ?? 0}</span>
+              </div>
+              <div style={styles.statRow}>
+                <span style={styles.statLabel}>💧</span>
+                <div style={styles.barBg}>
+                  <div style={{ ...styles.barFill, width: `${myAgent.thirst ?? 0}%`, background: (myAgent.thirst ?? 0) > 75 ? '#ef4444' : (myAgent.thirst ?? 0) > 50 ? '#f59e0b' : '#3b82f6' }} />
+                </div>
+                <span style={styles.statVal}>{myAgent.thirst ?? 0}</span>
+              </div>
+              <div style={styles.statRow}>
+                <span style={styles.statLabel}>😴</span>
+                <div style={styles.barBg}>
+                  <div style={{ ...styles.barFill, width: `${myAgent.sleepiness ?? 0}%`, background: (myAgent.sleepiness ?? 0) > 75 ? '#ef4444' : (myAgent.sleepiness ?? 0) > 50 ? '#f59e0b' : '#64748b' }} />
+                </div>
+                <span style={styles.statVal}>{myAgent.sleepiness ?? 0}</span>
+              </div>
               <div style={styles.moneyRow}>💰 {myAgent.money} RU</div>
               <div style={styles.locationLabel}>
                 📍 {zoneState.locations[myAgent.location_id]?.name ?? myAgent.location_id}
@@ -632,12 +660,25 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               <div style={styles.inventoryList}>
                 {myAgent.inventory.length === 0
                   ? <span style={styles.emptyText}>Empty</span>
-                  : myAgent.inventory.map((item) => (
-                    <div key={item.id} style={styles.inventoryItem}>
-                      <span style={styles.itemName}>{item.name}</span>
-                      {item.value != null && <span style={styles.itemVal}>{item.value} RU</span>}
-                    </div>
-                  ))}
+                  : myAgent.inventory.map((item) => {
+                    const isConsumable = ['medkit', 'bandage', 'antirad', 'bread', 'energy_drink', 'vodka'].includes(item.type);
+                    return (
+                      <div key={item.id} style={styles.inventoryItem}>
+                        <span style={styles.itemName}>{item.name}</span>
+                        {item.value != null && <span style={styles.itemVal}>{item.value} RU</span>}
+                        {isConsumable && canAct && (
+                          <button
+                            style={styles.useItemBtn}
+                            onClick={() => handleConsumeItem(item.id)}
+                            disabled={actionLoading}
+                            title={`Use ${item.name}`}
+                          >
+                            Use
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
               </div>
             </>
           ) : (
@@ -983,9 +1024,10 @@ const styles: Record<string, React.CSSProperties> = {
   actionUsedBadge: { background: '#334155', color: '#94a3b8', borderRadius: 6, padding: '0 5px', fontSize: '0.66rem' },
   inventoryTitle: { color: '#94a3b8', fontSize: '0.75rem', marginTop: 6 },
   inventoryList: { display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 120, overflowY: 'auto' as const },
-  inventoryItem: { display: 'flex', justifyContent: 'space-between', background: '#0f172a', borderRadius: 5, padding: '0.2rem 0.4rem' },
-  itemName: { color: '#cbd5e1', fontSize: '0.72rem' },
-  itemVal: { color: '#64748b', fontSize: '0.7rem' },
+  inventoryItem: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#0f172a', borderRadius: 5, padding: '0.2rem 0.4rem' },
+  itemName: { color: '#cbd5e1', fontSize: '0.72rem', flex: 1 },
+  itemVal: { color: '#64748b', fontSize: '0.7rem', marginRight: 4 },
+  useItemBtn: { padding: '0.1rem 0.4rem', background: '#166534', color: '#86efac', border: '1px solid #22c55e', borderRadius: 4, cursor: 'pointer', fontSize: '0.65rem', flexShrink: 0 },
 
   // center panel
   centerPanel: { flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: '0.75rem' },

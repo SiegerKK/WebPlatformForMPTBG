@@ -3,6 +3,7 @@ Fallback bot policy for human players who don't submit an action in time.
 
 Conservative strategy:
 - Heal if HP is low
+- Eat/drink if needs are critical
 - Retreat from combat
 - Move toward a safe location
 - Otherwise end turn
@@ -10,8 +11,11 @@ Conservative strategy:
 import random
 from typing import List, Dict, Any
 from sdk.bot_policy import BotPolicy
+from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
 
 _LOW_HP_THRESHOLD = 30
+_HIGH_HUNGER_THRESHOLD = 70
+_HIGH_THIRST_THRESHOLD = 70
 _SAFE_LOCATION_TYPES = {"safe_hub"}
 
 
@@ -46,19 +50,31 @@ class FallbackPlayerBotPolicy(BotPolicy):
         if not agent:
             return {"command_type": "end_turn", "payload": {}}
 
-        # Heal if HP is critically low and have a medkit
         inventory = agent.get("inventory", [])
-        if agent.get("hp", 100) < _LOW_HP_THRESHOLD:
-            medkit = next((i for i in inventory if i["type"] in ("medkit", "bandage")), None)
-            if medkit:
-                return {"command_type": "use_item", "payload": {"item_id": medkit["id"]}}
 
-        # Move toward a safe hub if not already there
+        # P1 — Heal if HP critically low
+        if agent.get("hp", 100) < _LOW_HP_THRESHOLD:
+            medkit = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
+            if medkit:
+                return {"command_type": "consume_item", "payload": {"item_id": medkit["id"]}}
+
+        # P2 — Eat if hungry
+        if agent.get("hunger", 0) >= _HIGH_HUNGER_THRESHOLD:
+            food = next((i for i in inventory if i["type"] in FOOD_ITEM_TYPES), None)
+            if food:
+                return {"command_type": "consume_item", "payload": {"item_id": food["id"]}}
+
+        # P2b — Drink if thirsty
+        if agent.get("thirst", 0) >= _HIGH_THIRST_THRESHOLD:
+            nourishment = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
+            if nourishment:
+                return {"command_type": "consume_item", "payload": {"item_id": nourishment["id"]}}
+
+        # P3 — Move toward a safe hub if not already there
         loc_id = agent.get("location_id")
         locations = state.get("locations", {})
         current_loc = locations.get(loc_id, {})
         if current_loc.get("type") not in _SAFE_LOCATION_TYPES:
-            # Find a connected safe location
             connections = current_loc.get("connections", [])
             for conn in connections:
                 connected_loc = locations.get(conn["to"], {})
@@ -67,7 +83,6 @@ class FallbackPlayerBotPolicy(BotPolicy):
                         "command_type": "move_agent",
                         "payload": {"target_location_id": conn["to"]},
                     }
-            # No safe neighbor — move away from danger (first connection)
             if connections:
                 return {
                     "command_type": "move_agent",

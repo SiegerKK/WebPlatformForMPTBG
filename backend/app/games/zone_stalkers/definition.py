@@ -43,6 +43,7 @@ class ZoneStalkersGame(GameDefinition):
                     "join_event",
                     "pick_up_artifact",
                     "pick_up_item",
+                    "consume_item",
                     "end_turn",
                 ],
                 turn_mode=TurnMode.SIMULTANEOUS,
@@ -268,6 +269,14 @@ class ZoneStalkersGame(GameDefinition):
                 payload_schema={"item_id": {"type": "string"}},
                 applicable_archetypes=["stalker_agent"],
                 context_types=["zone_map", "location_exploration"],
+            ),
+            ActionDefinition(
+                action_type="consume_item",
+                display_name="Use Item",
+                description="Use a consumable item from inventory (food, medkit, antirad…)",
+                payload_schema={"item_id": {"type": "string"}},
+                applicable_archetypes=["stalker_agent"],
+                context_types=["zone_map"],
             ),
             ActionDefinition(
                 action_type="end_turn",

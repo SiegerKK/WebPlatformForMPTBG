@@ -277,14 +277,22 @@ def _make_stalker_agent(
         "archetype": "stalker_agent",
         "name": name,
         "location_id": location_id,
+        # ─── Health & Status ───
         "hp": 100,
         "max_hp": 100,
         "radiation": 0,
         "stamina": 100,
+        # ─── Survival needs (0–100; higher = worse) ───
+        "hunger": 20,
+        "thirst": 20,
+        "sleepiness": 10,
+        # ─── Economy ───
         "money": rng.randint(100, 800),
         "carry_capacity": 50.0,
+        # ─── Inventory & Equipment ───
         "inventory": inventory,
         "equipment": equipment,
+        # ─── Identity & Faction ───
         "faction": faction,
         "controller": {
             "kind": controller_kind,
@@ -293,8 +301,22 @@ def _make_stalker_agent(
         "is_alive": True,
         "action_used": False,
         "reputation": 0,
-        "scheduled_action": None,  # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
-        "memory": [],              # list of {world_turn, world_day, type, title, summary, effects}
+        # ─── Development ───
+        "experience": 0,
+        "skill_combat": 1,
+        "skill_stalker": 1,
+        "skill_trade": 1,
+        "skill_medicine": 1,
+        "skill_social": 1,
+        # ─── Goals & Psychology ───
+        "global_goal": "survive",   # "survive" | "get_rich" | "explore" | "serve_faction"
+        "current_goal": None,
+        "risk_tolerance": 0.5,      # 0.0–1.0
+        # ─── Action state ───
+        "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
+        "action_queue": [],         # list of scheduled_action dicts to execute after current one
+        # ─── Memory ───
+        "memory": [],               # list of {world_turn, world_day, type, title, summary, effects}
     }
 
 

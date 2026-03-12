@@ -1,17 +1,19 @@
 """
-AI policy for NPC stalkers — basic wander/survive behaviour.
+AI policy for NPC stalkers — prioritised survive/wander behaviour.
 """
 import random
 from typing import List, Dict, Any
 from sdk.bot_policy import BotPolicy
+from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
 
 
 class StalkerBotPolicy(BotPolicy):
     """
-    Simple stalker bot that:
-    - Picks up nearby artifacts
-    - Moves to adjacent safe locations
-    - Ends turn if nothing to do
+    Stalker bot that follows a priority hierarchy (GDD §11):
+      P1 – Heal if HP critical
+      P2 – Eat/drink if needs are high
+      P3 – Pick up nearby artifacts
+      P4 – Move to adjacent location
     """
 
     def decide(
@@ -41,11 +43,30 @@ class StalkerBotPolicy(BotPolicy):
         if not agent:
             return {"command_type": "end_turn", "payload": {}}
 
+        inventory = agent.get("inventory", [])
         loc_id = agent.get("location_id")
         locations = state.get("locations", {})
         loc = locations.get(loc_id, {})
 
-        # Pick up artifact if available
+        # P1 — Heal if HP ≤ 30
+        if agent.get("hp", 100) <= 30:
+            heal_item = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
+            if heal_item:
+                return {"command_type": "consume_item", "payload": {"item_id": heal_item["id"]}}
+
+        # P2 — Eat if hungry
+        if agent.get("hunger", 0) >= 70:
+            food = next((i for i in inventory if i["type"] in FOOD_ITEM_TYPES), None)
+            if food:
+                return {"command_type": "consume_item", "payload": {"item_id": food["id"]}}
+
+        # P2b — Drink if thirsty
+        if agent.get("thirst", 0) >= 70:
+            nourishment = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
+            if nourishment:
+                return {"command_type": "consume_item", "payload": {"item_id": nourishment["id"]}}
+
+        # P3 — Pick up artifact if available
         artifacts = loc.get("artifacts", [])
         if artifacts:
             return {
@@ -53,7 +74,7 @@ class StalkerBotPolicy(BotPolicy):
                 "payload": {"artifact_id": artifacts[0]["id"]},
             }
 
-        # Move to a connected location
+        # P4 — Move to a connected location
         connections = loc.get("connections", [])
         if connections:
             target = random.choice(connections)

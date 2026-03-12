@@ -33,7 +33,26 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
             events.extend(new_evs)
 
-    # 2. AI bot agent decisions (bots without a scheduled action)
+    # 2. Degrade survival needs and apply critical penalties
+    for agent_id, agent in state.get("agents", {}).items():
+        if not agent.get("is_alive", True):
+            continue
+        agent["hunger"] = min(100, agent.get("hunger", 0) + 3)
+        agent["thirst"] = min(100, agent.get("thirst", 0) + 5)
+        agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + 4)
+        # Critical thirst causes HP damage faster than hunger
+        if agent.get("thirst", 0) >= 80:
+            agent["hp"] = max(0, agent["hp"] - 2)
+        if agent.get("hunger", 0) >= 80:
+            agent["hp"] = max(0, agent["hp"] - 1)
+        if agent["hp"] <= 0 and agent.get("is_alive", True):
+            agent["is_alive"] = False
+            events.append({
+                "event_type": "agent_died",
+                "payload": {"agent_id": agent_id, "cause": "starvation_or_thirst"},
+            })
+
+    # 3. AI bot agent decisions (bots without a scheduled action)
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -46,7 +65,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         bot_evs = _run_bot_action(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
-    # 3. Advance world time
+    # 4. Advance world time
     world_hour = state.get("world_hour", 6)
     world_day = state.get("world_day", 1)
     world_hour += 1
@@ -58,7 +77,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     state["world_day"] = world_day
     state["world_turn"] = world_turn + 1
 
-    # 4. Reset action_used for next turn
+    # 5. Reset action_used for next turn
     for agent in state.get("agents", {}).values():
         if agent.get("is_alive", True):
             agent["action_used"] = False
@@ -178,6 +197,17 @@ def _process_scheduled_action(
         events.append({
             "event_type": "event_participation_ended",
             "payload": {"agent_id": agent_id},
+        })
+
+    # Pop next queued action if available
+    queue = agent.get("action_queue", [])
+    if queue and not agent.get("scheduled_action"):
+        next_action = queue.pop(0)
+        agent["action_queue"] = queue
+        agent["scheduled_action"] = next_action
+        events.append({
+            "event_type": "queue_action_started",
+            "payload": {"agent_id": agent_id, "action_type": next_action["type"]},
         })
 
     return events
@@ -303,6 +333,8 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
     # Restore stamina
     agent["stamina"] = min(100, agent.get("stamina", 100) + 20 * hours)
+    # Reset sleepiness
+    agent["sleepiness"] = 0
     _add_memory(agent, world_turn, state, "sleep",
                 f"Slept for {hours} hours",
                 f"Rested well. HP +{hp_regen}, Radiation -{rad_reduce}.",
@@ -337,25 +369,90 @@ def _add_memory(
 # Bot decisions
 # ─────────────────────────────────────────────────────────────────
 
+# Import centralised item-type sets from balance data (single source of truth)
+from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+
+
+def _bot_consume(
+    agent_id: str,
+    agent: Dict[str, Any],
+    item: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Apply a consumable item to agent and remove it from inventory. Returns events."""
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+    from app.games.zone_stalkers.rules.world_rules import _apply_item_effects
+    item_info = ITEM_TYPES.get(item["type"], {})
+    effects = item_info.get("effects", {})
+    _apply_item_effects(agent, effects)
+    agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] != item["id"]]
+    agent["action_used"] = True
+    return [{
+        "event_type": "item_consumed",
+        "payload": {"agent_id": agent_id, "item_id": item["id"], "item_type": item["type"], "effects": effects},
+    }]
+
+
 def _run_bot_action(
     agent_id: str,
     agent: Dict[str, Any],
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Make a simple decision for a bot-controlled stalker agent and apply it."""
+    """
+    Make a prioritised decision for a bot-controlled stalker agent and apply it.
+
+    Priority order (GDD §11):
+      P1 – Heal if HP critical
+      P2 – Eat/drink if hunger/thirst critical
+      P3 – Sleep if sleepy and in safe location
+      P4 – Pick up artifacts at current location
+      P5 – Schedule exploration or move to adjacent location
+    """
     events: List[Dict[str, Any]] = []
     loc_id = agent.get("location_id")
     locations = state.get("locations", {})
     loc = locations.get(loc_id, {})
     rng = random.Random(agent_id + str(world_turn))
+    inventory = agent.get("inventory", [])
 
-    # If HP low: just stay put this turn
-    if agent.get("hp", 100) <= 20:
+    # P1 — Heal if HP ≤ 30
+    if agent.get("hp", 100) <= 30:
+        heal_item = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
+        if heal_item:
+            return _bot_consume(agent_id, agent, heal_item)
+        # No healing item: stay put
         agent["action_used"] = True
         return events
 
-    # Pick up artifact if available
+    # P2 — Eat if hunger ≥ 70
+    if agent.get("hunger", 0) >= 70:
+        food = next((i for i in inventory if i["type"] in FOOD_ITEM_TYPES), None)
+        if food:
+            return _bot_consume(agent_id, agent, food)
+
+    # P2b — Drink if thirst ≥ 70
+    if agent.get("thirst", 0) >= 70:
+        nourishment = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
+        if nourishment:
+            return _bot_consume(agent_id, agent, nourishment)
+
+    # P3 — Sleep if sleepiness ≥ 75 and in a safe/resting location
+    if agent.get("sleepiness", 0) >= 75 and loc.get("type") in ("safe_hub", "ruins"):
+        agent["scheduled_action"] = {
+            "type": "sleep",
+            "turns_remaining": 6,
+            "turns_total": 6,
+            "target_id": loc_id,
+            "started_turn": world_turn,
+        }
+        agent["action_used"] = True
+        events.append({
+            "event_type": "sleep_started",
+            "payload": {"agent_id": agent_id, "hours": 6},
+        })
+        return events
+
+    # P4 — Pick up artifact if available
     artifacts = loc.get("artifacts", [])
     if artifacts:
         art = artifacts[0]
@@ -368,7 +465,7 @@ def _run_bot_action(
         })
         return events
 
-    # Schedule exploration with 30% probability
+    # P5a — Schedule exploration with 30% probability
     if rng.random() < 0.30:
         agent["scheduled_action"] = {
             "type": "explore",
@@ -384,15 +481,13 @@ def _run_bot_action(
         })
         return events
 
-    # Move to adjacent location
+    # P5b — Move to adjacent location
     connections = loc.get("connections", [])
     if connections and rng.random() < 0.70:
         conn = rng.choice(connections)
         target_loc_id = conn["to"]
-        # Remove from old
         if agent_id in loc.get("agents", []):
             loc["agents"].remove(agent_id)
-        # Add to new
         agent["location_id"] = target_loc_id
         new_loc = locations.get(target_loc_id, {})
         if agent_id not in new_loc.get("agents", []):

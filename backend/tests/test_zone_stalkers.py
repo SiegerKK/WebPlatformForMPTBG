@@ -579,3 +579,141 @@ def test_zone_stalkers_second_action_rejected(test_client):
         "payload": {"target_location_id": next_target},
     }, headers=p1)
     assert resp2.json()["status"] == "rejected"
+
+
+# ─────────────────────────────────────────────────────────────────
+# New field tests
+# ─────────────────────────────────────────────────────────────────
+
+class TestNewAgentFields:
+    """Verify new fields added in GDD Phase-1 are present on generated agents."""
+
+    def _agent(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=7, num_players=1, num_ai_stalkers=1, num_mutants=0, num_traders=0)
+        return state["agents"]["agent_p0"]
+
+    def test_hunger_present(self):
+        agent = self._agent()
+        assert "hunger" in agent
+        assert 0 <= agent["hunger"] <= 100
+
+    def test_thirst_present(self):
+        agent = self._agent()
+        assert "thirst" in agent
+        assert 0 <= agent["thirst"] <= 100
+
+    def test_sleepiness_present(self):
+        agent = self._agent()
+        assert "sleepiness" in agent
+        assert 0 <= agent["sleepiness"] <= 100
+
+    def test_action_queue_present(self):
+        agent = self._agent()
+        assert "action_queue" in agent
+        assert isinstance(agent["action_queue"], list)
+        assert agent["action_queue"] == []
+
+    def test_experience_present(self):
+        agent = self._agent()
+        assert "experience" in agent
+        assert agent["experience"] == 0
+
+    def test_skills_present(self):
+        agent = self._agent()
+        for skill in ("skill_combat", "skill_stalker", "skill_trade", "skill_medicine", "skill_social"):
+            assert skill in agent, f"{skill} missing"
+            assert agent[skill] >= 1
+
+    def test_global_goal_present(self):
+        agent = self._agent()
+        assert "global_goal" in agent
+        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+
+    def test_risk_tolerance_present(self):
+        agent = self._agent()
+        assert "risk_tolerance" in agent
+        assert 0.0 <= agent["risk_tolerance"] <= 1.0
+
+
+# ─────────────────────────────────────────────────────────────────
+# consume_item command tests
+# ─────────────────────────────────────────────────────────────────
+
+class TestConsumeItem:
+    """Unit tests for the consume_item zone_map command."""
+
+    def _state_with_item(self, item_type: str = "medkit"):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state = generate_zone(seed=3, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        # Give a known item in inventory
+        item_info = ITEM_TYPES[item_type]
+        state["agents"]["agent_p0"]["inventory"] = [{
+            "id": "test_item_1", "type": item_type,
+            "name": item_info["name"], "weight": item_info.get("weight", 0), "value": item_info.get("value", 0),
+        }]
+        return state
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "player1")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "player1")
+
+    def test_consume_medkit_valid(self):
+        state = self._state_with_item("medkit")
+        assert self._v("consume_item", {"item_id": "test_item_1"}, state).valid
+
+    def test_consume_bread_valid(self):
+        state = self._state_with_item("bread")
+        assert self._v("consume_item", {"item_id": "test_item_1"}, state).valid
+
+    def test_consume_missing_item_invalid(self):
+        state = self._state_with_item("medkit")
+        result = self._v("consume_item", {"item_id": "no_such_item"}, state)
+        assert not result.valid
+        assert "inventory" in result.error.lower()
+
+    def test_consume_weapon_invalid(self):
+        state = self._state_with_item("ak74")
+        result = self._v("consume_item", {"item_id": "test_item_1"}, state)
+        assert not result.valid
+
+    def test_consume_medkit_heals_hp(self):
+        state = self._state_with_item("medkit")
+        state["agents"]["agent_p0"]["hp"] = 50
+        new_state, events = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["hp"] == 100
+        assert any(e["event_type"] == "item_consumed" for e in events)
+
+    def test_consume_removes_from_inventory(self):
+        state = self._state_with_item("medkit")
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert not any(i["id"] == "test_item_1" for i in new_state["agents"]["agent_p0"]["inventory"])
+
+    def test_consume_bread_reduces_hunger(self):
+        state = self._state_with_item("bread")
+        state["agents"]["agent_p0"]["hunger"] = 80
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["hunger"] < 80
+
+    def test_consume_energy_drink_reduces_thirst(self):
+        state = self._state_with_item("energy_drink")
+        state["agents"]["agent_p0"]["thirst"] = 80
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["thirst"] < 80
+
+    def test_hp_not_exceed_max(self):
+        state = self._state_with_item("medkit")
+        state["agents"]["agent_p0"]["hp"] = 100  # already full
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["hp"] == 100
+
+    def test_consume_no_item_id_invalid(self):
+        state = self._state_with_item()
+        assert not self._v("consume_item", {}, state).valid
