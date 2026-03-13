@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../api/client';
-import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../types';
+import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../../api/client';
+import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../../types';
 import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';

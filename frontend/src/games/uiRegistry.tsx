@@ -6,8 +6,8 @@
  * no other platform file needs to change.
  */
 import type { ComponentType } from 'react';
-import TicTacToeGame from '../components/TicTacToeGame';
-import ZoneStalkerGame from '../components/ZoneStalkerGame';
+import TicTacToeGame from './tictactoe/ui';
+import ZoneStalkerGame from './zone_stalkers/ui';
 import type { Match, User } from '../types';
 
 export interface GameUIProps {
