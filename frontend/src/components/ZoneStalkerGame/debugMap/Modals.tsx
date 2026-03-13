@@ -7,7 +7,7 @@ import { s } from './styles';
 // ─── Terrain type options ─────────────────────────────────────────────────────
 
 export const TERRAIN_TYPES = [
-  'plain', 'hills', 'slag_heaps', 'industrial', 'urban',
+  'plain', 'hills', 'slag_heaps', 'industrial', 'buildings', 'military_buildings',
   'hamlet', 'farm', 'field_camp',
 ] as const;
 
@@ -15,8 +15,9 @@ export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   plain: 'Равнина',
   hills: 'Холмы',
   slag_heaps: 'Террикони',
-  industrial: 'Промышленная застройка',
-  urban: 'Городская застройка',
+  industrial: 'Промзона',
+  buildings: 'Здания',
+  military_buildings: 'Военные здания',
   hamlet: 'Хутор',
   farm: 'Ферма',
   field_camp: 'Полевой лагерь',

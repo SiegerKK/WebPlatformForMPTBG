@@ -714,14 +714,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             ))}
           </div>
           <div style={s.toolbarRight}>
-            {saving && (
-              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>💾 Saving…</span>
-            )}
-            {saveError && (
-              <span style={{ color: '#ef4444', fontSize: '0.68rem' }} title={saveError}>
-                ⚠ Save failed
-              </span>
-            )}
+            <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
+            <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
+              ⚠ Save failed
+            </span>
             {/* Advance turn */}
             <button
               style={s.toolBtn}
@@ -755,9 +751,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             >
               🔗 {linkMode ? 'Link mode ON' : 'Link mode'}
             </button>
-            {(Object.keys(dragOverrides).length > 0) && (
-              <button
-                style={s.toolBtn}
+            <button
+                style={{ ...s.toolBtn, visibility: Object.keys(dragOverrides).length > 0 ? 'visible' : 'hidden' }}
                 onClick={() => {
                   setDragOverrides({});
                   persistMap({}, localConnsRef.current);
@@ -766,16 +761,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
               >
                 ↺ Reset layout
               </button>
-            )}
-            {(panOffset.x !== 0 || panOffset.y !== 0) && (
-              <button
-                style={s.toolBtn}
+            <button
+                style={{ ...s.toolBtn, visibility: (panOffset.x !== 0 || panOffset.y !== 0) ? 'visible' : 'hidden' }}
                 onClick={() => setPanOffset({ x: 0, y: 0 })}
                 title="Re-centre the canvas view"
               >
                 ⊙ Re-centre
               </button>
-            )}
             {/* Zoom controls */}
             <button
               style={s.toolBtn}
@@ -920,6 +912,21 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                   const mx = (a.x + b.x) / 2;
                   const my = (a.y + b.y) / 2;
                   const travelTime = conn.travel_time ?? 15;
+                  // Highlight if this edge touches the selected location
+                  const isLocHighlighted = !!selectedLocId && (locId === selectedLocId || conn.to === selectedLocId);
+                  // Highlight if both endpoints belong to the selected region
+                  const isRegionHighlighted = !!selectedRegionId && (
+                    zoneState.locations[locId]?.region === selectedRegionId ||
+                    zoneState.locations[conn.to]?.region === selectedRegionId
+                  );
+                  const isHighlighted = isLocHighlighted || isRegionHighlighted;
+                  const hasSelection = !!(selectedLocId || selectedRegionId);
+                  // Dim non-highlighted edges when something is selected
+                  const baseOpacity = hasSelection ? (isHighlighted ? 1.0 : 0.18) : 0.8;
+                  const strokeColor = isHighlighted
+                    ? (isLocHighlighted ? '#fbbf24' : '#c084fc')
+                    : (isDangerous ? '#7f1d1d' : '#1e3a5f');
+                  const strokeW = isHighlighted ? 2.5 : (isDangerous ? 2 : 1.5);
                   return (
                     <g key={`${locId}--${conn.to}`}>
                       <line
@@ -927,10 +934,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                         y1={a.y}
                         x2={b.x}
                         y2={b.y}
-                        stroke={isDangerous ? '#7f1d1d' : '#1e3a5f'}
-                        strokeWidth={isDangerous ? 2 : 1.5}
-                        strokeDasharray={isDangerous ? '6 3' : undefined}
-                        strokeOpacity={0.8}
+                        stroke={strokeColor}
+                        strokeWidth={strokeW}
+                        strokeDasharray={isDangerous && !isHighlighted ? '6 3' : undefined}
+                        strokeOpacity={baseOpacity}
                       />
                       {/* Travel-time label */}
                       <rect
@@ -940,15 +947,16 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                         height={14}
                         rx={4}
                         fill="#0f172a"
-                        fillOpacity={0.85}
+                        fillOpacity={baseOpacity * 0.85}
                       />
                       <text
                         x={mx}
                         y={my + 3}
                         textAnchor="middle"
                         fontSize={9}
-                        fill={isDangerous ? '#fca5a5' : '#94a3b8'}
+                        fill={isHighlighted ? '#fde68a' : (isDangerous ? '#fca5a5' : '#94a3b8')}
                         fontFamily="monospace"
+                        opacity={baseOpacity}
                       >
                         {travelTime}м
                       </text>

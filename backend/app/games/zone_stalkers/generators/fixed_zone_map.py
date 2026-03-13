@@ -253,7 +253,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_D1",
         "name": "Старый завод",
         "region": "dark_valley",
-        "terrain_type": "urban",
+        "terrain_type": "buildings",
         "anomaly_activity": 2,
         "connections": [
             {"to": "loc_D2", "travel_time": 8},
@@ -279,7 +279,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_D3",
         "name": "Тёмная Долина / Завод X18",
         "region": "dark_valley",
-        "terrain_type": "urban",
+        "terrain_type": "buildings",
         "anomaly_activity": 7,
         "connections": [
             {"to": "loc_D1", "travel_time": 6},
@@ -394,7 +394,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_S6",
         "name": "Руины деревни",
         "region": "swamps",
-        "terrain_type": "urban",
+        "terrain_type": "buildings",
         "anomaly_activity": 4,
         "connections": [
             {"to": "loc_S4", "travel_time": 9},

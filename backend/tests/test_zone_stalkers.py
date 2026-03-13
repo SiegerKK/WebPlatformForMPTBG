@@ -1012,7 +1012,7 @@ class TestDebugLocationCommands:
         state = self._state()
         for loc in state["locations"].values():
             assert "terrain_type" in loc
-            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "urban"}
+            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings", "hamlet", "farm", "field_camp"}
             assert "anomaly_activity" in loc
             assert isinstance(loc["anomaly_activity"], int)
             assert 0 <= loc["anomaly_activity"] <= 10

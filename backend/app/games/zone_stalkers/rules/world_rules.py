@@ -28,7 +28,7 @@ _MIN_SLEEP_HOURS = 2
 
 # Valid terrain types (shared between generator and debug commands)
 _VALID_TERRAIN_TYPES = frozenset([
-    "plain", "hills", "slag_heaps", "industrial", "urban",
+    "plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings",
     "hamlet", "farm", "field_camp",
 ])
 

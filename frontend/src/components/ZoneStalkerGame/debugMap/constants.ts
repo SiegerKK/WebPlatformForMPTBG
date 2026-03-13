@@ -79,21 +79,23 @@ export function computeBfsLayout(
 
 export const TERRAIN_TYPE_COLOR: Record<string, string> = {
   plain: '#84cc16',
-  hills: '#3b82f6',
-  slag_heaps: '#94a3b8',
+  hills: '#a78bfa',
+  slag_heaps: '#64748b',
   industrial: '#f59e0b',
-  urban: '#a855f7',
-  hamlet: '#f97316',
-  farm: '#22c55e',
-  field_camp: '#14b8a6',
+  buildings: '#818cf8',
+  military_buildings: '#ef4444',
+  hamlet: '#fb923c',
+  farm: '#34d399',
+  field_camp: '#2dd4bf',
 };
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   plain: 'Равнина',
   hills: 'Холмы',
   slag_heaps: 'Террикони',
-  industrial: 'Промышленная застройка',
-  urban: 'Городская застройка',
+  industrial: 'Промзона',
+  buildings: 'Здания',
+  military_buildings: 'Воен. здания',
   hamlet: 'Хутор',
   farm: 'Ферма',
   field_camp: 'Полевой лагерь',
