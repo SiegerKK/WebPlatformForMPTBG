@@ -153,19 +153,38 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [activeEventCtx, setActiveEventCtx] = useState<GameContext | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [takingControlOf, setTakingControlOf] = useState<string | null>(null);
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [travelTarget, setTravelTarget] = useState<string | null>(null);
   const [sleepHours, setSleepHours] = useState(6);
   const [showTravelPanel, setShowTravelPanel] = useState(false);
   const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory' | 'debug'>('map');
-  // ── Roster state ─────────────────────────────────────────────────────────
-  // Show roster on first load; persist "entered" status per match so a page
-  // refresh doesn't force the player back to the roster screen mid-game.
-  const rosterKey = `roster_seen_${match.id}`;
-  const [showRoster, setShowRoster] = useState<boolean>(
-    () => !sessionStorage.getItem(rosterKey)
+  // ── Entry / Roster state ─────────────────────────────────────────────────
+  // `entryKey` remembers that the player has passed the entry menu for this match.
+  // On the very first visit they see the Entry Menu; on subsequent visits they
+  // go straight back into the game.
+  const entryKey = `entry_seen_${match.id}`;
+  const [showEntryMenu, setShowEntryMenu] = useState<boolean>(
+    () => !sessionStorage.getItem(entryKey),
   );
-  const enterGame = () => { sessionStorage.setItem(rosterKey, '1'); setShowRoster(false); };
+  // Which sub-screen of the entry flow is active
+  const [entryScreen, setEntryScreen] = useState<'main' | 'npc_select'>('main');
+  // In-game roster overlay (toggled by the 👥 Roster button while already playing)
+  const [showRoster, setShowRoster] = useState(false);
+
+  // Enter game as your own assigned character
+  const enterGame = () => {
+    sessionStorage.setItem(entryKey, '1');
+    setShowEntryMenu(false);
+  };
+
+  // Enter game directly in Debug mode
+  const enterAsDebug = () => {
+    sessionStorage.setItem(entryKey, '1');
+    setActiveTab('debug');
+    setShowEntryMenu(false);
+  };
+
   // Agent whose profile modal is open (null = list view)
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -404,7 +423,193 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     }
   };
 
+  const handleTakeControl = async (agentId: string) => {
+    if (!context?.id) return;
+    setTakingControlOf(agentId);
+    setError(null);
+    try {
+      const res = await commandsApi.submit({
+        match_id: match.id,
+        context_id: context.id,
+        command_type: 'take_control',
+        payload: { agent_id: agentId },
+      });
+      if (res.data.status === 'rejected') {
+        setError(res.data.error ?? 'Take control rejected');
+        return;
+      }
+      await refresh();
+      enterGame();
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg ?? 'Take control failed.');
+    } finally {
+      setTakingControlOf(null);
+    }
+  };
+
   const alreadyJoined = participants.some((p) => p.user_id === user.id);
+
+  // ─── render: entry menu ──────────────────────────────────────────────────
+  const renderEntryMenu = () => {
+    const hasMyAgent = !!myAgentId;
+    const worldInfo = zoneState
+      ? `День ${zoneState.world_day} · ${HOUR_LABEL(zoneState.world_hour)} · Ход ${zoneState.world_turn}/${zoneState.max_turns}`
+      : 'Загрузка…';
+
+    return (
+      <div style={styles.entryPage}>
+        {/* Ambient glow background */}
+        <div style={styles.entryBg} />
+
+        <div style={styles.entryCard}>
+          {/* Title */}
+          <div style={styles.entryLogo}>☢️</div>
+          <h2 style={styles.entryTitle}>ZONE STALKERS</h2>
+          <div style={styles.entrySubtitle}>{worldInfo}</div>
+
+          <div style={styles.entrySep} />
+
+          {/* Menu buttons */}
+          <button
+            style={styles.entryBtn}
+            onClick={() => setEntryScreen('npc_select')}
+            disabled={!zoneState}
+          >
+            <span style={styles.entryBtnIcon}>🤖</span>
+            <span style={styles.entryBtnText}>
+              <span style={styles.entryBtnLabel}>Играть за существующего НПЦ</span>
+              <span style={styles.entryBtnHint}>Взять под контроль NPC-сталкера</span>
+            </span>
+          </button>
+
+          <button
+            style={{
+              ...styles.entryBtn,
+              ...(hasMyAgent ? styles.entryBtnPrimary : {}),
+            }}
+            onClick={enterGame}
+            disabled={!hasMyAgent}
+            title={hasMyAgent ? undefined : 'Нет назначенного персонажа'}
+          >
+            <span style={styles.entryBtnIcon}>👤</span>
+            <span style={styles.entryBtnText}>
+              <span style={styles.entryBtnLabel}>
+                {hasMyAgent
+                  ? `Играть за ${zoneState?.agents?.[myAgentId]?.name ?? 'сталкера'}`
+                  : 'Играть за нового персонажа'}
+              </span>
+              <span style={styles.entryBtnHint}>
+                {hasMyAgent ? 'Ваш назначенный сталкер' : 'Нет назначенного персонажа'}
+              </span>
+            </span>
+          </button>
+
+          <button
+            style={{ ...styles.entryBtn, ...styles.entryBtnDebug }}
+            onClick={enterAsDebug}
+            disabled={!zoneState}
+          >
+            <span style={styles.entryBtnIcon}>🔧</span>
+            <span style={styles.entryBtnText}>
+              <span style={styles.entryBtnLabel}>Дебаг</span>
+              <span style={styles.entryBtnHint}>Просмотр и редактирование игрового мира</span>
+            </span>
+          </button>
+
+          {error && <p style={styles.error}>{error}</p>}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── render: npc select ──────────────────────────────────────────────────
+  const renderNpcSelect = () => {
+    if (!zoneState) return <p style={styles.loadingText}>Загрузка…</p>;
+
+    // Only show alive AI-controlled stalkers
+    const aiStalkers = Object.values(zoneState.agents).filter(
+      (a) => a.is_alive && a.controller.kind === 'ai',
+    );
+
+    const locName = (locId: string) => zoneState.locations[locId]?.name ?? locId;
+
+    return (
+      <div style={styles.npcSelectPage}>
+        <div style={styles.npcSelectHeader}>
+          <button style={styles.npcBackBtn} onClick={() => setEntryScreen('main')}>
+            ← Назад
+          </button>
+          <h3 style={styles.npcSelectTitle}>🤖 Выбор NPC-сталкера</h3>
+          <span style={styles.npcSelectHint}>
+            Выберите NPC, за которого хотите играть. Вы возьмёте под контроль его агента.
+          </span>
+        </div>
+
+        {aiStalkers.length === 0 ? (
+          <div style={styles.npcEmpty}>
+            <p>Нет свободных NPC-сталкеров.</p>
+            <p style={{ color: '#475569', fontSize: '0.8rem' }}>
+              Все сталкеры уже под контролем игроков или мертвы.
+            </p>
+          </div>
+        ) : (
+          <div style={styles.npcGrid}>
+            {aiStalkers.map((agent) => (
+              <div key={agent.id} style={styles.npcCard}>
+                <div style={styles.npcCardTop}>
+                  <span style={styles.npcAvatar}>🤖</span>
+                  <div style={styles.npcInfo}>
+                    <div style={styles.npcName}>{agent.name}</div>
+                    <div style={styles.npcSub}>{agent.faction}</div>
+                  </div>
+                  <span style={{
+                    ...styles.npcAliveTag,
+                    background: agent.hp > 50 ? '#166534' : agent.hp > 25 ? '#78350f' : '#7f1d1d',
+                    color: agent.hp > 50 ? '#86efac' : agent.hp > 25 ? '#fde68a' : '#fca5a5',
+                  }}>
+                    ❤ {agent.hp}/{agent.max_hp}
+                  </span>
+                </div>
+                <div style={styles.npcLoc}>📍 {locName(agent.location_id)}</div>
+                {agent.scheduled_action && (
+                  <div style={styles.npcSched}>
+                    {SCHED_ICONS[agent.scheduled_action.type] ?? '⏳'} {agent.scheduled_action.type}
+                  </div>
+                )}
+                <div style={styles.npcStats}>
+                  <span>💰 {agent.money} RU</span>
+                  {agent.experience !== undefined && (
+                    <span style={{ color: '#94a3b8' }}>XP: {agent.experience}</span>
+                  )}
+                </div>
+                <div style={styles.npcCardFooter}>
+                  <button
+                    style={styles.npcViewBtn}
+                    onClick={() => setProfileAgentId(agent.id)}
+                  >
+                    Профиль
+                  </button>
+                  <button
+                    style={styles.npcTakeBtn}
+                    onClick={() => handleTakeControl(agent.id)}
+                    disabled={takingControlOf !== null}
+                  >
+                    {takingControlOf === agent.id ? '…' : '▶ Взять под контроль'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Profile modal */}
+        {profileAgentId && renderAgentProfile(profileAgentId)}
+
+        {error && <p style={styles.error}>{error}</p>}
+      </div>
+    );
+  };
 
   // ─── render: lobby ───────────────────────────────────────────────────────
   const renderLobby = () => {
@@ -1390,8 +1595,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
       </div>
       {isWaiting && renderLobby()}
-      {isActive && showRoster && renderRoster()}
-      {isActive && !showRoster && renderZoneMap()}
+      {isActive && showEntryMenu && entryScreen === 'main' && renderEntryMenu()}
+      {isActive && showEntryMenu && entryScreen === 'npc_select' && renderNpcSelect()}
+      {isActive && !showEntryMenu && showRoster && renderRoster()}
+      {isActive && !showEntryMenu && !showRoster && renderZoneMap()}
       {!isWaiting && !isActive && <p style={styles.loadingText}>Match status: {match.status}</p>}
     </div>
   );
@@ -1612,5 +1819,132 @@ const styles: Record<string, React.CSSProperties> = {
   profileInvRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', borderBottom: '1px solid #0f172a', paddingBottom: 3 },
   profileInvWeight: { color: '#475569', fontSize: '0.7rem' },
   profileMemoryList: { display: 'flex', flexDirection: 'column' as const, gap: 6, maxHeight: 260, overflowY: 'auto' as const },
+
+  // ── Entry menu ────────────────────────────────────────────────────────────
+  entryPage: {
+    position: 'relative' as const,
+    minHeight: 480,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '2rem 1rem',
+  },
+  entryBg: {
+    position: 'absolute' as const,
+    inset: 0,
+    background: 'radial-gradient(ellipse at 50% 30%, rgba(34,197,94,0.05) 0%, transparent 70%)',
+    pointerEvents: 'none' as const,
+  },
+  entryCard: {
+    position: 'relative' as const,
+    background: '#0a1020',
+    border: '1px solid #1e293b',
+    borderRadius: 16,
+    padding: '2.5rem 2rem',
+    maxWidth: 440,
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    gap: '0.85rem',
+    boxShadow: '0 0 40px rgba(34,197,94,0.06)',
+  },
+  entryLogo: { fontSize: '3.5rem', lineHeight: 1 },
+  entryTitle: {
+    color: '#f8fafc',
+    fontSize: '1.6rem',
+    fontWeight: 900,
+    letterSpacing: '0.12em',
+    margin: 0,
+    textShadow: '0 0 20px rgba(34,197,94,0.3)',
+  },
+  entrySubtitle: {
+    color: '#475569',
+    fontSize: '0.78rem',
+    letterSpacing: '0.04em',
+  },
+  entrySep: { width: '100%', height: 1, background: '#1e293b', margin: '0.5rem 0' },
+  entryBtn: {
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 14,
+    background: '#0f172a',
+    border: '1px solid #1e293b',
+    borderRadius: 10,
+    padding: '0.85rem 1.1rem',
+    cursor: 'pointer',
+    transition: 'border-color 0.15s, background 0.1s',
+    textAlign: 'left' as const,
+  },
+  entryBtnPrimary: {
+    border: '1px solid #166534',
+    background: '#0d1f15',
+  },
+  entryBtnDebug: {
+    border: '1px solid #78350f',
+    background: '#160d02',
+  },
+  entryBtnIcon: { fontSize: '1.6rem', flexShrink: 0, lineHeight: 1 },
+  entryBtnText: { display: 'flex', flexDirection: 'column' as const, gap: 2 },
+  entryBtnLabel: { color: '#f8fafc', fontWeight: 700, fontSize: '0.95rem' },
+  entryBtnHint: { color: '#475569', fontSize: '0.72rem' },
+
+  // ── NPC select ────────────────────────────────────────────────────────────
+  npcSelectPage: { display: 'flex', flexDirection: 'column' as const, gap: '1.25rem' },
+  npcSelectHeader: { display: 'flex', flexDirection: 'column' as const, gap: 6 },
+  npcBackBtn: {
+    alignSelf: 'flex-start' as const,
+    padding: '0.3rem 0.75rem',
+    background: 'transparent',
+    color: '#64748b',
+    border: '1px solid #334155',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontSize: '0.8rem',
+  },
+  npcSelectTitle: { color: '#f8fafc', fontSize: '1.05rem', margin: 0 },
+  npcSelectHint: { color: '#64748b', fontSize: '0.8rem' },
+  npcGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 },
+  npcEmpty: { color: '#64748b', background: '#1e293b', borderRadius: 10, padding: '1.5rem', textAlign: 'center' as const },
+  npcCard: {
+    background: '#1e293b',
+    borderRadius: 10,
+    padding: '0.85rem',
+    border: '1px solid #334155',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '0.45rem',
+  },
+  npcCardTop: { display: 'flex', alignItems: 'flex-start', gap: 8 },
+  npcAvatar: { fontSize: '1.4rem', flexShrink: 0 },
+  npcInfo: { flex: 1 },
+  npcName: { color: '#f8fafc', fontWeight: 700, fontSize: '0.9rem' },
+  npcSub: { color: '#64748b', fontSize: '0.72rem', marginTop: 1 },
+  npcAliveTag: { borderRadius: 6, padding: '0.1rem 0.45rem', fontSize: '0.68rem', fontWeight: 700, flexShrink: 0 },
+  npcLoc: { color: '#60a5fa', fontSize: '0.75rem' },
+  npcSched: { color: '#a78bfa', fontSize: '0.7rem', fontStyle: 'italic' },
+  npcStats: { display: 'flex', gap: 10, color: '#fbbf24', fontSize: '0.78rem', fontWeight: 600 },
+  npcCardFooter: { display: 'flex', gap: 6, marginTop: 4, alignItems: 'center' },
+  npcViewBtn: {
+    padding: '0.2rem 0.6rem',
+    background: '#0f172a',
+    color: '#94a3b8',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+  },
+  npcTakeBtn: {
+    flex: 1,
+    padding: '0.3rem 0.7rem',
+    background: '#166534',
+    color: '#86efac',
+    border: '1px solid #22c55e',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontWeight: 700,
+    fontSize: '0.78rem',
+  },
 };
 

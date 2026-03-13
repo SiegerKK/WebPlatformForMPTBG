@@ -10,6 +10,7 @@ Supported commands:
 - pick_up_artifact(artifact_id)
 - pick_up_item(item_id)
 - end_turn
+- take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -39,6 +40,10 @@ def validate_world_command(
     state: Dict[str, Any],
     player_id: str,
 ) -> RuleCheckResult:
+    # take_control is a meta-command that works even without an existing agent
+    if command_type == "take_control":
+        return _validate_take_control(payload, state, player_id)
+
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
         return RuleCheckResult(valid=False, error="No agent found for this player")
@@ -86,7 +91,6 @@ def validate_world_command(
 
     return RuleCheckResult(valid=False, error=f"Unknown command for zone_map: {command_type}")
 
-
 def resolve_world_command(
     command_type: str,
     payload: Dict[str, Any],
@@ -97,6 +101,25 @@ def resolve_world_command(
     state = copy.deepcopy(state)
     agent_id = _get_player_agent(state, player_id)
     events: List[Dict[str, Any]] = []
+
+    # ── take_control: meta-command, no action cost ────────────────────────────
+    if command_type == "take_control":
+        target_agent_id = payload["agent_id"]
+        # Release current agent back to AI if the player had one
+        if agent_id and agent_id in state.get("agents", {}):
+            state["agents"][agent_id]["controller"] = {"kind": "ai", "participant_id": None}
+        # Assign the new agent to this player
+        state.setdefault("player_agents", {})[player_id] = target_agent_id
+        state["agents"][target_agent_id]["controller"] = {"kind": "human", "participant_id": player_id}
+        events.append({
+            "event_type": "agent_control_taken",
+            "payload": {
+                "player_id": player_id,
+                "agent_id": target_agent_id,
+                "previous_agent_id": agent_id,
+            },
+        })
+        return state, events
 
     if command_type == "end_turn":
         # Mark this player's agent as having acted
@@ -428,3 +451,23 @@ def _route_travel_turns(route: List[str], locations: Dict[str, Any]) -> int:
         danger = locations.get(loc_id, {}).get("danger_level", 2)
         total += _TRAVEL_TURNS_PER_HOP.get(danger, 2)
     return max(1, total)
+
+
+def _validate_take_control(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+    player_id: str,
+) -> RuleCheckResult:
+    target_agent_id = payload.get("agent_id")
+    if not target_agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    agents = state.get("agents", {})
+    agent = agents.get(target_agent_id)
+    if not agent:
+        return RuleCheckResult(valid=False, error="Agent not found")
+    controller = agent.get("controller", {})
+    if controller.get("kind") != "ai":
+        return RuleCheckResult(valid=False, error="Agent is already controlled by a player")
+    if not agent.get("is_alive", True):
+        return RuleCheckResult(valid=False, error="Cannot take control of a dead agent")
+    return RuleCheckResult(valid=True)
