@@ -83,6 +83,9 @@ export const TERRAIN_TYPE_COLOR: Record<string, string> = {
   slag_heaps: '#94a3b8',
   industrial: '#f59e0b',
   urban: '#a855f7',
+  hamlet: '#f97316',
+  farm: '#22c55e',
+  field_camp: '#14b8a6',
 };
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -91,6 +94,9 @@ export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   slag_heaps: 'Террикони',
   industrial: 'Промышленная застройка',
   urban: 'Городская застройка',
+  hamlet: 'Хутор',
+  farm: 'Ферма',
+  field_camp: 'Полевой лагерь',
 };
 
 // ─── Region colors & labels ───────────────────────────────────────────────────

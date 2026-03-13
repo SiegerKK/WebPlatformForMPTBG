@@ -22,6 +22,7 @@ export function LocationDetailPanel({
   onSpawnStalker,
   onSpawnMutant,
   onDeleteConnection,
+  onUpdateConnectionWeight,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -37,6 +38,7 @@ export function LocationDetailPanel({
   onSpawnStalker: (name: string, faction: string, globalGoal: string) => Promise<void>;
   onSpawnMutant: (mutantType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
+  onUpdateConnectionWeight: (toId: string, travelTime: number) => void;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'mutant' | null>(null);
 
@@ -118,9 +120,32 @@ export function LocationDetailPanel({
                 <span style={{ color: '#cbd5e1', fontSize: '0.8rem', flex: 1 }}>
                   {target?.name ?? c.to}
                 </span>
-                <span style={{ color: c.type === 'dangerous' ? '#ef4444' : '#475569', fontSize: '0.68rem' }}>
+                <span style={{ color: c.type === 'dangerous' ? '#ef4444' : '#475569', fontSize: '0.68rem', marginRight: 4 }}>
                   {c.type}
                 </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={999}
+                  value={c.travel_time ?? 15}
+                  title="Время перехода (минут)"
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!isNaN(v) && v > 0) onUpdateConnectionWeight(c.to, v);
+                  }}
+                  style={{
+                    width: 44,
+                    background: '#0f172a',
+                    border: '1px solid #1e3a5f',
+                    borderRadius: 4,
+                    color: '#94a3b8',
+                    fontSize: '0.72rem',
+                    padding: '1px 4px',
+                    textAlign: 'center',
+                    marginRight: 4,
+                  }}
+                />
+                <span style={{ color: '#475569', fontSize: '0.65rem', marginRight: 4 }}>м</span>
                 <button
                   style={s.connDelBtn}
                   onClick={() => onDeleteConnection(c.to)}

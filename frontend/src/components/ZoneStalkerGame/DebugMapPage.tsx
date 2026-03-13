@@ -196,9 +196,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       setSaveError(null);
       try {
         // Serialize connections: plain objects, no class instances
-        const serialisedConns: Record<string, Array<{ to: string; type: string }>> = {};
+        const serialisedConns: Record<string, Array<{ to: string; type: string; travel_time: number }>> = {};
         for (const [id, cs] of Object.entries(conns)) {
-          serialisedConns[id] = cs.map((c) => ({ to: c.to, type: c.type }));
+          serialisedConns[id] = cs.map((c) => ({ to: c.to, type: c.type, travel_time: c.travel_time ?? 15 }));
         }
         await sendCommand('debug_update_map', {
           positions,
@@ -297,8 +297,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           }
         : {
             ...prev,
-            [aId]: [...aC, { to: bId, type: 'normal' }],
-            [bId]: [...bC, { to: aId, type: 'normal' }],
+            [aId]: [...aC, { to: bId, type: 'normal', travel_time: 15 }],
+            [bId]: [...bC, { to: aId, type: 'normal', travel_time: 15 }],
           };
       setLocalConns(newConns);
       persistMap(effectivePosRef.current, newConns);
@@ -312,6 +312,19 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       ...prev,
       [fromId]: (prev[fromId] ?? []).filter((c) => c.to !== toId),
       [toId]: (prev[toId] ?? []).filter((c) => c.to !== fromId),
+    };
+    setLocalConns(newConns);
+    persistMap(effectivePosRef.current, newConns);
+  }, [persistMap]);
+
+  const updateConnectionWeight = useCallback((fromId: string, toId: string, travelTime: number) => {
+    const prev = localConnsRef.current;
+    const applyWeight = (list: LocationConn[]) =>
+      list.map((c) => c.to === toId ? { ...c, travel_time: travelTime } : c);
+    const newConns = {
+      ...prev,
+      [fromId]: applyWeight(prev[fromId] ?? []),
+      [toId]: (prev[toId] ?? []).map((c) => c.to === fromId ? { ...c, travel_time: travelTime } : c),
     };
     setLocalConns(newConns);
     persistMap(effectivePosRef.current, newConns);
@@ -904,18 +917,42 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                   const b = effectivePos[conn.to];
                   if (!a || !b) return null;
                   const isDangerous = conn.type === 'dangerous';
+                  const mx = (a.x + b.x) / 2;
+                  const my = (a.y + b.y) / 2;
+                  const travelTime = conn.travel_time ?? 15;
                   return (
-                    <line
-                      key={`${locId}--${conn.to}`}
-                      x1={a.x}
-                      y1={a.y}
-                      x2={b.x}
-                      y2={b.y}
-                      stroke={isDangerous ? '#7f1d1d' : '#1e3a5f'}
-                      strokeWidth={isDangerous ? 2 : 1.5}
-                      strokeDasharray={isDangerous ? '6 3' : undefined}
-                      strokeOpacity={0.8}
-                    />
+                    <g key={`${locId}--${conn.to}`}>
+                      <line
+                        x1={a.x}
+                        y1={a.y}
+                        x2={b.x}
+                        y2={b.y}
+                        stroke={isDangerous ? '#7f1d1d' : '#1e3a5f'}
+                        strokeWidth={isDangerous ? 2 : 1.5}
+                        strokeDasharray={isDangerous ? '6 3' : undefined}
+                        strokeOpacity={0.8}
+                      />
+                      {/* Travel-time label */}
+                      <rect
+                        x={mx - 12}
+                        y={my - 8}
+                        width={24}
+                        height={14}
+                        rx={4}
+                        fill="#0f172a"
+                        fillOpacity={0.85}
+                      />
+                      <text
+                        x={mx}
+                        y={my + 3}
+                        textAnchor="middle"
+                        fontSize={9}
+                        fill={isDangerous ? '#fca5a5' : '#94a3b8'}
+                        fontFamily="monospace"
+                      >
+                        {travelTime}м
+                      </text>
+                    </g>
                   );
                 }),
               )}
@@ -1068,6 +1105,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
               await sendCommand('debug_spawn_mutant', { loc_id: selectedLocId!, mutant_type: mutantType });
             }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
+            onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel

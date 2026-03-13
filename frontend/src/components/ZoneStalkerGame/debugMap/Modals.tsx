@@ -8,6 +8,7 @@ import { s } from './styles';
 
 export const TERRAIN_TYPES = [
   'plain', 'hills', 'slag_heaps', 'industrial', 'urban',
+  'hamlet', 'farm', 'field_camp',
 ] as const;
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -16,6 +17,9 @@ export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   slag_heaps: 'Террикони',
   industrial: 'Промышленная застройка',
   urban: 'Городская застройка',
+  hamlet: 'Хутор',
+  farm: 'Ферма',
+  field_camp: 'Полевой лагерь',
 };
 
 export const DOMINANT_ANOMALY_OPTIONS = [

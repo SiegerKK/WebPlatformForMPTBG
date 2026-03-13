@@ -3,6 +3,7 @@
 export interface LocationConn {
   to: string;
   type: string;
+  travel_time?: number;
 }
 
 export interface ZoneLocation {

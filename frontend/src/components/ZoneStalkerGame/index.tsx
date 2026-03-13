@@ -134,6 +134,9 @@ const TERRAIN_TYPE_COLOR: Record<string, string> = {
   slag_heaps: '#5b4a30',
   industrial: '#854d0e',
   urban: '#7c3aed',
+  hamlet: '#9a3412',
+  farm: '#14532d',
+  field_camp: '#134e4a',
 };
 
 const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -142,6 +145,9 @@ const TERRAIN_TYPE_LABELS: Record<string, string> = {
   slag_heaps: 'Террикони',
   industrial: 'Промзона',
   urban: 'Город',
+  hamlet: 'Хутор',
+  farm: 'Ферма',
+  field_camp: 'Пол. лагерь',
 };
 
 const HOUR_LABEL = (h: number) => `${String(h).padStart(2, '0')}:00`;

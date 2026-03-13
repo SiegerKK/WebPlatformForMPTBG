@@ -29,6 +29,7 @@ _MIN_SLEEP_HOURS = 2
 # Valid terrain types (shared between generator and debug commands)
 _VALID_TERRAIN_TYPES = frozenset([
     "plain", "hills", "slag_heaps", "industrial", "urban",
+    "hamlet", "farm", "field_camp",
 ])
 
 
@@ -154,6 +155,7 @@ def resolve_world_command(
                     {
                         "to": c["to"],
                         "travel_time": int(c.get("travel_time", 15)),
+                        "type": c.get("type", "normal"),
                     }
                     for c in conns
                     if "to" in c and c["to"] in locations
