@@ -62,7 +62,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
   // ── Fullscreen ────────────────────────────────────────────────────────────
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const canvasWrapRef = useRef<HTMLDivElement>(null);
+  // pageWrapRef is on the outer page div so that the detail panel and modals
+  // are included inside the fullscreen element.
+  const pageWrapRef = useRef<HTMLDivElement>(null);
 
   // ── Import file input ref ─────────────────────────────────────────────────
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -509,7 +511,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
   const handleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
-      canvasWrapRef.current?.requestFullscreen().catch(() => {/* ignore */});
+      pageWrapRef.current?.requestFullscreen().catch(() => {/* ignore */});
     } else {
       document.exitFullscreen().catch(() => {/* ignore */});
     }
@@ -653,12 +655,15 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   }, [persistMap]);
 
   return (
-    <div style={s.page}>
+    <div
+      ref={pageWrapRef}
+      style={{
+        ...s.page,
+        ...(isFullscreen ? { background: '#060b14', height: '100vh', padding: 8, boxSizing: 'border-box', alignItems: 'stretch' } : {}),
+      }}
+    >
       {/* ── Canvas ────────────────────────────────────────── */}
-      <div ref={canvasWrapRef} style={{
-        ...s.canvasWrap,
-        ...(isFullscreen ? { background: '#060b14', height: '100vh', padding: 8 } : {}),
-      }}>
+      <div style={s.canvasWrap}>
         {/* Toolbar */}
         <div style={s.toolbar}>
           <div style={s.legend}>
