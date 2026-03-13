@@ -1,39 +1,26 @@
 """
-Procedural zone generator for Zone Stalkers.
-Given an integer seed produces a deterministic world graph.
+Zone generator for Zone Stalkers.
+
+Builds a deterministic world state from a fixed canonical 32-location graph
+defined in ``fixed_zone_map.FIXED_ZONE_LOCATIONS``.
+
+The topology (location names, regions, terrain, anomaly_activity, and
+connections with travel_time) is fixed.  Only the runtime contents
+(anomalies, artifacts, items, agents, mutants, traders) are generated
+randomly from *seed*.
 """
+import copy
 import random
-import uuid as _uuid
 from typing import List, Dict, Any
 
 from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 from app.games.zone_stalkers.balance.mutants import MUTANT_TYPES
 from app.games.zone_stalkers.balance.items import ITEM_TYPES
+from app.games.zone_stalkers.generators.fixed_zone_map import FIXED_ZONE_LOCATIONS
 
-# Valid terrain types for a location
+# Valid terrain types (kept for reference / external callers)
 TERRAIN_TYPES = ["plain", "hills", "slag_heaps", "industrial", "urban"]
-
-# Location blueprint templates
-_LOCATION_BLUEPRINTS = [
-    {"name": "Cordon",          "type": "safe_hub",       "danger_level": 1, "terrain_type": "plain"},
-    {"name": "Garbage",         "type": "wild_area",      "danger_level": 2, "terrain_type": "industrial"},
-    {"name": "Agroprom",        "type": "ruins",          "danger_level": 3, "terrain_type": "industrial"},
-    {"name": "Dark Valley",     "type": "military_zone",  "danger_level": 4, "terrain_type": "hills"},
-    {"name": "Bar",             "type": "safe_hub",       "danger_level": 1, "terrain_type": "urban"},
-    {"name": "Wild Territory",  "type": "wild_area",      "danger_level": 3, "terrain_type": "plain"},
-    {"name": "Yantar",          "type": "anomaly_cluster","danger_level": 4, "terrain_type": "industrial"},
-    {"name": "Red Forest",      "type": "anomaly_cluster","danger_level": 5, "terrain_type": "plain"},
-    {"name": "Pripyat",         "type": "ruins",          "danger_level": 5, "terrain_type": "urban"},
-    {"name": "Swamp",           "type": "wild_area",      "danger_level": 2, "terrain_type": "plain"},
-    {"name": "Outskirts",       "type": "ruins",          "danger_level": 3, "terrain_type": "urban"},
-    {"name": "Jupiter",         "type": "military_zone",  "danger_level": 4, "terrain_type": "industrial"},
-    {"name": "Slag Heaps",      "type": "wild_area",      "danger_level": 3, "terrain_type": "slag_heaps"},
-    {"name": "Eastern Hills",   "type": "wild_area",      "danger_level": 2, "terrain_type": "hills"},
-]
-
-_MIN_LOCATIONS = 8
-_MAX_LOCATIONS = 12
 
 
 def _make_id(prefix: str, rng: random.Random) -> str:
@@ -51,57 +38,28 @@ def generate_zone(
     """
     Generate a full zone_map state blob deterministically from *seed*.
 
+    The location graph is the fixed 32-location canonical map.
+    Anomalies, artifacts, items, agents, mutants and traders are placed
+    randomly using *seed*.
+
     Returns the state blob dict suitable for use as a context's state_blob.
     """
     rng = random.Random(seed)
 
-    # 1. Choose locations
-    num_locs = rng.randint(_MIN_LOCATIONS, min(_MAX_LOCATIONS, len(_LOCATION_BLUEPRINTS)))
-    blueprints = rng.sample(_LOCATION_BLUEPRINTS, num_locs)
-
+    # 1. Deep-copy fixed locations and add empty runtime-state lists
     locations: Dict[str, Any] = {}
-    loc_ids: List[str] = []
-    for i, bp in enumerate(blueprints):
-        loc_id = f"loc_{i}"
-        loc_ids.append(loc_id)
-        # anomaly_activity: anomaly_cluster gets 6-10, wild_area 2-5, others 0-3
-        if bp["type"] == "anomaly_cluster":
-            anom_activity = rng.randint(6, 10)
-        elif bp["type"] == "wild_area":
-            anom_activity = rng.randint(2, 5)
-        else:
-            anom_activity = rng.randint(0, 3)
-        locations[loc_id] = {
-            "id": loc_id,
-            "name": bp["name"],
-            "terrain_type": bp.get("terrain_type", "plain"),
-            "anomaly_activity": anom_activity,
-            "dominant_anomaly_type": None,
-            "connections": [],
-            "anomalies": [],
-            "artifacts": [],
-            "agents": [],
-            "items": [],
-        }
+    for loc_id, blueprint in FIXED_ZONE_LOCATIONS.items():
+        loc = copy.deepcopy(blueprint)
+        loc["dominant_anomaly_type"] = None
+        loc["anomalies"] = []
+        loc["artifacts"] = []
+        loc["agents"] = []
+        loc["items"] = []
+        locations[loc_id] = loc
 
-    # 2. Build connections (ensure connectivity: chain + extra edges)
-    # First create a spanning chain so every node is reachable
-    for i in range(len(loc_ids) - 1):
-        a, b = loc_ids[i], loc_ids[i + 1]
-        locations[a]["connections"].append({"to": b, "type": "normal"})
-        locations[b]["connections"].append({"to": a, "type": "normal"})
+    loc_ids: List[str] = list(locations.keys())
 
-    # Add a few extra edges for variety
-    extra_edges = rng.randint(2, max(2, num_locs // 3))
-    for _ in range(extra_edges):
-        a, b = rng.sample(loc_ids, 2)
-        # Avoid duplicates
-        existing_targets = {c["to"] for c in locations[a]["connections"]}
-        if b not in existing_targets:
-            locations[a]["connections"].append({"to": b, "type": "normal"})
-            locations[b]["connections"].append({"to": a, "type": "normal"})
-
-    # 3. Place anomalies (more in high-anomaly-activity locations)
+    # 2. Place anomalies (more in high-anomaly-activity locations)
     anomaly_type_keys = list(ANOMALY_TYPES.keys())
     for loc_id, loc in locations.items():
         num_anomalies = 0
@@ -127,7 +85,7 @@ def generate_zone(
                 counts[a["type"]] = counts.get(a["type"], 0) + 1
             loc["dominant_anomaly_type"] = max(counts, key=lambda k: counts[k])
 
-    # 4. Place artifacts near anomalies
+    # 3. Place artifacts near anomalies
     artifact_type_keys = list(ARTIFACT_TYPES.keys())
     for loc in locations.values():
         if loc["anomalies"]:
@@ -142,7 +100,7 @@ def generate_zone(
                     "value": art_info["value"],
                 })
 
-    # 5. Place loose items (containers/stashes)
+    # 4. Place loose items (containers/stashes)
     item_type_keys = [k for k, v in ITEM_TYPES.items() if v["type"] in ("medical", "consumable", "ammo")]
     for loc in locations.values():
         if rng.random() < 0.4:
@@ -156,7 +114,7 @@ def generate_zone(
                 "value": item_info["value"],
             })
 
-    # 6. Create agent states
+    # 5. Create agent states
     agents: Dict[str, Any] = {}
 
     # Safe hub locations for starting positions (low anomaly activity ≤ 3)

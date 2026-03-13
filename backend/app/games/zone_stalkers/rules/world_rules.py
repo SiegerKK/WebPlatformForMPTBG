@@ -147,7 +147,10 @@ def resolve_world_command(
         for loc_id, conns in connections.items():
             if loc_id in locations:
                 locations[loc_id]["connections"] = [
-                    {"to": c["to"], "type": c.get("type", "normal")}
+                    {
+                        "to": c["to"],
+                        "travel_time": int(c.get("travel_time", 15)),
+                    }
                     for c in conns
                     if "to" in c and c["to"] in locations
                 ]
@@ -330,7 +333,7 @@ def resolve_world_command(
         if not route:
             events.append({"event_type": "travel_failed", "payload": {"agent_id": agent_id, "reason": "no_route"}})
         else:
-            turns = _route_travel_turns(route, state["locations"])
+            turns = _route_travel_turns(route, state["locations"], agent["location_id"])
             agent["scheduled_action"] = {
                 "type": "travel",
                 "turns_remaining": turns,
@@ -575,9 +578,35 @@ def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
     return []
 
 
-def _route_travel_turns(route: List[str], locations: Dict[str, Any]) -> int:
-    """Sum up travel turns for each hop in the route (fixed 2 turns per hop)."""
-    return max(1, len(route) * 2)
+def _route_travel_turns(
+    route: List[str],
+    locations: Dict[str, Any],
+    start_loc_id: str = None,
+) -> int:
+    """Sum travel_time (minutes) across all hops and convert to turns (1 turn = 60 min).
+
+    *route* is an ordered list of location IDs [waypoint1, ..., destination],
+    NOT including the starting location.  *start_loc_id* is the agent's current
+    location; when provided the connection weights are used directly.
+    Falls back to 12 min/hop if *start_loc_id* is unknown or a connection weight
+    is missing.
+    """
+    import math
+    if not route:
+        return 1
+    if start_loc_id is None:
+        return max(1, math.ceil(len(route) * 12 / 60))
+    total_minutes = 0
+    current = start_loc_id
+    for next_loc in route:
+        conns = locations.get(current, {}).get("connections", [])
+        travel_time = next(
+            (c.get("travel_time", 12) for c in conns if c["to"] == next_loc),
+            12,
+        )
+        total_minutes += travel_time
+        current = next_loc
+    return max(1, math.ceil(total_minutes / 60))
 
 
 def _validate_take_control(
