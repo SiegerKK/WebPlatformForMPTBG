@@ -742,6 +742,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
             conns={detailConns}
             zoneState={zoneState}
             onClose={() => setSelectedLocId(null)}
+            onEdit={() => setEditingLocId(selectedLocId!)}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
           />
         ) : (
@@ -784,12 +785,14 @@ function LocationDetailPanel({
   conns,
   zoneState,
   onClose,
+  onEdit,
   onDeleteConnection,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
   zoneState: ZoneMapState;
   onClose: () => void;
+  onEdit: () => void;
   onDeleteConnection: (toId: string) => void;
 }) {
   const stalkers = loc.agents
@@ -822,7 +825,16 @@ function LocationDetailPanel({
             </span>
           </div>
         </div>
-        <button onClick={onClose} style={s.closeBtn}>✕</button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <button
+            onClick={onEdit}
+            style={s.editDetailBtn}
+            title="Редактировать локацию"
+          >
+            ✏ Редактировать
+          </button>
+          <button onClick={onClose} style={s.closeBtn}>✕</button>
+        </div>
       </div>
 
       {/* New location properties */}
@@ -971,18 +983,6 @@ function LocationDetailPanel({
         </Section>
       )}
 
-      {/* Anomalies */}
-      {loc.anomalies.length > 0 && (
-        <Section label="⚠️ Anomalies">
-          {loc.anomalies.map((a) => (
-            <DetailRow key={a.id}>
-              <span style={{ color: '#e879f9', fontSize: '0.8rem' }}>{a.name}</span>
-              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{a.type}</span>
-            </DetailRow>
-          ))}
-        </Section>
-      )}
-
       {/* Ground items */}
       {loc.items.length > 0 && (
         <Section label="📦 Ground items">
@@ -1079,7 +1079,7 @@ function EmptyDetailHint({ totalLocs }: { totalLocs: number }) {
   return (
     <div style={s.emptyDetail}>
       <div style={s.emptyDetailTitle}>Location Details</div>
-      <p style={s.emptyDetailHint}>Click a location card on the map to see full details.</p>
+      <p style={s.emptyDetailHint}>Кликните на карточку локации на карте, чтобы увидеть детали и кнопку редактирования.</p>
       <hr style={s.hr} />
       <div style={{ color: '#334155', fontSize: '0.7rem' }}>
         {totalLocs} locations on map
@@ -1407,14 +1407,27 @@ const s: Record<string, React.CSSProperties> = {
     margin: '10px 0',
   },
   editBtn: {
-    background: 'transparent',
-    border: 'none',
-    color: '#64748b',
+    background: '#1e3a5f',
+    border: '1px solid #3b82f6',
+    color: '#93c5fd',
     cursor: 'pointer',
-    fontSize: '0.7rem',
-    padding: '0 0.2rem',
-    lineHeight: 1,
+    fontSize: '0.68rem',
+    padding: '0.15rem 0.4rem',
+    borderRadius: 4,
+    lineHeight: 1.4,
     flexShrink: 0,
+  },
+  editDetailBtn: {
+    background: '#1e3a5f',
+    border: '1px solid #3b82f6',
+    color: '#93c5fd',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    padding: '0.25rem 0.6rem',
+    borderRadius: 5,
+    lineHeight: 1.4,
+    flexShrink: 0,
+    fontWeight: 600,
   },
   modalOverlay: {
     position: 'fixed' as const,
