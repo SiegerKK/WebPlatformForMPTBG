@@ -132,23 +132,42 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   // ── Sync new locations into dragOverrides + localConns after CRUD ops ──────
   // After debug_create_location, zoneState gets a new entry; we need to
   // incorporate its persisted position and open an empty conns slot.
+  // On non-initial changes we also freeze the entire effective layout so that
+  // the BFS graph topology change (new node) does not reshuffle cards.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const locKeysStr = JSON.stringify(Object.keys(zoneState.locations).sort());
+  const isFirstLocKeysEffect = useRef(true);
   useEffect(() => {
+    const isFirst = isFirstLocKeysEffect.current;
+    isFirstLocKeysEffect.current = false;
+
     const persistedPos = zoneState.debug_layout?.positions ?? {};
-    setDragOverrides((prev) => {
-      const incoming: Record<string, { x: number; y: number }> = {};
-      for (const [id, pos] of Object.entries(persistedPos)) {
-        if (!(id in prev)) incoming[id] = pos as { x: number; y: number };
+    const prevOverrides = dragOverridesRef.current;
+
+    // Find positions that the backend has saved but are not yet in local overrides
+    const incoming: Record<string, { x: number; y: number }> = {};
+    for (const [id, pos] of Object.entries(persistedPos)) {
+      if (!(id in prevOverrides)) incoming[id] = pos as { x: number; y: number };
+    }
+
+    if (Object.keys(incoming).length > 0) {
+      setDragOverrides((prev) => ({ ...prev, ...incoming }));
+
+      // On non-initial changes (i.e. a location was just added) freeze the
+      // current effective layout by persisting all positions.  This prevents
+      // BFS from reshuffling cards that were already laid out.
+      if (!isFirst) {
+        const fullPositions = { ...effectivePosRef.current, ...incoming };
+        persistMap(fullPositions, localConnsRef.current);
       }
-      return Object.keys(incoming).length ? { ...prev, ...incoming } : prev;
-    });
+    }
+
     setLocalConns((prev) => {
-      const incoming: Record<string, LocationConn[]> = {};
+      const newConns: Record<string, LocationConn[]> = {};
       for (const [id, loc] of Object.entries(zoneState.locations)) {
-        if (!(id in prev)) incoming[id] = [...(loc as ZoneLocation).connections];
+        if (!(id in prev)) newConns[id] = [...(loc as ZoneLocation).connections];
       }
-      return Object.keys(incoming).length ? { ...prev, ...incoming } : prev;
+      return Object.keys(newConns).length ? { ...prev, ...newConns } : prev;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locKeysStr]);
@@ -250,6 +269,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const dragOverridesRef = useRef(dragOverrides);
   dragOverridesRef.current = dragOverrides;
 
+  // effectivePosRef mirrors effectivePos = { ...layoutPositions, ...dragOverrides }.
+  // Using this in persistMap saves ALL card positions (including BFS-computed ones
+  // for cards never manually dragged), so that topology changes (new location added)
+  // do not reshuffle cards that the user has already positioned.
+  const effectivePosRef = useRef(effectivePos);
+  effectivePosRef.current = effectivePos;
+
   const localConnsRef = useRef(localConns);
   localConnsRef.current = localConns;
 
@@ -275,7 +301,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             [bId]: [...bC, { to: aId, type: 'normal' }],
           };
       setLocalConns(newConns);
-      persistMap(dragOverridesRef.current, newConns);
+      persistMap(effectivePosRef.current, newConns);
     },
     [persistMap],
   );
@@ -288,7 +314,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       [toId]: (prev[toId] ?? []).filter((c) => c.to !== fromId),
     };
     setLocalConns(newConns);
-    persistMap(dragOverridesRef.current, newConns);
+    persistMap(effectivePosRef.current, newConns);
   }, [persistMap]);
 
   // ── Pointer handlers on each card ────────────────────────────────────────
@@ -341,7 +367,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
         // completed before pointerup fires).
         const finalX = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardX + (e.clientX - d.startPtrX) / zoomRef.current));
         const finalY = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardY + (e.clientY - d.startPtrY) / zoomRef.current));
-        const finalPositions = { ...dragOverridesRef.current, [d.id]: { x: finalX, y: finalY } };
+        const finalPositions = { ...effectivePosRef.current, [d.id]: { x: finalX, y: finalY } };
         // Update state immediately with the exact final position
         setDragOverrides(finalPositions);
         persistMap(finalPositions, localConnsRef.current);
@@ -469,7 +495,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       }
       const dx = (e.clientX - d.startPtrX) / zoomRef.current;
       const dy = (e.clientY - d.startPtrY) / zoomRef.current;
-      const finalPositions = { ...dragOverridesRef.current };
+      const finalPositions = { ...effectivePosRef.current };
       for (const [id, startPos] of Object.entries(d.startPositions)) {
         finalPositions[id] = { x: startPos.x + dx, y: startPos.y + dy };
       }
@@ -521,7 +547,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const handleExport = useCallback(() => {
     const exportData = {
       version: 1,
-      positions: dragOverridesRef.current,
+      positions: effectivePosRef.current,
       connections: localConnsRef.current,
       locations_meta: Object.fromEntries(
         Object.entries(zoneState.locations).map(([id, loc]) => [
@@ -618,7 +644,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const handleSaveRegion = useCallback((regionId: string, name: string, colorIndex: number) => {
     const next = { ...localRegionsRef.current, [regionId]: { name, colorIndex } };
     setLocalRegions(next);
-    persistMap(dragOverridesRef.current, localConnsRef.current, next);
+    persistMap(effectivePosRef.current, localConnsRef.current, next);
   }, [persistMap]);
 
   const handleDeleteRegion = useCallback((regionId: string) => {
@@ -638,7 +664,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       }),
     );
     Promise.all(updatePromises).then(() => {
-      persistMap(dragOverridesRef.current, localConnsRef.current, nextRegions);
+      persistMap(effectivePosRef.current, localConnsRef.current, nextRegions);
     });
   }, [zoneState.locations, sendCommand, persistMap]);
 
@@ -651,7 +677,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     const next = { ...existing, [newId]: { name: `Регион ${n + 1}`, colorIndex } };
     setLocalRegions(next);
     setSelectedRegionId(newId);
-    persistMap(dragOverridesRef.current, localConnsRef.current, next);
+    persistMap(effectivePosRef.current, localConnsRef.current, next);
   }, [persistMap]);
 
   return (
