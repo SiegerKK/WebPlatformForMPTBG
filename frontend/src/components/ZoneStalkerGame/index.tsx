@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../api/client';
 import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../types';
 import DebugMapPage from './DebugMapPage';
+import AgentProfileModal from './AgentProfileModal';
 
 interface Props {
   match: Match;
@@ -1548,13 +1549,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // ─── render: debug screen ────────────────────────────────────────────────
   const renderDebugScreen = () => {
     if (!zoneState) return <p style={styles.loadingText}>Загрузка…</p>;
+    const profileAgent = profileAgentId ? zoneState.agents[profileAgentId] : null;
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {/* Header with back button and sub-tabs */}
         <div style={styles.debugHeader}>
           <button
             style={styles.btnSmall}
-            onClick={() => { setShowDebug(false); setShowEntryMenu(true); }}
+            onClick={() => { setShowDebug(false); setShowEntryMenu(true); setProfileAgentId(null); }}
           >
             ← Меню
           </button>
@@ -1579,6 +1581,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
+
+        {/* Agent profile modal (shown over debug screen) */}
+        {profileAgent && (
+          <AgentProfileModal
+            agent={profileAgent}
+            locationName={zoneState.locations[profileAgent.location_id]?.name ?? profileAgent.location_id}
+            onClose={() => setProfileAgentId(null)}
+          />
+        )}
       </div>
     );
   };
@@ -1632,6 +1643,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             }}>
               {agent.controller.kind === 'human' ? '👤 Игрок' : '🤖 ИИ'}
             </span>
+            <button
+              style={styles.btnSmall}
+              onClick={() => setProfileAgentId(agent.id)}
+              title="Открыть профиль персонажа"
+            >
+              👁 Профиль
+            </button>
           </div>
         ))}
       </div>

@@ -159,6 +159,19 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [creatingLoc, setCreatingLoc] = useState(false);
 
+  // ── Canvas pan ────────────────────────────────────────────────────────────
+  // panOffset is the translation (in px) of the canvas viewport.
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panRef = useRef<{
+    startPtrX: number;
+    startPtrY: number;
+    startPanX: number;
+    startPanY: number;
+  } | null>(null);
+  const panOffsetRef = useRef(panOffset);
+  panOffsetRef.current = panOffset;
+
   // ── Drag ─────────────────────────────────────────────────────────────────
   // dragOverrides: user-defined card CENTER positions in canvas-space pixels.
   // Seeded from persisted debug_layout.positions so positions survive reload.
@@ -391,6 +404,43 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     });
   }, []);
 
+  // ── Canvas pan handlers ───────────────────────────────────────────────────
+  // These fire on the viewport div. Cards stop propagation in their
+  // onPointerDown, so pan only starts when the canvas background is pressed.
+  const handleCanvasPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      // If a card drag is already active, don't start pan
+      if (dragRef.current) return;
+      e.preventDefault();
+      panRef.current = {
+        startPtrX: e.clientX,
+        startPtrY: e.clientY,
+        startPanX: panOffsetRef.current.x,
+        startPanY: panOffsetRef.current.y,
+      };
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      setIsPanning(true);
+    },
+    [],
+  );
+
+  const handleCanvasPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const d = panRef.current;
+      if (!d) return;
+      setPanOffset({
+        x: d.startPanX + e.clientX - d.startPtrX,
+        y: d.startPanY + e.clientY - d.startPtrY,
+      });
+    },
+    [],
+  );
+
+  const handleCanvasPanEnd = useCallback(() => {
+    panRef.current = null;
+    setIsPanning(false);
+  }, []);
+
   // ── Location CRUD ─────────────────────────────────────────────────────────
   const handleSaveEdit = useCallback(
     async (data: { name: string; locType: string; dangerLevel: number }) => {
@@ -477,6 +527,15 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                 ↺ Reset layout
               </button>
             )}
+            {(panOffset.x !== 0 || panOffset.y !== 0) && (
+              <button
+                style={s.toolBtn}
+                onClick={() => setPanOffset({ x: 0, y: 0 })}
+                title="Re-centre the canvas view"
+              >
+                ⊙ Re-centre
+              </button>
+            )}
           </div>
         </div>
 
@@ -488,37 +547,56 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           </div>
         )}
 
-        <div style={s.canvasScroll}>
-          {/* SVG connection lines */}
-          <svg
-            style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 0 }}
-            width={canvasW}
-            height={canvasH}
+        <div
+          style={{
+            ...s.canvasScroll,
+            cursor: isPanning ? 'grabbing' : linkMode ? 'crosshair' : 'grab',
+          }}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPanEnd}
+          onPointerCancel={handleCanvasPanEnd}
+        >
+          {/* Panning layer — translated by panOffset */}
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              transform: `translate(${panOffset.x}px, ${panOffset.y}px)`,
+              willChange: 'transform',
+            }}
           >
-            {/* Draw connections from localConns */}
-            {Object.entries(localConns).flatMap(([locId, conns]) =>
-              conns.map((conn) => {
-                // Deduplicate: only draw A→B when A < B
-                if (locId > conn.to) return null;
-                const a = effectivePos[locId];
-                const b = effectivePos[conn.to];
-                if (!a || !b) return null;
-                const isDangerous = conn.type === 'dangerous';
-                return (
-                  <line
-                    key={`${locId}--${conn.to}`}
-                    x1={a.x}
-                    y1={a.y}
-                    x2={b.x}
-                    y2={b.y}
-                    stroke={isDangerous ? '#7f1d1d' : '#1e3a5f'}
-                    strokeWidth={isDangerous ? 2 : 1.5}
-                    strokeDasharray={isDangerous ? '6 3' : undefined}
-                    strokeOpacity={0.8}
-                  />
-                );
-              }),
-            )}
+            {/* SVG connection lines */}
+            <svg
+              style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 0 }}
+              width={canvasW}
+              height={canvasH}
+            >
+              {/* Draw connections from localConns */}
+              {Object.entries(localConns).flatMap(([locId, conns]) =>
+                conns.map((conn) => {
+                  // Deduplicate: only draw A→B when A < B
+                  if (locId > conn.to) return null;
+                  const a = effectivePos[locId];
+                  const b = effectivePos[conn.to];
+                  if (!a || !b) return null;
+                  const isDangerous = conn.type === 'dangerous';
+                  return (
+                    <line
+                      key={`${locId}--${conn.to}`}
+                      x1={a.x}
+                      y1={a.y}
+                      x2={b.x}
+                      y2={b.y}
+                      stroke={isDangerous ? '#7f1d1d' : '#1e3a5f'}
+                      strokeWidth={isDangerous ? 2 : 1.5}
+                      strokeDasharray={isDangerous ? '6 3' : undefined}
+                      strokeOpacity={0.8}
+                    />
+                  );
+                }),
+              )}
           </svg>
 
           {/* Location cards */}
@@ -641,6 +719,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
               );
             })}
           </div>
+          </div>{/* end panning layer */}
         </div>
       </div>
 
@@ -1119,11 +1198,11 @@ const s: Record<string, React.CSSProperties> = {
   },
   canvasScroll: {
     position: 'relative',
-    overflow: 'auto',
+    overflow: 'hidden',
     background: '#060b14',
     borderRadius: 10,
     border: '1px solid #1e293b',
-    minHeight: 400,
+    height: 'min(620px, 72vh)',
   },
   detailPanel: {
     width: 268,
