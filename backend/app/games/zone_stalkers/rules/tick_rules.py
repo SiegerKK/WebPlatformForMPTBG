@@ -222,14 +222,11 @@ def _resolve_exploration(
     world_turn: int,
 ) -> List[Dict[str, Any]]:
     """Resolve exploration: chance for loot, anomaly encounter, or discovery."""
-    from app.games.zone_stalkers.rules.world_rules import _EXPLORE_LOOT_CHANCE
     from app.games.zone_stalkers.balance.items import ITEM_TYPES
     from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
     events: List[Dict[str, Any]] = []
 
-    loc_type = loc.get("type", "wild_area")
-    danger_level = loc.get("danger_level", 2)
-    loot_chance = _EXPLORE_LOOT_CHANCE.get(loc_type, 0.3)
+    loot_chance = 0.4
 
     # Seed using agent id for reproducibility variance
     rng = random.Random(agent_id + str(world_turn))
@@ -283,7 +280,7 @@ def _resolve_exploration(
         notes.append("Searched the area but found nothing of value.")
 
     # Possible anomaly encounter during exploration
-    if loc.get("anomalies") and rng.random() < 0.15 * danger_level / 5:
+    if loc.get("anomalies") and rng.random() < 0.15 * (loc.get("anomaly_activity", 5) / 10):
         from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
         anom = rng.choice(loc["anomalies"])
         anom_info = ANOMALY_TYPES.get(anom["type"], {})
@@ -331,8 +328,6 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     # Reduce radiation (5 per hour)
     rad_reduce = 5 * hours
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
-    # Restore stamina
-    agent["stamina"] = min(100, agent.get("stamina", 100) + 20 * hours)
     # Reset sleepiness
     agent["sleepiness"] = 0
     _add_memory(agent, world_turn, state, "sleep",
@@ -436,8 +431,8 @@ def _run_bot_action(
         if nourishment:
             return _bot_consume(agent_id, agent, nourishment)
 
-    # P3 — Sleep if sleepiness ≥ 75 and in a safe/resting location
-    if agent.get("sleepiness", 0) >= 75 and loc.get("type") in ("safe_hub", "ruins"):
+    # P3 — Sleep if sleepiness ≥ 75
+    if agent.get("sleepiness", 0) >= 75:
         agent["scheduled_action"] = {
             "type": "sleep",
             "turns_remaining": 6,

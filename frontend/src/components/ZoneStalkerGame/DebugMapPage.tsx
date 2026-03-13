@@ -22,8 +22,6 @@ interface LocationConn {
 interface ZoneLocation {
   id: string;
   name: string;
-  type: string;
-  danger_level: number;
   terrain_type?: string;
   anomaly_activity?: number;
   dominant_anomaly_type?: string | null;
@@ -89,7 +87,7 @@ function computeBfsLayout(
   if (ids.length === 0) return {};
 
   const startId =
-    Object.values(locations).find((l) => l.type === 'safe_hub')?.id ?? ids[0];
+    Object.values(locations).find((l) => (l.anomaly_activity ?? 0) <= 3)?.id ?? ids[0];
 
   const visited = new Set<string>();
   const levels: string[][] = [];
@@ -142,13 +140,12 @@ function computeBfsLayout(
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const LOC_TYPE_COLOR: Record<string, string> = {
-  safe_hub: '#22c55e',
-  wild_area: '#84cc16',
-  anomaly_cluster: '#a855f7',
-  ruins: '#94a3b8',
-  military_zone: '#3b82f6',
-  underground: '#f59e0b',
+const TERRAIN_TYPE_COLOR: Record<string, string> = {
+  plain: '#84cc16',
+  hills: '#3b82f6',
+  slag_heaps: '#94a3b8',
+  industrial: '#f59e0b',
+  urban: '#a855f7',
 };
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -485,10 +482,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         {/* Toolbar */}
         <div style={s.toolbar}>
           <div style={s.legend}>
-            {Object.entries(LOC_TYPE_COLOR).map(([t, c]) => (
+            {Object.entries(TERRAIN_TYPE_COLOR).map(([t, c]) => (
               <span key={t} style={s.legendItem}>
                 <span style={{ ...s.legendDot, background: c }} />
-                {t.replace(/_/g, ' ')}
+                {TERRAIN_TYPE_LABELS[t] ?? t.replace(/_/g, ' ')}
               </span>
             ))}
           </div>
@@ -637,7 +634,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                 : isCurrent
                 ? '#22c55e'
                 : '#1e293b';
-              const stripColor = LOC_TYPE_COLOR[loc.type] ?? '#334155';
+              const stripColor = TERRAIN_TYPE_COLOR[loc.terrain_type ?? ''] ?? '#334155';
 
               return (
                 <div

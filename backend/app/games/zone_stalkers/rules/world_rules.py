@@ -21,32 +21,15 @@ import collections
 from typing import List, Tuple, Dict, Any
 from sdk.rule_set import RuleCheckResult
 
-# How many game-turns travel takes per hop based on danger_level
-_TRAVEL_TURNS_PER_HOP: Dict[int, int] = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3}
 # Default sleep duration when the player just calls sleep with no hours argument
 _DEFAULT_SLEEP_HOURS = 6
 _MAX_SLEEP_HOURS = 10
 _MIN_SLEEP_HOURS = 2
 
-# Valid location types (shared between generator and debug commands)
-_VALID_LOC_TYPES = frozenset([
-    "safe_hub", "wild_area", "ruins", "military_zone", "anomaly_cluster", "underground",
-])
-
 # Valid terrain types (shared between generator and debug commands)
 _VALID_TERRAIN_TYPES = frozenset([
     "plain", "hills", "slag_heaps", "industrial", "urban",
 ])
-
-# Exploration rewards by location type (probability keys)
-_EXPLORE_LOOT_CHANCE: Dict[str, float] = {
-    "safe_hub": 0.15,
-    "wild_area": 0.40,
-    "ruins": 0.45,
-    "military_zone": 0.35,
-    "anomaly_cluster": 0.60,
-    "underground": 0.50,
-}
 
 
 def validate_world_command(
@@ -197,8 +180,6 @@ def resolve_world_command(
         new_loc = {
             "id": new_id,
             "name": str(payload["name"]).strip(),
-            "type": "wild_area",
-            "danger_level": 1,
             "terrain_type": payload.get("terrain_type", "plain"),
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
@@ -513,10 +494,6 @@ def _validate_travel(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict
 
 
 def _validate_sleep(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
-    loc_id = agent.get("location_id")
-    loc = state.get("locations", {}).get(loc_id, {})
-    if loc.get("type") not in ("safe_hub", "ruins"):
-        return RuleCheckResult(valid=False, error="You can only sleep in a safe hub or ruins")
     return RuleCheckResult(valid=True)
 
 
@@ -568,13 +545,11 @@ def _validate_consume_item(payload: Dict[str, Any], state: Dict[str, Any], agent
 
 
 def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
-    """Apply item effect dict to agent stats (hp, radiation, stamina, hunger, thirst)."""
+    """Apply item effect dict to agent stats (hp, radiation, hunger, thirst)."""
     if "hp" in effects:
         agent["hp"] = max(0, min(agent.get("max_hp", 100), agent.get("hp", 100) + effects["hp"]))
     if "radiation" in effects:
         agent["radiation"] = max(0, agent.get("radiation", 0) + effects["radiation"])
-    if "stamina" in effects:
-        agent["stamina"] = min(100, agent.get("stamina", 100) + effects["stamina"])
     if "hunger" in effects:
         agent["hunger"] = max(0, agent.get("hunger", 0) + effects["hunger"])
     if "thirst" in effects:
@@ -601,12 +576,8 @@ def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
 
 
 def _route_travel_turns(route: List[str], locations: Dict[str, Any]) -> int:
-    """Sum up travel turns for each hop in the route."""
-    total = 0
-    for loc_id in route:
-        danger = locations.get(loc_id, {}).get("danger_level", 2)
-        total += _TRAVEL_TURNS_PER_HOP.get(danger, 2)
-    return max(1, total)
+    """Sum up travel turns for each hop in the route (fixed 2 turns per hop)."""
+    return max(1, len(route) * 2)
 
 
 def _validate_take_control(

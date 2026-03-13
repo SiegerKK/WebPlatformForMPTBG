@@ -881,15 +881,12 @@ class TestDebugLocationCommands:
         assert new_state["locations"][loc_id]["name"] == "Changed"
 
     def test_update_location_type_and_danger_level(self):
-        # type and danger_level are no longer editable via debug_update_location;
-        # they retain their original values
+        # type and danger_level are no longer part of the location data model
         state = self._state()
         loc_id = next(iter(state["locations"]))
-        orig_type = state["locations"][loc_id]["type"]
-        orig_danger = state["locations"][loc_id]["danger_level"]
         new_state, _ = self._r("debug_update_location", {"loc_id": loc_id, "name": "X"}, state)
-        assert new_state["locations"][loc_id]["type"] == orig_type
-        assert new_state["locations"][loc_id]["danger_level"] == orig_danger
+        assert "type" not in new_state["locations"][loc_id]
+        assert "danger_level" not in new_state["locations"][loc_id]
 
     def test_update_location_event_emitted(self):
         state = self._state()
@@ -957,8 +954,8 @@ class TestDebugLocationCommands:
         new_id = list(new_ids)[0]
         loc = new_state["locations"][new_id]
         assert loc["name"] == "CNPP"
-        assert loc["type"] == "wild_area"        # default
-        assert loc["danger_level"] == 1          # default
+        assert "type" not in loc
+        assert "danger_level" not in loc
         assert loc["connections"] == []
         assert loc["agents"] == []
 

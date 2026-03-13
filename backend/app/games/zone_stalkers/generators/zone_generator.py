@@ -74,8 +74,6 @@ def generate_zone(
         locations[loc_id] = {
             "id": loc_id,
             "name": bp["name"],
-            "type": bp["type"],
-            "danger_level": bp["danger_level"],
             "terrain_type": bp.get("terrain_type", "plain"),
             "anomaly_activity": anom_activity,
             "dominant_anomaly_type": None,
@@ -90,9 +88,8 @@ def generate_zone(
     # First create a spanning chain so every node is reachable
     for i in range(len(loc_ids) - 1):
         a, b = loc_ids[i], loc_ids[i + 1]
-        conn_type = "dangerous" if locations[b]["danger_level"] >= 4 else "normal"
-        locations[a]["connections"].append({"to": b, "type": conn_type})
-        locations[b]["connections"].append({"to": a, "type": conn_type})
+        locations[a]["connections"].append({"to": b, "type": "normal"})
+        locations[b]["connections"].append({"to": a, "type": "normal"})
 
     # Add a few extra edges for variety
     extra_edges = rng.randint(2, max(2, num_locs // 3))
@@ -101,19 +98,19 @@ def generate_zone(
         # Avoid duplicates
         existing_targets = {c["to"] for c in locations[a]["connections"]}
         if b not in existing_targets:
-            conn_type = "dangerous" if locations[b]["danger_level"] >= 4 else "normal"
-            locations[a]["connections"].append({"to": b, "type": conn_type})
-            locations[b]["connections"].append({"to": a, "type": conn_type})
+            locations[a]["connections"].append({"to": b, "type": "normal"})
+            locations[b]["connections"].append({"to": a, "type": "normal"})
 
-    # 3. Place anomalies (more in dangerous/cluster locations)
+    # 3. Place anomalies (more in high-anomaly-activity locations)
     anomaly_type_keys = list(ANOMALY_TYPES.keys())
     for loc_id, loc in locations.items():
         num_anomalies = 0
-        if loc["type"] == "anomaly_cluster":
+        anom_act = loc["anomaly_activity"]
+        if anom_act >= 6:
             num_anomalies = rng.randint(2, 4)
-        elif loc["type"] == "wild_area":
+        elif anom_act >= 2:
             num_anomalies = rng.randint(0, 2)
-        elif loc["danger_level"] >= 3:
+        else:
             num_anomalies = rng.randint(0, 1)
         for _ in range(num_anomalies):
             anom_type = rng.choice(anomaly_type_keys)
@@ -162,8 +159,8 @@ def generate_zone(
     # 6. Create agent states
     agents: Dict[str, Any] = {}
 
-    # Safe hub locations for starting positions
-    safe_locs = [lid for lid, l in locations.items() if l["type"] == "safe_hub"]
+    # Safe hub locations for starting positions (low anomaly activity ≤ 3)
+    safe_locs = [lid for lid, l in locations.items() if l["anomaly_activity"] <= 3]
     if not safe_locs:
         safe_locs = loc_ids[:2]
 
@@ -198,13 +195,11 @@ def generate_zone(
         agents[agent_id] = agent
         locations[spawn_loc]["agents"].append(agent_id)
 
-    # Spawn mutants
+    # Spawn mutants across all locations
     mutant_type_keys = list(MUTANT_TYPES.keys())
     mutants: Dict[str, Any] = {}
     for i in range(num_mutants):
-        # Prefer dangerous locations
-        dangerous_locs = [lid for lid, l in locations.items() if l["danger_level"] >= 2]
-        spawn_loc = rng.choice(dangerous_locs if dangerous_locs else loc_ids)
+        spawn_loc = rng.choice(loc_ids)
         mutant_id = f"mutant_{i}"
         mutant_type = rng.choice(mutant_type_keys)
         mutant_info = MUTANT_TYPES[mutant_type]
@@ -302,14 +297,12 @@ def _make_stalker_agent(
         "hp": 100,
         "max_hp": 100,
         "radiation": 0,
-        "stamina": 100,
         # ─── Survival needs (0–100; higher = worse) ───
         "hunger": 20,
         "thirst": 20,
         "sleepiness": 10,
         # ─── Economy ───
         "money": rng.randint(100, 800),
-        "carry_capacity": 50.0,
         # ─── Inventory & Equipment ───
         "inventory": inventory,
         "equipment": equipment,

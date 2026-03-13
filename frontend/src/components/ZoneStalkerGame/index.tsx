@@ -21,8 +21,6 @@ interface LocationConn {
 interface ZoneLocation {
   id: string;
   name: string;
-  type: string;
-  danger_level: number;
   terrain_type?: string;
   anomaly_activity?: number;
   dominant_anomaly_type?: string | null;
@@ -67,7 +65,6 @@ interface StalkerAgent {
   hp: number;
   max_hp: number;
   radiation: number;
-  stamina: number;
   hunger: number;
   thirst: number;
   sleepiness: number;
@@ -130,16 +127,21 @@ interface ZoneEventState {
 
 // ─── Location type colour ────────────────────────────────────────────────────
 
-const LOC_TYPE_COLOR: Record<string, string> = {
-  safe_hub: '#166534',
-  wild_area: '#854d0e',
-  anomaly_cluster: '#7c3aed',
-  underground: '#374151',
-  ruins: '#5b4a30',
-  military_zone: '#1e3a5f',
+const TERRAIN_TYPE_COLOR: Record<string, string> = {
+  plain: '#166534',
+  hills: '#1e3a5f',
+  slag_heaps: '#5b4a30',
+  industrial: '#854d0e',
+  urban: '#7c3aed',
 };
 
-const DANGER_COLORS = ['#22c55e', '#84cc16', '#f59e0b', '#f97316', '#ef4444'];
+const TERRAIN_TYPE_LABELS: Record<string, string> = {
+  plain: 'Равнина',
+  hills: 'Холмы',
+  slag_heaps: 'Террикони',
+  industrial: 'Промзона',
+  urban: 'Город',
+};
 
 const HOUR_LABEL = (h: number) => `${String(h).padStart(2, '0')}:00`;
 
@@ -697,7 +699,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const renderActionPanel = () => {
     if (!myAgent) return null;
     const loc = currentLoc;
-    const isSafe = loc?.type === 'safe_hub' || loc?.type === 'ruins';
+    const isSafe = (loc?.anomaly_activity ?? 0) <= 3;
     const scheduled = !!myAgent.scheduled_action;
 
     return (
@@ -785,7 +787,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                   }}
                 >
                   {loc.name}
-                  <span style={styles.travelDanger}> ⚠ {loc.danger_level}</span>
+                  {(loc.anomaly_activity ?? 0) > 0 && <span style={styles.travelDanger}> ☢ {loc.anomaly_activity}</span>}
                   {travelTarget === loc.id && <span style={{ color: '#60a5fa' }}> → Go!</span>}
                 </button>
               ))}
@@ -879,7 +881,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 {[
                   { label: '❤️ HP', val: stalker.hp, max: stalker.max_hp, pct: stalker.max_hp > 0 ? stalker.hp / stalker.max_hp : 0, color: stalker.hp > 50 ? '#22c55e' : stalker.hp > 25 ? '#f59e0b' : '#ef4444' },
                   { label: '☢ Rad', val: stalker.radiation, max: 100, pct: Math.min(stalker.radiation, 100) / 100, color: '#a855f7' },
-                  { label: '⚡ Stamina', val: stalker.stamina, max: 100, pct: stalker.stamina / 100, color: '#facc15' },
                   { label: '🍖 Hunger', val: stalker.hunger ?? 0, max: 100, pct: (stalker.hunger ?? 0) / 100, color: (stalker.hunger ?? 0) > 75 ? '#ef4444' : '#22c55e' },
                   { label: '💧 Thirst', val: stalker.thirst ?? 0, max: 100, pct: (stalker.thirst ?? 0) / 100, color: (stalker.thirst ?? 0) > 75 ? '#ef4444' : '#3b82f6' },
                   { label: '😴 Sleep', val: stalker.sleepiness ?? 0, max: 100, pct: (stalker.sleepiness ?? 0) / 100, color: (stalker.sleepiness ?? 0) > 75 ? '#ef4444' : '#64748b' },
@@ -1353,7 +1354,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                         ...(isConnected && canAct ? styles.locationReachable : {}),
                         ...(isSelected ? styles.locationSelected : {}),
                         cursor: isConnected && canAct ? 'pointer' : 'default',
-                        borderLeftColor: LOC_TYPE_COLOR[loc.type] ?? '#475569',
+                        borderLeftColor: TERRAIN_TYPE_COLOR[loc.terrain_type ?? ''] ?? '#475569',
                       }}
                       onClick={() => {
                         if (isConnected && canAct) {
@@ -1364,11 +1365,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                     >
                       <div style={styles.locRow}>
                         <span style={styles.locName}>{loc.name}</span>
-                        <span style={{ ...styles.dangerBadge, background: DANGER_COLORS[Math.min(loc.danger_level - 1, 4)] }}>
-                          ⚠ {loc.danger_level}
-                        </span>
+                        {(loc.anomaly_activity ?? 0) > 0 && (
+                          <span style={{ ...styles.dangerBadge, background: '#7c3aed' }}>
+                            ☢ {loc.anomaly_activity}
+                          </span>
+                        )}
                       </div>
-                      <div style={styles.locType}>{loc.type.replace('_', ' ')}</div>
+                      <div style={styles.locType}>{TERRAIN_TYPE_LABELS[loc.terrain_type ?? ''] ?? (loc.terrain_type ?? '—')}</div>
                       <div style={styles.locIcons}>
                         {isCurrentLoc && <span style={styles.locBadgeSelf}>📍 You</span>}
                         {agentHere > 0 && <span style={styles.locBadge}>👥 {agentHere}</span>}

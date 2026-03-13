@@ -118,27 +118,28 @@ class TestWorldRulesNewCommands:
     def test_sleep_in_safe_hub_valid(self):
         state = _make_world()
         agent = state["agents"]["agent_p0"]
-        # Move agent to a safe_hub if not already there
-        safe_locs = [lid for lid, l in state["locations"].items() if l["type"] == "safe_hub"]
+        # Move agent to a low-anomaly location (anomaly_activity <= 3 = "safe")
+        safe_locs = [lid for lid, l in state["locations"].items() if l.get("anomaly_activity", 0) <= 3]
         if safe_locs:
             agent["location_id"] = safe_locs[0]
             assert self._v("sleep", {"hours": 6}, state).valid
 
     def test_sleep_in_dangerous_area_invalid(self):
+        # Sleep is now valid everywhere (restriction removed); this test verifies it stays valid
         state = _make_world()
         agent = state["agents"]["agent_p0"]
-        wild_locs = [lid for lid, l in state["locations"].items() if l["type"] == "wild_area"]
+        wild_locs = [lid for lid, l in state["locations"].items() if l.get("anomaly_activity", 0) > 3]
         if wild_locs:
             agent["location_id"] = wild_locs[0]
             result = self._v("sleep", {"hours": 6}, state)
-            assert not result.valid
+            assert result.valid  # sleep is allowed anywhere now
 
     def test_sleep_schedules_action(self):
         state = _make_world()
         agent = state["agents"]["agent_p0"]
-        safe_locs = [lid for lid, l in state["locations"].items() if l["type"] == "safe_hub"]
+        safe_locs = [lid for lid, l in state["locations"].items() if l.get("anomaly_activity", 0) <= 3]
         if not safe_locs:
-            pytest.skip("No safe hub in generated world")
+            pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         new_state, events = self._r("sleep", {"hours": 6}, state)
         scheduled = new_state["agents"]["agent_p0"]["scheduled_action"]
@@ -279,9 +280,9 @@ class TestTickRules:
         state = _make_world()
         agent = state["agents"]["agent_p0"]
         agent["hp"] = 50
-        safe_locs = [lid for lid, l in state["locations"].items() if l["type"] == "safe_hub"]
+        safe_locs = [lid for lid, l in state["locations"].items() if l.get("anomaly_activity", 0) <= 3]
         if not safe_locs:
-            pytest.skip("No safe hub in generated world")
+            pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 4}, state, "player1")
         for _ in range(4):
@@ -293,9 +294,9 @@ class TestTickRules:
         state = _make_world()
         agent = state["agents"]["agent_p0"]
         agent["radiation"] = 50
-        safe_locs = [lid for lid, l in state["locations"].items() if l["type"] == "safe_hub"]
+        safe_locs = [lid for lid, l in state["locations"].items() if l.get("anomaly_activity", 0) <= 3]
         if not safe_locs:
-            pytest.skip("No safe hub in generated world")
+            pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 4}, state, "player1")
         for _ in range(4):
@@ -306,9 +307,9 @@ class TestTickRules:
         from app.games.zone_stalkers.rules.world_rules import resolve_world_command
         state = _make_world()
         agent = state["agents"]["agent_p0"]
-        safe_locs = [lid for lid, l in state["locations"].items() if l["type"] == "safe_hub"]
+        safe_locs = [lid for lid, l in state["locations"].items() if l.get("anomaly_activity", 0) <= 3]
         if not safe_locs:
-            pytest.skip("No safe hub in generated world")
+            pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 2}, state, "player1")
         for _ in range(2):
@@ -575,7 +576,7 @@ class TestNeedsDegradation:
 
     def test_sleep_resets_sleepiness(self):
         from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
-        agent = {"hp": 60, "max_hp": 100, "radiation": 10, "stamina": 40, "sleepiness": 90}
+        agent = {"hp": 60, "max_hp": 100, "radiation": 10, "sleepiness": 90}
         sched = {"turns_total": 6}
         _resolve_sleep(agent, sched, 5, {})
         assert agent["sleepiness"] == 0
