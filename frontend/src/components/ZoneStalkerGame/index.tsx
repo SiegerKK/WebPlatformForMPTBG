@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../api/client';
 import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../types';
+import DebugMapPage from './DebugMapPage';
 
 interface Props {
   match: Match;
@@ -156,7 +157,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [travelTarget, setTravelTarget] = useState<string | null>(null);
   const [sleepHours, setSleepHours] = useState(6);
   const [showTravelPanel, setShowTravelPanel] = useState(false);
-  const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory'>('map');
+  const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory' | 'debug'>('map');
   // ── Roster state ─────────────────────────────────────────────────────────
   // Show roster on first load; persist "entered" status per match so a page
   // refresh doesn't force the player back to the roster screen mid-game.
@@ -993,11 +994,12 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const renderZoneMap = () => {
     if (!zoneState) return <p style={styles.loadingText}>Generating the Zone…</p>;
     const locations = Object.values(zoneState.locations);
+    const isDebug = activeTab === 'debug';
 
     return (
       <div style={styles.mapContainer}>
-        {/* ── Agent status panel ── */}
-        <div style={styles.agentPanel}>
+        {/* ── Agent status panel (hidden on debug page) ── */}
+        {!isDebug && <div style={styles.agentPanel}>
           <div style={styles.panelTitle}>☢️ Your Stalker</div>
           {myAgent ? (
             <>
@@ -1084,10 +1086,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           ) : (
             <p style={styles.emptyText}>No agent assigned yet.</p>
           )}
-        </div>
+        </div>}
 
-        {/* ── Center: tabs (map / event / memory) ── */}
-        <div style={styles.centerPanel}>
+        {/* ── Center: tabs (map / event / memory / debug) ── */}
+        <div style={isDebug ? styles.centerPanelFull : styles.centerPanel}>
           <div style={styles.tabBar}>
             {(['map', 'event', 'memory'] as const).map((tab) => (
               <button
@@ -1098,6 +1100,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 {tab === 'map' ? '🗺 Map' : tab === 'event' ? `📖 Event${eventState?.phase === 'active' ? ' ●' : ''}` : '🧠 Memory'}
               </button>
             ))}
+            <button
+              style={{ ...styles.tabBtn, ...(activeTab === 'debug' ? styles.tabBtnActive : {}), ...styles.debugTabBtn }}
+              onClick={() => setActiveTab('debug')}
+              title="Debug map view — free-form canvas with location details"
+            >
+              🔧 Debug
+            </button>
             <button
               style={{ ...styles.tabBtn, ...styles.rosterTabBtn }}
               onClick={() => setShowRoster(true)}
@@ -1317,17 +1326,20 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               )}
             </div>
           )}
+          {activeTab === 'debug' && (
+            <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} />
+          )}
         </div>
 
-        {/* ── Right: action panel + event log ── */}
-        <div style={styles.rightPanel}>
+        {/* ── Right: action panel + event log (hidden on debug page) ── */}
+        {!isDebug && <div style={styles.rightPanel}>
           {renderActionPanel()}
 
           <div style={styles.eventsPanel}>
             <div style={styles.panelTitle}>📜 Event Log</div>
             {renderEvents()}
           </div>
-        </div>
+        </div>}
       </div>
     );
   };
@@ -1439,9 +1451,11 @@ const styles: Record<string, React.CSSProperties> = {
 
   // center panel
   centerPanel: { flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: '0.75rem' },
-  tabBar: { display: 'flex', gap: 6 },
+  centerPanelFull: { flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: '0.75rem' },
+  tabBar: { display: 'flex', gap: 6, flexWrap: 'wrap' as const },
   tabBtn: { padding: '0.35rem 0.8rem', background: '#1e293b', color: '#64748b', border: '1px solid #334155', borderRadius: 8, cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 },
   tabBtnActive: { background: '#0f172a', color: '#f8fafc', borderColor: '#475569' },
+  debugTabBtn: { color: '#f59e0b', borderColor: '#78350f' },
 
   mapHint: { color: '#64748b', fontSize: '0.8rem', margin: 0 },
   locationGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 },
