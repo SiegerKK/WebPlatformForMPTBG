@@ -2,11 +2,13 @@
  * DebugMapPage — free-form canvas for inspecting and editing the Zone Stalkers world map.
  *
  * Features:
- *  - BFS radial initial layout
+ *  - BFS radial initial layout (restored from persisted positions on reload)
  *  - Drag-and-drop: cards can be freely moved on the canvas (pointer capture)
  *  - Link mode: click a source card then a target card to create/delete a
  *    bidirectional connection; remove individual connections from the detail panel
  *  - Location detail panel with connection management
+ *  - All edits (positions + connections) are persisted to the backend via
+ *    the debug_update_map command so they survive page reloads
  */
 import React, { useMemo, useState, useRef, useCallback } from 'react';
 
@@ -52,11 +54,15 @@ interface ZoneMapState {
   player_agents: Record<string, string>;
   active_events: string[];
   game_over: boolean;
+  /** Persisted debug canvas state written by the debug_update_map command */
+  debug_layout?: { positions: Record<string, { x: number; y: number }> };
 }
 
 interface Props {
   zoneState: ZoneMapState;
   currentLocId: string | null;
+  /** Send a command to the backend (uses the zone_map context id automatically) */
+  sendCommand: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
 }
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
@@ -145,12 +151,15 @@ const LOC_TYPE_COLOR: Record<string, string> = {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export default function DebugMapPage({ zoneState, currentLocId }: Props) {
+export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: Props) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
 
   // ── Drag ─────────────────────────────────────────────────────────────────
-  // dragOverrides: user-defined card CENTER positions in canvas-space pixels
-  const [dragOverrides, setDragOverrides] = useState<Record<string, { x: number; y: number }>>({});
+  // dragOverrides: user-defined card CENTER positions in canvas-space pixels.
+  // Seeded from persisted debug_layout.positions so positions survive reload.
+  const [dragOverrides, setDragOverrides] = useState<Record<string, { x: number; y: number }>>(
+    () => zoneState.debug_layout?.positions ?? {},
+  );
   const dragRef = useRef<{
     id: string;
     startPtrX: number;
@@ -165,10 +174,39 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
   const [linkSource, setLinkSource] = useState<string | null>(null);
 
   // ── Local (editable) connections ─────────────────────────────────────────
+  // Seeded from zoneState which already contains any previously-persisted edits.
   const [localConns, setLocalConns] = useState<Record<string, LocationConn[]>>(() =>
     Object.fromEntries(
       Object.entries(zoneState.locations).map(([id, loc]) => [id, [...loc.connections]]),
     ),
+  );
+
+  // ── Persistence ──────────────────────────────────────────────────────────
+  // Saving flag shown in toolbar while the backend round-trip is in flight
+  const [saving, setSaving] = useState(false);
+
+  // Build the serializable connections map (all locations) and call backend
+  const persistMap = useCallback(
+    async (
+      positions: Record<string, { x: number; y: number }>,
+      conns: Record<string, LocationConn[]>,
+    ) => {
+      setSaving(true);
+      try {
+        // Serialize connections: plain objects, no class instances
+        const serialisedConns: Record<string, Array<{ to: string; type: string }>> = {};
+        for (const [id, cs] of Object.entries(conns)) {
+          serialisedConns[id] = cs.map((c) => ({ to: c.to, type: c.type }));
+        }
+        await sendCommand('debug_update_map', {
+          positions,
+          connections: serialisedConns,
+        });
+      } finally {
+        setSaving(false);
+      }
+    },
+    [sendCommand],
   );
 
   // ── Layout ───────────────────────────────────────────────────────────────
@@ -197,37 +235,47 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
     return Math.max(300, ...vals.map((p) => p.y + CARD_H / 2 + CANVAS_PAD));
   }, [effectivePos]);
 
+  // ── Refs that always hold the latest state (for use inside callbacks) ─────
+  const dragOverridesRef = useRef(dragOverrides);
+  dragOverridesRef.current = dragOverrides;
+
+  const localConnsRef = useRef(localConns);
+  localConnsRef.current = localConns;
+
   // ── Link/click logic ─────────────────────────────────────────────────────
   const toggleLink = useCallback(
     (aId: string, bId: string) => {
-      setLocalConns((prev) => {
-        const aC = prev[aId] ?? [];
-        const bC = prev[bId] ?? [];
-        const exists = aC.some((c) => c.to === bId);
-        if (exists) {
-          return {
+      const prev = localConnsRef.current;
+      const aC = prev[aId] ?? [];
+      const bC = prev[bId] ?? [];
+      const exists = aC.some((c) => c.to === bId);
+      const newConns = exists
+        ? {
             ...prev,
             [aId]: aC.filter((c) => c.to !== bId),
             [bId]: bC.filter((c) => c.to !== aId),
+          }
+        : {
+            ...prev,
+            [aId]: [...aC, { to: bId, type: 'normal' }],
+            [bId]: [...bC, { to: aId, type: 'normal' }],
           };
-        }
-        return {
-          ...prev,
-          [aId]: [...aC, { to: bId, type: 'normal' }],
-          [bId]: [...bC, { to: aId, type: 'normal' }],
-        };
-      });
+      setLocalConns(newConns);
+      persistMap(dragOverridesRef.current, newConns);
     },
-    [],
+    [persistMap],
   );
 
   const deleteConnection = useCallback((fromId: string, toId: string) => {
-    setLocalConns((prev) => ({
+    const prev = localConnsRef.current;
+    const newConns = {
       ...prev,
       [fromId]: (prev[fromId] ?? []).filter((c) => c.to !== toId),
       [toId]: (prev[toId] ?? []).filter((c) => c.to !== fromId),
-    }));
-  }, []);
+    };
+    setLocalConns(newConns);
+    persistMap(dragOverridesRef.current, newConns);
+  }, [persistMap]);
 
   // ── Pointer handlers on each card ────────────────────────────────────────
   const handlePointerDown = useCallback(
@@ -270,7 +318,12 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
     (_e: React.PointerEvent<HTMLDivElement>, id: string) => {
       const d = dragRef.current;
       dragRef.current = null;
-      if (d?.hasMoved) return; // it was a drag, not a click
+      if (d?.hasMoved) {
+        // Persist the final card positions; use latest value from ref
+        // (dragOverridesRef is updated by the last pointermove before this call)
+        persistMap(dragOverridesRef.current, localConnsRef.current);
+        return;
+      }
 
       // It was a click
       if (linkMode) {
@@ -286,7 +339,7 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
         setSelectedLocId((prev) => (prev === id ? null : id));
       }
     },
-    [linkMode, linkSource, toggleLink],
+    [linkMode, linkSource, toggleLink, persistMap],
   );
 
   // When exiting link mode, clear source
@@ -315,6 +368,9 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
             ))}
           </div>
           <div style={s.toolbarRight}>
+            {saving && (
+              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>💾 Saving…</span>
+            )}
             <button
               style={{
                 ...s.toolBtn,
@@ -328,7 +384,10 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
             {(Object.keys(dragOverrides).length > 0) && (
               <button
                 style={s.toolBtn}
-                onClick={() => setDragOverrides({})}
+                onClick={() => {
+                  setDragOverrides({});
+                  persistMap({}, localConnsRef.current);
+                }}
                 title="Reset all card positions to the auto-layout"
               >
                 ↺ Reset layout

@@ -1532,7 +1532,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             </div>
           )}
           {activeTab === 'debug' && (
-            <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} />
+            <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
           )}
         </div>
 

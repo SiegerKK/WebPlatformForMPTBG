@@ -11,6 +11,7 @@ Supported commands:
 - pick_up_item(item_id)
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
+- debug_update_map(positions, connections) — persist debug canvas layout (meta, no action cost)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -43,6 +44,10 @@ def validate_world_command(
     # take_control is a meta-command that works even without an existing agent
     if command_type == "take_control":
         return _validate_take_control(payload, state, player_id)
+
+    # debug_update_map is a meta-command: persists canvas positions + connections
+    if command_type == "debug_update_map":
+        return _validate_debug_update_map(payload, state)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -119,6 +124,24 @@ def resolve_world_command(
                 "previous_agent_id": agent_id,
             },
         })
+        return state, events
+
+    # ── debug_update_map: meta-command, persists canvas layout ────────────────
+    if command_type == "debug_update_map":
+        positions = payload.get("positions", {})
+        connections = payload.get("connections", {})
+        # Persist card positions
+        state.setdefault("debug_layout", {})["positions"] = positions
+        # Update location connections for each location provided
+        locations = state.get("locations", {})
+        for loc_id, conns in connections.items():
+            if loc_id in locations:
+                locations[loc_id]["connections"] = [
+                    {"to": c["to"], "type": c.get("type", "normal")}
+                    for c in conns
+                    if "to" in c and c["to"] in locations
+                ]
+        events.append({"event_type": "debug_map_updated", "payload": {}})
         return state, events
 
     if command_type == "end_turn":
@@ -470,4 +493,31 @@ def _validate_take_control(
         return RuleCheckResult(valid=False, error="Agent is already controlled by a player")
     if not agent.get("is_alive", True):
         return RuleCheckResult(valid=False, error="Cannot take control of a dead agent")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_update_map(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    positions = payload.get("positions")
+    connections = payload.get("connections")
+    if positions is not None and not isinstance(positions, dict):
+        return RuleCheckResult(valid=False, error="positions must be a dict")
+    if connections is not None and not isinstance(connections, dict):
+        return RuleCheckResult(valid=False, error="connections must be a dict")
+    locations = state.get("locations", {})
+    if connections:
+        for loc_id, conns in connections.items():
+            if loc_id not in locations:
+                return RuleCheckResult(valid=False, error=f"Unknown location id: {loc_id}")
+            if not isinstance(conns, list):
+                return RuleCheckResult(valid=False, error=f"Connections for {loc_id} must be a list")
+            for conn in conns:
+                to_id = conn.get("to") if isinstance(conn, dict) else None
+                if not to_id or to_id not in locations:
+                    return RuleCheckResult(
+                        valid=False,
+                        error=f"Connection target '{to_id}' is not a valid location id",
+                    )
     return RuleCheckResult(valid=True)
