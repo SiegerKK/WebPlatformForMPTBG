@@ -1,11 +1,14 @@
 /**
- * DebugMapPage — free-form canvas for inspecting the Zone Stalkers world map.
+ * DebugMapPage — free-form canvas for inspecting and editing the Zone Stalkers world map.
  *
- * Locations are rendered as draggable cards auto-positioned by a BFS radial
- * layout derived from the connection graph.  Clicking a card opens the full
- * location detail panel on the right.  SVG lines trace the connections.
+ * Features:
+ *  - BFS radial initial layout
+ *  - Drag-and-drop: cards can be freely moved on the canvas (pointer capture)
+ *  - Link mode: click a source card then a target card to create/delete a
+ *    bidirectional connection; remove individual connections from the detail panel
+ *  - Location detail panel with connection management
  */
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useRef, useCallback } from 'react';
 
 // ─── Types (mirrored from ZoneStalkerGame/index.tsx) ─────────────────────────
 
@@ -61,19 +64,20 @@ interface Props {
 const CARD_W = 180;
 const CARD_H = 112;
 const RING_RADIUS = 210;
-const CANVAS_PADDING = 100;
+const CANVAS_PAD = 100;
 
 /**
- * BFS radial layout: place the safe_hub (or first location) at the centre,
- * then arrange BFS-level neighbours in concentric rings.
+ * BFS radial layout.
+ * Returns canvas-space CENTER coordinates {x, y} for each location so that
+ * all values are ≥ (CARD_W/2 + CANVAS_PAD, CARD_H/2 + CANVAS_PAD).
+ * No external offset variable needed — positions are ready to use directly.
  */
-function computeLayout(
+function computeBfsLayout(
   locations: Record<string, ZoneLocation>,
 ): Record<string, { x: number; y: number }> {
   const ids = Object.keys(locations);
   if (ids.length === 0) return {};
 
-  // Prefer safe_hub as centre node
   const startId =
     Object.values(locations).find((l) => l.type === 'safe_hub')?.id ?? ids[0];
 
@@ -97,27 +101,33 @@ function computeLayout(
     queue = nextQueue;
   }
 
-  // Disconnected nodes form an extra ring
   const disconnected = ids.filter((id) => !visited.has(id));
   if (disconnected.length > 0) levels.push(disconnected);
 
-  // Approximate canvas centre — will be shifted by offset later
-  const cx = 430;
-  const cy = 300;
-
-  const positions: Record<string, { x: number; y: number }> = {};
+  // Raw radial positions centred at (0, 0)
+  const raw: Record<string, { x: number; y: number }> = {};
   levels.forEach((level, li) => {
     const r = li === 0 ? 0 : RING_RADIUS * li;
     level.forEach((id, i) => {
       const angle = (2 * Math.PI * i) / level.length - Math.PI / 2;
-      positions[id] = {
-        x: Math.round(cx + r * Math.cos(angle)),
-        y: Math.round(cy + r * Math.sin(angle)),
+      raw[id] = {
+        x: Math.round(r * Math.cos(angle)),
+        y: Math.round(r * Math.sin(angle)),
       };
     });
   });
 
-  return positions;
+  // Normalise so min values ≥ CARD_W/2 + CANVAS_PAD
+  const xs = Object.values(raw).map((p) => p.x);
+  const ys = Object.values(raw).map((p) => p.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const shiftX = CARD_W / 2 + CANVAS_PAD - minX;
+  const shiftY = CARD_H / 2 + CANVAS_PAD - minY;
+
+  return Object.fromEntries(
+    Object.entries(raw).map(([id, p]) => [id, { x: p.x + shiftX, y: p.y + shiftY }]),
+  );
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -138,65 +148,226 @@ const LOC_TYPE_COLOR: Record<string, string> = {
 export default function DebugMapPage({ zoneState, currentLocId }: Props) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
 
-  const positions = useMemo(
-    () => computeLayout(zoneState.locations),
+  // ── Drag ─────────────────────────────────────────────────────────────────
+  // dragOverrides: user-defined card CENTER positions in canvas-space pixels
+  const [dragOverrides, setDragOverrides] = useState<Record<string, { x: number; y: number }>>({});
+  const dragRef = useRef<{
+    id: string;
+    startPtrX: number;
+    startPtrY: number;
+    startCardX: number;
+    startCardY: number;
+    hasMoved: boolean;
+  } | null>(null);
+
+  // ── Link mode ────────────────────────────────────────────────────────────
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkSource, setLinkSource] = useState<string | null>(null);
+
+  // ── Local (editable) connections ─────────────────────────────────────────
+  const [localConns, setLocalConns] = useState<Record<string, LocationConn[]>>(() =>
+    Object.fromEntries(
+      Object.entries(zoneState.locations).map(([id, loc]) => [id, [...loc.connections]]),
+    ),
+  );
+
+  // ── Layout ───────────────────────────────────────────────────────────────
+  const layoutPositions = useMemo(
+    () => computeBfsLayout(zoneState.locations),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [JSON.stringify(Object.keys(zoneState.locations))],
   );
 
-  // Derive canvas dimensions from layout
-  const posValues = Object.values(positions);
-  const xs = posValues.map((p) => p.x);
-  const ys = posValues.map((p) => p.y);
-  const minX = (xs.length ? Math.min(...xs) : 0) - CARD_W / 2 - CANVAS_PADDING;
-  const minY = (ys.length ? Math.min(...ys) : 0) - CARD_H / 2 - CANVAS_PADDING;
-  const maxX = (xs.length ? Math.max(...xs) : 0) + CARD_W / 2 + CANVAS_PADDING;
-  const maxY = (ys.length ? Math.max(...ys) : 0) + CARD_H / 2 + CANVAS_PADDING;
-  const canvasW = Math.max(maxX - minX, 400);
-  const canvasH = Math.max(maxY - minY, 300);
-  const offsetX = -minX;
-  const offsetY = -minY;
+  // Merge layout + user overrides
+  const effectivePos = useMemo(
+    () => ({ ...layoutPositions, ...dragOverrides }),
+    [layoutPositions, dragOverrides],
+  );
+
+  // Canvas dimensions auto-expand when cards are dragged outward
+  const canvasW = useMemo(() => {
+    const vals = Object.values(effectivePos);
+    if (!vals.length) return 400;
+    return Math.max(400, ...vals.map((p) => p.x + CARD_W / 2 + CANVAS_PAD));
+  }, [effectivePos]);
+
+  const canvasH = useMemo(() => {
+    const vals = Object.values(effectivePos);
+    if (!vals.length) return 300;
+    return Math.max(300, ...vals.map((p) => p.y + CARD_H / 2 + CANVAS_PAD));
+  }, [effectivePos]);
+
+  // ── Link/click logic ─────────────────────────────────────────────────────
+  const toggleLink = useCallback(
+    (aId: string, bId: string) => {
+      setLocalConns((prev) => {
+        const aC = prev[aId] ?? [];
+        const bC = prev[bId] ?? [];
+        const exists = aC.some((c) => c.to === bId);
+        if (exists) {
+          return {
+            ...prev,
+            [aId]: aC.filter((c) => c.to !== bId),
+            [bId]: bC.filter((c) => c.to !== aId),
+          };
+        }
+        return {
+          ...prev,
+          [aId]: [...aC, { to: bId, type: 'normal' }],
+          [bId]: [...bC, { to: aId, type: 'normal' }],
+        };
+      });
+    },
+    [],
+  );
+
+  const deleteConnection = useCallback((fromId: string, toId: string) => {
+    setLocalConns((prev) => ({
+      ...prev,
+      [fromId]: (prev[fromId] ?? []).filter((c) => c.to !== toId),
+      [toId]: (prev[toId] ?? []).filter((c) => c.to !== fromId),
+    }));
+  }, []);
+
+  // ── Pointer handlers on each card ────────────────────────────────────────
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>, id: string) => {
+      if (linkMode) return; // clicks handled in onPointerUp
+      e.preventDefault();
+      e.stopPropagation();
+      const pos = effectivePos[id] ?? { x: 0, y: 0 };
+      dragRef.current = {
+        id,
+        startPtrX: e.clientX,
+        startPtrY: e.clientY,
+        startCardX: pos.x,
+        startCardY: pos.y,
+        hasMoved: false,
+      };
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    },
+    [linkMode, effectivePos],
+  );
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.startPtrX;
+    const dy = e.clientY - d.startPtrY;
+    if (!d.hasMoved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+    d.hasMoved = true;
+    setDragOverrides((prev) => ({
+      ...prev,
+      [d.id]: {
+        // Keep card within [half-card-width, 4000px] so it stays accessible
+        x: Math.max(CARD_W / 2, Math.min(4000, d.startCardX + dx)),
+        y: Math.max(CARD_H / 2, Math.min(4000, d.startCardY + dy)),
+      },
+    }));
+  }, []);
+
+  const handlePointerUp = useCallback(
+    (_e: React.PointerEvent<HTMLDivElement>, id: string) => {
+      const d = dragRef.current;
+      dragRef.current = null;
+      if (d?.hasMoved) return; // it was a drag, not a click
+
+      // It was a click
+      if (linkMode) {
+        if (!linkSource) {
+          setLinkSource(id);
+        } else if (linkSource === id) {
+          setLinkSource(null);
+        } else {
+          toggleLink(linkSource, id);
+          setLinkSource(null);
+        }
+      } else {
+        setSelectedLocId((prev) => (prev === id ? null : id));
+      }
+    },
+    [linkMode, linkSource, toggleLink],
+  );
+
+  // When exiting link mode, clear source
+  const handleToggleLinkMode = useCallback(() => {
+    setLinkMode((prev) => {
+      if (prev) setLinkSource(null);
+      return !prev;
+    });
+  }, []);
 
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
-
-  const toggleSelect = (id: string) =>
-    setSelectedLocId((prev) => (prev === id ? null : id));
+  const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
 
   return (
     <div style={s.page}>
       {/* ── Canvas ────────────────────────────────────────── */}
       <div style={s.canvasWrap}>
-        <div style={s.legend}>
-          {Object.entries(LOC_TYPE_COLOR).map(([t, c]) => (
-            <span key={t} style={s.legendItem}>
-              <span style={{ ...s.legendDot, background: c }} />
-              {t.replace(/_/g, ' ')}
-            </span>
-          ))}
+        {/* Toolbar */}
+        <div style={s.toolbar}>
+          <div style={s.legend}>
+            {Object.entries(LOC_TYPE_COLOR).map(([t, c]) => (
+              <span key={t} style={s.legendItem}>
+                <span style={{ ...s.legendDot, background: c }} />
+                {t.replace(/_/g, ' ')}
+              </span>
+            ))}
+          </div>
+          <div style={s.toolbarRight}>
+            <button
+              style={{
+                ...s.toolBtn,
+                ...(linkMode ? s.toolBtnActive : {}),
+              }}
+              onClick={handleToggleLinkMode}
+              title="Toggle link-editing mode. In link mode: click a location to select it as source, then click another to create/remove a connection."
+            >
+              🔗 {linkMode ? 'Link mode ON' : 'Link mode'}
+            </button>
+            {(Object.keys(dragOverrides).length > 0) && (
+              <button
+                style={s.toolBtn}
+                onClick={() => setDragOverrides({})}
+                title="Reset all card positions to the auto-layout"
+              >
+                ↺ Reset layout
+              </button>
+            )}
+          </div>
         </div>
 
-        <div style={{ ...s.canvasScroll }}>
+        {linkMode && (
+          <div style={s.linkHint}>
+            {linkSource
+              ? `📍 Source: ${zoneState.locations[linkSource]?.name ?? linkSource} — click another location to create/remove a connection, or click it again to deselect`
+              : '🔗 Click a location card to select it as the connection source'}
+          </div>
+        )}
+
+        <div style={s.canvasScroll}>
           {/* SVG connection lines */}
           <svg
             style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 0 }}
             width={canvasW}
             height={canvasH}
           >
-            {Object.values(zoneState.locations).flatMap((loc) =>
-              loc.connections.map((conn) => {
-                const a = positions[loc.id];
-                const b = positions[conn.to];
+            {/* Draw connections from localConns */}
+            {Object.entries(localConns).flatMap(([locId, conns]) =>
+              conns.map((conn) => {
+                // Deduplicate: only draw A→B when A < B
+                if (locId > conn.to) return null;
+                const a = effectivePos[locId];
+                const b = effectivePos[conn.to];
                 if (!a || !b) return null;
                 const isDangerous = conn.type === 'dangerous';
-                // Deduplicate: only draw A→B, not also B→A
-                if (loc.id > conn.to) return null;
                 return (
                   <line
-                    key={`${loc.id}--${conn.to}`}
-                    x1={a.x + offsetX}
-                    y1={a.y + offsetY}
-                    x2={b.x + offsetX}
-                    y2={b.y + offsetY}
+                    key={`${locId}--${conn.to}`}
+                    x1={a.x}
+                    y1={a.y}
+                    x2={b.x}
+                    y2={b.y}
                     stroke={isDangerous ? '#7f1d1d' : '#1e3a5f'}
                     strokeWidth={isDangerous ? 2 : 1.5}
                     strokeDasharray={isDangerous ? '6 3' : undefined}
@@ -210,10 +381,17 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
           {/* Location cards */}
           <div style={{ position: 'relative', width: canvasW, height: canvasH }}>
             {Object.entries(zoneState.locations).map(([id, loc]) => {
-              const pos = positions[id];
+              const pos = effectivePos[id];
               if (!pos) return null;
+
               const isSelected = id === selectedLocId;
               const isCurrent = id === currentLocId;
+              const isLinkSrc = id === linkSource;
+              const isLinkTarget =
+                linkSource && linkSource !== id
+                  ? (localConns[linkSource] ?? []).some((c) => c.to === id)
+                  : false;
+
               const aliveAgents = loc.agents.filter(
                 (aid) =>
                   zoneState.agents[aid]?.is_alive ||
@@ -223,31 +401,54 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
                 (t) => t.location_id === id,
               ).length;
 
+              // ── Border: avoid border shorthand + borderLeft conflict ────────
+              // Using explicit individual side borders fixes the "stripe
+              // disappears on deselect" bug caused by React only updating the
+              // changed shorthand property, which resets border-left-width.
+              const sideColor = isLinkSrc
+                ? '#f59e0b'
+                : isSelected
+                ? '#60a5fa'
+                : isCurrent
+                ? '#22c55e'
+                : '#1e293b';
+              const stripColor = LOC_TYPE_COLOR[loc.type] ?? '#334155';
+
               return (
                 <div
                   key={id}
-                  onClick={() => toggleSelect(id)}
-                  title={`${loc.name} — click for details`}
+                  title={`${loc.name} — ${linkMode ? 'click to link' : 'click for details, drag to move'}`}
                   style={{
                     position: 'absolute',
-                    left: pos.x + offsetX - CARD_W / 2,
-                    top: pos.y + offsetY - CARD_H / 2,
+                    left: pos.x - CARD_W / 2,
+                    top: pos.y - CARD_H / 2,
                     width: CARD_W,
                     background: isCurrent ? '#0d2a1a' : '#0f172a',
                     borderRadius: 10,
                     padding: '0.55rem 0.65rem',
-                    border: `1px solid ${isSelected ? '#60a5fa' : isCurrent ? '#22c55e' : '#1e293b'}`,
-                    borderLeft: `4px solid ${LOC_TYPE_COLOR[loc.type] ?? '#334155'}`,
-                    cursor: 'pointer',
-                    boxShadow: isSelected
+                    // Individual side borders — avoids the CSS shorthand reset bug
+                    borderTop: `1px solid ${sideColor}`,
+                    borderRight: `1px solid ${sideColor}`,
+                    borderBottom: `1px solid ${sideColor}`,
+                    borderLeft: `4px solid ${stripColor}`,
+                    cursor: linkMode ? 'crosshair' : 'grab',
+                    boxShadow: isLinkSrc
+                      ? '0 0 0 2px #f59e0b'
+                      : isLinkTarget
+                      ? '0 0 0 2px #a855f7'
+                      : isSelected
                       ? '0 0 0 2px #3b82f6'
                       : isCurrent
                       ? '0 0 0 1px #22c55e44'
                       : 'none',
-                    transition: 'border-color 0.15s, box-shadow 0.15s',
-                    zIndex: isSelected ? 10 : 1,
+                    transition: 'box-shadow 0.15s',
+                    zIndex: isSelected || isLinkSrc ? 10 : 1,
                     userSelect: 'none',
+                    touchAction: 'none',
                   }}
+                  onPointerDown={(e) => handlePointerDown(e, id)}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={(e) => handlePointerUp(e, id)}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4 }}>
                     <span style={{ color: '#f8fafc', fontWeight: 700, fontSize: '0.82rem', lineHeight: 1.2, flex: 1 }}>
@@ -296,8 +497,10 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
         {detailLoc ? (
           <LocationDetailPanel
             loc={detailLoc}
+            conns={detailConns}
             zoneState={zoneState}
             onClose={() => setSelectedLocId(null)}
+            onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
           />
         ) : (
           <EmptyDetailHint totalLocs={Object.keys(zoneState.locations).length} />
@@ -311,12 +514,16 @@ export default function DebugMapPage({ zoneState, currentLocId }: Props) {
 
 function LocationDetailPanel({
   loc,
+  conns,
   zoneState,
   onClose,
+  onDeleteConnection,
 }: {
   loc: ZoneLocation;
+  conns: LocationConn[];
   zoneState: ZoneMapState;
   onClose: () => void;
+  onDeleteConnection: (toId: string) => void;
 }) {
   const stalkers = loc.agents
     .map((id) => zoneState.agents[id])
@@ -351,14 +558,14 @@ function LocationDetailPanel({
 
       {/* Connections */}
       <Section label="🔗 Connections">
-        {loc.connections.length === 0 ? (
+        {conns.length === 0 ? (
           <EmptyRow />
         ) : (
-          loc.connections.map((c) => {
+          conns.map((c) => {
             const target = zoneState.locations[c.to];
             return (
               <DetailRow key={c.to}>
-                <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>
+                <span style={{ color: '#cbd5e1', fontSize: '0.8rem', flex: 1 }}>
                   {target?.name ?? c.to}
                 </span>
                 <span
@@ -369,6 +576,13 @@ function LocationDetailPanel({
                 >
                   {c.type}
                 </span>
+                <button
+                  style={s.connDelBtn}
+                  onClick={() => onDeleteConnection(c.to)}
+                  title="Delete this connection"
+                >
+                  ✕
+                </button>
               </DetailRow>
             );
           })
@@ -568,14 +782,21 @@ const s: Record<string, React.CSSProperties> = {
     gap: 8,
     minWidth: 0,
   },
-  legend: {
+  toolbar: {
     display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
     flexWrap: 'wrap',
-    gap: '6px 14px',
     padding: '6px 10px',
     background: '#060b14',
     borderRadius: 8,
     border: '1px solid #1e293b',
+  },
+  legend: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '6px 14px',
   },
   legendItem: {
     display: 'flex',
@@ -589,6 +810,35 @@ const s: Record<string, React.CSSProperties> = {
     height: 8,
     borderRadius: '50%',
     flexShrink: 0,
+  },
+  toolbarRight: {
+    display: 'flex',
+    gap: 6,
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  toolBtn: {
+    padding: '0.25rem 0.65rem',
+    background: '#0f172a',
+    color: '#94a3b8',
+    border: '1px solid #334155',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+  },
+  toolBtnActive: {
+    background: '#1c2a1a',
+    color: '#86efac',
+    borderColor: '#22c55e',
+  },
+  linkHint: {
+    background: '#0d1a0d',
+    border: '1px solid #166534',
+    borderRadius: 7,
+    padding: '0.35rem 0.7rem',
+    color: '#86efac',
+    fontSize: '0.75rem',
   },
   canvasScroll: {
     position: 'relative',
@@ -636,6 +886,16 @@ const s: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '1rem',
     padding: '0.15rem',
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+  connDelBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#475569',
+    cursor: 'pointer',
+    fontSize: '0.7rem',
+    padding: '0 0.2rem',
     lineHeight: 1,
     flexShrink: 0,
   },
