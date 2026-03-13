@@ -574,17 +574,19 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   // ── Export layout ─────────────────────────────────────────────────────────
   const handleExport = useCallback(() => {
     const exportData = {
-      version: 1,
+      version: 2,
       positions: effectivePosRef.current,
       connections: localConnsRef.current,
-      locations_meta: Object.fromEntries(
+      regions: localRegionsRef.current,
+      locations: Object.fromEntries(
         Object.entries(zoneState.locations).map(([id, loc]) => [
           id,
           {
-            id,
             name: loc.name,
             terrain_type: loc.terrain_type,
             anomaly_activity: loc.anomaly_activity,
+            dominant_anomaly_type: loc.dominant_anomaly_type ?? null,
+            region: loc.region ?? null,
           },
         ]),
       ),
@@ -604,7 +606,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      file.text().then((text) => {
+      file.text().then(async (text) => {
         let parsed: Record<string, unknown>;
         try {
           parsed = JSON.parse(text) as Record<string, unknown>;
@@ -618,17 +620,50 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
         }
         const newPositions = parsed.positions as Record<string, { x: number; y: number }>;
         setDragOverrides(newPositions);
+
         let newConns = localConnsRef.current;
         if (parsed.connections && typeof parsed.connections === 'object' && !Array.isArray(parsed.connections)) {
           newConns = parsed.connections as Record<string, LocationConn[]>;
           setLocalConns(newConns);
         }
-        persistMap(newPositions, newConns);
+
+        // Restore regions if present (v2+)
+        let newRegions: Record<string, { name: string; colorIndex: number }> | undefined;
+        if (parsed.regions && typeof parsed.regions === 'object' && !Array.isArray(parsed.regions)) {
+          newRegions = parsed.regions as Record<string, { name: string; colorIndex: number }>;
+          setLocalRegions(newRegions);
+        }
+
+        await persistMap(newPositions, newConns, newRegions);
+
+        // Restore per-location metadata (name, terrain_type, etc.) via backend (v2+)
+        if (parsed.locations && typeof parsed.locations === 'object' && !Array.isArray(parsed.locations)) {
+          const locsData = parsed.locations as Record<string, {
+            name?: string;
+            terrain_type?: string;
+            anomaly_activity?: number;
+            dominant_anomaly_type?: string | null;
+            region?: string | null;
+          }>;
+          for (const [locId, locData] of Object.entries(locsData)) {
+            if (locId in zoneState.locations) {
+              await sendCommand('debug_update_location', {
+                loc_id: locId,
+                name: locData.name ?? zoneState.locations[locId].name,
+                terrain_type: locData.terrain_type,
+                anomaly_activity: locData.anomaly_activity,
+                dominant_anomaly_type: locData.dominant_anomaly_type,
+                region: locData.region,
+              });
+            }
+          }
+        }
+
         // Reset so the same file can be re-imported
         e.target.value = '';
       });
     },
-    [persistMap],
+    [persistMap, sendCommand, zoneState.locations],
   );
 
   // ── Location CRUD ─────────────────────────────────────────────────────────
