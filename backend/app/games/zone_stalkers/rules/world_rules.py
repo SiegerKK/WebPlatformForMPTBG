@@ -11,7 +11,9 @@ Supported commands:
 - pick_up_item(item_id)
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
-- debug_update_map(positions, connections) — persist debug canvas layout (meta, no action cost)
+- debug_update_map(positions, connections)        — persist debug canvas layout (meta, no action cost)
+- debug_update_location(loc_id, name, type, danger_level) — edit location params in debug mode (meta)
+- debug_create_location(name, type, danger_level, position?) — add a new location in debug mode (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -23,6 +25,11 @@ _TRAVEL_TURNS_PER_HOP: Dict[int, int] = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3}
 _DEFAULT_SLEEP_HOURS = 6
 _MAX_SLEEP_HOURS = 10
 _MIN_SLEEP_HOURS = 2
+
+# Valid location types (shared between generator and debug commands)
+_VALID_LOC_TYPES = frozenset([
+    "safe_hub", "wild_area", "ruins", "military_zone", "anomaly_cluster", "underground",
+])
 
 # Exploration rewards by location type (probability keys)
 _EXPLORE_LOOT_CHANCE: Dict[str, float] = {
@@ -48,6 +55,13 @@ def validate_world_command(
     # debug_update_map is a meta-command: persists canvas positions + connections
     if command_type == "debug_update_map":
         return _validate_debug_update_map(payload, state)
+
+    # debug location CRUD meta-commands
+    if command_type == "debug_update_location":
+        return _validate_debug_update_location(payload, state)
+
+    if command_type == "debug_create_location":
+        return _validate_debug_create_location(payload)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -142,6 +156,47 @@ def resolve_world_command(
                     if "to" in c and c["to"] in locations
                 ]
         events.append({"event_type": "debug_map_updated", "payload": {}})
+        return state, events
+
+    # ── debug_update_location: meta-command, edit location params ─────────────
+    if command_type == "debug_update_location":
+        loc_id = payload["loc_id"]
+        loc = state["locations"][loc_id]
+        loc["name"] = str(payload.get("name", loc["name"])).strip()
+        loc["type"] = payload.get("type", loc["type"])
+        loc["danger_level"] = int(payload.get("danger_level", loc["danger_level"]))
+        events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
+        return state, events
+
+    # ── debug_create_location: meta-command, add new location ─────────────────
+    if command_type == "debug_create_location":
+        existing_ids = set(state.get("locations", {}).keys())
+        # Generate a collision-free id
+        n = len(existing_ids)
+        new_id = f"loc_debug_{n}"
+        while new_id in existing_ids:
+            n += 1
+            new_id = f"loc_debug_{n}"
+        new_loc = {
+            "id": new_id,
+            "name": str(payload["name"]).strip(),
+            "type": payload["type"],
+            "danger_level": int(payload["danger_level"]),
+            "connections": [],
+            "anomalies": [],
+            "artifacts": [],
+            "agents": [],
+            "items": [],
+        }
+        state["locations"][new_id] = new_loc
+        # If a canvas position was provided, persist it immediately
+        pos = payload.get("position")
+        if isinstance(pos, dict) and "x" in pos and "y" in pos:
+            state.setdefault("debug_layout", {}).setdefault("positions", {})[new_id] = {
+                "x": float(pos["x"]),
+                "y": float(pos["y"]),
+            }
+        events.append({"event_type": "debug_location_created", "payload": {"loc_id": new_id}})
         return state, events
 
     if command_type == "end_turn":
@@ -520,4 +575,40 @@ def _validate_debug_update_map(
                         valid=False,
                         error=f"Connection target '{to_id}' is not a valid location id",
                     )
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_update_location(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        return RuleCheckResult(valid=False, error="name must be non-empty")
+    loc_type = payload.get("type")
+    if loc_type not in _VALID_LOC_TYPES:
+        return RuleCheckResult(valid=False, error=f"Invalid type '{loc_type}'; must be one of {sorted(_VALID_LOC_TYPES)}")
+    danger_level = payload.get("danger_level")
+    if not isinstance(danger_level, int) or not (1 <= danger_level <= 5):
+        return RuleCheckResult(valid=False, error="danger_level must be an integer between 1 and 5")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_create_location(
+    payload: Dict[str, Any],
+) -> RuleCheckResult:
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        return RuleCheckResult(valid=False, error="name must be non-empty")
+    loc_type = payload.get("type")
+    if loc_type not in _VALID_LOC_TYPES:
+        return RuleCheckResult(valid=False, error=f"Invalid type '{loc_type}'; must be one of {sorted(_VALID_LOC_TYPES)}")
+    danger_level = payload.get("danger_level")
+    if not isinstance(danger_level, int) or not (1 <= danger_level <= 5):
+        return RuleCheckResult(valid=False, error="danger_level must be an integer between 1 and 5")
     return RuleCheckResult(valid=True)

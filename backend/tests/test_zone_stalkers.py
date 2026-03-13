@@ -849,3 +849,154 @@ class TestDebugUpdateMap:
         state = self._state()
         _, events = self._r({}, state)
         assert any(e["event_type"] == "debug_map_updated" for e in events)
+
+
+class TestDebugLocationCommands:
+    """Tests for debug_update_location and debug_create_location meta-commands."""
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "any_user")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "any_user")
+
+    def _state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    # ── debug_update_location ────────────────────────────────────────────────
+
+    def test_update_location_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        payload = {"loc_id": loc_id, "name": "Updated Name", "type": "ruins", "danger_level": 3}
+        assert self._v("debug_update_location", payload, state).valid
+
+    def test_update_location_name_changed(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_update_location", {"loc_id": loc_id, "name": "Changed", "type": "ruins", "danger_level": 2}, state)
+        assert new_state["locations"][loc_id]["name"] == "Changed"
+
+    def test_update_location_type_and_danger_level(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "underground", "danger_level": 5}, state)
+        assert new_state["locations"][loc_id]["type"] == "underground"
+        assert new_state["locations"][loc_id]["danger_level"] == 5
+
+    def test_update_location_event_emitted(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        _, events = self._r("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1}, state)
+        assert any(e["event_type"] == "debug_location_updated" for e in events)
+
+    def test_update_location_invalid_no_loc_id(self):
+        state = self._state()
+        result = self._v("debug_update_location", {"name": "X", "type": "ruins", "danger_level": 1}, state)
+        assert not result.valid
+
+    def test_update_location_invalid_bad_loc_id(self):
+        state = self._state()
+        result = self._v("debug_update_location", {"loc_id": "nonexistent", "name": "X", "type": "ruins", "danger_level": 1}, state)
+        assert not result.valid
+
+    def test_update_location_invalid_empty_name(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "   ", "type": "ruins", "danger_level": 1}, state)
+        assert not result.valid
+
+    def test_update_location_invalid_bad_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "volcano", "danger_level": 1}, state)
+        assert not result.valid
+
+    def test_update_location_invalid_bad_danger_level(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 6}, state)
+        assert not result.valid
+
+    def test_update_location_does_not_change_connections(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        orig_conns = list(state["locations"][loc_id]["connections"])
+        new_state, _ = self._r("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1}, state)
+        assert new_state["locations"][loc_id]["connections"] == orig_conns
+
+    def test_update_location_original_state_not_mutated(self):
+        import copy
+        state = self._state()
+        original = copy.deepcopy(state)
+        loc_id = next(iter(state["locations"]))
+        self._r("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1}, state)
+        assert state == original
+
+    # ── debug_create_location ────────────────────────────────────────────────
+
+    def test_create_location_valid(self):
+        state = self._state()
+        assert self._v("debug_create_location", {"name": "CNPP", "type": "anomaly_cluster", "danger_level": 5}, state).valid
+
+    def test_create_location_appears_in_state(self):
+        state = self._state()
+        new_state, _ = self._r("debug_create_location", {"name": "CNPP", "type": "anomaly_cluster", "danger_level": 5}, state)
+        assert len(new_state["locations"]) == len(state["locations"]) + 1
+        new_ids = set(new_state["locations"].keys()) - set(state["locations"].keys())
+        assert len(new_ids) == 1
+        new_id = list(new_ids)[0]
+        loc = new_state["locations"][new_id]
+        assert loc["name"] == "CNPP"
+        assert loc["type"] == "anomaly_cluster"
+        assert loc["danger_level"] == 5
+        assert loc["connections"] == []
+        assert loc["agents"] == []
+
+    def test_create_location_with_position_saved(self):
+        state = self._state()
+        payload = {"name": "CNPP", "type": "ruins", "danger_level": 4, "position": {"x": 123.0, "y": 456.0}}
+        new_state, _ = self._r("debug_create_location", payload, state)
+        new_id = list(set(new_state["locations"].keys()) - set(state["locations"].keys()))[0]
+        assert new_state["debug_layout"]["positions"][new_id] == {"x": 123.0, "y": 456.0}
+
+    def test_create_location_without_position_no_debug_layout_entry(self):
+        state = self._state()
+        new_state, _ = self._r("debug_create_location", {"name": "X", "type": "ruins", "danger_level": 1}, state)
+        new_id = list(set(new_state["locations"].keys()) - set(state["locations"].keys()))[0]
+        positions = new_state.get("debug_layout", {}).get("positions", {})
+        assert new_id not in positions
+
+    def test_create_location_id_no_collision(self):
+        state = self._state()
+        # Force existing "loc_debug_N" IDs to trigger the collision-avoidance path
+        n = len(state["locations"])
+        state["locations"][f"loc_debug_{n}"] = {"id": f"loc_debug_{n}", "name": "X", "type": "ruins", "danger_level": 1, "connections": [], "anomalies": [], "artifacts": [], "agents": [], "items": []}
+        new_state, evts = self._r("debug_create_location", {"name": "Y", "type": "ruins", "danger_level": 2}, state)
+        assert len(set(new_state["locations"].keys())) == len(new_state["locations"])  # no duplicate ids
+        assert any(e["event_type"] == "debug_location_created" for e in evts)
+
+    def test_create_location_invalid_empty_name(self):
+        state = self._state()
+        result = self._v("debug_create_location", {"name": "", "type": "ruins", "danger_level": 1}, state)
+        assert not result.valid
+
+    def test_create_location_invalid_bad_type(self):
+        state = self._state()
+        result = self._v("debug_create_location", {"name": "X", "type": "badtype", "danger_level": 1}, state)
+        assert not result.valid
+
+    def test_create_location_invalid_danger_zero(self):
+        state = self._state()
+        result = self._v("debug_create_location", {"name": "X", "type": "ruins", "danger_level": 0}, state)
+        assert not result.valid
+
+    def test_create_location_original_state_not_mutated(self):
+        import copy
+        state = self._state()
+        original = copy.deepcopy(state)
+        self._r("debug_create_location", {"name": "X", "type": "ruins", "danger_level": 1}, state)
+        assert state == original

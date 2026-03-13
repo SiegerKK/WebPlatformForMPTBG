@@ -10,7 +10,7 @@
  *  - All edits (positions + connections) are persisted to the backend via
  *    the debug_update_map command so they survive page reloads
  */
-import React, { useMemo, useState, useRef, useCallback } from 'react';
+import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
 // ─── Types (mirrored from ZoneStalkerGame/index.tsx) ─────────────────────────
 
@@ -155,6 +155,10 @@ const LOC_TYPE_COLOR: Record<string, string> = {
 export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: Props) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
 
+  // ── Location edit / create modals ─────────────────────────────────────────
+  const [editingLocId, setEditingLocId] = useState<string | null>(null);
+  const [creatingLoc, setCreatingLoc] = useState(false);
+
   // ── Drag ─────────────────────────────────────────────────────────────────
   // dragOverrides: user-defined card CENTER positions in canvas-space pixels.
   // Seeded from persisted debug_layout.positions so positions survive reload.
@@ -181,6 +185,30 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       Object.entries(zoneState.locations).map(([id, loc]) => [id, [...loc.connections]]),
     ),
   );
+
+  // ── Sync new locations into dragOverrides + localConns after CRUD ops ──────
+  // After debug_create_location, zoneState gets a new entry; we need to
+  // incorporate its persisted position and open an empty conns slot.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const locKeysStr = JSON.stringify(Object.keys(zoneState.locations).sort());
+  useEffect(() => {
+    const persistedPos = zoneState.debug_layout?.positions ?? {};
+    setDragOverrides((prev) => {
+      const incoming: Record<string, { x: number; y: number }> = {};
+      for (const [id, pos] of Object.entries(persistedPos)) {
+        if (!(id in prev)) incoming[id] = pos as { x: number; y: number };
+      }
+      return Object.keys(incoming).length ? { ...prev, ...incoming } : prev;
+    });
+    setLocalConns((prev) => {
+      const incoming: Record<string, LocationConn[]> = {};
+      for (const [id, loc] of Object.entries(zoneState.locations)) {
+        if (!(id in prev)) incoming[id] = [...(loc as ZoneLocation).connections];
+      }
+      return Object.keys(incoming).length ? { ...prev, ...incoming } : prev;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locKeysStr]);
 
   // ── Persistence ──────────────────────────────────────────────────────────
   // Saving flag and error shown in toolbar
@@ -363,6 +391,37 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     });
   }, []);
 
+  // ── Location CRUD ─────────────────────────────────────────────────────────
+  const handleSaveEdit = useCallback(
+    async (data: { name: string; locType: string; dangerLevel: number }) => {
+      if (!editingLocId) return;
+      await sendCommand('debug_update_location', {
+        loc_id: editingLocId,
+        name: data.name,
+        type: data.locType,
+        danger_level: data.dangerLevel,
+      });
+    },
+    [editingLocId, sendCommand],
+  );
+
+  const handleSaveCreate = useCallback(
+    async (data: { name: string; locType: string; dangerLevel: number }) => {
+      // Place the new card just below the current canvas bottom-center so it's visible
+      const pos = {
+        x: Math.max(CARD_W / 2 + CANVAS_PAD, canvasW / 2),
+        y: canvasH + CARD_H / 2 + CANVAS_PAD,
+      };
+      await sendCommand('debug_create_location', {
+        name: data.name,
+        type: data.locType,
+        danger_level: data.dangerLevel,
+        position: pos,
+      });
+    },
+    [sendCommand, canvasW, canvasH],
+  );
+
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
   const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
 
@@ -389,6 +448,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                 ⚠ Save failed
               </span>
             )}
+            <button
+              style={s.toolBtn}
+              onClick={() => setCreatingLoc(true)}
+              title="Create a new location"
+            >
+              ➕ Location
+            </button>
             <button
               style={{
                 ...s.toolBtn,
@@ -544,6 +610,15 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                     >
                       ⚠ {loc.danger_level}
                     </span>
+                    {/* Edit button — stops drag + link capture so it fires as a click */}
+                    <button
+                      style={s.editBtn}
+                      title="Edit location"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); setEditingLocId(id); }}
+                    >
+                      ✏
+                    </button>
                   </div>
                   <div style={{ color: '#475569', fontSize: '0.68rem', marginTop: 2 }}>
                     {loc.type.replace(/_/g, ' ')}
@@ -583,6 +658,28 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           <EmptyDetailHint totalLocs={Object.keys(zoneState.locations).length} />
         )}
       </div>
+
+      {/* ── Location edit modal ───────────────────────────────── */}
+      {editingLocId && zoneState.locations[editingLocId] && (
+        <LocationModal
+          mode="edit"
+          initialName={zoneState.locations[editingLocId].name}
+          initialLocType={zoneState.locations[editingLocId].type}
+          initialDangerLevel={zoneState.locations[editingLocId].danger_level}
+          locId={editingLocId}
+          onClose={() => setEditingLocId(null)}
+          onSave={handleSaveEdit}
+        />
+      )}
+
+      {/* ── Location create modal ─────────────────────────────── */}
+      {creatingLoc && (
+        <LocationModal
+          mode="create"
+          onClose={() => setCreatingLoc(false)}
+          onSave={handleSaveCreate}
+        />
+      )}
     </div>
   );
 }
@@ -843,6 +940,109 @@ function EmptyDetailHint({ totalLocs }: { totalLocs: number }) {
   );
 }
 
+// ─── Location modal (edit & create) ──────────────────────────────────────────
+
+const LOC_TYPES = [
+  'safe_hub', 'wild_area', 'ruins', 'military_zone', 'anomaly_cluster', 'underground',
+] as const;
+
+function LocationModal({
+  mode,
+  initialName = '',
+  initialLocType = 'safe_hub',
+  initialDangerLevel = 1,
+  locId,
+  onClose,
+  onSave,
+}: {
+  mode: 'edit' | 'create';
+  initialName?: string;
+  initialLocType?: string;
+  initialDangerLevel?: number;
+  locId?: string;
+  onClose: () => void;
+  onSave: (data: { name: string; locType: string; dangerLevel: number }) => Promise<void>;
+}) {
+  const [name, setName] = useState(initialName);
+  const [locType, setLocType] = useState(initialLocType);
+  const [dangerLevel, setDangerLevel] = useState(initialDangerLevel);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) { setErr('Name cannot be empty'); return; }
+    setSaving(true); setErr(null);
+    try {
+      await onSave({ name: trimmed, locType, dangerLevel });
+      onClose();
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={s.modalOverlay}
+      onMouseDown={onClose}
+    >
+      <div
+        style={s.modal}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>
+          {mode === 'edit' ? '✏ Edit Location' : '➕ New Location'}
+        </h3>
+        {locId && (
+          <div style={{ color: '#475569', fontSize: '0.65rem', marginBottom: 10 }}>ID: {locId}</div>
+        )}
+
+        <label style={s.modalLabel}>Name</label>
+        <input
+          style={s.modalInput}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Location name"
+          autoFocus
+        />
+
+        <label style={s.modalLabel}>Type</label>
+        <select
+          style={s.modalInput}
+          value={locType}
+          onChange={(e) => setLocType(e.target.value)}
+        >
+          {LOC_TYPES.map((t) => (
+            <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
+          ))}
+        </select>
+
+        <label style={s.modalLabel}>Danger level (1-5)</label>
+        <select
+          style={s.modalInput}
+          value={dangerLevel}
+          onChange={(e) => setDangerLevel(Number(e.target.value))}
+        >
+          {[1, 2, 3, 4, 5].map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
+
+        {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
+          <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
@@ -999,5 +1199,74 @@ const s: Record<string, React.CSSProperties> = {
   hr: {
     borderColor: '#1e293b',
     margin: '10px 0',
+  },
+  editBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#64748b',
+    cursor: 'pointer',
+    fontSize: '0.7rem',
+    padding: '0 0.2rem',
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+  modalOverlay: {
+    position: 'fixed' as const,
+    inset: 0,
+    background: 'rgba(0,0,0,0.65)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  modal: {
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: 12,
+    padding: '1.25rem 1.5rem',
+    width: 340,
+    maxWidth: '95vw',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 4,
+  },
+  modalLabel: {
+    color: '#64748b',
+    fontSize: '0.7rem',
+    fontWeight: 700,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.06em',
+    marginTop: 8,
+    marginBottom: 3,
+    display: 'block',
+  },
+  modalInput: {
+    width: '100%',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    color: '#f1f5f9',
+    fontSize: '0.82rem',
+    padding: '0.4rem 0.55rem',
+    boxSizing: 'border-box' as const,
+  },
+  modalSaveBtn: {
+    padding: '0.4rem 1rem',
+    background: '#1d4ed8',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontSize: '0.8rem',
+    fontWeight: 600,
+  },
+  modalCancelBtn: {
+    padding: '0.4rem 0.8rem',
+    background: '#1e293b',
+    color: '#94a3b8',
+    border: '1px solid #334155',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontSize: '0.8rem',
   },
 };

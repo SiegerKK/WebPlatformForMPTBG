@@ -158,31 +158,30 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [travelTarget, setTravelTarget] = useState<string | null>(null);
   const [sleepHours, setSleepHours] = useState(6);
   const [showTravelPanel, setShowTravelPanel] = useState(false);
-  const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory' | 'debug'>('map');
+  const [activeTab, setActiveTab] = useState<'map' | 'event' | 'memory'>('map');
   // ── Entry / Roster state ─────────────────────────────────────────────────
-  // `entryKey` remembers that the player has passed the entry menu for this match.
-  // On the very first visit they see the Entry Menu; on subsequent visits they
-  // go straight back into the game.
-  const entryKey = `entry_seen_${match.id}`;
-  const [showEntryMenu, setShowEntryMenu] = useState<boolean>(
-    () => !sessionStorage.getItem(entryKey),
-  );
+  // The main menu is ALWAYS the entry screen — no sessionStorage skip.
+  const [showEntryMenu, setShowEntryMenu] = useState<boolean>(true);
   // Which sub-screen of the entry flow is active
   const [entryScreen, setEntryScreen] = useState<'main' | 'npc_select'>('main');
   // In-game roster overlay (toggled by the 👥 Roster button while already playing)
   const [showRoster, setShowRoster] = useState(false);
+  // When true, the full-screen Debug panel is shown (with its own sub-tabs)
+  const [showDebug, setShowDebug] = useState(false);
+  // Sub-tab within the debug panel
+  const [debugTab, setDebugTab] = useState<'map' | 'characters'>('map');
 
   // Enter game as your own assigned character
   const enterGame = () => {
-    sessionStorage.setItem(entryKey, '1');
     setShowEntryMenu(false);
+    setShowDebug(false);
   };
 
-  // Enter game directly in Debug mode
+  // Enter the debug panel
   const enterAsDebug = () => {
-    sessionStorage.setItem(entryKey, '1');
-    setActiveTab('debug');
     setShowEntryMenu(false);
+    setShowDebug(true);
+    setDebugTab('map');
   };
 
   // Agent whose profile modal is open (null = list view)
@@ -1200,12 +1199,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const renderZoneMap = () => {
     if (!zoneState) return <p style={styles.loadingText}>Generating the Zone…</p>;
     const locations = Object.values(zoneState.locations);
-    const isDebug = activeTab === 'debug';
 
     return (
       <div style={styles.mapContainer}>
-        {/* ── Agent status panel (hidden on debug page) ── */}
-        {!isDebug && <div style={styles.agentPanel}>
+        {/* ── Agent status panel ── */}
+        <div style={styles.agentPanel}>
           <div style={styles.panelTitle}>☢️ Your Stalker</div>
           {myAgent ? (
             <>
@@ -1292,10 +1290,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           ) : (
             <p style={styles.emptyText}>No agent assigned yet.</p>
           )}
-        </div>}
+        </div>
 
-        {/* ── Center: tabs (map / event / memory / debug) ── */}
-        <div style={isDebug ? styles.centerPanelFull : styles.centerPanel}>
+        {/* ── Center: tabs (map / event / memory) ── */}
+        <div style={styles.centerPanel}>
           <div style={styles.tabBar}>
             {(['map', 'event', 'memory'] as const).map((tab) => (
               <button
@@ -1307,9 +1305,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               </button>
             ))}
             <button
-              style={{ ...styles.tabBtn, ...(activeTab === 'debug' ? styles.tabBtnActive : {}), ...styles.debugTabBtn }}
-              onClick={() => setActiveTab('debug')}
-              title="Debug map view — free-form canvas with location details"
+              style={{ ...styles.tabBtn, ...styles.debugTabBtn }}
+              onClick={() => { setShowDebug(true); setShowEntryMenu(false); setDebugTab('map'); }}
+              title="Open full debug panel"
             >
               🔧 Debug
             </button>
@@ -1532,20 +1530,110 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               )}
             </div>
           )}
-          {activeTab === 'debug' && (
-            <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
-          )}
         </div>
 
-        {/* ── Right: action panel + event log (hidden on debug page) ── */}
-        {!isDebug && <div style={styles.rightPanel}>
+        {/* ── Right: action panel + event log ── */}
+        <div style={styles.rightPanel}>
           {renderActionPanel()}
 
           <div style={styles.eventsPanel}>
             <div style={styles.panelTitle}>📜 Event Log</div>
             {renderEvents()}
           </div>
-        </div>}
+        </div>
+      </div>
+    );
+  };
+
+  // ─── render: debug screen ────────────────────────────────────────────────
+  const renderDebugScreen = () => {
+    if (!zoneState) return <p style={styles.loadingText}>Загрузка…</p>;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {/* Header with back button and sub-tabs */}
+        <div style={styles.debugHeader}>
+          <button
+            style={styles.btnSmall}
+            onClick={() => { setShowDebug(false); setShowEntryMenu(true); }}
+          >
+            ← Меню
+          </button>
+          <div style={styles.tabBar}>
+            <button
+              style={{ ...styles.tabBtn, ...(debugTab === 'map' ? styles.tabBtnActive : {}) }}
+              onClick={() => setDebugTab('map')}
+            >
+              🗺 Карта
+            </button>
+            <button
+              style={{ ...styles.tabBtn, ...(debugTab === 'characters' ? styles.tabBtnActive : {}) }}
+              onClick={() => setDebugTab('characters')}
+            >
+              👥 Персонажи
+            </button>
+          </div>
+        </div>
+
+        {debugTab === 'map' && (
+          <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
+        )}
+
+        {debugTab === 'characters' && renderCharactersDebug()}
+      </div>
+    );
+  };
+
+  // ─── render: characters debug tab ───────────────────────────────────────
+  const renderCharactersDebug = () => {
+    if (!zoneState) return null;
+    const allAgents = Object.values(zoneState.agents);
+    const locName = (id: string) => zoneState.locations[id]?.name ?? id;
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: 4 }}>
+          {allAgents.length} сталкеров в Зоне
+        </div>
+        {allAgents.map((agent) => (
+          <div
+            key={agent.id}
+            style={{
+              background: '#0f172a',
+              border: '1px solid #1e293b',
+              borderLeft: `4px solid ${agent.is_alive ? '#22c55e' : '#475569'}`,
+              borderRadius: 8,
+              padding: '0.6rem 0.8rem',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.5rem 1.5rem',
+              alignItems: 'center',
+            }}
+          >
+            <span style={{ color: agent.is_alive ? '#f8fafc' : '#475569', fontWeight: 700, fontSize: '0.9rem', minWidth: 120 }}>
+              {agent.name}
+              {!agent.is_alive && <span style={{ color: '#ef4444', fontSize: '0.7rem', marginLeft: 6 }}>†</span>}
+            </span>
+            <span style={{ color: '#64748b', fontSize: '0.72rem' }}>
+              {agent.faction}
+            </span>
+            <span style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+              ❤ {agent.hp}/{agent.max_hp}
+            </span>
+            <span style={{ color: '#64748b', fontSize: '0.72rem' }}>
+              📍 {locName(agent.location_id)}
+            </span>
+            <span style={{
+              background: agent.controller.kind === 'human' ? '#1d4ed8' : '#1e293b',
+              color: agent.controller.kind === 'human' ? '#bfdbfe' : '#475569',
+              borderRadius: 5,
+              padding: '0.1rem 0.4rem',
+              fontSize: '0.65rem',
+              fontWeight: 700,
+            }}>
+              {agent.controller.kind === 'human' ? '👤 Игрок' : '🤖 ИИ'}
+            </span>
+          </div>
+        ))}
       </div>
     );
   };
@@ -1598,8 +1686,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
       {isWaiting && renderLobby()}
       {isActive && showEntryMenu && entryScreen === 'main' && renderEntryMenu()}
       {isActive && showEntryMenu && entryScreen === 'npc_select' && renderNpcSelect()}
-      {isActive && !showEntryMenu && showRoster && renderRoster()}
-      {isActive && !showEntryMenu && !showRoster && renderZoneMap()}
+      {isActive && !showEntryMenu && showDebug && renderDebugScreen()}
+      {isActive && !showEntryMenu && !showDebug && showRoster && renderRoster()}
+      {isActive && !showEntryMenu && !showDebug && !showRoster && renderZoneMap()}
       {!isWaiting && !isActive && <p style={styles.loadingText}>Match status: {match.status}</p>}
     </div>
   );
@@ -1612,6 +1701,7 @@ const styles: Record<string, React.CSSProperties> = {
   title: { color: '#f8fafc', margin: 0, fontSize: '1.25rem', display: 'flex', alignItems: 'center', gap: 10 },
   matchIdBadge: { color: '#475569', fontSize: '0.75rem', fontWeight: 400 },
   statusPill: { padding: '0.2rem 0.6rem', borderRadius: 12, color: '#fff', fontSize: '0.75rem', fontWeight: 600, textTransform: 'uppercase' as const },
+  debugHeader: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' as const },
 
   // lobby
   lobby: { background: '#1e293b', borderRadius: 12, padding: '2rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem', maxWidth: 480 },
