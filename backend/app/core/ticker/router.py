@@ -1,8 +1,8 @@
 """
 Ticker router — exposes the manual tick endpoint for testing and administration.
 
-POST /api/matches/{match_id}/tick   — advance world turn by one hour
-POST /api/tick/all                  — tick all active zone_stalkers matches (admin)
+POST /api/matches/{match_id}/tick   — advance a match by one game-turn
+POST /api/tick/all                  — tick all active matches (admin)
 """
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
@@ -44,7 +44,7 @@ def tick_all(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Tick all active zone_stalkers matches. Admin only."""
+    """Tick all active matches. Admin only."""
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin only")
     return tick_all_active_matches(db)

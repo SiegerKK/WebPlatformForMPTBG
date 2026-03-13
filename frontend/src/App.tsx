@@ -5,10 +5,9 @@ import Login from './components/Login/Login';
 import Layout from './components/Layout/Layout';
 import MatchList from './components/MatchList/MatchList';
 import GameLobby from './components/GameLobby';
-import TicTacToeGame from './components/TicTacToeGame';
-import ZoneStalkerGame from './components/ZoneStalkerGame';
 import AdminPanel from './components/AdminPanel/AdminPanel';
 import UserProfile from './components/UserProfile/UserProfile';
+import { gameUIRegistry } from './games/uiRegistry';
 import type { User, Match } from './types';
 
 type View = 'games' | 'matches' | 'match' | 'admin' | 'profile';
@@ -125,8 +124,7 @@ export default function App() {
 
   if (!state.token) return <Login />;
 
-  const isTicTacToe = state.currentMatch?.game_id === 'tictactoe';
-  const isZoneStalkers = state.currentMatch?.game_id === 'zone_stalkers';
+  const GameUI = state.currentMatch ? gameUIRegistry[state.currentMatch.game_id] : null;
   const isAdmin = state.user?.is_superuser ?? false;
 
   const handleMatchDeleted = (deletedId: string) => {
@@ -173,17 +171,8 @@ export default function App() {
         <div>
           {!state.currentMatch ? (
             <p style={styles.hint}>Select a match from the Matches list.</p>
-          ) : isTicTacToe && state.user ? (
-            <TicTacToeGame
-              match={state.currentMatch}
-              user={state.user}
-              onMatchUpdated={(updated: Match) =>
-                dispatch({ type: 'SET_CURRENT_MATCH', payload: updated })
-              }
-              onMatchDeleted={handleMatchDeleted}
-            />
-          ) : isZoneStalkers && state.user ? (
-            <ZoneStalkerGame
+          ) : GameUI && state.user ? (
+            <GameUI
               match={state.currentMatch}
               user={state.user}
               onMatchUpdated={(updated: Match) =>

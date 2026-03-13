@@ -15,12 +15,13 @@ from app.core.ticker.router import router as ticker_router
 from app.core.commands.pipeline import register_ruleset
 from app.games.tictactoe.rules import TicTacToeRuleSet
 from app.games.zone_stalkers.ruleset import ZoneStalkerRuleSet
+from app.games.zone_stalkers.router import router as zone_stalkers_router
 
 logger = logging.getLogger(__name__)
 
 
 async def _background_ticker(interval_seconds: int) -> None:
-    """Periodically tick all active zone_stalkers matches."""
+    """Periodically tick all active matches."""
     from app.database import SessionLocal
     from app.core.ticker.service import tick_all_active_matches
     while True:
@@ -71,6 +72,8 @@ app.include_router(turns_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(ticker_router, prefix="/api")
+# Game-specific routers — each game may expose its own endpoints
+app.include_router(zone_stalkers_router, prefix="/api")
 
 # Register game rulesets
 register_ruleset("tictactoe", TicTacToeRuleSet())

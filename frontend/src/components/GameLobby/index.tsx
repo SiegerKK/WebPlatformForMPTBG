@@ -1,40 +1,8 @@
 import React, { useState } from 'react';
 import { matchesApi } from '../../api/client';
 import { useAppState } from '../../store';
+import { GAME_CATALOG } from '../../games/registry';
 import type { Match } from '../../types';
-
-interface GameCard {
-  id: string;
-  name: string;
-  emoji: string;
-  description: string;
-  minPlayers: number;
-  maxPlayers: number;
-  tags: string[];
-}
-
-const GAMES: GameCard[] = [
-  {
-    id: 'tictactoe',
-    name: 'Tic-Tac-Toe',
-    emoji: '✕',
-    description:
-      'Classic two-player game. Place X or O on a 3×3 grid — first to get three in a row wins.',
-    minPlayers: 2,
-    maxPlayers: 2,
-    tags: ['classic', '2 players', 'quick'],
-  },
-  {
-    id: 'zone_stalkers',
-    name: 'Zone Stalkers',
-    emoji: '☢️',
-    description:
-      'Async sandbox RPG in a post-apocalyptic Zone. Explore locations, collect artifacts, fight mutants, trade with merchants. Human players and AI bots coexist as equal agents.',
-    minPlayers: 1,
-    maxPlayers: 8,
-    tags: ['RPG', 'sandbox', 'async', 'multiplayer', 'S.T.A.L.K.E.R. inspired'],
-  },
-];
 
 export default function GameLobby() {
   const { state, dispatch } = useAppState();
@@ -66,7 +34,7 @@ export default function GameLobby() {
       {error && <p style={styles.error}>{error}</p>}
 
       <div style={styles.grid}>
-        {GAMES.map((game) => (
+        {GAME_CATALOG.map((game) => (
           <div key={game.id} style={styles.card}>
             <div style={styles.cardTop}>
               <span style={styles.cardEmoji}>{game.emoji}</span>
