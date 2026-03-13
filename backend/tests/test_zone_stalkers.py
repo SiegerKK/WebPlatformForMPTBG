@@ -751,3 +751,101 @@ class TestConsumeItem:
     def test_consume_no_item_id_invalid(self):
         state = self._state_with_item()
         assert not self._v("consume_item", {}, state).valid
+
+
+class TestDebugUpdateMap:
+    """Tests for the debug_update_map meta-command (no player agent required)."""
+
+    def _v(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command("debug_update_map", payload, state, "any_user")
+
+    def _r(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("debug_update_map", payload, state, "any_user")
+
+    def _state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    def test_valid_with_positions_and_connections(self):
+        state = self._state()
+        loc_ids = list(state["locations"].keys())
+        payload = {
+            "positions": {loc_ids[0]: {"x": 300, "y": 200}},
+            "connections": {
+                loc_id: [{"to": c["to"], "type": c.get("type", "normal")}
+                          for c in loc["connections"]]
+                for loc_id, loc in state["locations"].items()
+            },
+        }
+        assert self._v(payload, state).valid
+
+    def test_valid_with_empty_payload(self):
+        assert self._v({}, self._state()).valid
+
+    def test_valid_positions_only(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        assert self._v({"positions": {loc_id: {"x": 100, "y": 200}}}, state).valid
+
+    def test_invalid_unknown_location_in_connections(self):
+        state = self._state()
+        result = self._v({
+            "connections": {"nonexistent_loc": []}
+        }, state)
+        assert not result.valid
+
+    def test_invalid_connection_target_not_in_locations(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v({
+            "connections": {loc_id: [{"to": "nonexistent_target", "type": "normal"}]}
+        }, state)
+        assert not result.valid
+
+    def test_positions_are_persisted(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        payload = {"positions": {loc_id: {"x": 123.0, "y": 456.0}}}
+        new_state, _ = self._r(payload, state)
+        assert new_state["debug_layout"]["positions"][loc_id] == {"x": 123.0, "y": 456.0}
+
+    def test_connections_are_persisted(self):
+        state = self._state()
+        loc_ids = list(state["locations"].keys())
+        a, b = loc_ids[0], loc_ids[1]
+        payload = {
+            "connections": {
+                a: [{"to": b, "type": "normal"}],
+                b: [{"to": a, "type": "normal"}],
+            }
+        }
+        new_state, _ = self._r(payload, state)
+        assert any(c["to"] == b for c in new_state["locations"][a]["connections"])
+        assert any(c["to"] == a for c in new_state["locations"][b]["connections"])
+
+    def test_debug_layout_overwrites_on_second_save(self):
+        """Re-saving overwrites positions rather than merging — only saved positions survive."""
+        state = self._state()
+        loc_ids = list(state["locations"].keys())
+        # First save: two positions
+        state, _ = self._r({"positions": {loc_ids[0]: {"x": 1, "y": 1}, loc_ids[1]: {"x": 2, "y": 2}}}, state)
+        # Second save: only one position
+        state, _ = self._r({"positions": {loc_ids[0]: {"x": 99, "y": 99}}}, state)
+        assert state["debug_layout"]["positions"][loc_ids[0]] == {"x": 99, "y": 99}
+        # loc_ids[1] was NOT included in the second save — only positions explicitly sent survive
+        assert loc_ids[1] not in state["debug_layout"]["positions"]
+
+    def test_original_state_not_mutated(self):
+        state = self._state()
+        import copy
+        original = copy.deepcopy(state)
+        loc_id = next(iter(state["locations"]))
+        self._r({"positions": {loc_id: {"x": 1, "y": 1}}}, state)
+        assert state == original  # resolve_world_command deep-copies; original is unchanged
+
+    def test_event_emitted(self):
+        state = self._state()
+        _, events = self._r({}, state)
+        assert any(e["event_type"] == "debug_map_updated" for e in events)

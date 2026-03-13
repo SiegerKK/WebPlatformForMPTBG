@@ -308,7 +308,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   }, [isActive, zoneState?.game_over, match.id, refresh]);
 
   // ─── commands ────────────────────────────────────────────────────────────
-  const sendCommand = async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {
+  const sendCommand = useCallback(async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {
     const ctxId = contextId ?? context?.id;
     if (!ctxId) return;
     setActionLoading(true);
@@ -330,7 +330,8 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     } finally {
       setActionLoading(false);
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [context?.id, match.id, refresh]);
 
   const handleMove = async (targetLocId: string) => {
     await sendCommand('move_agent', { target_location_id: targetLocId });

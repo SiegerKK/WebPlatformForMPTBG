@@ -71,6 +71,7 @@ const CARD_W = 180;
 const CARD_H = 112;
 const RING_RADIUS = 210;
 const CANVAS_PAD = 100;
+const MAX_CANVAS_COORD = 4000; // px upper bound for draggable card positions
 
 /**
  * BFS radial layout.
@@ -182,8 +183,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   );
 
   // ── Persistence ──────────────────────────────────────────────────────────
-  // Saving flag shown in toolbar while the backend round-trip is in flight
+  // Saving flag and error shown in toolbar
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
@@ -192,6 +194,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       conns: Record<string, LocationConn[]>,
     ) => {
       setSaving(true);
+      setSaveError(null);
       try {
         // Serialize connections: plain objects, no class instances
         const serialisedConns: Record<string, Array<{ to: string; type: string }>> = {};
@@ -202,6 +205,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           positions,
           connections: serialisedConns,
         });
+      } catch (err: unknown) {
+        const msg = (err as { message?: string })?.message ?? 'Save failed';
+        setSaveError(msg);
       } finally {
         setSaving(false);
       }
@@ -307,21 +313,28 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     setDragOverrides((prev) => ({
       ...prev,
       [d.id]: {
-        // Keep card within [half-card-width, 4000px] so it stays accessible
-        x: Math.max(CARD_W / 2, Math.min(4000, d.startCardX + dx)),
-        y: Math.max(CARD_H / 2, Math.min(4000, d.startCardY + dy)),
+        // Keep card within [half-card-width, MAX_CANVAS_COORD] so it stays accessible
+        x: Math.max(CARD_W / 2, Math.min(MAX_CANVAS_COORD, d.startCardX + dx)),
+        y: Math.max(CARD_H / 2, Math.min(MAX_CANVAS_COORD, d.startCardY + dy)),
       },
     }));
   }, []);
 
   const handlePointerUp = useCallback(
-    (_e: React.PointerEvent<HTMLDivElement>, id: string) => {
+    (e: React.PointerEvent<HTMLDivElement>, id: string) => {
       const d = dragRef.current;
       dragRef.current = null;
       if (d?.hasMoved) {
-        // Persist the final card positions; use latest value from ref
-        // (dragOverridesRef is updated by the last pointermove before this call)
-        persistMap(dragOverridesRef.current, localConnsRef.current);
+        // Compute the exact final position from the pointer event to avoid
+        // reading a potentially-stale dragOverridesRef (which is only updated
+        // on re-render, and the last pointermove's render may not have
+        // completed before pointerup fires).
+        const finalX = Math.max(CARD_W / 2, Math.min(MAX_CANVAS_COORD, d.startCardX + (e.clientX - d.startPtrX)));
+        const finalY = Math.max(CARD_H / 2, Math.min(MAX_CANVAS_COORD, d.startCardY + (e.clientY - d.startPtrY)));
+        const finalPositions = { ...dragOverridesRef.current, [d.id]: { x: finalX, y: finalY } };
+        // Update state immediately with the exact final position
+        setDragOverrides(finalPositions);
+        persistMap(finalPositions, localConnsRef.current);
         return;
       }
 
@@ -370,6 +383,11 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           <div style={s.toolbarRight}>
             {saving && (
               <span style={{ color: '#64748b', fontSize: '0.68rem' }}>💾 Saving…</span>
+            )}
+            {saveError && (
+              <span style={{ color: '#ef4444', fontSize: '0.68rem' }} title={saveError}>
+                ⚠ Save failed
+              </span>
             )}
             <button
               style={{
