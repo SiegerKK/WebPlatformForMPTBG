@@ -1037,6 +1037,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           <RegionDetailPanel
             regionId={selectedRegionId}
             region={localRegions[selectedRegionId]}
+            locations={Object.values(zoneState.locations)
+              .filter((l) => l.region === selectedRegionId)
+              .map((l) => ({ id: l.id, name: l.name }))}
             onClose={() => setSelectedRegionId(null)}
             onSave={(name, colorIndex) => handleSaveRegion(selectedRegionId, name, colorIndex)}
             onDelete={() => handleDeleteRegion(selectedRegionId)}

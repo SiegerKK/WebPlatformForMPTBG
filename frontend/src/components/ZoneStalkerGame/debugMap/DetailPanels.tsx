@@ -260,12 +260,15 @@ export function LocationDetailPanel({
 export function RegionDetailPanel({
   regionId,
   region,
+  locations,
   onClose,
   onSave,
   onDelete,
 }: {
   regionId: string;
   region: { name: string; colorIndex: number };
+  /** Locations that belong to this region, pre-filtered by the parent. */
+  locations: { id: string; name: string }[];
   onClose: () => void;
   onSave: (name: string, colorIndex: number) => void;
   onDelete: () => void;
@@ -280,6 +283,20 @@ export function RegionDetailPanel({
         <button onClick={onClose} style={s.closeBtn}>✕</button>
       </div>
       <div style={{ color: '#475569', fontSize: '0.65rem', marginBottom: 8 }}>ID: {regionId}</div>
+
+      {/* Location list */}
+      <Section label={`📍 Локации (${locations.length})`}>
+        {locations.length === 0 ? (
+          <EmptyRow />
+        ) : (
+          locations.map((loc) => (
+            <DetailRow key={loc.id}>
+              <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>{loc.name}</span>
+              <span style={{ color: '#334155', fontSize: '0.65rem' }}>{loc.id}</span>
+            </DetailRow>
+          ))
+        )}
+      </Section>
 
       <Section label="⚙ Настройки региона">
         <label style={s.modalLabel}>Название</label>
