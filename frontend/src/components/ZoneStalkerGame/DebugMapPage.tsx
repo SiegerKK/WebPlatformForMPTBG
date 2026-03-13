@@ -914,7 +914,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                   const travelTime = conn.travel_time ?? 15;
                   // Highlight if this edge touches the selected location
                   const isLocHighlighted = !!selectedLocId && (locId === selectedLocId || conn.to === selectedLocId);
-                  // Highlight if both endpoints belong to the selected region
+                  // Highlight if either endpoint belongs to the selected region
                   const isRegionHighlighted = !!selectedRegionId && (
                     zoneState.locations[locId]?.region === selectedRegionId ||
                     zoneState.locations[conn.to]?.region === selectedRegionId
