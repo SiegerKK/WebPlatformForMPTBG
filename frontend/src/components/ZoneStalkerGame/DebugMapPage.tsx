@@ -142,8 +142,6 @@ function computeBfsLayout(
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DANGER_COLORS = ['#22c55e', '#84cc16', '#f59e0b', '#f97316', '#ef4444'];
-
 const LOC_TYPE_COLOR: Record<string, string> = {
   safe_hub: '#22c55e',
   wild_area: '#84cc16',
@@ -446,13 +444,11 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
 
   // ── Location CRUD ─────────────────────────────────────────────────────────
   const handleSaveEdit = useCallback(
-    async (data: { name: string; locType: string; dangerLevel: number; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
       if (!editingLocId) return;
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
         name: data.name,
-        type: data.locType,
-        danger_level: data.dangerLevel,
         terrain_type: data.terrainType,
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
@@ -462,7 +458,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   );
 
   const handleSaveCreate = useCallback(
-    async (data: { name: string; locType: string; dangerLevel: number; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
       // Place the new card just below the current canvas bottom-center so it's visible
       const pos = {
         x: Math.max(CARD_W / 2 + CANVAS_PAD, canvasW / 2),
@@ -470,8 +466,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       };
       await sendCommand('debug_create_location', {
         name: data.name,
-        type: data.locType,
-        danger_level: data.dangerLevel,
         terrain_type: data.terrainType,
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
@@ -685,19 +679,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                     <span style={{ color: '#f8fafc', fontWeight: 700, fontSize: '0.82rem', lineHeight: 1.2, flex: 1 }}>
                       {loc.name}
                     </span>
-                    <span
-                      style={{
-                        background: DANGER_COLORS[Math.min(loc.danger_level - 1, 4)],
-                        color: '#fff',
-                        borderRadius: 6,
-                        padding: '0.1rem 0.35rem',
-                        fontSize: '0.65rem',
-                        fontWeight: 700,
-                        flexShrink: 0,
-                      }}
-                    >
-                      ⚠ {loc.danger_level}
-                    </span>
                     {/* Edit button — stops drag + link capture so it fires as a click */}
                     <button
                       style={s.editBtn}
@@ -709,7 +690,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                     </button>
                   </div>
                   <div style={{ color: '#475569', fontSize: '0.68rem', marginTop: 2 }}>
-                    {loc.type.replace(/_/g, ' ')}
+                    {TERRAIN_TYPE_LABELS[loc.terrain_type ?? ''] ?? (loc.terrain_type ?? '—')}
                   </div>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
                     {isCurrent && <Badge bg="#166534" color="#86efac">📍 You</Badge>}
@@ -743,6 +724,12 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
             zoneState={zoneState}
             onClose={() => setSelectedLocId(null)}
             onEdit={() => setEditingLocId(selectedLocId!)}
+            onSpawnStalker={async (name) => {
+              await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name });
+            }}
+            onSpawnMutant={async (mutantType) => {
+              await sendCommand('debug_spawn_mutant', { loc_id: selectedLocId!, mutant_type: mutantType });
+            }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
           />
         ) : (
@@ -755,8 +742,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         <LocationModal
           mode="edit"
           initialName={zoneState.locations[editingLocId].name}
-          initialLocType={zoneState.locations[editingLocId].type}
-          initialDangerLevel={zoneState.locations[editingLocId].danger_level}
           initialTerrainType={zoneState.locations[editingLocId].terrain_type ?? 'plain'}
           initialAnomalyActivity={zoneState.locations[editingLocId].anomaly_activity ?? 0}
           initialDominantAnomalyType={zoneState.locations[editingLocId].dominant_anomaly_type ?? ''}
@@ -786,6 +771,8 @@ function LocationDetailPanel({
   zoneState,
   onClose,
   onEdit,
+  onSpawnStalker,
+  onSpawnMutant,
   onDeleteConnection,
 }: {
   loc: ZoneLocation;
@@ -793,8 +780,11 @@ function LocationDetailPanel({
   zoneState: ZoneMapState;
   onClose: () => void;
   onEdit: () => void;
+  onSpawnStalker: (name: string) => Promise<void>;
+  onSpawnMutant: (mutantType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
 }) {
+  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'mutant' | null>(null);
   const stalkers = loc.agents
     .map((id) => zoneState.agents[id])
     .filter(Boolean);
@@ -814,15 +804,10 @@ function LocationDetailPanel({
         <div>
           <div style={s.detailName}>{loc.name}</div>
           <div style={s.detailMeta}>
-            {loc.type.replace(/_/g, ' ')} · Danger&nbsp;
-            <span
-              style={{
-                color: DANGER_COLORS[Math.min(loc.danger_level - 1, 4)],
-                fontWeight: 700,
-              }}
-            >
-              {loc.danger_level}
-            </span>
+            {TERRAIN_TYPE_LABELS[loc.terrain_type ?? ''] ?? (loc.terrain_type ?? '—')}
+            {(loc.anomaly_activity ?? 0) > 0 && (
+              <span style={{ color: '#a855f7', marginLeft: 6 }}>· ☢ {loc.anomaly_activity}</span>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
@@ -995,7 +980,38 @@ function LocationDetailPanel({
         </Section>
       )}
 
+      {/* Spawn controls */}
+      <Section label="⚡ Spawn">
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            style={s.spawnBtn}
+            onClick={() => setShowSpawnModal('stalker')}
+          >
+            👤 Spawn Stalker
+          </button>
+          <button
+            style={s.spawnBtn}
+            onClick={() => setShowSpawnModal('mutant')}
+          >
+            ☣️ Spawn Mutant
+          </button>
+        </div>
+      </Section>
+
       <div style={{ color: '#1e293b', fontSize: '0.62rem', marginTop: 6 }}>id: {loc.id}</div>
+
+      {showSpawnModal === 'stalker' && (
+        <SpawnStalkerModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (name) => { await onSpawnStalker(name); setShowSpawnModal(null); }}
+        />
+      )}
+      {showSpawnModal === 'mutant' && (
+        <SpawnMutantModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (mutantType) => { await onSpawnMutant(mutantType); setShowSpawnModal(null); }}
+        />
+      )}
     </div>
   );
 }
@@ -1090,10 +1106,6 @@ function EmptyDetailHint({ totalLocs }: { totalLocs: number }) {
 
 // ─── Location modal (edit & create) ──────────────────────────────────────────
 
-const LOC_TYPES = [
-  'safe_hub', 'wild_area', 'ruins', 'military_zone', 'anomaly_cluster', 'underground',
-] as const;
-
 const TERRAIN_TYPES = [
   'plain', 'hills', 'slag_heaps', 'industrial', 'urban',
 ] as const;
@@ -1113,8 +1125,6 @@ const DOMINANT_ANOMALY_OPTIONS = [
 function LocationModal({
   mode,
   initialName = '',
-  initialLocType = 'safe_hub',
-  initialDangerLevel = 1,
   initialTerrainType = 'plain',
   initialAnomalyActivity = 0,
   initialDominantAnomalyType = '',
@@ -1124,18 +1134,14 @@ function LocationModal({
 }: {
   mode: 'edit' | 'create';
   initialName?: string;
-  initialLocType?: string;
-  initialDangerLevel?: number;
   initialTerrainType?: string;
   initialAnomalyActivity?: number;
   initialDominantAnomalyType?: string;
   locId?: string;
   onClose: () => void;
-  onSave: (data: { name: string; locType: string; dangerLevel: number; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => Promise<void>;
+  onSave: (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => Promise<void>;
 }) {
   const [name, setName] = useState(initialName);
-  const [locType, setLocType] = useState(initialLocType);
-  const [dangerLevel, setDangerLevel] = useState(initialDangerLevel);
   const [terrainType, setTerrainType] = useState(initialTerrainType);
   const [anomalyActivity, setAnomalyActivity] = useState(initialAnomalyActivity);
   const [dominantAnomalyType, setDominantAnomalyType] = useState(initialDominantAnomalyType);
@@ -1147,7 +1153,7 @@ function LocationModal({
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, locType, dangerLevel, terrainType, anomalyActivity, dominantAnomalyType });
+      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -1180,28 +1186,6 @@ function LocationModal({
           placeholder="Location name"
           autoFocus
         />
-
-        <label style={s.modalLabel}>Type</label>
-        <select
-          style={s.modalInput}
-          value={locType}
-          onChange={(e) => setLocType(e.target.value)}
-        >
-          {LOC_TYPES.map((t) => (
-            <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
-          ))}
-        </select>
-
-        <label style={s.modalLabel}>Danger level (1-5)</label>
-        <select
-          style={s.modalInput}
-          value={dangerLevel}
-          onChange={(e) => setDangerLevel(Number(e.target.value))}
-        >
-          {[1, 2, 3, 4, 5].map((n) => (
-            <option key={n} value={n}>{n}</option>
-          ))}
-        </select>
 
         <label style={s.modalLabel}>Terrain type</label>
         <select
@@ -1242,6 +1226,116 @@ function LocationModal({
           <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
           <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
             {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Spawn Modals ─────────────────────────────────────────────────────────────
+
+const MUTANT_TYPE_OPTIONS = [
+  'blind_dog', 'flesh', 'zombie', 'bloodsucker', 'psi_controller',
+] as const;
+
+const MUTANT_TYPE_LABELS: Record<string, string> = {
+  blind_dog: 'Blind Dog',
+  flesh: 'Flesh',
+  zombie: 'Zombie',
+  bloodsucker: 'Bloodsucker',
+  psi_controller: 'Psi-Controller',
+};
+
+function SpawnStalkerModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (name: string) => Promise<void>;
+}) {
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true); setErr(null);
+    try {
+      await onSave(name.trim());
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Spawn failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>👤 Spawn Stalker</h3>
+        <label style={s.modalLabel}>Имя (необязательно)</label>
+        <input
+          style={s.modalInput}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Оставьте пустым для случайного"
+          autoFocus
+        />
+        <div style={{ color: '#64748b', fontSize: '0.68rem', marginTop: 4, marginBottom: 8 }}>
+          Фракция, снаряжение и навыки генерируются автоматически.
+        </div>
+        {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
+          <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Spawning…' : 'Spawn'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SpawnMutantModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (mutantType: string) => Promise<void>;
+}) {
+  const [mutantType, setMutantType] = useState<string>(MUTANT_TYPE_OPTIONS[0]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true); setErr(null);
+    try {
+      await onSave(mutantType);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Spawn failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>☣️ Spawn Mutant</h3>
+        <label style={s.modalLabel}>Тип мутанта</label>
+        <select
+          style={s.modalInput}
+          value={mutantType}
+          onChange={(e) => setMutantType(e.target.value)}
+          autoFocus
+        >
+          {MUTANT_TYPE_OPTIONS.map((t) => (
+            <option key={t} value={t}>{MUTANT_TYPE_LABELS[t] ?? t}</option>
+          ))}
+        </select>
+        {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
+          <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Spawning…' : 'Spawn'}
           </button>
         </div>
       </div>
@@ -1487,5 +1581,16 @@ const s: Record<string, React.CSSProperties> = {
     borderRadius: 7,
     cursor: 'pointer',
     fontSize: '0.8rem',
+  },
+  spawnBtn: {
+    background: '#1e3a5f',
+    border: '1px solid #3b82f6',
+    color: '#93c5fd',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    padding: '0.3rem 0.6rem',
+    borderRadius: 5,
+    fontWeight: 600,
+    flex: 1,
   },
 };

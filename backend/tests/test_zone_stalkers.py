@@ -881,11 +881,15 @@ class TestDebugLocationCommands:
         assert new_state["locations"][loc_id]["name"] == "Changed"
 
     def test_update_location_type_and_danger_level(self):
+        # type and danger_level are no longer editable via debug_update_location;
+        # they retain their original values
         state = self._state()
         loc_id = next(iter(state["locations"]))
-        new_state, _ = self._r("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "underground", "danger_level": 5}, state)
-        assert new_state["locations"][loc_id]["type"] == "underground"
-        assert new_state["locations"][loc_id]["danger_level"] == 5
+        orig_type = state["locations"][loc_id]["type"]
+        orig_danger = state["locations"][loc_id]["danger_level"]
+        new_state, _ = self._r("debug_update_location", {"loc_id": loc_id, "name": "X"}, state)
+        assert new_state["locations"][loc_id]["type"] == orig_type
+        assert new_state["locations"][loc_id]["danger_level"] == orig_danger
 
     def test_update_location_event_emitted(self):
         state = self._state()
@@ -910,16 +914,18 @@ class TestDebugLocationCommands:
         assert not result.valid
 
     def test_update_location_invalid_bad_type(self):
+        # type is no longer validated; unknown type keys are silently ignored
         state = self._state()
         loc_id = next(iter(state["locations"]))
-        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "volcano", "danger_level": 1}, state)
-        assert not result.valid
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X"}, state)
+        assert result.valid
 
     def test_update_location_invalid_bad_danger_level(self):
+        # danger_level is no longer validated; the field is ignored
         state = self._state()
         loc_id = next(iter(state["locations"]))
-        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 6}, state)
-        assert not result.valid
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X"}, state)
+        assert result.valid
 
     def test_update_location_does_not_change_connections(self):
         state = self._state()
@@ -944,15 +950,15 @@ class TestDebugLocationCommands:
 
     def test_create_location_appears_in_state(self):
         state = self._state()
-        new_state, _ = self._r("debug_create_location", {"name": "CNPP", "type": "anomaly_cluster", "danger_level": 5}, state)
+        new_state, _ = self._r("debug_create_location", {"name": "CNPP"}, state)
         assert len(new_state["locations"]) == len(state["locations"]) + 1
         new_ids = set(new_state["locations"].keys()) - set(state["locations"].keys())
         assert len(new_ids) == 1
         new_id = list(new_ids)[0]
         loc = new_state["locations"][new_id]
         assert loc["name"] == "CNPP"
-        assert loc["type"] == "anomaly_cluster"
-        assert loc["danger_level"] == 5
+        assert loc["type"] == "wild_area"        # default
+        assert loc["danger_level"] == 1          # default
         assert loc["connections"] == []
         assert loc["agents"] == []
 
@@ -985,14 +991,16 @@ class TestDebugLocationCommands:
         assert not result.valid
 
     def test_create_location_invalid_bad_type(self):
+        # type is no longer accepted as input; unknown type keys are silently ignored
         state = self._state()
-        result = self._v("debug_create_location", {"name": "X", "type": "badtype", "danger_level": 1}, state)
-        assert not result.valid
+        result = self._v("debug_create_location", {"name": "X"}, state)
+        assert result.valid
 
     def test_create_location_invalid_danger_zero(self):
+        # danger_level is no longer accepted as input; the field is ignored
         state = self._state()
-        result = self._v("debug_create_location", {"name": "X", "type": "ruins", "danger_level": 0}, state)
-        assert not result.valid
+        result = self._v("debug_create_location", {"name": "X"}, state)
+        assert result.valid
 
     def test_create_location_original_state_not_mutated(self):
         import copy
@@ -1076,3 +1084,93 @@ class TestDebugLocationCommands:
         assert loc["terrain_type"] == "slag_heaps"
         assert loc["anomaly_activity"] == 8
         assert loc["dominant_anomaly_type"] == "gravitational"
+
+    # ── debug_spawn_stalker ──────────────────────────────────────────────────
+
+    def test_spawn_stalker_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        assert result.valid
+
+    def test_spawn_stalker_appears_in_state(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        old_agent_count = len(state["agents"])
+        old_loc_agents = list(state["locations"][loc_id]["agents"])
+        new_state, events = self._r("debug_spawn_stalker", {"loc_id": loc_id, "name": "Test Stalker"}, state)
+        assert len(new_state["agents"]) == old_agent_count + 1
+        new_ids = set(new_state["agents"].keys()) - set(state["agents"].keys())
+        assert len(new_ids) == 1
+        new_agent_id = list(new_ids)[0]
+        agent = new_state["agents"][new_agent_id]
+        assert agent["name"] == "Test Stalker"
+        assert agent["location_id"] == loc_id
+        assert agent["is_alive"] is True
+        assert new_agent_id in new_state["locations"][loc_id]["agents"]
+        assert any(e["event_type"] == "debug_stalker_spawned" for e in events)
+
+    def test_spawn_stalker_default_name(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        new_ids = set(new_state["agents"].keys()) - set(state["agents"].keys())
+        agent = new_state["agents"][list(new_ids)[0]]
+        assert agent["name"]  # non-empty default name
+
+    def test_spawn_stalker_invalid_no_loc_id(self):
+        state = self._state()
+        result = self._v("debug_spawn_stalker", {}, state)
+        assert not result.valid
+
+    def test_spawn_stalker_invalid_bad_loc_id(self):
+        state = self._state()
+        result = self._v("debug_spawn_stalker", {"loc_id": "nonexistent"}, state)
+        assert not result.valid
+
+    # ── debug_spawn_mutant ───────────────────────────────────────────────────
+
+    def test_spawn_mutant_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": "blind_dog"}, state)
+        assert result.valid
+
+    def test_spawn_mutant_appears_in_state(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        old_mutant_count = len(state["mutants"])
+        new_state, events = self._r("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": "bloodsucker"}, state)
+        assert len(new_state["mutants"]) == old_mutant_count + 1
+        new_ids = set(new_state["mutants"].keys()) - set(state["mutants"].keys())
+        assert len(new_ids) == 1
+        new_mutant_id = list(new_ids)[0]
+        mutant = new_state["mutants"][new_mutant_id]
+        assert mutant["type"] == "bloodsucker"
+        assert mutant["location_id"] == loc_id
+        assert mutant["is_alive"] is True
+        assert new_mutant_id in new_state["locations"][loc_id]["agents"]
+        assert any(e["event_type"] == "debug_mutant_spawned" for e in events)
+
+    def test_spawn_mutant_invalid_no_loc_id(self):
+        state = self._state()
+        result = self._v("debug_spawn_mutant", {"mutant_type": "zombie"}, state)
+        assert not result.valid
+
+    def test_spawn_mutant_invalid_bad_loc_id(self):
+        state = self._state()
+        result = self._v("debug_spawn_mutant", {"loc_id": "nope", "mutant_type": "zombie"}, state)
+        assert not result.valid
+
+    def test_spawn_mutant_invalid_bad_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": "dragon"}, state)
+        assert not result.valid
+
+    def test_spawn_mutant_all_types(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        for mt in ("blind_dog", "flesh", "zombie", "bloodsucker", "psi_controller"):
+            result = self._v("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": mt}, state)
+            assert result.valid, f"Expected valid for mutant_type={mt}"

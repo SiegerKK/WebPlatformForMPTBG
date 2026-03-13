@@ -12,8 +12,10 @@ Supported commands:
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 - debug_update_map(positions, connections)        — persist debug canvas layout (meta, no action cost)
-- debug_update_location(loc_id, name, type, danger_level, terrain_type?, anomaly_activity?, dominant_anomaly_type?) — edit location params in debug mode (meta)
-- debug_create_location(name, type, danger_level, position?) — add a new location in debug mode (meta)
+- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?) — edit location params in debug mode (meta)
+- debug_create_location(name, position?) — add a new location in debug mode (meta)
+- debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
+- debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -67,6 +69,12 @@ def validate_world_command(
 
     if command_type == "debug_create_location":
         return _validate_debug_create_location(payload)
+
+    if command_type == "debug_spawn_stalker":
+        return _validate_debug_spawn_stalker(payload, state)
+
+    if command_type == "debug_spawn_mutant":
+        return _validate_debug_spawn_mutant(payload, state)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -168,8 +176,6 @@ def resolve_world_command(
         loc_id = payload["loc_id"]
         loc = state["locations"][loc_id]
         loc["name"] = str(payload.get("name", loc["name"])).strip()
-        loc["type"] = payload.get("type", loc["type"])
-        loc["danger_level"] = int(payload.get("danger_level", loc["danger_level"]))
         if "terrain_type" in payload:
             loc["terrain_type"] = payload["terrain_type"]
         if "anomaly_activity" in payload:
@@ -191,8 +197,8 @@ def resolve_world_command(
         new_loc = {
             "id": new_id,
             "name": str(payload["name"]).strip(),
-            "type": payload["type"],
-            "danger_level": int(payload["danger_level"]),
+            "type": "wild_area",
+            "danger_level": 1,
             "terrain_type": payload.get("terrain_type", "plain"),
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
@@ -211,6 +217,64 @@ def resolve_world_command(
                 "y": float(pos["y"]),
             }
         events.append({"event_type": "debug_location_created", "payload": {"loc_id": new_id}})
+        return state, events
+
+    # ── debug_spawn_stalker: meta-command, spawn NPC stalker ──────────────────
+    if command_type == "debug_spawn_stalker":
+        import random as _random
+        from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
+        loc_id = payload["loc_id"]
+        existing_agents = state.get("agents", {})
+        n = len(existing_agents)
+        new_agent_id = f"agent_debug_{n}"
+        while new_agent_id in existing_agents:
+            n += 1
+            new_agent_id = f"agent_debug_{n}"
+        name = str(payload.get("name", "")).strip() or f"Сталкер #{n}"
+        rng = _random.Random(new_agent_id)
+        agent = _make_stalker_agent(
+            agent_id=new_agent_id,
+            name=name,
+            location_id=loc_id,
+            controller_kind="ai",
+            participant_id=None,
+            rng=rng,
+        )
+        state.setdefault("agents", {})[new_agent_id] = agent
+        state["locations"][loc_id]["agents"].append(new_agent_id)
+        events.append({"event_type": "debug_stalker_spawned", "payload": {"agent_id": new_agent_id, "loc_id": loc_id}})
+        return state, events
+
+    # ── debug_spawn_mutant: meta-command, spawn a mutant ─────────────────────
+    if command_type == "debug_spawn_mutant":
+        from app.games.zone_stalkers.balance.mutants import MUTANT_TYPES
+        loc_id = payload["loc_id"]
+        mutant_type = payload["mutant_type"]
+        mutant_info = MUTANT_TYPES[mutant_type]
+        existing_mutants = state.get("mutants", {})
+        n = len(existing_mutants)
+        new_mutant_id = f"mutant_debug_{n}"
+        while new_mutant_id in existing_mutants:
+            n += 1
+            new_mutant_id = f"mutant_debug_{n}"
+        mutant = {
+            "id": new_mutant_id,
+            "archetype": "mutant_agent",
+            "type": mutant_type,
+            "name": mutant_info["name"],
+            "location_id": loc_id,
+            "hp": mutant_info["hp"],
+            "max_hp": mutant_info["max_hp"],
+            "damage": mutant_info["damage"],
+            "defense": mutant_info["defense"],
+            "aggression": mutant_info["aggression"],
+            "is_alive": True,
+            "loot_table": mutant_info["loot_table"],
+            "money_drop": mutant_info["money_drop"],
+        }
+        state.setdefault("mutants", {})[new_mutant_id] = mutant
+        state["locations"][loc_id]["agents"].append(new_mutant_id)
+        events.append({"event_type": "debug_mutant_spawned", "payload": {"mutant_id": new_mutant_id, "loc_id": loc_id}})
         return state, events
 
     if command_type == "end_turn":
@@ -604,12 +668,6 @@ def _validate_debug_update_location(
     name = str(payload.get("name", "")).strip()
     if not name:
         return RuleCheckResult(valid=False, error="name must be non-empty")
-    loc_type = payload.get("type")
-    if loc_type not in _VALID_LOC_TYPES:
-        return RuleCheckResult(valid=False, error=f"Invalid type '{loc_type}'; must be one of {sorted(_VALID_LOC_TYPES)}")
-    danger_level = payload.get("danger_level")
-    if not isinstance(danger_level, int) or not (1 <= danger_level <= 5):
-        return RuleCheckResult(valid=False, error="danger_level must be an integer between 1 and 5")
     if "terrain_type" in payload:
         terrain_type = payload["terrain_type"]
         if terrain_type not in _VALID_TERRAIN_TYPES:
@@ -627,10 +685,32 @@ def _validate_debug_create_location(
     name = str(payload.get("name", "")).strip()
     if not name:
         return RuleCheckResult(valid=False, error="name must be non-empty")
-    loc_type = payload.get("type")
-    if loc_type not in _VALID_LOC_TYPES:
-        return RuleCheckResult(valid=False, error=f"Invalid type '{loc_type}'; must be one of {sorted(_VALID_LOC_TYPES)}")
-    danger_level = payload.get("danger_level")
-    if not isinstance(danger_level, int) or not (1 <= danger_level <= 5):
-        return RuleCheckResult(valid=False, error="danger_level must be an integer between 1 and 5")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_stalker(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_mutant(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    from app.games.zone_stalkers.balance.mutants import MUTANT_TYPES
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    mutant_type = payload.get("mutant_type")
+    if not mutant_type or mutant_type not in MUTANT_TYPES:
+        return RuleCheckResult(valid=False, error=f"Invalid mutant_type '{mutant_type}'; must be one of {sorted(MUTANT_TYPES.keys())}")
     return RuleCheckResult(valid=True)
