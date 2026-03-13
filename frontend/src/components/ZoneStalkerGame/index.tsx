@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../api/client';
 import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../types';
 import DebugMapPage from './DebugMapPage';
-import AgentProfileModal from './AgentProfileModal';
+import AgentRow from './AgentRow';
+import type { AgentForProfile } from './AgentProfileModal';
 
 interface Props {
   match: Match;
@@ -159,7 +160,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [activeEventCtx, setActiveEventCtx] = useState<GameContext | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const [takingControlOf, setTakingControlOf] = useState<string | null>(null);
+  const [, setTakingControlOf] = useState<string | null>(null);
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [travelTarget, setTravelTarget] = useState<string | null>(null);
   const [sleepHours, setSleepHours] = useState(6);
@@ -538,8 +539,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
       (a) => a.is_alive && a.controller.kind === 'ai',
     );
 
-    const locName = (locId: string) => zoneState.locations[locId]?.name ?? locId;
-
     return (
       <div style={styles.npcSelectPage}>
         <div style={styles.npcSelectHeader}>
@@ -560,57 +559,17 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             </p>
           </div>
         ) : (
-          <div style={styles.npcGrid}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {aiStalkers.map((agent) => (
-              <div key={agent.id} style={styles.npcCard}>
-                <div style={styles.npcCardTop}>
-                  <span style={styles.npcAvatar}>🤖</span>
-                  <div style={styles.npcInfo}>
-                    <div style={styles.npcName}>{agent.name}</div>
-                    <div style={styles.npcSub}>{agent.faction}</div>
-                  </div>
-                  <span style={{
-                    ...styles.npcAliveTag,
-                    background: agent.hp > 50 ? '#166534' : agent.hp > 25 ? '#78350f' : '#7f1d1d',
-                    color: agent.hp > 50 ? '#86efac' : agent.hp > 25 ? '#fde68a' : '#fca5a5',
-                  }}>
-                    ❤ {agent.hp}/{agent.max_hp}
-                  </span>
-                </div>
-                <div style={styles.npcLoc}>📍 {locName(agent.location_id)}</div>
-                {agent.scheduled_action && (
-                  <div style={styles.npcSched}>
-                    {SCHED_ICONS[agent.scheduled_action.type] ?? '⏳'} {agent.scheduled_action.type}
-                  </div>
-                )}
-                <div style={styles.npcStats}>
-                  <span>💰 {agent.money} RU</span>
-                  {agent.experience !== undefined && (
-                    <span style={{ color: '#94a3b8' }}>XP: {agent.experience}</span>
-                  )}
-                </div>
-                <div style={styles.npcCardFooter}>
-                  <button
-                    style={styles.npcViewBtn}
-                    onClick={() => setProfileAgentId(agent.id)}
-                  >
-                    Профиль
-                  </button>
-                  <button
-                    style={styles.npcTakeBtn}
-                    onClick={() => handleTakeControl(agent.id)}
-                    disabled={takingControlOf !== null}
-                  >
-                    {takingControlOf === agent.id ? '…' : '▶ Взять под контроль'}
-                  </button>
-                </div>
-              </div>
+              <AgentRow
+                key={agent.id}
+                agent={agent as unknown as AgentForProfile}
+                locations={zoneState.locations}
+                onTakeControl={() => handleTakeControl(agent.id)}
+              />
             ))}
           </div>
         )}
-
-        {/* Profile modal */}
-        {profileAgentId && renderAgentProfile(profileAgentId)}
 
         {error && <p style={styles.error}>{error}</p>}
       </div>
@@ -1555,14 +1514,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // ─── render: debug screen ────────────────────────────────────────────────
   const renderDebugScreen = () => {
     if (!zoneState) return <p style={styles.loadingText}>Загрузка…</p>;
-    const profileAgent = profileAgentId ? zoneState.agents[profileAgentId] : null;
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {/* Header with back button and sub-tabs */}
         <div style={styles.debugHeader}>
           <button
             style={styles.btnSmall}
-            onClick={() => { setShowDebug(false); setShowEntryMenu(true); setProfileAgentId(null); }}
+            onClick={() => { setShowDebug(false); setShowEntryMenu(true); }}
           >
             ← Меню
           </button>
@@ -1587,15 +1545,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
-
-        {/* Agent profile modal (shown over debug screen) */}
-        {profileAgent && (
-          <AgentProfileModal
-            agent={profileAgent}
-            locationName={zoneState.locations[profileAgent.location_id]?.name ?? profileAgent.location_id}
-            onClose={() => setProfileAgentId(null)}
-          />
-        )}
       </div>
     );
   };
@@ -1612,51 +1561,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           {allAgents.length} сталкеров в Зоне
         </div>
         {allAgents.map((agent) => (
-          <div
+          <AgentRow
             key={agent.id}
-            style={{
-              background: '#0f172a',
-              border: '1px solid #1e293b',
-              borderLeft: `4px solid ${agent.is_alive ? '#22c55e' : '#475569'}`,
-              borderRadius: 8,
-              padding: '0.6rem 0.8rem',
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: '0.5rem 1.5rem',
-              alignItems: 'center',
-            }}
-          >
-            <span style={{ color: agent.is_alive ? '#f8fafc' : '#475569', fontWeight: 700, fontSize: '0.9rem', minWidth: 120 }}>
-              {agent.name}
-              {!agent.is_alive && <span style={{ color: '#ef4444', fontSize: '0.7rem', marginLeft: 6 }}>†</span>}
-            </span>
-            <span style={{ color: '#64748b', fontSize: '0.72rem' }}>
-              {agent.faction}
-            </span>
-            <span style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
-              ❤ {agent.hp}/{agent.max_hp}
-            </span>
-            <span style={{ color: '#64748b', fontSize: '0.72rem' }}>
-              📍 {locName(agent.location_id)}
-            </span>
-            <span style={{
-              background: agent.controller.kind === 'human' ? '#1d4ed8' : '#1e293b',
-              color: agent.controller.kind === 'human' ? '#bfdbfe' : '#475569',
-              borderRadius: 5,
-              padding: '0.1rem 0.4rem',
-              fontSize: '0.65rem',
-              fontWeight: 700,
-            }}>
-              {agent.controller.kind === 'human' ? '👤 Игрок' : '🤖 ИИ'}
-            </span>
-            <button
-              style={styles.btnSmall}
-              onClick={() => setProfileAgentId(agent.id)}
-              title="Открыть профиль персонажа"
-            >
-              👁 Профиль
-            </button>
-          </div>
+            agent={agent as unknown as AgentForProfile}
+            locationName={locName(agent.location_id)}
+            locations={zoneState.locations}
+            isCurrentPlayer={agent.id === myAgentId}
+          />
         ))}
       </div>
     );

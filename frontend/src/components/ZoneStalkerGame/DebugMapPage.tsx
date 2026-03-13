@@ -11,6 +11,7 @@
  *    the debug_update_map command so they survive page reloads
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
+import { AgentCreateModal } from './AgentProfileModal';
 
 // ─── Types (mirrored from ZoneStalkerGame/index.tsx) ─────────────────────────
 
@@ -225,6 +226,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   // Saving flag and error shown in toolbar
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // ── Advance turn ─────────────────────────────────────────────────────────
+  const [ticking, setTicking] = useState(false);
+  const handleTick = async () => {
+    setTicking(true);
+    try { await sendCommand('end_turn', {}); }
+    finally { setTicking(false); }
+  };
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
@@ -498,6 +507,15 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                 ⚠ Save failed
               </span>
             )}
+            {/* Advance turn */}
+            <button
+              style={s.toolBtn}
+              onClick={handleTick}
+              disabled={ticking}
+              title="Advance world by one turn (end_turn command)"
+            >
+              {ticking ? '…' : '⏭ Ход'}
+            </button>
             <button
               style={s.toolBtn}
               onClick={() => setCreatingLoc(true)}
@@ -721,8 +739,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
             zoneState={zoneState}
             onClose={() => setSelectedLocId(null)}
             onEdit={() => setEditingLocId(selectedLocId!)}
-            onSpawnStalker={async (name) => {
-              await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name });
+            onSpawnStalker={async (name, faction, globalGoal) => {
+              await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name, faction, global_goal: globalGoal });
             }}
             onSpawnMutant={async (mutantType) => {
               await sendCommand('debug_spawn_mutant', { loc_id: selectedLocId!, mutant_type: mutantType });
@@ -777,7 +795,7 @@ function LocationDetailPanel({
   zoneState: ZoneMapState;
   onClose: () => void;
   onEdit: () => void;
-  onSpawnStalker: (name: string) => Promise<void>;
+  onSpawnStalker: (name: string, faction: string, globalGoal: string) => Promise<void>;
   onSpawnMutant: (mutantType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
 }) {
@@ -998,9 +1016,12 @@ function LocationDetailPanel({
       <div style={{ color: '#1e293b', fontSize: '0.62rem', marginTop: 6 }}>id: {loc.id}</div>
 
       {showSpawnModal === 'stalker' && (
-        <SpawnStalkerModal
+        <AgentCreateModal
           onClose={() => setShowSpawnModal(null)}
-          onSave={async (name) => { await onSpawnStalker(name); setShowSpawnModal(null); }}
+          onSave={async (name, faction, globalGoal) => {
+            await onSpawnStalker(name, faction, globalGoal);
+            setShowSpawnModal(null);
+          }}
         />
       )}
       {showSpawnModal === 'mutant' && (
@@ -1244,53 +1265,7 @@ const MUTANT_TYPE_LABELS: Record<string, string> = {
   psi_controller: 'Psi-Controller',
 };
 
-function SpawnStalkerModal({
-  onClose,
-  onSave,
-}: {
-  onClose: () => void;
-  onSave: (name: string) => Promise<void>;
-}) {
-  const [name, setName] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const handleSubmit = async () => {
-    setSaving(true); setErr(null);
-    try {
-      await onSave(name.trim());
-    } catch (e: unknown) {
-      setErr((e as { message?: string })?.message ?? 'Spawn failed');
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={s.modalOverlay} onMouseDown={onClose}>
-      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
-        <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>👤 Spawn Stalker</h3>
-        <label style={s.modalLabel}>Имя (необязательно)</label>
-        <input
-          style={s.modalInput}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Оставьте пустым для случайного"
-          autoFocus
-        />
-        <div style={{ color: '#64748b', fontSize: '0.68rem', marginTop: 4, marginBottom: 8 }}>
-          Фракция, снаряжение и навыки генерируются автоматически.
-        </div>
-        {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
-        <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
-          <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
-          <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
-            {saving ? 'Spawning…' : 'Spawn'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ─── SpawnMutantModal ─────────────────────────────────────────────────────────
 
 function SpawnMutantModal({
   onClose,

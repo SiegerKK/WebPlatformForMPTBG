@@ -4,7 +4,7 @@
  * Import `AgentForProfile` to build a compatible agent object.
  * Closing: clicking the semi-transparent overlay or the ✕ button calls `onClose`.
  */
-import React from 'react';
+import React, { useState } from 'react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -373,4 +373,136 @@ const s: Record<string, React.CSSProperties> = {
   memoryWhen: { color: '#475569', fontSize: '0.7rem' },
   memoryTitle: { color: '#f8fafc', fontWeight: 600, fontSize: '0.82rem', marginBottom: 2 },
   memorySummary: { color: '#94a3b8', fontSize: '0.78rem', lineHeight: 1.5 },
+};
+
+// ─── AgentCreateModal ─────────────────────────────────────────────────────────
+
+export interface AgentCreateProps {
+  onClose: () => void;
+  onSave: (name: string, faction: string, globalGoal: string) => Promise<void>;
+}
+
+const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'loner',    label: 'Одиночка' },
+  { value: 'military', label: 'Военные'  },
+  { value: 'duty',     label: 'Долг'     },
+  { value: 'freedom',  label: 'Свобода'  },
+];
+
+export function AgentCreateModal({ onClose, onSave }: AgentCreateProps) {
+  const [name,       setName]       = useState('');
+  const [faction,    setFaction]    = useState('loner');
+  const [globalGoal, setGlobalGoal] = useState('');
+  const [saving,     setSaving]     = useState(false);
+  const [err,        setErr]        = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      await onSave(name.trim(), faction, globalGoal.trim());
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Ошибка создания');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={s.overlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div style={s.header}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: '1.5rem' }}>👤</span>
+            <span style={s.name}>Создать сталкера</span>
+          </div>
+          <button style={s.closeBtn} onClick={onClose} title="Закрыть">✕</button>
+        </div>
+
+        {/* Name */}
+        <div style={s.section}>
+          <div style={s.sectionLabel}>Имя персонажа</div>
+          <input
+            style={cs.input}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Имя персонажа (пусто = случайное)"
+            autoFocus
+          />
+        </div>
+
+        {/* Faction */}
+        <div style={s.section}>
+          <div style={s.sectionLabel}>Фракция</div>
+          <select
+            style={cs.input}
+            value={faction}
+            onChange={(e) => setFaction(e.target.value)}
+          >
+            {FACTION_OPTIONS.map(({ value, label }) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Global goal */}
+        <div style={s.section}>
+          <div style={s.sectionLabel}>Глобальная цель</div>
+          <textarea
+            style={{ ...cs.input, minHeight: 64, resize: 'vertical' as const }}
+            value={globalGoal}
+            onChange={(e) => setGlobalGoal(e.target.value)}
+            placeholder="Глобальная цель в Зоне…"
+          />
+        </div>
+
+        {err && (
+          <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: -4 }}>{err}</div>
+        )}
+
+        {/* Buttons */}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+          <button style={cs.cancelBtn} onClick={onClose} disabled={saving}>
+            Отмена
+          </button>
+          <button style={cs.saveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? '…' : 'Создать'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Styles local to AgentCreateModal (avoid polluting `s`)
+const cs: Record<string, React.CSSProperties> = {
+  input: {
+    width: '100%',
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    color: '#f1f5f9',
+    fontSize: '0.82rem',
+    padding: '0.4rem 0.55rem',
+    boxSizing: 'border-box',
+  },
+  saveBtn: {
+    padding: '0.4rem 1rem',
+    background: '#1d4ed8',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontSize: '0.8rem',
+    fontWeight: 600,
+  },
+  cancelBtn: {
+    padding: '0.4rem 0.8rem',
+    background: '#1e293b',
+    color: '#94a3b8',
+    border: '1px solid #334155',
+    borderRadius: 7,
+    cursor: 'pointer',
+    fontSize: '0.8rem',
+  },
 };
