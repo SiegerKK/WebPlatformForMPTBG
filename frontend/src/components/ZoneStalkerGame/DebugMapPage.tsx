@@ -24,6 +24,9 @@ interface ZoneLocation {
   name: string;
   type: string;
   danger_level: number;
+  terrain_type?: string;
+  anomaly_activity?: number;
+  dominant_anomaly_type?: string | null;
   connections: LocationConn[];
   anomalies: Array<{ id: string; type: string; name: string; active?: boolean }>;
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;
@@ -443,20 +446,23 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
 
   // ── Location CRUD ─────────────────────────────────────────────────────────
   const handleSaveEdit = useCallback(
-    async (data: { name: string; locType: string; dangerLevel: number }) => {
+    async (data: { name: string; locType: string; dangerLevel: number; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
       if (!editingLocId) return;
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
         name: data.name,
         type: data.locType,
         danger_level: data.dangerLevel,
+        terrain_type: data.terrainType,
+        anomaly_activity: data.anomalyActivity,
+        dominant_anomaly_type: data.dominantAnomalyType || null,
       });
     },
     [editingLocId, sendCommand],
   );
 
   const handleSaveCreate = useCallback(
-    async (data: { name: string; locType: string; dangerLevel: number }) => {
+    async (data: { name: string; locType: string; dangerLevel: number; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
       // Place the new card just below the current canvas bottom-center so it's visible
       const pos = {
         x: Math.max(CARD_W / 2 + CANVAS_PAD, canvasW / 2),
@@ -466,6 +472,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         name: data.name,
         type: data.locType,
         danger_level: data.dangerLevel,
+        terrain_type: data.terrainType,
+        anomaly_activity: data.anomalyActivity,
+        dominant_anomaly_type: data.dominantAnomalyType || null,
         position: pos,
       });
     },
@@ -614,9 +623,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                   : false;
 
               const aliveAgents = loc.agents.filter(
-                (aid) =>
-                  zoneState.agents[aid]?.is_alive ||
-                  zoneState.mutants[aid]?.is_alive,
+                (aid) => zoneState.agents[aid]?.is_alive,
+              ).length;
+              const aliveMutantsOnCard = loc.agents.filter(
+                (aid) => zoneState.mutants[aid]?.is_alive,
               ).length;
               const traderCount = Object.values(zoneState.traders).filter(
                 (t) => t.location_id === id,
@@ -704,12 +714,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
                     {isCurrent && <Badge bg="#166534" color="#86efac">📍 You</Badge>}
                     {aliveAgents > 0 && <Badge bg="#334155" color="#94a3b8">👥 {aliveAgents}</Badge>}
+                    {aliveMutantsOnCard > 0 && <Badge bg="#7f1d1d" color="#fca5a5">☣️ {aliveMutantsOnCard}</Badge>}
                     {traderCount > 0 && <Badge bg="#1e293b" color="#94a3b8">🏪 {traderCount}</Badge>}
                     {loc.artifacts.length > 0 && (
                       <Badge bg="#312e81" color="#a5b4fc">💎 {loc.artifacts.length}</Badge>
                     )}
-                    {loc.anomalies.length > 0 && (
-                      <Badge bg="#4a044e" color="#e879f9">☢ {loc.anomalies.length}</Badge>
+                    {(loc.anomaly_activity ?? 0) > 0 && (
+                      <Badge bg="#4a044e" color="#e879f9">☢ {loc.anomaly_activity}</Badge>
                     )}
                     {loc.items.length > 0 && (
                       <Badge bg="#1c1917" color="#78716c">📦 {loc.items.length}</Badge>
@@ -745,6 +756,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           initialName={zoneState.locations[editingLocId].name}
           initialLocType={zoneState.locations[editingLocId].type}
           initialDangerLevel={zoneState.locations[editingLocId].danger_level}
+          initialTerrainType={zoneState.locations[editingLocId].terrain_type ?? 'plain'}
+          initialAnomalyActivity={zoneState.locations[editingLocId].anomaly_activity ?? 0}
+          initialDominantAnomalyType={zoneState.locations[editingLocId].dominant_anomaly_type ?? ''}
           locId={editingLocId}
           onClose={() => setEditingLocId(null)}
           onSave={handleSaveEdit}
@@ -784,6 +798,8 @@ function LocationDetailPanel({
   const mutants = loc.agents
     .map((id) => zoneState.mutants[id])
     .filter(Boolean);
+  const aliveMutants = mutants.filter((m) => m.is_alive);
+  const deadMutants = mutants.filter((m) => !m.is_alive);
   const traders = Object.values(zoneState.traders).filter(
     (t) => t.location_id === loc.id,
   );
@@ -808,6 +824,37 @@ function LocationDetailPanel({
         </div>
         <button onClick={onClose} style={s.closeBtn}>✕</button>
       </div>
+
+      {/* New location properties */}
+      <Section label="🌍 Характеристики">
+        {loc.terrain_type && (
+          <DetailRow>
+            <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Местность</span>
+            <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>
+              {TERRAIN_TYPE_LABELS[loc.terrain_type] ?? loc.terrain_type}
+            </span>
+          </DetailRow>
+        )}
+        <DetailRow>
+          <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Аном. активность</span>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ flex: 1, height: 5, background: '#0f172a', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${((loc.anomaly_activity ?? 0) / 10) * 100}%`, background: '#a855f7', borderRadius: 3 }} />
+            </div>
+            <span style={{ color: '#a855f7', fontSize: '0.7rem', width: 24, textAlign: 'right', flexShrink: 0 }}>{loc.anomaly_activity ?? 0}</span>
+          </div>
+        </DetailRow>
+        {loc.dominant_anomaly_type && (
+          <DetailRow>
+            <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Тип аномалий</span>
+            <span style={{ color: '#e879f9', fontSize: '0.8rem' }}>{loc.dominant_anomaly_type}</span>
+          </DetailRow>
+        )}
+        <DetailRow>
+          <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Артефактов</span>
+          <span style={{ color: '#a5b4fc', fontSize: '0.8rem' }}>{loc.artifacts.length}</span>
+        </DetailRow>
+      </Section>
 
       {/* Connections */}
       <Section label="🔗 Connections">
@@ -842,42 +889,64 @@ function LocationDetailPanel({
         )}
       </Section>
 
-      {/* Stalkers */}
-      {stalkers.length > 0 && (
-        <Section label="🧍 Stalkers">
-          {stalkers.map((a) => (
+      {/* Stalkers — always show with count, full list */}
+      <Section label={`🧍 Сталкеры (${stalkers.length})`}>
+        {stalkers.length === 0 ? (
+          <EmptyRow />
+        ) : (
+          stalkers.map((a) => (
             <DetailRow key={a.id}>
-              <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem' }}>
+              <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem', flex: 1 }}>
                 {a.name}
                 {!a.is_alive && (
                   <span style={{ color: '#ef4444', fontSize: '0.65rem', marginLeft: 4 }}>
-                    (dead)
+                    (мёртв)
                   </span>
                 )}
               </span>
               <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
                 {a.hp}/{a.max_hp} HP
               </span>
+              <span style={{
+                background: a.controller.kind === 'human' ? '#1d4ed8' : '#1e293b',
+                color: a.controller.kind === 'human' ? '#bfdbfe' : '#475569',
+                borderRadius: 4,
+                padding: '0 0.3rem',
+                fontSize: '0.62rem',
+                flexShrink: 0,
+              }}>
+                {a.controller.kind === 'human' ? '👤' : '🤖'}
+              </span>
             </DetailRow>
-          ))}
-        </Section>
-      )}
+          ))
+        )}
+      </Section>
 
-      {/* Mutants */}
-      {mutants.length > 0 && (
-        <Section label="☣️ Mutants">
-          {mutants.map((m) => (
-            <DetailRow key={m.id}>
-              <span style={{ color: m.is_alive ? '#fca5a5' : '#475569', fontSize: '0.8rem' }}>
-                {m.name}
-              </span>
-              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
-                {m.hp}/{m.max_hp} HP
-              </span>
-            </DetailRow>
-          ))}
-        </Section>
-      )}
+      {/* Mutants — show count stats + list */}
+      <Section label={`☣️ Мутанты (${mutants.length})`}>
+        {mutants.length === 0 ? (
+          <EmptyRow />
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
+              <span style={{ color: '#fca5a5', fontSize: '0.72rem' }}>Живых: {aliveMutants.length}</span>
+              {deadMutants.length > 0 && (
+                <span style={{ color: '#475569', fontSize: '0.72rem' }}>Мёртвых: {deadMutants.length}</span>
+              )}
+            </div>
+            {mutants.map((m) => (
+              <DetailRow key={m.id}>
+                <span style={{ color: m.is_alive ? '#fca5a5' : '#475569', fontSize: '0.8rem', flex: 1 }}>
+                  {m.name}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                  {m.hp}/{m.max_hp} HP
+                </span>
+              </DetailRow>
+            ))}
+          </>
+        )}
+      </Section>
 
       {/* Traders */}
       {traders.length > 0 && (
@@ -1025,11 +1094,30 @@ const LOC_TYPES = [
   'safe_hub', 'wild_area', 'ruins', 'military_zone', 'anomaly_cluster', 'underground',
 ] as const;
 
+const TERRAIN_TYPES = [
+  'plain', 'hills', 'slag_heaps', 'industrial', 'urban',
+] as const;
+
+const TERRAIN_TYPE_LABELS: Record<string, string> = {
+  plain: 'Равнина',
+  hills: 'Холмы',
+  slag_heaps: 'Террикони',
+  industrial: 'Промышленная застройка',
+  urban: 'Городская застройка',
+};
+
+const DOMINANT_ANOMALY_OPTIONS = [
+  '', 'chemical', 'electric', 'gravitational', 'thermal', 'radioactive',
+] as const;
+
 function LocationModal({
   mode,
   initialName = '',
   initialLocType = 'safe_hub',
   initialDangerLevel = 1,
+  initialTerrainType = 'plain',
+  initialAnomalyActivity = 0,
+  initialDominantAnomalyType = '',
   locId,
   onClose,
   onSave,
@@ -1038,13 +1126,19 @@ function LocationModal({
   initialName?: string;
   initialLocType?: string;
   initialDangerLevel?: number;
+  initialTerrainType?: string;
+  initialAnomalyActivity?: number;
+  initialDominantAnomalyType?: string;
   locId?: string;
   onClose: () => void;
-  onSave: (data: { name: string; locType: string; dangerLevel: number }) => Promise<void>;
+  onSave: (data: { name: string; locType: string; dangerLevel: number; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => Promise<void>;
 }) {
   const [name, setName] = useState(initialName);
   const [locType, setLocType] = useState(initialLocType);
   const [dangerLevel, setDangerLevel] = useState(initialDangerLevel);
+  const [terrainType, setTerrainType] = useState(initialTerrainType);
+  const [anomalyActivity, setAnomalyActivity] = useState(initialAnomalyActivity);
+  const [dominantAnomalyType, setDominantAnomalyType] = useState(initialDominantAnomalyType);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1053,7 +1147,7 @@ function LocationModal({
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, locType, dangerLevel });
+      await onSave({ name: trimmed, locType, dangerLevel, terrainType, anomalyActivity, dominantAnomalyType });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -1106,6 +1200,39 @@ function LocationModal({
         >
           {[1, 2, 3, 4, 5].map((n) => (
             <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
+
+        <label style={s.modalLabel}>Terrain type</label>
+        <select
+          style={s.modalInput}
+          value={terrainType}
+          onChange={(e) => setTerrainType(e.target.value)}
+        >
+          {TERRAIN_TYPES.map((t) => (
+            <option key={t} value={t}>{TERRAIN_TYPE_LABELS[t] ?? t}</option>
+          ))}
+        </select>
+
+        <label style={s.modalLabel}>Anomaly activity: {anomalyActivity}</label>
+        <input
+          type="range"
+          min={0}
+          max={10}
+          step={1}
+          value={anomalyActivity}
+          onChange={(e) => setAnomalyActivity(Number(e.target.value))}
+          style={{ width: '100%', accentColor: '#a855f7', marginBottom: 10 }}
+        />
+
+        <label style={s.modalLabel}>Dominant anomaly type</label>
+        <select
+          style={s.modalInput}
+          value={dominantAnomalyType}
+          onChange={(e) => setDominantAnomalyType(e.target.value)}
+        >
+          {DOMINANT_ANOMALY_OPTIONS.map((t) => (
+            <option key={t} value={t}>{t === '' ? '— none —' : t}</option>
           ))}
         </select>
 

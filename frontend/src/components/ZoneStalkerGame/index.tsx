@@ -23,6 +23,9 @@ interface ZoneLocation {
   name: string;
   type: string;
   danger_level: number;
+  terrain_type?: string;
+  anomaly_activity?: number;
+  dominant_anomaly_type?: string | null;
   connections: LocationConn[];
   anomalies: Array<{ id: string; type: string; name: string }>;
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;

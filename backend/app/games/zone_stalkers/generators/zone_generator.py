@@ -11,20 +11,25 @@ from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 from app.games.zone_stalkers.balance.mutants import MUTANT_TYPES
 from app.games.zone_stalkers.balance.items import ITEM_TYPES
 
+# Valid terrain types for a location
+TERRAIN_TYPES = ["plain", "hills", "slag_heaps", "industrial", "urban"]
+
 # Location blueprint templates
 _LOCATION_BLUEPRINTS = [
-    {"name": "Cordon",          "type": "safe_hub",       "danger_level": 1},
-    {"name": "Garbage",         "type": "wild_area",      "danger_level": 2},
-    {"name": "Agroprom",        "type": "ruins",          "danger_level": 3},
-    {"name": "Dark Valley",     "type": "military_zone",  "danger_level": 4},
-    {"name": "Bar",             "type": "safe_hub",       "danger_level": 1},
-    {"name": "Wild Territory",  "type": "wild_area",      "danger_level": 3},
-    {"name": "Yantar",          "type": "anomaly_cluster","danger_level": 4},
-    {"name": "Red Forest",      "type": "anomaly_cluster","danger_level": 5},
-    {"name": "Pripyat",         "type": "ruins",          "danger_level": 5},
-    {"name": "Swamp",           "type": "wild_area",      "danger_level": 2},
-    {"name": "Outskirts",       "type": "ruins",          "danger_level": 3},
-    {"name": "Jupiter",         "type": "military_zone",  "danger_level": 4},
+    {"name": "Cordon",          "type": "safe_hub",       "danger_level": 1, "terrain_type": "plain"},
+    {"name": "Garbage",         "type": "wild_area",      "danger_level": 2, "terrain_type": "industrial"},
+    {"name": "Agroprom",        "type": "ruins",          "danger_level": 3, "terrain_type": "industrial"},
+    {"name": "Dark Valley",     "type": "military_zone",  "danger_level": 4, "terrain_type": "hills"},
+    {"name": "Bar",             "type": "safe_hub",       "danger_level": 1, "terrain_type": "urban"},
+    {"name": "Wild Territory",  "type": "wild_area",      "danger_level": 3, "terrain_type": "plain"},
+    {"name": "Yantar",          "type": "anomaly_cluster","danger_level": 4, "terrain_type": "industrial"},
+    {"name": "Red Forest",      "type": "anomaly_cluster","danger_level": 5, "terrain_type": "plain"},
+    {"name": "Pripyat",         "type": "ruins",          "danger_level": 5, "terrain_type": "urban"},
+    {"name": "Swamp",           "type": "wild_area",      "danger_level": 2, "terrain_type": "plain"},
+    {"name": "Outskirts",       "type": "ruins",          "danger_level": 3, "terrain_type": "urban"},
+    {"name": "Jupiter",         "type": "military_zone",  "danger_level": 4, "terrain_type": "industrial"},
+    {"name": "Slag Heaps",      "type": "wild_area",      "danger_level": 3, "terrain_type": "slag_heaps"},
+    {"name": "Eastern Hills",   "type": "wild_area",      "danger_level": 2, "terrain_type": "hills"},
 ]
 
 _MIN_LOCATIONS = 8
@@ -59,11 +64,21 @@ def generate_zone(
     for i, bp in enumerate(blueprints):
         loc_id = f"loc_{i}"
         loc_ids.append(loc_id)
+        # anomaly_activity: anomaly_cluster gets 6-10, wild_area 2-5, others 0-3
+        if bp["type"] == "anomaly_cluster":
+            anom_activity = rng.randint(6, 10)
+        elif bp["type"] == "wild_area":
+            anom_activity = rng.randint(2, 5)
+        else:
+            anom_activity = rng.randint(0, 3)
         locations[loc_id] = {
             "id": loc_id,
             "name": bp["name"],
             "type": bp["type"],
             "danger_level": bp["danger_level"],
+            "terrain_type": bp.get("terrain_type", "plain"),
+            "anomaly_activity": anom_activity,
+            "dominant_anomaly_type": None,
             "connections": [],
             "anomalies": [],
             "artifacts": [],
@@ -108,6 +123,12 @@ def generate_zone(
                 "name": ANOMALY_TYPES[anom_type]["name"],
                 "active": True,
             })
+        # Set dominant_anomaly_type from the most common anomaly type present
+        if loc["anomalies"]:
+            counts: Dict[str, int] = {}
+            for a in loc["anomalies"]:
+                counts[a["type"]] = counts.get(a["type"], 0) + 1
+            loc["dominant_anomaly_type"] = max(counts, key=lambda k: counts[k])
 
     # 4. Place artifacts near anomalies
     artifact_type_keys = list(ARTIFACT_TYPES.keys())

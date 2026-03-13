@@ -12,7 +12,7 @@ Supported commands:
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 - debug_update_map(positions, connections)        — persist debug canvas layout (meta, no action cost)
-- debug_update_location(loc_id, name, type, danger_level) — edit location params in debug mode (meta)
+- debug_update_location(loc_id, name, type, danger_level, terrain_type?, anomaly_activity?, dominant_anomaly_type?) — edit location params in debug mode (meta)
 - debug_create_location(name, type, danger_level, position?) — add a new location in debug mode (meta)
 """
 import collections
@@ -29,6 +29,11 @@ _MIN_SLEEP_HOURS = 2
 # Valid location types (shared between generator and debug commands)
 _VALID_LOC_TYPES = frozenset([
     "safe_hub", "wild_area", "ruins", "military_zone", "anomaly_cluster", "underground",
+])
+
+# Valid terrain types (shared between generator and debug commands)
+_VALID_TERRAIN_TYPES = frozenset([
+    "plain", "hills", "slag_heaps", "industrial", "urban",
 ])
 
 # Exploration rewards by location type (probability keys)
@@ -165,6 +170,12 @@ def resolve_world_command(
         loc["name"] = str(payload.get("name", loc["name"])).strip()
         loc["type"] = payload.get("type", loc["type"])
         loc["danger_level"] = int(payload.get("danger_level", loc["danger_level"]))
+        if "terrain_type" in payload:
+            loc["terrain_type"] = payload["terrain_type"]
+        if "anomaly_activity" in payload:
+            loc["anomaly_activity"] = int(payload["anomaly_activity"])
+        if "dominant_anomaly_type" in payload:
+            loc["dominant_anomaly_type"] = payload["dominant_anomaly_type"] or None
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 
@@ -182,6 +193,9 @@ def resolve_world_command(
             "name": str(payload["name"]).strip(),
             "type": payload["type"],
             "danger_level": int(payload["danger_level"]),
+            "terrain_type": payload.get("terrain_type", "plain"),
+            "anomaly_activity": int(payload.get("anomaly_activity", 0)),
+            "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
             "connections": [],
             "anomalies": [],
             "artifacts": [],
@@ -596,6 +610,14 @@ def _validate_debug_update_location(
     danger_level = payload.get("danger_level")
     if not isinstance(danger_level, int) or not (1 <= danger_level <= 5):
         return RuleCheckResult(valid=False, error="danger_level must be an integer between 1 and 5")
+    if "terrain_type" in payload:
+        terrain_type = payload["terrain_type"]
+        if terrain_type not in _VALID_TERRAIN_TYPES:
+            return RuleCheckResult(valid=False, error=f"Invalid terrain_type '{terrain_type}'; must be one of {sorted(_VALID_TERRAIN_TYPES)}")
+    if "anomaly_activity" in payload:
+        aa = payload["anomaly_activity"]
+        if not isinstance(aa, int) or not (0 <= aa <= 10):
+            return RuleCheckResult(valid=False, error="anomaly_activity must be an integer between 0 and 10")
     return RuleCheckResult(valid=True)
 
 

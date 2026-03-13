@@ -1000,3 +1000,79 @@ class TestDebugLocationCommands:
         original = copy.deepcopy(state)
         self._r("debug_create_location", {"name": "X", "type": "ruins", "danger_level": 1}, state)
         assert state == original
+
+    # ── new location fields (terrain_type, anomaly_activity, dominant_anomaly_type) ──
+
+    def test_generator_sets_new_location_fields(self):
+        state = self._state()
+        for loc in state["locations"].values():
+            assert "terrain_type" in loc
+            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "urban"}
+            assert "anomaly_activity" in loc
+            assert isinstance(loc["anomaly_activity"], int)
+            assert 0 <= loc["anomaly_activity"] <= 10
+            assert "dominant_anomaly_type" in loc  # may be None
+
+    def test_update_location_terrain_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        payload = {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1, "terrain_type": "hills"}
+        new_state, _ = self._r("debug_update_location", payload, state)
+        assert new_state["locations"][loc_id]["terrain_type"] == "hills"
+
+    def test_update_location_anomaly_activity(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        payload = {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1, "anomaly_activity": 7}
+        new_state, _ = self._r("debug_update_location", payload, state)
+        assert new_state["locations"][loc_id]["anomaly_activity"] == 7
+
+    def test_update_location_dominant_anomaly_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        payload = {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1, "dominant_anomaly_type": "chemical"}
+        new_state, _ = self._r("debug_update_location", payload, state)
+        assert new_state["locations"][loc_id]["dominant_anomaly_type"] == "chemical"
+
+    def test_update_location_clear_dominant_anomaly_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        # first set it
+        state["locations"][loc_id]["dominant_anomaly_type"] = "fire"
+        payload = {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1, "dominant_anomaly_type": ""}
+        new_state, _ = self._r("debug_update_location", payload, state)
+        assert new_state["locations"][loc_id]["dominant_anomaly_type"] is None
+
+    def test_update_location_invalid_terrain_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1, "terrain_type": "ocean"}, state)
+        assert not result.valid
+
+    def test_update_location_invalid_anomaly_activity_out_of_range(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "type": "ruins", "danger_level": 1, "anomaly_activity": 11}, state)
+        assert not result.valid
+
+    def test_create_location_default_new_fields(self):
+        state = self._state()
+        new_state, _ = self._r("debug_create_location", {"name": "TestLoc", "type": "wild_area", "danger_level": 2}, state)
+        new_id = list(set(new_state["locations"].keys()) - set(state["locations"].keys()))[0]
+        loc = new_state["locations"][new_id]
+        assert loc["terrain_type"] == "plain"
+        assert loc["anomaly_activity"] == 0
+        assert loc["dominant_anomaly_type"] is None
+
+    def test_create_location_with_new_fields(self):
+        state = self._state()
+        payload = {
+            "name": "TestLoc", "type": "anomaly_cluster", "danger_level": 4,
+            "terrain_type": "slag_heaps", "anomaly_activity": 8, "dominant_anomaly_type": "gravitational",
+        }
+        new_state, _ = self._r("debug_create_location", payload, state)
+        new_id = list(set(new_state["locations"].keys()) - set(state["locations"].keys()))[0]
+        loc = new_state["locations"][new_id]
+        assert loc["terrain_type"] == "slag_heaps"
+        assert loc["anomaly_activity"] == 8
+        assert loc["dominant_anomaly_type"] == "gravitational"
