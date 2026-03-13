@@ -12,6 +12,19 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      // Token expired or invalid — clear session and reload to show login screen
+      localStorage.removeItem('access_token');
+      alert('Ваша сессия истекла. Пожалуйста, войдите снова.');
+      window.location.reload();
+    }
+    return Promise.reject(error);
+  },
+);
+
 export const authApi = {
   register: (data: { username: string; email: string; password: string }) =>
     apiClient.post('/auth/register', data),
