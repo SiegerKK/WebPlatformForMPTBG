@@ -350,9 +350,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   // ── Pointer handlers on each card ────────────────────────────────────────
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>, id: string) => {
-      if (linkMode) return; // clicks handled in onPointerUp
       e.preventDefault();
       e.stopPropagation();
+      // Always capture the pointer so handlePointerUp fires on this card.
+      // In link mode we don't start a drag, but we still need capture so the
+      // click-to-link logic in handlePointerUp fires (not the canvas pan handler).
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      if (linkMode) return;
       const pos = effectivePos[id] ?? { x: 0, y: 0 };
       dragRef.current = {
         id,
@@ -362,7 +366,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         startCardY: pos.y,
         hasMoved: false,
       };
-      (e.currentTarget as Element).setPointerCapture(e.pointerId);
     },
     [linkMode, effectivePos],
   );
@@ -377,9 +380,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     setDragOverrides((prev) => ({
       ...prev,
       [d.id]: {
-        // Keep card within [half-card-width, MAX_CANVAS_COORD] so it stays accessible
-        x: Math.max(CARD_W / 2, Math.min(MAX_CANVAS_COORD, d.startCardX + dx)),
-        y: Math.max(CARD_H / 2, Math.min(MAX_CANVAS_COORD, d.startCardY + dy)),
+        x: Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardX + dx)),
+        y: Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardY + dy)),
       },
     }));
   }, []);
@@ -393,8 +395,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         // reading a potentially-stale dragOverridesRef (which is only updated
         // on re-render, and the last pointermove's render may not have
         // completed before pointerup fires).
-        const finalX = Math.max(CARD_W / 2, Math.min(MAX_CANVAS_COORD, d.startCardX + (e.clientX - d.startPtrX)));
-        const finalY = Math.max(CARD_H / 2, Math.min(MAX_CANVAS_COORD, d.startCardY + (e.clientY - d.startPtrY)));
+        const finalX = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardX + (e.clientX - d.startPtrX)));
+        const finalY = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardY + (e.clientY - d.startPtrY)));
         const finalPositions = { ...dragOverridesRef.current, [d.id]: { x: finalX, y: finalY } };
         // Update state immediately with the exact final position
         setDragOverrides(finalPositions);
