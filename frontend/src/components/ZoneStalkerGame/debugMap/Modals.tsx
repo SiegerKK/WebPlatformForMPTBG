@@ -8,7 +8,7 @@ import { s } from './styles';
 
 export const TERRAIN_TYPES = [
   'plain', 'hills', 'slag_heaps', 'industrial', 'buildings', 'military_buildings',
-  'hamlet', 'farm', 'field_camp',
+  'hamlet', 'farm', 'field_camp', 'dungeon', 'x_lab',
 ] as const;
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -21,6 +21,8 @@ export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   hamlet: 'Хутор',
   farm: 'Ферма',
   field_camp: 'Полевой лагерь',
+  dungeon: 'Подземелья',
+  x_lab: 'Лаборатория Х',
 };
 
 export const DOMINANT_ANOMALY_OPTIONS = [

@@ -196,9 +196,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       setSaveError(null);
       try {
         // Serialize connections: plain objects, no class instances
-        const serialisedConns: Record<string, Array<{ to: string; type: string; travel_time: number }>> = {};
+        const serialisedConns: Record<string, Array<{ to: string; type: string; travel_time: number; closed: boolean }>> = {};
         for (const [id, cs] of Object.entries(conns)) {
-          serialisedConns[id] = cs.map((c) => ({ to: c.to, type: c.type, travel_time: c.travel_time ?? 15 }));
+          serialisedConns[id] = cs.map((c) => ({ to: c.to, type: c.type, travel_time: c.travel_time ?? 15, closed: c.closed ?? false }));
         }
         await sendCommand('debug_update_map', {
           positions,
@@ -325,6 +325,21 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       ...prev,
       [fromId]: applyWeight(prev[fromId] ?? []),
       [toId]: (prev[toId] ?? []).map((c) => c.to === fromId ? { ...c, travel_time: travelTime } : c),
+    };
+    setLocalConns(newConns);
+    persistMap(effectivePosRef.current, newConns);
+  }, [persistMap]);
+
+  const toggleConnectionClosed = useCallback((fromId: string, toId: string) => {
+    const prev = localConnsRef.current;
+    const fromConn = (prev[fromId] ?? []).find((c) => c.to === toId);
+    const newClosed = !(fromConn?.closed ?? false);
+    const applyToggle = (list: LocationConn[], target: string) =>
+      list.map((c) => c.to === target ? { ...c, closed: newClosed } : c);
+    const newConns = {
+      ...prev,
+      [fromId]: applyToggle(prev[fromId] ?? [], toId),
+      [toId]: applyToggle(prev[toId] ?? [], fromId),
     };
     setLocalConns(newConns);
     persistMap(effectivePosRef.current, newConns);
@@ -909,6 +924,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                   const b = effectivePos[conn.to];
                   if (!a || !b) return null;
                   const isDangerous = conn.type === 'dangerous';
+                  const isClosed = !!conn.closed;
                   const mx = (a.x + b.x) / 2;
                   const my = (a.y + b.y) / 2;
                   const travelTime = conn.travel_time ?? 15;
@@ -923,10 +939,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                   const hasSelection = !!(selectedLocId || selectedRegionId);
                   // Dim non-highlighted edges when something is selected
                   const baseOpacity = hasSelection ? (isHighlighted ? 1.0 : 0.18) : 0.8;
-                  const strokeColor = isHighlighted
-                    ? (isLocHighlighted ? '#fbbf24' : '#c084fc')
-                    : (isDangerous ? '#7f1d1d' : '#1e3a5f');
-                  const strokeW = isHighlighted ? 2.5 : (isDangerous ? 2 : 1.5);
+                  // Closed edges: bright-red when highlighted, dark-red otherwise
+                  const strokeColor = isClosed
+                    ? (isHighlighted ? '#ef4444' : '#7f1d1d')
+                    : isHighlighted
+                      ? (isLocHighlighted ? '#fbbf24' : '#c084fc')
+                      : (isDangerous ? '#7f1d1d' : '#1e3a5f');
+                  const strokeW = isHighlighted ? 2.5 : (isDangerous || isClosed ? 2 : 1.5);
+                  const dashArray = isClosed ? '4 4' : (isDangerous && !isHighlighted ? '6 3' : undefined);
                   return (
                     <g key={`${locId}--${conn.to}`}>
                       <line
@@ -936,7 +956,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                         y2={b.y}
                         stroke={strokeColor}
                         strokeWidth={strokeW}
-                        strokeDasharray={isDangerous && !isHighlighted ? '6 3' : undefined}
+                        strokeDasharray={dashArray}
                         strokeOpacity={baseOpacity}
                       />
                       {/* Travel-time label */}
@@ -954,7 +974,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                         y={my + 3}
                         textAnchor="middle"
                         fontSize={9}
-                        fill={isHighlighted ? '#fde68a' : (isDangerous ? '#fca5a5' : '#94a3b8')}
+                        fill={isClosed ? (isHighlighted ? '#fca5a5' : '#7f1d1d') : (isHighlighted ? '#fde68a' : (isDangerous ? '#fca5a5' : '#94a3b8'))}
                         fontFamily="monospace"
                         opacity={baseOpacity}
                       >
@@ -1114,6 +1134,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
             onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}
+            onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel

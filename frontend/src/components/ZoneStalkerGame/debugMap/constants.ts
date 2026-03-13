@@ -87,6 +87,8 @@ export const TERRAIN_TYPE_COLOR: Record<string, string> = {
   hamlet: '#fb923c',
   farm: '#34d399',
   field_camp: '#2dd4bf',
+  dungeon: '#7c3aed',
+  x_lab: '#06b6d4',
 };
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -99,6 +101,8 @@ export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   hamlet: 'Хутор',
   farm: 'Ферма',
   field_camp: 'Полевой лагерь',
+  dungeon: 'Подземелья',
+  x_lab: 'Лаборатория Х',
 };
 
 // ─── Region colors & labels ───────────────────────────────────────────────────

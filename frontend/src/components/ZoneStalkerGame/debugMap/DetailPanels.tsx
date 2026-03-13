@@ -23,6 +23,7 @@ export function LocationDetailPanel({
   onSpawnMutant,
   onDeleteConnection,
   onUpdateConnectionWeight,
+  onToggleConnectionClosed,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -39,6 +40,7 @@ export function LocationDetailPanel({
   onSpawnMutant: (mutantType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
   onUpdateConnectionWeight: (toId: string, travelTime: number) => void;
+  onToggleConnectionClosed: (toId: string) => void;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'mutant' | null>(null);
 
@@ -146,6 +148,20 @@ export function LocationDetailPanel({
                   }}
                 />
                 <span style={{ color: '#475569', fontSize: '0.65rem', marginRight: 4 }}>м</span>
+                <button
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    padding: '0 4px',
+                    color: c.closed ? '#ef4444' : '#475569',
+                  }}
+                  onClick={() => onToggleConnectionClosed(c.to)}
+                  title={c.closed ? 'Открыть переход' : 'Закрыть переход'}
+                >
+                  {c.closed ? '🔒' : '🔓'}
+                </button>
                 <button
                   style={s.connDelBtn}
                   onClick={() => onDeleteConnection(c.to)}
