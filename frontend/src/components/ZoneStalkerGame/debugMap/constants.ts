@@ -8,8 +8,6 @@ export const RING_RADIUS = 210;
 export const CANVAS_PAD = 100;
 /** px upper bound for draggable card positions */
 export const MAX_CANVAS_COORD = 4000;
-/** px — used for fullscreen canvas height calc */
-export const TOOLBAR_HEIGHT = 52;
 
 // ─── BFS radial layout ───────────────────────────────────────────────────────
 

@@ -15,7 +15,7 @@ import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react'
 
 import type { DebugMapPageProps, LocationConn, ZoneLocation } from './debugMap/types';
 import {
-  CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, TOOLBAR_HEIGHT, REGION_PAD,
+  CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
   TERRAIN_TYPE_COLOR, TERRAIN_TYPE_LABELS,
   REGION_LABELS, REGION_BG_COLOR, REGION_BORDER_COLOR, REGION_COLOR_PALETTE,
@@ -655,7 +655,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   return (
     <div style={s.page}>
       {/* ── Canvas ────────────────────────────────────────── */}
-      <div ref={canvasWrapRef} style={s.canvasWrap}>
+      <div ref={canvasWrapRef} style={{
+        ...s.canvasWrap,
+        ...(isFullscreen ? { background: '#060b14', height: '100vh', padding: 8 } : {}),
+      }}>
         {/* Toolbar */}
         <div style={s.toolbar}>
           <div style={s.legend}>
@@ -798,7 +801,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           style={{
             ...s.canvasScroll,
             cursor: isPanning ? 'grabbing' : linkMode ? 'crosshair' : 'grab',
-            ...(isFullscreen ? { height: `calc(100vh - ${TOOLBAR_HEIGHT}px)`, borderRadius: 0 } : {}),
+            ...(isFullscreen ? { flex: 1, height: 'auto', borderRadius: 0 } : {}),
           }}
           onPointerDown={handleCanvasPointerDown}
           onPointerMove={handleCanvasPointerMove}
@@ -957,7 +960,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                     zIndex: isSelected || isLinkSrc ? 10 : 1,
                     userSelect: 'none',
                     touchAction: 'none',
-                    pointerEvents: 'auto',
+                    pointerEvents: 'auto', // re-enable on cards — parent container has pointerEvents:'none'
                   }}
                   onPointerDown={(e) => handlePointerDown(e, id)}
                   onPointerMove={handlePointerMove}
