@@ -889,7 +889,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           </svg>
 
           {/* Location cards */}
-          <div style={{ position: 'relative', width: canvasW, height: canvasH }}>
+          {/* pointerEvents:'none' lets clicks on empty space pass through to the SVG region rects below */}
+          <div style={{ position: 'relative', width: canvasW, height: canvasH, pointerEvents: 'none' }}>
             {Object.entries(zoneState.locations).map(([id, loc]) => {
               const pos = effectivePos[id];
               if (!pos) return null;
@@ -956,6 +957,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                     zIndex: isSelected || isLinkSrc ? 10 : 1,
                     userSelect: 'none',
                     touchAction: 'none',
+                    pointerEvents: 'auto',
                   }}
                   onPointerDown={(e) => handlePointerDown(e, id)}
                   onPointerMove={handlePointerMove}
