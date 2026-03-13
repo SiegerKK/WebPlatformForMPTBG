@@ -11,8 +11,8 @@ Supported commands:
 - pick_up_item(item_id)
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
-- debug_update_map(positions, connections)        — persist debug canvas layout (meta, no action cost)
-- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?) — edit location params in debug mode (meta)
+- debug_update_map(positions, connections, regions?) — persist debug canvas layout (meta, no action cost)
+- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?) — edit location params in debug mode (meta)
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
@@ -140,8 +140,12 @@ def resolve_world_command(
     if command_type == "debug_update_map":
         positions = payload.get("positions", {})
         connections = payload.get("connections", {})
+        regions = payload.get("regions")
         # Persist card positions
         state.setdefault("debug_layout", {})["positions"] = positions
+        # Persist region metadata if provided
+        if regions is not None:
+            state["debug_layout"]["regions"] = regions
         # Update location connections for each location provided
         locations = state.get("locations", {})
         for loc_id, conns in connections.items():
@@ -168,6 +172,9 @@ def resolve_world_command(
             loc["anomaly_activity"] = int(payload["anomaly_activity"])
         if "dominant_anomaly_type" in payload:
             loc["dominant_anomaly_type"] = payload["dominant_anomaly_type"] or None
+        if "region" in payload:
+            region_val = payload["region"]
+            loc["region"] = region_val if region_val else None
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 

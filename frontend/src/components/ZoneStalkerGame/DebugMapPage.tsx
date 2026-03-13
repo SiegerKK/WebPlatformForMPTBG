@@ -58,7 +58,10 @@ interface ZoneMapState {
   active_events: string[];
   game_over: boolean;
   /** Persisted debug canvas state written by the debug_update_map command */
-  debug_layout?: { positions: Record<string, { x: number; y: number }> };
+  debug_layout?: {
+    positions: Record<string, { x: number; y: number }>;
+    regions?: Record<string, { name: string; colorIndex: number }>;
+  };
 }
 
 interface Props {
@@ -174,10 +177,22 @@ const REGION_BORDER_COLOR: Record<string, string> = {
   swamps: '#134e4a',
 };
 
+const REGION_COLOR_PALETTE: Array<{ bg: string; border: string }> = [
+  { bg: '#1a2a1a', border: '#166534' },  // 0 green
+  { bg: '#2a2010', border: '#854d0e' },  // 1 amber
+  { bg: '#1a1a2a', border: '#1e3a8a' },  // 2 blue
+  { bg: '#2a1a1a', border: '#7f1d1d' },  // 3 red
+  { bg: '#0f2020', border: '#134e4a' },  // 4 teal
+  { bg: '#1e1a2a', border: '#5b21b6' },  // 5 purple
+  { bg: '#1a2020', border: '#0f766e' },  // 6 cyan
+  { bg: '#201a1a', border: '#9f1239' },  // 7 rose
+];
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: Props) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
 
   // ── Location edit / create modals ─────────────────────────────────────────
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
@@ -230,6 +245,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     startPtrX: number;
     startPtrY: number;
     startPositions: Record<string, { x: number; y: number }>;
+    hasMoved: boolean;
   } | null>(null);
 
   // ── Link mode ────────────────────────────────────────────────────────────
@@ -243,6 +259,22 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       Object.entries(zoneState.locations).map(([id, loc]) => [id, [...loc.connections]]),
     ),
   );
+
+  // ── Local (editable) regions ──────────────────────────────────────────────
+  // Seeded from zoneState.debug_layout?.regions, then the predefined static regions
+  const [localRegions, setLocalRegions] = useState<Record<string, { name: string; colorIndex: number }>>(() => {
+    const persisted = zoneState.debug_layout?.regions ?? {};
+    const fromLocs: Record<string, { name: string; colorIndex: number }> = {};
+    const STATIC_COLOR_INDEX: Record<string, number> = { cordon: 0, garbage: 1, agroprom: 2, dark_valley: 3, swamps: 4 };
+    const STATIC_NAMES: Record<string, string> = { cordon: 'Кордон', garbage: 'Свалка', agroprom: 'Агропром', dark_valley: 'Тёмная Долина', swamps: 'Болота' };
+    for (const loc of Object.values(zoneState.locations)) {
+      const r = loc.region;
+      if (r && !persisted[r] && !fromLocs[r]) {
+        fromLocs[r] = { name: STATIC_NAMES[r] ?? r, colorIndex: STATIC_COLOR_INDEX[r] ?? 0 };
+      }
+    }
+    return { ...fromLocs, ...persisted };
+  });
 
   // ── Sync new locations into dragOverrides + localConns after CRUD ops ──────
   // After debug_create_location, zoneState gets a new entry; we need to
@@ -286,6 +318,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     async (
       positions: Record<string, { x: number; y: number }>,
       conns: Record<string, LocationConn[]>,
+      regions?: Record<string, { name: string; colorIndex: number }>,
     ) => {
       setSaving(true);
       setSaveError(null);
@@ -298,6 +331,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         await sendCommand('debug_update_map', {
           positions,
           connections: serialisedConns,
+          regions: regions ?? localRegionsRef.current,
         });
       } catch (err: unknown) {
         const msg = (err as { message?: string })?.message ?? 'Save failed';
@@ -329,6 +363,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     for (const [id, loc] of Object.entries(zoneState.locations)) {
       const region = loc.region;
       if (!region) continue;
+      // Only render regions that exist in localRegions
+      if (!localRegions[region]) continue;
       const pos = effectivePos[id];
       if (!pos) continue;
       const half_w = CARD_W / 2 + REGION_PAD;
@@ -343,7 +379,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       }
     }
     return boxes;
-  }, [effectivePos, zoneState.locations]);
+  }, [effectivePos, zoneState.locations, localRegions]);
 
   // Canvas dimensions auto-expand when cards are dragged outward
   const canvasW = useMemo(() => {
@@ -364,6 +400,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
 
   const localConnsRef = useRef(localConns);
   localConnsRef.current = localConns;
+
+  const localRegionsRef = useRef(localRegions);
+  localRegionsRef.current = localRegions;
 
   // ── Link/click logic ─────────────────────────────────────────────────────
   const toggleLink = useCallback(
@@ -469,6 +508,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         }
       } else {
         setSelectedLocId((prev) => (prev === id ? null : id));
+        setSelectedRegionId(null);
       }
     },
     [linkMode, linkSource, toggleLink, persistMap],
@@ -536,6 +576,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         startPtrX: e.clientX,
         startPtrY: e.clientY,
         startPositions,
+        hasMoved: false,
       };
     },
     [zoneState.locations, effectivePos],
@@ -547,6 +588,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       if (!d) return;
       const dx = (e.clientX - d.startPtrX) / zoomRef.current;
       const dy = (e.clientY - d.startPtrY) / zoomRef.current;
+      if (!d.hasMoved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      d.hasMoved = true;
       setDragOverrides((prev) => {
         const next = { ...prev };
         for (const [id, startPos] of Object.entries(d.startPositions)) {
@@ -566,6 +609,12 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
       const d = regionDragRef.current;
       regionDragRef.current = null;
       if (!d) return;
+      if (!d.hasMoved) {
+        // It was a click — select the region, clear location selection
+        setSelectedRegionId(d.region);
+        setSelectedLocId(null);
+        return;
+      }
       const dx = (e.clientX - d.startPtrX) / zoomRef.current;
       const dy = (e.clientY - d.startPtrY) / zoomRef.current;
       const finalPositions = { ...dragOverridesRef.current };
@@ -678,7 +727,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
 
   // ── Location CRUD ─────────────────────────────────────────────────────────
   const handleSaveEdit = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
       if (!editingLocId) return;
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
@@ -686,13 +735,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         terrain_type: data.terrainType,
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
+        region: data.region || null,
       });
     },
     [editingLocId, sendCommand],
   );
 
   const handleSaveCreate = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
       // Place the new card just below the current canvas bottom-center so it's visible
       const pos = {
         x: Math.max(CARD_W / 2 + CANVAS_PAD, canvasW / 2),
@@ -711,6 +761,46 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
 
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
   const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
+
+  // ── Region CRUD ───────────────────────────────────────────────────────────
+  const handleSaveRegion = useCallback((regionId: string, name: string, colorIndex: number) => {
+    const next = { ...localRegionsRef.current, [regionId]: { name, colorIndex } };
+    setLocalRegions(next);
+    persistMap(dragOverridesRef.current, localConnsRef.current, next);
+  }, [persistMap]);
+
+  const handleDeleteRegion = useCallback((regionId: string) => {
+    const nextRegions = { ...localRegionsRef.current };
+    delete nextRegions[regionId];
+    setLocalRegions(nextRegions);
+    setSelectedRegionId(null);
+    const locsInRegion = Object.values(zoneState.locations).filter((l) => l.region === regionId);
+    const updatePromises = locsInRegion.map((l) =>
+      sendCommand('debug_update_location', {
+        loc_id: l.id,
+        name: l.name,
+        terrain_type: l.terrain_type,
+        anomaly_activity: l.anomaly_activity,
+        dominant_anomaly_type: l.dominant_anomaly_type || null,
+        region: null,
+      }),
+    );
+    Promise.all(updatePromises).then(() => {
+      persistMap(dragOverridesRef.current, localConnsRef.current, nextRegions);
+    });
+  }, [zoneState.locations, sendCommand, persistMap]);
+
+  const handleCreateRegion = useCallback(() => {
+    const existing = localRegionsRef.current;
+    let n = Object.keys(existing).length;
+    let newId = `region_${n}`;
+    while (newId in existing) { n++; newId = `region_${n}`; }
+    const colorIndex = n % REGION_COLOR_PALETTE.length;
+    const next = { ...existing, [newId]: { name: `Регион ${n + 1}`, colorIndex } };
+    setLocalRegions(next);
+    setSelectedRegionId(newId);
+    persistMap(dragOverridesRef.current, localConnsRef.current, next);
+  }, [persistMap]);
 
   return (
     <div style={s.page}>
@@ -750,6 +840,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
               title="Create a new location"
             >
               ➕ Location
+            </button>
+            <button
+              style={s.toolBtn}
+              onClick={handleCreateRegion}
+              title="Create a new region"
+            >
+              ➕ Регион
             </button>
             <button
               style={{
@@ -878,9 +975,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
             >
               {/* Region background rects */}
               {Object.entries(regionBBoxes).map(([region, box]) => {
-                const bg = REGION_BG_COLOR[region] ?? '#1a1a2a';
-                const border = REGION_BORDER_COLOR[region] ?? '#334155';
-                const label = REGION_LABELS[region] ?? region;
+                const palette = REGION_COLOR_PALETTE[localRegions[region]?.colorIndex ?? 0] ?? { bg: REGION_BG_COLOR[region] ?? '#1a1a2a', border: REGION_BORDER_COLOR[region] ?? '#334155' };
+                const bg = palette.bg;
+                const border = palette.border;
+                const label = localRegions[region]?.name ?? REGION_LABELS[region] ?? region;
                 return (
                   <g key={region}>
                     <rect
@@ -1032,7 +1130,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                     {TERRAIN_TYPE_LABELS[loc.terrain_type ?? ''] ?? (loc.terrain_type ?? '—')}
                     {loc.region && (
                       <span style={{ color: '#334155', marginLeft: 5 }}>
-                        · {REGION_LABELS[loc.region] ?? loc.region}
+                        · {localRegions[loc.region]?.name ?? REGION_LABELS[loc.region] ?? loc.region}
                       </span>
                     )}
                   </div>
@@ -1085,6 +1183,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
             }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
           />
+        ) : selectedRegionId && localRegions[selectedRegionId] ? (
+          <RegionDetailPanel
+            regionId={selectedRegionId}
+            region={localRegions[selectedRegionId]}
+            onClose={() => setSelectedRegionId(null)}
+            onSave={(name, colorIndex) => handleSaveRegion(selectedRegionId, name, colorIndex)}
+            onDelete={() => handleDeleteRegion(selectedRegionId)}
+          />
         ) : (
           <EmptyDetailHint totalLocs={Object.keys(zoneState.locations).length} />
         )}
@@ -1098,6 +1204,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           initialTerrainType={zoneState.locations[editingLocId].terrain_type ?? 'plain'}
           initialAnomalyActivity={zoneState.locations[editingLocId].anomaly_activity ?? 0}
           initialDominantAnomalyType={zoneState.locations[editingLocId].dominant_anomaly_type ?? ''}
+          initialRegion={zoneState.locations[editingLocId].region ?? ''}
+          regions={localRegions}
           locId={editingLocId}
           onClose={() => setEditingLocId(null)}
           onSave={handleSaveEdit}
@@ -1492,6 +1600,8 @@ function LocationModal({
   initialTerrainType = 'plain',
   initialAnomalyActivity = 0,
   initialDominantAnomalyType = '',
+  initialRegion = '',
+  regions,
   locId,
   onClose,
   onSave,
@@ -1501,14 +1611,17 @@ function LocationModal({
   initialTerrainType?: string;
   initialAnomalyActivity?: number;
   initialDominantAnomalyType?: string;
+  initialRegion?: string;
+  regions?: Record<string, { name: string; colorIndex: number }>;
   locId?: string;
   onClose: () => void;
-  onSave: (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => Promise<void>;
+  onSave: (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => Promise<void>;
 }) {
   const [name, setName] = useState(initialName);
   const [terrainType, setTerrainType] = useState(initialTerrainType);
   const [anomalyActivity, setAnomalyActivity] = useState(initialAnomalyActivity);
   const [dominantAnomalyType, setDominantAnomalyType] = useState(initialDominantAnomalyType);
+  const [region, setRegion] = useState(initialRegion);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1517,7 +1630,7 @@ function LocationModal({
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType });
+      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -1584,6 +1697,22 @@ function LocationModal({
           ))}
         </select>
 
+        {regions && (
+          <>
+            <label style={s.modalLabel}>Регион</label>
+            <select
+              style={s.modalInput}
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+            >
+              <option value="">— None —</option>
+              {Object.entries(regions).map(([id, r]) => (
+                <option key={id} value={id}>{r.name}</option>
+              ))}
+            </select>
+          </>
+        )}
+
         {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
 
         <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
@@ -1593,6 +1722,75 @@ function LocationModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── RegionDetailPanel ────────────────────────────────────────────────────────
+
+function RegionDetailPanel({
+  regionId,
+  region,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  regionId: string;
+  region: { name: string; colorIndex: number };
+  onClose: () => void;
+  onSave: (name: string, colorIndex: number) => void;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState(region.name);
+  const [colorIndex, setColorIndex] = useState(region.colorIndex);
+
+  return (
+    <div style={s.detail}>
+      <div style={s.detailHeader}>
+        <div style={s.detailName}>🗺 {region.name}</div>
+        <button onClick={onClose} style={s.closeBtn}>✕</button>
+      </div>
+      <div style={{ color: '#475569', fontSize: '0.65rem', marginBottom: 8 }}>ID: {regionId}</div>
+
+      <Section label="⚙ Настройки региона">
+        <label style={s.modalLabel}>Название</label>
+        <input
+          style={s.modalInput}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <label style={s.modalLabel}>Цвет</label>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+          {REGION_COLOR_PALETTE.map((c, i) => (
+            <div
+              key={i}
+              onClick={() => setColorIndex(i)}
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: 6,
+                background: c.bg,
+                border: `3px solid ${colorIndex === i ? '#f8fafc' : c.border}`,
+                cursor: 'pointer',
+              }}
+            />
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <button
+            style={s.modalSaveBtn}
+            onClick={() => onSave(name.trim() || region.name, colorIndex)}
+          >
+            💾 Сохранить
+          </button>
+          <button
+            style={{ ...s.modalCancelBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
+            onClick={onDelete}
+          >
+            🗑 Удалить регион
+          </button>
+        </div>
+      </Section>
     </div>
   );
 }
