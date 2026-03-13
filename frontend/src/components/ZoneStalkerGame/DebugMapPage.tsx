@@ -23,6 +23,7 @@ interface LocationConn {
 interface ZoneLocation {
   id: string;
   name: string;
+  region?: string;
   terrain_type?: string;
   anomaly_activity?: number;
   dominant_anomaly_type?: string | null;
@@ -147,6 +148,14 @@ const TERRAIN_TYPE_COLOR: Record<string, string> = {
   slag_heaps: '#94a3b8',
   industrial: '#f59e0b',
   urban: '#a855f7',
+};
+
+const REGION_LABELS: Record<string, string> = {
+  cordon: 'Кордон',
+  garbage: 'Свалка',
+  agroprom: 'Агропром',
+  dark_valley: 'Тёмная Долина',
+  swamps: 'Болота',
 };
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -842,6 +851,11 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                   </div>
                   <div style={{ color: '#475569', fontSize: '0.68rem', marginTop: 2 }}>
                     {TERRAIN_TYPE_LABELS[loc.terrain_type ?? ''] ?? (loc.terrain_type ?? '—')}
+                    {loc.region && (
+                      <span style={{ color: '#334155', marginLeft: 5 }}>
+                        · {REGION_LABELS[loc.region] ?? loc.region}
+                      </span>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
                     {isCurrent && <Badge bg="#166534" color="#86efac">📍 You</Badge>}
@@ -984,6 +998,14 @@ function LocationDetailPanel({
 
       {/* New location properties */}
       <Section label="🌍 Характеристики">
+        {loc.region && (
+          <DetailRow>
+            <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Регион</span>
+            <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>
+              {REGION_LABELS[loc.region] ?? loc.region}
+            </span>
+          </DetailRow>
+        )}
         {loc.terrain_type && (
           <DetailRow>
             <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Местность</span>
