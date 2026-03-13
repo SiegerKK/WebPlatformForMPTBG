@@ -162,6 +162,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   // panOffset is the translation (in px) of the canvas viewport.
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+
+  // ── Zoom ─────────────────────────────────────────────────────────────────
+  const [zoom, setZoom] = useState(1.0);
+  const canvasScrollRef = useRef<HTMLDivElement>(null);
+
+  // ── Import file input ref ─────────────────────────────────────────────────
+  const importInputRef = useRef<HTMLInputElement>(null);
   const panRef = useRef<{
     startPtrX: number;
     startPtrY: number;
@@ -448,6 +455,89 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     setIsPanning(false);
   }, []);
 
+  // ── Wheel zoom (imperative listener so we can pass { passive: false }) ────
+  useEffect(() => {
+    const el = canvasScrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 0.1 : -0.1;
+      setZoom((prev) => {
+        const nextZoom = Math.min(3, Math.max(0.25, +(prev + delta).toFixed(2)));
+        const rect = el.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        setPanOffset((pan) => ({
+          x: mouseX - (mouseX - pan.x) * (nextZoom / prev),
+          y: mouseY - (mouseY - pan.y) * (nextZoom / prev),
+        }));
+        return nextZoom;
+      });
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
+
+  // ── Export layout ─────────────────────────────────────────────────────────
+  const handleExport = useCallback(() => {
+    const exportData = {
+      version: 1,
+      positions: dragOverridesRef.current,
+      connections: localConnsRef.current,
+      locations_meta: Object.fromEntries(
+        Object.entries(zoneState.locations).map(([id, loc]) => [
+          id,
+          {
+            id,
+            name: loc.name,
+            terrain_type: loc.terrain_type,
+            anomaly_activity: loc.anomaly_activity,
+          },
+        ]),
+      ),
+    };
+    const json = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'zone_layout.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [zoneState.locations]);
+
+  // ── Import layout ─────────────────────────────────────────────────────────
+  const handleImportFile = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      file.text().then((text) => {
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          alert('Import failed: invalid JSON');
+          return;
+        }
+        if (!parsed.positions || typeof parsed.positions !== 'object' || Array.isArray(parsed.positions)) {
+          alert('Import failed: JSON must have a "positions" object');
+          return;
+        }
+        const newPositions = parsed.positions as Record<string, { x: number; y: number }>;
+        setDragOverrides(newPositions);
+        let newConns = localConnsRef.current;
+        if (parsed.connections && typeof parsed.connections === 'object' && !Array.isArray(parsed.connections)) {
+          newConns = parsed.connections as Record<string, LocationConn[]>;
+          setLocalConns(newConns);
+        }
+        persistMap(newPositions, newConns);
+        // Reset so the same file can be re-imported
+        e.target.value = '';
+      });
+    },
+    [persistMap],
+  );
+
   // ── Location CRUD ─────────────────────────────────────────────────────────
   const handleSaveEdit = useCallback(
     async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string }) => {
@@ -554,6 +644,50 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                 ⊙ Re-centre
               </button>
             )}
+            {/* Zoom controls */}
+            <button
+              style={s.toolBtn}
+              onClick={() =>
+                setZoom((prev) => Math.max(0.25, +(prev - 0.1).toFixed(2)))
+              }
+              disabled={zoom <= 0.25}
+              title="Zoom out"
+            >
+              –
+            </button>
+            <button
+              style={s.toolBtn}
+              onClick={() => setZoom(1.0)}
+              title="Reset zoom to 100%"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              style={s.toolBtn}
+              onClick={() =>
+                setZoom((prev) => Math.min(3, +(prev + 0.1).toFixed(2)))
+              }
+              disabled={zoom >= 3}
+              title="Zoom in"
+            >
+              +
+            </button>
+            {/* Export */}
+            <button
+              style={s.toolBtn}
+              onClick={handleExport}
+              title="Export current layout as zone_layout.json"
+            >
+              📤 Export
+            </button>
+            {/* Import */}
+            <button
+              style={s.toolBtn}
+              onClick={() => importInputRef.current?.click()}
+              title="Import a previously-exported zone_layout.json"
+            >
+              📥 Import
+            </button>
           </div>
         </div>
 
@@ -566,6 +700,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         )}
 
         <div
+          ref={canvasScrollRef}
           style={{
             ...s.canvasScroll,
             cursor: isPanning ? 'grabbing' : linkMode ? 'crosshair' : 'grab',
@@ -575,13 +710,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           onPointerUp={handleCanvasPanEnd}
           onPointerCancel={handleCanvasPanEnd}
         >
-          {/* Panning layer — translated by panOffset */}
+          {/* Panning layer — translated by panOffset and scaled by zoom */}
           <div
             style={{
               position: 'absolute',
               top: 0,
               left: 0,
-              transform: `translate(${panOffset.x}px, ${panOffset.y}px)`,
+              transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`,
+              transformOrigin: '0 0',
               willChange: 'transform',
             }}
           >
@@ -729,6 +865,15 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           </div>{/* end panning layer */}
         </div>
       </div>
+
+      {/* ── Hidden file input for Import ─────────────────────── */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".json"
+        style={{ display: 'none' }}
+        onChange={handleImportFile}
+      />
 
       {/* ── Detail panel ──────────────────────────────────── */}
       <div style={s.detailPanel}>
