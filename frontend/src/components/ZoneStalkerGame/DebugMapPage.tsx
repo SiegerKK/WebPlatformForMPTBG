@@ -75,6 +75,7 @@ const CARD_H = 112;
 const RING_RADIUS = 210;
 const CANVAS_PAD = 100;
 const MAX_CANVAS_COORD = 4000; // px upper bound for draggable card positions
+const TOOLBAR_HEIGHT = 52;  // px — used for fullscreen canvas height calc
 
 /**
  * BFS radial layout.
@@ -158,6 +159,21 @@ const REGION_LABELS: Record<string, string> = {
   swamps: 'Болота',
 };
 
+const REGION_BG_COLOR: Record<string, string> = {
+  cordon: '#1a2a1a',
+  garbage: '#2a2010',
+  agroprom: '#1a1a2a',
+  dark_valley: '#2a1a1a',
+  swamps: '#0f2020',
+};
+const REGION_BORDER_COLOR: Record<string, string> = {
+  cordon: '#166534',
+  garbage: '#854d0e',
+  agroprom: '#1e3a8a',
+  dark_valley: '#7f1d1d',
+  swamps: '#134e4a',
+};
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: Props) {
@@ -174,7 +190,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
 
   // ── Zoom ─────────────────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1.0);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
   const canvasScrollRef = useRef<HTMLDivElement>(null);
+
+  // ── Fullscreen ────────────────────────────────────────────────────────────
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const canvasWrapRef = useRef<HTMLDivElement>(null);
 
   // ── Import file input ref ─────────────────────────────────────────────────
   const importInputRef = useRef<HTMLInputElement>(null);
@@ -200,6 +222,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     startCardX: number;
     startCardY: number;
     hasMoved: boolean;
+  } | null>(null);
+
+  // ── Region drag ───────────────────────────────────────────────────────────
+  const regionDragRef = useRef<{
+    region: string;
+    startPtrX: number;
+    startPtrY: number;
+    startPositions: Record<string, { x: number; y: number }>;
   } | null>(null);
 
   // ── Link mode ────────────────────────────────────────────────────────────
@@ -292,6 +322,29 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     [layoutPositions, dragOverrides],
   );
 
+  // Region bounding boxes (for background rects)
+  const REGION_PAD = 40;
+  const regionBBoxes = useMemo(() => {
+    const boxes: Record<string, { minX: number; minY: number; maxX: number; maxY: number }> = {};
+    for (const [id, loc] of Object.entries(zoneState.locations)) {
+      const region = loc.region;
+      if (!region) continue;
+      const pos = effectivePos[id];
+      if (!pos) continue;
+      const half_w = CARD_W / 2 + REGION_PAD;
+      const half_h = CARD_H / 2 + REGION_PAD;
+      if (!boxes[region]) {
+        boxes[region] = { minX: pos.x - half_w, minY: pos.y - half_h, maxX: pos.x + half_w, maxY: pos.y + half_h };
+      } else {
+        boxes[region].minX = Math.min(boxes[region].minX, pos.x - half_w);
+        boxes[region].minY = Math.min(boxes[region].minY, pos.y - half_h);
+        boxes[region].maxX = Math.max(boxes[region].maxX, pos.x + half_w);
+        boxes[region].maxY = Math.max(boxes[region].maxY, pos.y + half_h);
+      }
+    }
+    return boxes;
+  }, [effectivePos, zoneState.locations]);
+
   // Canvas dimensions auto-expand when cards are dragged outward
   const canvasW = useMemo(() => {
     const vals = Object.values(effectivePos);
@@ -373,8 +426,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const d = dragRef.current;
     if (!d) return;
-    const dx = e.clientX - d.startPtrX;
-    const dy = e.clientY - d.startPtrY;
+    const dx = (e.clientX - d.startPtrX) / zoomRef.current;
+    const dy = (e.clientY - d.startPtrY) / zoomRef.current;
     if (!d.hasMoved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
     d.hasMoved = true;
     setDragOverrides((prev) => ({
@@ -395,8 +448,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         // reading a potentially-stale dragOverridesRef (which is only updated
         // on re-render, and the last pointermove's render may not have
         // completed before pointerup fires).
-        const finalX = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardX + (e.clientX - d.startPtrX)));
-        const finalY = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardY + (e.clientY - d.startPtrY)));
+        const finalX = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardX + (e.clientX - d.startPtrX) / zoomRef.current));
+        const finalY = Math.max(-MAX_CANVAS_COORD, Math.min(MAX_CANVAS_COORD, d.startCardY + (e.clientY - d.startPtrY) / zoomRef.current));
         const finalPositions = { ...dragOverridesRef.current, [d.id]: { x: finalX, y: finalY } };
         // Update state immediately with the exact final position
         setDragOverrides(finalPositions);
@@ -466,6 +519,65 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     setIsPanning(false);
   }, []);
 
+  // ── Region drag handlers ──────────────────────────────────────────────────
+  const handleRegionPointerDown = useCallback(
+    (e: React.PointerEvent<SVGRectElement>, region: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      const startPositions: Record<string, { x: number; y: number }> = {};
+      for (const [id, loc] of Object.entries(zoneState.locations)) {
+        if (loc.region === region) {
+          startPositions[id] = effectivePos[id] ?? { x: 0, y: 0 };
+        }
+      }
+      regionDragRef.current = {
+        region,
+        startPtrX: e.clientX,
+        startPtrY: e.clientY,
+        startPositions,
+      };
+    },
+    [zoneState.locations, effectivePos],
+  );
+
+  const handleRegionPointerMove = useCallback(
+    (e: React.PointerEvent<SVGRectElement>) => {
+      const d = regionDragRef.current;
+      if (!d) return;
+      const dx = (e.clientX - d.startPtrX) / zoomRef.current;
+      const dy = (e.clientY - d.startPtrY) / zoomRef.current;
+      setDragOverrides((prev) => {
+        const next = { ...prev };
+        for (const [id, startPos] of Object.entries(d.startPositions)) {
+          next[id] = {
+            x: startPos.x + dx,
+            y: startPos.y + dy,
+          };
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleRegionPointerUp = useCallback(
+    (e: React.PointerEvent<SVGRectElement>, _region: string) => {
+      const d = regionDragRef.current;
+      regionDragRef.current = null;
+      if (!d) return;
+      const dx = (e.clientX - d.startPtrX) / zoomRef.current;
+      const dy = (e.clientY - d.startPtrY) / zoomRef.current;
+      const finalPositions = { ...dragOverridesRef.current };
+      for (const [id, startPos] of Object.entries(d.startPositions)) {
+        finalPositions[id] = { x: startPos.x + dx, y: startPos.y + dy };
+      }
+      setDragOverrides(finalPositions);
+      persistMap(finalPositions, localConnsRef.current);
+    },
+    [persistMap],
+  );
+
   // ── Wheel zoom (imperative listener so we can pass { passive: false }) ────
   useEffect(() => {
     const el = canvasScrollRef.current;
@@ -487,6 +599,21 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
+  }, []);
+
+  // ── Fullscreen tracking + handler ─────────────────────────────────────────
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  const handleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      canvasWrapRef.current?.requestFullscreen().catch(() => {/* ignore */});
+    } else {
+      document.exitFullscreen().catch(() => {/* ignore */});
+    }
   }, []);
 
   // ── Export layout ─────────────────────────────────────────────────────────
@@ -527,11 +654,11 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
         try {
           parsed = JSON.parse(text) as Record<string, unknown>;
         } catch {
-          alert('Import failed: invalid JSON');
+          setSaveError('Import failed: invalid JSON');
           return;
         }
         if (!parsed.positions || typeof parsed.positions !== 'object' || Array.isArray(parsed.positions)) {
-          alert('Import failed: JSON must have a "positions" object');
+          setSaveError('Import failed: JSON must have a "positions" object');
           return;
         }
         const newPositions = parsed.positions as Record<string, { x: number; y: number }>;
@@ -588,7 +715,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
   return (
     <div style={s.page}>
       {/* ── Canvas ────────────────────────────────────────── */}
-      <div style={s.canvasWrap}>
+      <div ref={canvasWrapRef} style={s.canvasWrap}>
         {/* Toolbar */}
         <div style={s.toolbar}>
           <div style={s.legend}>
@@ -683,6 +810,15 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
             >
               +
             </button>
+            {/* Fullscreen */}
+            <button
+              style={s.toolBtn}
+              onClick={handleFullscreen}
+              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen map'}
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            >
+              {isFullscreen ? '⊡' : '⛶'}
+            </button>
             {/* Export */}
             <button
               style={s.toolBtn}
@@ -715,6 +851,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           style={{
             ...s.canvasScroll,
             cursor: isPanning ? 'grabbing' : linkMode ? 'crosshair' : 'grab',
+            ...(isFullscreen ? { height: `calc(100vh - ${TOOLBAR_HEIGHT}px)`, borderRadius: 0 } : {}),
           }}
           onPointerDown={handleCanvasPointerDown}
           onPointerMove={handleCanvasPointerMove}
@@ -734,11 +871,50 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
           >
             {/* SVG connection lines */}
             <svg
-              style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 0 }}
+              style={{ position: 'absolute', top: 0, left: 0, zIndex: 0 }}
               width={canvasW}
               height={canvasH}
+              overflow="visible"
             >
+              {/* Region background rects */}
+              {Object.entries(regionBBoxes).map(([region, box]) => {
+                const bg = REGION_BG_COLOR[region] ?? '#1a1a2a';
+                const border = REGION_BORDER_COLOR[region] ?? '#334155';
+                const label = REGION_LABELS[region] ?? region;
+                return (
+                  <g key={region}>
+                    <rect
+                      x={box.minX}
+                      y={box.minY}
+                      width={box.maxX - box.minX}
+                      height={box.maxY - box.minY}
+                      fill={bg}
+                      stroke={border}
+                      strokeWidth={1.5}
+                      strokeDasharray="6 3"
+                      rx={14}
+                      opacity={0.85}
+                      style={{ cursor: 'grab' }}
+                      onPointerDown={(e) => handleRegionPointerDown(e, region)}
+                      onPointerMove={handleRegionPointerMove}
+                      onPointerUp={(e) => handleRegionPointerUp(e, region)}
+                    />
+                    <text
+                      x={box.minX + 12}
+                      y={box.minY + 22}
+                      fill={border}
+                      fontSize={13}
+                      fontWeight={700}
+                      fontFamily="system-ui, sans-serif"
+                      style={{ pointerEvents: 'none', userSelect: 'none' }}
+                    >
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
               {/* Draw connections from localConns */}
+              <g pointerEvents="none">
               {Object.entries(localConns).flatMap(([locId, conns]) =>
                 conns.map((conn) => {
                   // Deduplicate: only draw A→B when A < B
@@ -762,6 +938,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: P
                   );
                 }),
               )}
+              </g>
           </svg>
 
           {/* Location cards */}
