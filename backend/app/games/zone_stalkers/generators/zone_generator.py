@@ -223,6 +223,7 @@ def _make_stalker_agent(
     controller_kind: str,
     participant_id,
     rng: random.Random,
+    global_goal: str | None = None,
 ) -> Dict[str, Any]:
     faction = rng.choice(["loner", "loner", "loner", "military", "duty", "freedom"])
     weapon = rng.choice([None, "pistol", "pistol", "ak74"])
@@ -283,7 +284,7 @@ def _make_stalker_agent(
         "skill_medicine": 1,
         "skill_social": 1,
         # ─── Goals & Psychology ───
-        "global_goal": rng.choice(["survive", "get_rich", "explore", "serve_faction"]),
+        "global_goal": global_goal if global_goal else rng.choice(["survive", "get_rich", "explore", "serve_faction"]),
         "current_goal": None,
         "risk_tolerance": round(rng.uniform(0.2, 0.9), 2),
         # Minimum wealth (money + inventory value) before pursuing global_goal

@@ -725,10 +725,18 @@ const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'freedom',  label: 'Свобода'  },
 ];
 
+const GLOBAL_GOAL_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'get_rich',    label: 'Разбогатеть'      },
+  { value: 'explore_zone', label: 'Исследовать Зону' },
+  { value: 'survive',     label: 'Выжить'            },
+  { value: 'help_others', label: 'Помогать другим'   },
+  { value: 'find_wish',   label: 'Найти Желание'     },
+];
+
 export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: AgentCreateProps) {
   const [name,       setName]       = useState('');
   const [faction,    setFaction]    = useState('loner');
-  const [globalGoal, setGlobalGoal] = useState('');
+  const [globalGoal, setGlobalGoal] = useState('get_rich');
   const [isTrader,   setIsTrader]   = useState(defaultIsTrader);
   const [saving,     setSaving]     = useState(false);
   const [err,        setErr]        = useState<string | null>(null);
@@ -737,7 +745,7 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: A
     setSaving(true);
     setErr(null);
     try {
-      await onSave(name.trim(), faction, globalGoal.trim(), isTrader);
+      await onSave(name.trim(), faction, globalGoal, isTrader);
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Ошибка создания');
       setSaving(false);
@@ -803,12 +811,15 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: A
         {!isTrader && (
           <div style={s.section}>
             <div style={s.sectionLabel}>Глобальная цель</div>
-            <textarea
-              style={{ ...cs.input, minHeight: 64, resize: 'vertical' as const }}
+            <select
+              style={cs.input}
               value={globalGoal}
               onChange={(e) => setGlobalGoal(e.target.value)}
-              placeholder="Глобальная цель в Зоне…"
-            />
+            >
+              {GLOBAL_GOAL_OPTIONS.map(({ value, label }) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
           </div>
         )}
 

@@ -42,6 +42,10 @@ _VALID_TERRAIN_TYPES = frozenset([
     "hamlet", "farm", "field_camp", "dungeon", "x_lab",
 ])
 
+_VALID_GLOBAL_GOALS = frozenset([
+    "get_rich", "explore_zone", "survive", "help_others", "find_wish",
+])
+
 
 def validate_world_command(
     command_type: str,
@@ -253,6 +257,7 @@ def resolve_world_command(
             new_agent_id = f"agent_debug_{n}"
         name = str(payload.get("name", "")).strip() or f"Сталкер #{n}"
         rng = _random.Random(new_agent_id)
+        global_goal = str(payload.get("global_goal", "")).strip() or None
         agent = _make_stalker_agent(
             agent_id=new_agent_id,
             name=name,
@@ -260,6 +265,7 @@ def resolve_world_command(
             controller_kind="bot",
             participant_id=None,
             rng=rng,
+            global_goal=global_goal,
         )
         state.setdefault("agents", {})[new_agent_id] = agent
         state["locations"][loc_id]["agents"].append(new_agent_id)
@@ -932,6 +938,9 @@ def _validate_debug_spawn_stalker(
         return RuleCheckResult(valid=False, error="loc_id is required")
     if loc_id not in state.get("locations", {}):
         return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    global_goal = payload.get("global_goal")
+    if global_goal is not None and global_goal not in _VALID_GLOBAL_GOALS:
+        return RuleCheckResult(valid=False, error=f"Invalid global_goal '{global_goal}'; must be one of {sorted(_VALID_GLOBAL_GOALS)}")
     return RuleCheckResult(valid=True)
 
 
