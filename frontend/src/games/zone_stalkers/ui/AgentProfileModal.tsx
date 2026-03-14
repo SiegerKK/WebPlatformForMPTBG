@@ -58,6 +58,7 @@ export interface AgentForProfile {
     type: string;
     title: string;
     summary: string;
+    effects?: Record<string, unknown>;
   }>;
 }
 
@@ -72,6 +73,21 @@ interface Props {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+
+/** 1 game turn = 1 real minute (mirrors MINUTES_PER_TURN in tick_rules.py) */
+const MINUTES_PER_TURN = 1;
+const TURNS_PER_HOUR = 60 / MINUTES_PER_TURN;
+
+/**
+ * Format a scheduled-action countdown for display.
+ * For sleep, turns are converted to hours; everything else shows minutes.
+ */
+const schedRemaining = (type: string, turns: number): string => {
+  if (type === 'sleep') {
+    return `${Math.ceil(turns / TURNS_PER_HOUR)} ч осталось`;
+  }
+  return `${turns * MINUTES_PER_TURN} мин осталось`;
+};
 
 const SCHED_ICONS: Record<string, string> = {
   travel: '🚶',
@@ -177,12 +193,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
           {agent.scheduled_action && (
             <div style={s.schedLine}>
               {SCHED_ICONS[agent.scheduled_action.type] ?? '⏳'}{' '}
-              {agent.scheduled_action.type === 'travel'
-                ? `travel — ${agent.scheduled_action.turns_remaining} мин осталось`
-                : agent.scheduled_action.type === 'sleep'
-                  ? `sleep — ${Math.ceil(agent.scheduled_action.turns_remaining / 60)} ч осталось`
-                  : `${agent.scheduled_action.type} — ${agent.scheduled_action.turns_remaining} мин осталось`
-              }
+              {agent.scheduled_action.type} — {schedRemaining(agent.scheduled_action.type, agent.scheduled_action.turns_remaining)}
             </div>
           )}
         </Section>

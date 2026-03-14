@@ -593,6 +593,27 @@ class TestNeedsDegradation:
         _resolve_sleep(agent, sched, 5, {})
         assert agent["sleepiness"] == 0
 
+    def test_sleep_resolve_hours_field(self):
+        """_resolve_sleep heals correctly when scheduled with the 'hours' key."""
+        from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
+        agent = {"hp": 50, "max_hp": 100, "radiation": 30, "sleepiness": 80, "memory": []}
+        _resolve_sleep(agent, {"hours": 4}, 1, {"world_day": 1, "world_hour": 6, "world_minute": 0})
+        assert agent["hp"] == min(50 + 15 * 4, 100)  # 110 → capped at max_hp=100
+        assert agent["radiation"] == 30 - 5 * 4     # 10
+        assert agent["sleepiness"] == 0
+
+    def test_sleep_resolve_turns_total_fallback(self):
+        """_resolve_sleep falls back to turns_total when 'hours' key is absent (legacy saves)."""
+        from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep, _HOUR_IN_TURNS
+        agent = {"hp": 70, "max_hp": 100, "radiation": 20, "sleepiness": 75, "memory": []}
+        # Simulate legacy scheduled action that used turns_total=360 (= 6 h × 60 turns/h)
+        sched = {"turns_total": 6 * _HOUR_IN_TURNS}
+        _resolve_sleep(agent, sched, 1, {"world_day": 1, "world_hour": 0, "world_minute": 0})
+        # 6 hours → same result as hours=6
+        assert agent["hp"] == 100          # 70 + 6*15 = 160 → capped at 100
+        assert agent["radiation"] == 0     # 20 - 6*5 = -10 → clamped to 0
+        assert agent["sleepiness"] == 0
+
 
 # ─────────────────────────────────────────────────────────────────
 # Action queue tests

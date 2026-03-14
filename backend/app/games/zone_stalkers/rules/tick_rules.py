@@ -378,7 +378,13 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     * ``turns_total`` – fallback; total turns of the sleep action (converted via
                         ``turns_total // _HOUR_IN_TURNS``).
     """
-    hours = sched.get("hours", sched.get("turns_total", DEFAULT_SLEEP_HOURS * _HOUR_IN_TURNS) // _HOUR_IN_TURNS)
+    hours_from_sched = sched.get("hours")
+    if hours_from_sched is not None:
+        hours = int(hours_from_sched)
+    elif sched.get("turns_total"):
+        hours = sched["turns_total"] // _HOUR_IN_TURNS
+    else:
+        hours = DEFAULT_SLEEP_HOURS
     # Heal HP (15 per hour, max 100)
     hp_regen = min(15 * hours, agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
@@ -612,6 +618,13 @@ def _bot_sell_to_trader(
 ) -> List[Dict[str, Any]]:
     """
     Perform a direct (inline) sale of all artifacts from *agent* to *trader*.
+
+    Pricing: each artifact sells for 60 % of its base ``value``.
+    Items are skipped (not sold) if the trader cannot afford the asking price
+    at the time of that individual transaction; remaining artifacts continue
+    to be processed.
+
+    Returns early with an empty event list if the agent carries no artifacts.
 
     Updates money on both sides, removes artifacts from agent inventory,
     appends them to trader inventory, and writes memory entries for

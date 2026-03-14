@@ -60,6 +60,7 @@ export interface ZoneMapState {
       type: string;
       title: string;
       summary: string;
+      effects?: Record<string, unknown>;
     }>;
   }>;
   player_agents: Record<string, string>;
