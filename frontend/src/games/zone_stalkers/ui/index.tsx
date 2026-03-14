@@ -592,7 +592,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
     // Only show alive AI-controlled stalkers
     const aiStalkers = Object.values(zoneState.agents).filter(
-      (a) => a.is_alive && a.controller.kind === 'ai',
+      (a) => a.is_alive && a.controller.kind === 'bot',
     );
 
     return (

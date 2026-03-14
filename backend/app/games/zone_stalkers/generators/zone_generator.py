@@ -282,11 +282,11 @@ def _make_stalker_agent(
         "skill_medicine": 1,
         "skill_social": 1,
         # ─── Goals & Psychology ───
-        "global_goal": rng.choice(["survive", "get_rich", "explore", "serve_faction"]) if controller_kind == "bot" else "survive",
+        "global_goal": rng.choice(["survive", "get_rich", "explore", "serve_faction"]),
         "current_goal": None,
-        "risk_tolerance": round(rng.uniform(0.2, 0.9), 2) if controller_kind == "bot" else 0.5,
+        "risk_tolerance": round(rng.uniform(0.2, 0.9), 2),
         # Minimum wealth (money + inventory value) before pursuing global_goal
-        "material_threshold": rng.randint(500, 3000) if controller_kind == "bot" else 1000,
+        "material_threshold": rng.randint(500, 3000),
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one

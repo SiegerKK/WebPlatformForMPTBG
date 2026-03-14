@@ -131,9 +131,9 @@ def resolve_world_command(
     # ── take_control: meta-command, no action cost ────────────────────────────
     if command_type == "take_control":
         target_agent_id = payload["agent_id"]
-        # Release current agent back to AI if the player had one
+        # Release current agent back to bot AI if the player had one
         if agent_id and agent_id in state.get("agents", {}):
-            state["agents"][agent_id]["controller"] = {"kind": "ai", "participant_id": None}
+            state["agents"][agent_id]["controller"] = {"kind": "bot", "participant_id": None}
         # Assign the new agent to this player
         state.setdefault("player_agents", {})[player_id] = target_agent_id
         state["agents"][target_agent_id]["controller"] = {"kind": "human", "participant_id": player_id}
@@ -240,7 +240,7 @@ def resolve_world_command(
             agent_id=new_agent_id,
             name=name,
             location_id=loc_id,
-            controller_kind="ai",
+            controller_kind="bot",
             participant_id=None,
             rng=rng,
         )
@@ -712,7 +712,7 @@ def _validate_take_control(
     if not agent:
         return RuleCheckResult(valid=False, error="Agent not found")
     controller = agent.get("controller", {})
-    if controller.get("kind") != "ai":
+    if controller.get("kind") != "bot":
         return RuleCheckResult(valid=False, error="Agent is already controlled by a player")
     if not agent.get("is_alive", True):
         return RuleCheckResult(valid=False, error="Cannot take control of a dead agent")

@@ -1171,3 +1171,128 @@ class TestDebugLocationCommands:
         for mt in ("blind_dog", "flesh", "zombie", "bloodsucker", "psi_controller"):
             result = self._v("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": mt}, state)
             assert result.valid, f"Expected valid for mutant_type={mt}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Unified stalker model — controller.kind consistency
+# ─────────────────────────────────────────────────────────────────
+
+class TestUnifiedStalkerModel:
+    """
+    All stalker agents (player and NPC) use the same _make_stalker_agent factory.
+    The only distinction is controller.kind = 'human' | 'bot'.
+    """
+
+    def _state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=42, num_players=1, num_ai_stalkers=2, num_mutants=0, num_traders=0)
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "player1")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "player1")
+
+    # ── controller.kind values ────────────────────────────────────────────────
+
+    def test_player_agent_controller_kind_is_human(self):
+        state = self._state()
+        agent = state["agents"]["agent_p0"]
+        assert agent["controller"]["kind"] == "human"
+
+    def test_npc_agent_controller_kind_is_bot(self):
+        state = self._state()
+        agent = state["agents"]["agent_ai_0"]
+        assert agent["controller"]["kind"] == "bot"
+
+    def test_debug_spawn_stalker_controller_kind_is_bot(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        new_id = (set(new_state["agents"]) - set(state["agents"])).pop()
+        assert new_state["agents"][new_id]["controller"]["kind"] == "bot"
+
+    def test_take_control_sets_controller_to_human(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        npc_id = "agent_ai_0"
+        new_state, events = self._r("take_control", {"agent_id": npc_id}, state)
+        assert new_state["agents"][npc_id]["controller"]["kind"] == "human"
+        assert new_state["agents"][npc_id]["controller"]["participant_id"] == "player1"
+        assert any(e["event_type"] == "agent_control_taken" for e in events)
+
+    def test_take_control_releases_previous_agent_to_bot(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        npc_id = "agent_ai_0"
+        new_state, _ = self._r("take_control", {"agent_id": npc_id}, state)
+        # Previous player agent should be released back to bot
+        assert new_state["agents"]["agent_p0"]["controller"]["kind"] == "bot"
+        assert new_state["agents"]["agent_p0"]["controller"]["participant_id"] is None
+
+    def test_take_control_validates_bot_only(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        # Taking control of a human-controlled agent should fail
+        result = self._v("take_control", {"agent_id": "agent_p0"}, state)
+        assert not result.valid
+        assert "player" in result.error.lower()
+
+    # ── same fields on player and NPC agents ─────────────────────────────────
+
+    _REQUIRED_FIELDS = [
+        "id", "archetype", "name", "location_id", "hp", "max_hp", "radiation",
+        "hunger", "thirst", "sleepiness", "money", "inventory", "equipment",
+        "faction", "controller", "is_alive", "action_used",
+        "experience", "skill_combat", "skill_stalker", "skill_trade",
+        "skill_medicine", "skill_social",
+        "global_goal", "current_goal", "risk_tolerance", "material_threshold",
+        "scheduled_action", "action_queue", "memory",
+    ]
+
+    def test_player_agent_has_all_required_fields(self):
+        state = self._state()
+        agent = state["agents"]["agent_p0"]
+        for field in self._REQUIRED_FIELDS:
+            assert field in agent, f"Player agent missing field: {field}"
+
+    def test_npc_agent_has_all_required_fields(self):
+        state = self._state()
+        agent = state["agents"]["agent_ai_0"]
+        for field in self._REQUIRED_FIELDS:
+            assert field in agent, f"NPC agent missing field: {field}"
+
+    def test_player_and_npc_have_same_field_set(self):
+        state = self._state()
+        player_fields = set(state["agents"]["agent_p0"].keys())
+        npc_fields = set(state["agents"]["agent_ai_0"].keys())
+        assert player_fields == npc_fields, (
+            f"Field mismatch — only in player: {player_fields - npc_fields}, "
+            f"only in NPC: {npc_fields - player_fields}"
+        )
+
+    # ── global_goal present for all agents ────────────────────────────────────
+
+    def test_player_agent_has_global_goal(self):
+        state = self._state()
+        agent = state["agents"]["agent_p0"]
+        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+
+    def test_npc_agent_has_global_goal(self):
+        state = self._state()
+        agent = state["agents"]["agent_ai_0"]
+        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+
+    def test_all_agents_have_material_threshold(self):
+        state = self._state()
+        for aid, agent in state["agents"].items():
+            assert "material_threshold" in agent, f"Agent {aid} missing material_threshold"
+            assert isinstance(agent["material_threshold"], int)
+            assert agent["material_threshold"] > 0
