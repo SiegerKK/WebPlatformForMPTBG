@@ -1454,6 +1454,7 @@ class TestUnreachableTargetHandling:
 def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = None, armor: str | None = None):
     """Build a minimal world with one bot stalker that has no weapon/armor."""
     from app.games.zone_stalkers.generators.zone_generator import generate_zone, _make_stalker_agent
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
     import random
 
     state = generate_zone(seed=7, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
@@ -1469,12 +1470,18 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
         participant_id=None,
         rng=rng,
     )
+
+    def _item(item_type: str, item_id: str) -> dict:
+        info = ITEM_TYPES[item_type]
+        return {"id": item_id, "type": item_type, "name": info["name"],
+                "weight": info.get("weight", 0), "value": info.get("value", 0)}
+
     # Strip equipment and inventory for deterministic tests
     stalker["inventory"] = [
-        {"id": "ammo_t", "type": "ammo_545", "name": "Патроны 5.45х39 (30 шт.)", "weight": 0.3, "value": 100},
-        {"id": "heal_t", "type": "bandage", "name": "Бинт", "weight": 0.1, "value": 50},
-        {"id": "food_t", "type": "bread", "name": "Буханка хлеба", "weight": 0.3, "value": 20},
-        {"id": "water_t", "type": "water", "name": "Вода (0.5л)", "weight": 0.5, "value": 30},
+        _item("ammo_545", "ammo_t"),
+        _item("bandage", "heal_t"),
+        _item("bread", "food_t"),
+        _item("water", "water_t"),
     ]
     stalker["equipment"] = {"weapon": None, "armor": None, "detector": None}
     stalker["money"] = 2000
@@ -1486,12 +1493,16 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
     stalker["material_threshold"] = 999999
 
     if weapon:
+        info = ITEM_TYPES[weapon]
         stalker["equipment"]["weapon"] = {
-            "id": "wpn_preset", "type": weapon, "name": weapon, "weight": 1.0, "value": 500
+            "id": "wpn_preset", "type": weapon, "name": info["name"],
+            "weight": info.get("weight", 1.0), "value": info.get("value", 500),
         }
     if armor:
+        info = ITEM_TYPES[armor]
         stalker["equipment"]["armor"] = {
-            "id": "arm_preset", "type": armor, "name": armor, "weight": 2.0, "value": 300
+            "id": "arm_preset", "type": armor, "name": info["name"],
+            "weight": info.get("weight", 2.0), "value": info.get("value", 300),
         }
 
     state["agents"]["bot_bare"] = stalker
@@ -1499,7 +1510,6 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
 
     if with_trader:
         conns = state["locations"][stalker_loc].get("connections", [])
-        trader_loc = conns[0]["to"] if conns else locs[1]
         trader = {
             "id": "trader_bare",
             "archetype": "trader_npc",
@@ -1525,11 +1535,14 @@ class TestEquipmentMaintenance:
 
     def test_equip_weapon_from_inventory(self):
         """Bot should equip a weapon from inventory into the weapon slot."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state, sid, loc_id = _make_bare_stalker_state()
-        # Put a weapon in inventory
-        state["agents"][sid]["inventory"].append({
-            "id": "wpn_inv", "type": "pistol", "name": "Пистолет ПМ", "weight": 0.7, "value": 500,
-        })
+        # Put a weapon in inventory using ITEM_TYPES as source of truth
+        info = ITEM_TYPES["pistol"]
+        state["agents"][sid]["inventory"].append(
+            {"id": "wpn_inv", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        )
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         assert agent["equipment"].get("weapon") is not None, "Weapon should be equipped from inventory"
@@ -1539,10 +1552,13 @@ class TestEquipmentMaintenance:
 
     def test_equip_armor_from_inventory(self):
         """Bot should equip armor from inventory when no armor is equipped."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
-        state["agents"][sid]["inventory"].append({
-            "id": "arm_inv", "type": "leather_jacket", "name": "Кожаная куртка", "weight": 2.0, "value": 300,
-        })
+        info = ITEM_TYPES["leather_jacket"]
+        state["agents"][sid]["inventory"].append(
+            {"id": "arm_inv", "type": "leather_jacket", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        )
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         assert agent["equipment"].get("armor") is not None, "Armor should be equipped from inventory"
@@ -1551,11 +1567,14 @@ class TestEquipmentMaintenance:
 
     def test_pickup_weapon_from_ground(self):
         """Bot should pick up a weapon from the ground when not equipped."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state, sid, loc_id = _make_bare_stalker_state()
-        # Place weapon on ground
-        state["locations"][loc_id]["items"] = [{
-            "id": "wpn_ground", "type": "pistol", "name": "Пистолет ПМ", "weight": 0.7, "value": 500,
-        }]
+        # Place weapon on ground using ITEM_TYPES
+        info = ITEM_TYPES["pistol"]
+        state["locations"][loc_id]["items"] = [
+            {"id": "wpn_ground", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         # Weapon should be in inventory now (equip from inventory happens on NEXT tick)
@@ -1567,10 +1586,13 @@ class TestEquipmentMaintenance:
 
     def test_pickup_armor_from_ground(self):
         """Bot should pick up armor from the ground when not equipped (weapon already set)."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
-        state["locations"][loc_id]["items"] = [{
-            "id": "arm_ground", "type": "leather_jacket", "name": "Кожаная куртка", "weight": 2.0, "value": 300,
-        }]
+        info = ITEM_TYPES["leather_jacket"]
+        state["locations"][loc_id]["items"] = [
+            {"id": "arm_ground", "type": "leather_jacket", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
         new_state, events = self._tick(state)
         loc_items = new_state["locations"][loc_id]["items"]
         assert not any(i["id"] == "arm_ground" for i in loc_items), "Armor removed from ground"
@@ -1619,15 +1641,18 @@ class TestEquipmentMaintenance:
 
     def test_seek_item_from_memory(self):
         """Bot should travel to a location remembered as having a weapon."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state, sid, loc_id = _make_bare_stalker_state()
         conns = state["locations"][loc_id].get("connections", [])
         if not conns:
             return  # Skip if no connections
         mem_loc = conns[0]["to"]
-        # Place weapon at mem_loc
-        state["locations"][mem_loc]["items"] = [{
-            "id": "wpn_mem", "type": "pistol", "name": "Пистолет ПМ", "weight": 0.7, "value": 500,
-        }]
+        # Place weapon at mem_loc using ITEM_TYPES for consistency
+        info = ITEM_TYPES["pistol"]
+        state["locations"][mem_loc]["items"] = [
+            {"id": "wpn_mem", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
         # Give agent a memory of seeing that item at mem_loc
         state["agents"][sid]["memory"] = [{
             "world_turn": 1,
@@ -1645,11 +1670,16 @@ class TestEquipmentMaintenance:
 
     def test_no_equipment_maintenance_when_fully_equipped(self):
         """Bot with full equipment should skip the equipment maintenance layer."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state, sid, loc_id = _make_bare_stalker_state(weapon="pistol", armor="leather_jacket")
-        # Ensure ammo is present
+        # Ensure ammo is present (pistol uses 9x18 ammo)
+        info_ammo = ITEM_TYPES["ammo_9mm"]
+        info_heal = ITEM_TYPES["bandage"]
         state["agents"][sid]["inventory"] = [
-            {"id": "ammo_9mm_t", "type": "ammo_9mm", "name": "Патроны 9х18", "weight": 0.2, "value": 60},
-            {"id": "heal_t2", "type": "bandage", "name": "Бинт", "weight": 0.1, "value": 50},
+            {"id": "ammo_9mm_t", "type": "ammo_9mm", "name": info_ammo["name"],
+             "weight": info_ammo["weight"], "value": info_ammo["value"]},
+            {"id": "heal_t2", "type": "bandage", "name": info_heal["name"],
+             "weight": info_heal["weight"], "value": info_heal["value"]},
         ]
         new_state, events = self._tick(state)
         # No item_equipped or item_picked_up events should fire

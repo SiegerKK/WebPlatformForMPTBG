@@ -1421,7 +1421,8 @@ def _run_bot_action_inner(
     # Need 3 — Ammo for equipped weapon ───────────────────────────────────────
     _equipped_weapon = equipment.get("weapon")
     if _equipped_weapon:
-        _required_ammo = AMMO_FOR_WEAPON.get(_equipped_weapon.get("type", ""))
+        _weapon_type = _equipped_weapon.get("type")  # None if missing
+        _required_ammo = AMMO_FOR_WEAPON.get(_weapon_type) if _weapon_type else None
         if _required_ammo:
             _required_ammo_set = frozenset({_required_ammo})
             _has_ammo = any(i["type"] == _required_ammo for i in agent.get("inventory", []))
@@ -1975,7 +1976,8 @@ def _describe_bot_decision_tree(
     _no_weapon = not equipment.get("weapon")
     _no_armor = not equipment.get("armor")
     _equipped_weapon = equipment.get("weapon")
-    _required_ammo = AMMO_FOR_WEAPON.get(_equipped_weapon.get("type", "") if _equipped_weapon else "", None)
+    _equipped_weapon_type = _equipped_weapon.get("type") if _equipped_weapon else None
+    _required_ammo = AMMO_FOR_WEAPON.get(_equipped_weapon_type) if _equipped_weapon_type else None
     _no_ammo = _required_ammo and not any(i["type"] == _required_ammo for i in inventory)
     _no_heal = not any(i["type"] in HEAL_ITEM_TYPES for i in inventory)
     cond4_equip = bool(_no_weapon or _no_armor or _no_ammo)
