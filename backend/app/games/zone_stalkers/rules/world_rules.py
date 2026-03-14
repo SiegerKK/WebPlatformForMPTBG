@@ -85,6 +85,9 @@ def validate_world_command(
                         "debug_set_time", "debug_advance_turns"):
         return RuleCheckResult(valid=True)
 
+    if command_type == "debug_set_agent_money":
+        return _validate_debug_set_agent_money(payload, state)
+
     if command_type == "debug_delete_agent":
         return _validate_debug_delete_agent(payload, state)
 
@@ -450,6 +453,20 @@ def resolve_world_command(
                 if agent_id_to_del in loc.get("agents", []):
                     loc["agents"].remove(agent_id_to_del)
         events.append({"event_type": "debug_agent_deleted", "payload": {"agent_id": agent_id_to_del}})
+        return state, events
+
+    # ── debug_set_agent_money: meta-command, set agent's money directly ─────
+    if command_type == "debug_set_agent_money":
+        target_id = str(payload["agent_id"])
+        amount = int(payload["amount"])
+        if target_id in state.get("agents", {}):
+            state["agents"][target_id]["money"] = amount
+        elif target_id in state.get("traders", {}):
+            state["traders"][target_id]["money"] = amount
+        events.append({
+            "event_type": "debug_agent_money_set",
+            "payload": {"agent_id": target_id, "amount": amount},
+        })
         return state, events
 
     # ── debug_advance_turns ───────────────────────────────────────────────────
@@ -1031,4 +1048,26 @@ def _validate_debug_preview_bot_decision(
         return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
     if agent.get("controller", {}).get("kind") != "bot":
         return RuleCheckResult(valid=False, error="Agent is not bot-controlled")
+    return RuleCheckResult(valid=True)
+
+def _validate_debug_set_agent_money(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    exists = (
+        agent_id in state.get("agents", {}) or
+        agent_id in state.get("traders", {})
+    )
+    if not exists:
+        return RuleCheckResult(valid=False, error=f"Agent/trader not found: {agent_id}")
+    amount = payload.get("amount")
+    if amount is None:
+        return RuleCheckResult(valid=False, error="amount is required")
+    try:
+        int(amount)
+    except (TypeError, ValueError):
+        return RuleCheckResult(valid=False, error="amount must be an integer")
     return RuleCheckResult(valid=True)

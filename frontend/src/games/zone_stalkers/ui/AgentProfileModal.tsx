@@ -152,6 +152,22 @@ type DecisionPreview = {
 export default function AgentProfileModal({ agent, locationName, onClose, locations, sendCommand }: Props) {
   // Initialise immediately with the client-side hint so the panel renders on
   // first paint without needing a button click.
+  const [moneyEdit, setMoneyEdit] = React.useState<string | null>(null);
+  const [moneySaving, setMoneySaving] = React.useState(false);
+
+  const handleMoneySave = async () => {
+    if (!sendCommand || moneyEdit === null) return;
+    const parsed = parseInt(moneyEdit, 10);
+    if (isNaN(parsed)) { setMoneyEdit(null); return; }
+    setMoneySaving(true);
+    try {
+      await sendCommand('debug_set_agent_money', { agent_id: agent.id, amount: parsed });
+    } finally {
+      setMoneySaving(false);
+      setMoneyEdit(null);
+    }
+  };
+
   const [decisionPreview, setDecisionPreview] = React.useState<DecisionPreview | null>(() => {
     if (sendCommand && agent.controller.kind === 'bot') {
       return _clientSideDecisionHint(agent);
@@ -247,7 +263,42 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               <span style={s.statVal}>{val}/{max}</span>
             </div>
           ))}
-          <div style={s.moneyLine}>💰 {agent.money} RU</div>
+          {sendCommand ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+              <span style={s.moneyLabel}>💰</span>
+              {moneyEdit !== null ? (
+                <>
+                  <input
+                    type="number"
+                    value={moneyEdit}
+                    onChange={(e) => setMoneyEdit(e.target.value)}
+                    onBlur={handleMoneySave}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleMoneySave(); if (e.key === 'Escape') setMoneyEdit(null); }}
+                    style={s.moneyInput}
+                    autoFocus
+                    disabled={moneySaving}
+                  />
+                  <span style={s.moneyRu}>RU</span>
+                  <button style={s.moneySaveBtn} onClick={handleMoneySave} disabled={moneySaving} title="Сохранить">
+                    {moneySaving ? '…' : '💾'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span
+                    style={s.moneyLineEditable}
+                    onClick={() => setMoneyEdit(String(agent.money))}
+                    title="Нажмите для редактирования"
+                  >
+                    {agent.money} RU
+                  </span>
+                  <span style={s.moneyEditHint}>✏️</span>
+                </>
+              )}
+            </div>
+          ) : (
+            <div style={s.moneyLine}>💰 {agent.money} RU</div>
+          )}
           {agent.reputation != null && (
             <div style={s.repLine}>⭐ Репутация: {agent.reputation}</div>
           )}
@@ -522,6 +573,23 @@ const s: Record<string, React.CSSProperties> = {
   barFill: { height: '100%', borderRadius: 3, transition: 'width 0.3s' },
   statVal: { color: '#94a3b8', fontSize: '0.7rem', width: 42, textAlign: 'right' },
   moneyLine: { color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem', marginTop: 4 },
+  moneyLabel: { color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem' },
+  moneyLineEditable: {
+    color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem',
+    cursor: 'pointer', borderBottom: '1px dashed #fbbf24',
+  },
+  moneyEditHint: { color: '#64748b', fontSize: '0.72rem', cursor: 'pointer' },
+  moneyInput: {
+    background: '#0f172a', border: '1px solid #fbbf24', borderRadius: 5,
+    color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem',
+    padding: '0.1rem 0.35rem', width: 100,
+  },
+  moneyRu: { color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem' },
+  moneySaveBtn: {
+    background: 'transparent', border: '1px solid #fbbf24',
+    borderRadius: 5, color: '#fbbf24', cursor: 'pointer',
+    fontSize: '0.8rem', padding: '0.1rem 0.3rem', lineHeight: 1,
+  },
   repLine: { color: '#a78bfa', fontSize: '0.8rem' },
   skillGrid: {
     display: 'grid',

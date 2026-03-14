@@ -249,6 +249,18 @@ def _make_stalker_agent(
     if armor:
         equipment["armor"] = _make_item_instance(armor, rng)
 
+    # Choose global goal first so the material_threshold can be calibrated to it.
+    # get_rich agents aim for a large wealth target; others just need a modest buffer.
+    chosen_global_goal = global_goal if global_goal else rng.choice(
+        ["survive", "get_rich", "explore", "serve_faction"]
+    )
+    if chosen_global_goal == "get_rich":
+        # High threshold: agent pursues the global goal once truly wealthy
+        chosen_threshold = rng.randint(50_000, 1_000_000)
+    else:
+        # Modest buffer before switching to the global goal
+        chosen_threshold = rng.randint(3_000, 10_000)
+
     return {
         "id": agent_id,
         "archetype": "stalker_agent",
@@ -284,11 +296,12 @@ def _make_stalker_agent(
         "skill_medicine": 1,
         "skill_social": 1,
         # ─── Goals & Psychology ───
-        "global_goal": global_goal if global_goal else rng.choice(["survive", "get_rich", "explore", "serve_faction"]),
+        "global_goal": chosen_global_goal,
         "current_goal": None,
         "risk_tolerance": round(rng.uniform(0.2, 0.9), 2),
-        # Minimum wealth (money + inventory value) before pursuing global_goal
-        "material_threshold": rng.randint(500, 3000),
+        # Wealth target: for get_rich agents this is a high bar (50k–1M);
+        # for others it's a modest buffer (3k–10k) before pursuing their global goal.
+        "material_threshold": chosen_threshold,
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one

@@ -64,6 +64,38 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     "payload": {"agent_id": agent_id, "cause": "starvation_or_thirst"},
                 })
 
+
+    # 2b. Midnight artifact spawn: when the world clock crosses midnight (23:59 → 00:00),
+    # each location with anomalies has a chance to spawn a new artifact.
+    # This runs BEFORE bot AI decisions so bots can react to fresh spawns this turn.
+    _is_midnight_crossing = (_new_minute == 0 and state.get("world_hour", 6) == 23)
+    if _is_midnight_crossing:
+        _midnight_rng = random.Random(
+            state.get("seed", 0) + state.get("world_day", 1) * 1000
+        )
+        for _mid_loc_id, _mid_loc in state.get("locations", {}).items():
+            if not _mid_loc.get("anomalies"):
+                continue
+            _spawn_chance = _mid_loc.get("anomaly_activity", 0) / 10.0
+            if _midnight_rng.random() < _spawn_chance:
+                _art_type = _midnight_rng.choice(list(ARTIFACT_TYPES.keys()))
+                _art_info = ARTIFACT_TYPES[_art_type]
+                _art_id = f"art_midnight_{_mid_loc_id}_{state.get('world_day', 1)}"
+                _new_art = {
+                    "id": _art_id,
+                    "type": _art_type,
+                    "name": _art_info["name"],
+                    "value": _art_info["value"],
+                }
+                _mid_loc.setdefault("artifacts", []).append(_new_art)
+                events.append({
+                    "event_type": "artifact_spawned",
+                    "payload": {
+                        "location_id": _mid_loc_id,
+                        "artifact_type": _art_type,
+                    },
+                })
+
     # 3. AI bot agent decisions (bots without a scheduled action)
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
@@ -338,72 +370,90 @@ def _resolve_exploration(
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Resolve exploration: chance for loot, anomaly encounter, or discovery."""
-    from app.games.zone_stalkers.balance.items import ITEM_TYPES
-    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    """Resolve exploration: pick up an existing artifact (50 % chance) or mark the location.
+
+    New logic (replaces the old loot-table approach):
+    - Checks existing artifacts on the location rather than conjuring one from thin air.
+    - 50 % success roll.  On success the agent picks up one random artifact.
+    - On failure distinguishes between a truly empty location and bad luck.
+    """
+    from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
     events: List[Dict[str, Any]] = []
 
-    loot_chance = 0.4
-
-    # Seed using agent id for reproducibility variance
+    # Seed using agent id + turn for per-agent variance
     rng = random.Random(agent_id + str(world_turn))
-    roll = rng.random()
 
-    found_items = []
-    found_artifacts = []
-    notes = []
+    existing_artifacts = loc.get("artifacts", [])
+    found_artifacts: List[Dict[str, Any]] = []
+    loc_name = loc.get("name", loc_id)
 
-    if roll < loot_chance:
-        # Found something!
-        roll2 = rng.random()
-        if loc.get("anomalies") and roll2 < 0.4:
-            # Found an artifact near an anomaly
-            art_type = rng.choice(list(ARTIFACT_TYPES.keys()))
-            art_info = ARTIFACT_TYPES[art_type]
-            art_item = {
-                "id": f"art_{agent_id}_{world_turn}",
-                "type": art_type,
-                "name": art_info["name"],
-                "value": art_info["value"],
-            }
-            agent.setdefault("inventory", []).append(art_item)
-            found_artifacts.append(art_item)
-            notes.append(f"Found {art_info['name']} near an anomaly cluster.")
-            events.append({
-                "event_type": "exploration_found_artifact",
-                "payload": {"agent_id": agent_id, "artifact": art_item},
-            })
-        else:
-            # Found a regular item
-            consumable_types = [k for k, v in ITEM_TYPES.items() if v["type"] in ("medical", "consumable", "ammo")]
-            if consumable_types:
-                item_type = rng.choice(consumable_types)
-                item_info = ITEM_TYPES[item_type]
-                item = {
-                    "id": f"item_{agent_id}_{world_turn}",
-                    "type": item_type,
-                    "name": item_info["name"],
-                    "weight": item_info.get("weight", 0),
-                    "value": item_info.get("value", 0),
-                }
-                agent.setdefault("inventory", []).append(item)
-                found_items.append(item)
-                notes.append(f"Found {item_info['name']} in the rubble.")
-                events.append({
-                    "event_type": "exploration_found_item",
-                    "payload": {"agent_id": agent_id, "item": item},
-                })
+    artifact_found = existing_artifacts and rng.random() < 0.5
+    if artifact_found:
+        # Pick one artifact at random and transfer it to the agent
+        art = rng.choice(existing_artifacts)
+        loc["artifacts"] = [a for a in existing_artifacts if a["id"] != art["id"]]
+        agent.setdefault("inventory", []).append(art)
+        found_artifacts.append(art)
+        art_name = art.get("name", art.get("type", "артефакт"))
+
+        # Action memory: agent picked up the artifact
+        _add_memory(
+            agent, world_turn, state, "action",
+            f"Подобрал артефакт {art_name}",
+            f"Поднял артефакт {art_name} с аномалии.",
+            {
+                "action_kind": "pickup",
+                "artifact_id": art["id"],
+                "artifact_type": art["type"],
+                "artifact_value": art.get("value", 0),
+                "location_id": loc_id,
+            },
+        )
+        # Observation memory
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Поднял артефакт {art_name} с аномалии",
+            f"Во время обыска нашёл и поднял «{art_name}» на локации «{loc_name}».",
+            {"action_kind": "pickup", "artifact_type": art["type"], "location_id": loc_id},
+        )
+        events.append({
+            "event_type": "exploration_found_artifact",
+            "payload": {"agent_id": agent_id, "artifact": art},
+        })
     else:
-        notes.append("Searched the area but found nothing of value.")
+        # Did not pick up an artifact — determine why and write appropriate memory
+        if not existing_artifacts:
+            # Location is genuinely empty — record as confirmed empty to block future tries
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Аномалия в «{loc_name}» пустая",
+                f"Тщательно обыскал «{loc_name}» — артефактов нет.",
+                {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
+            )
+        else:
+            # Bad luck — artifacts are present but agent missed them
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Не нашёл артефакт в «{loc_name}»",
+                f"Искал в «{loc_name}» — не повезло, ничего не нашёл.",
+                {"action_kind": "explore_miss", "location_id": loc_id},
+            )
 
-    # Possible anomaly encounter during exploration
+    # Always record that an exploration action was performed (satisfies memory tests
+    # and gives the agent a record of every search attempt regardless of outcome).
+    _add_memory(
+        agent, world_turn, state, "action",
+        f"Исследовал «{loc_name}»",
+        f"Провёл разведку в «{loc_name}». Найдено артефактов: {len(found_artifacts)}.",
+        {"action_kind": "explore", "location_id": loc_id, "artifacts_found": len(found_artifacts)},
+    )
+
+    # ── Possible anomaly encounter during exploration (unchanged) ─────────────
     if loc.get("anomalies") and rng.random() < 0.15 * (loc.get("anomaly_activity", 5) / 10):
-        from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
         anom = rng.choice(loc["anomalies"])
         anom_info = ANOMALY_TYPES.get(anom["type"], {})
         dmg = anom_info.get("damage", 10)
         agent["hp"] = max(0, agent["hp"] - dmg)
-        notes.append(f"Triggered a {anom_info.get('name', 'anomaly')} — took {dmg} damage!")
         events.append({
             "event_type": "anomaly_damage",
             "payload": {
@@ -415,24 +465,21 @@ def _resolve_exploration(
         })
         if agent["hp"] <= 0:
             agent["is_alive"] = False
-            events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly_exploration"}})
+            events.append({
+                "event_type": "agent_died",
+                "payload": {"agent_id": agent_id, "cause": "anomaly_exploration"},
+            })
 
-    summary = " ".join(notes) if notes else f"Explored {loc.get('name', loc_id)}."
     events.insert(0, {
         "event_type": "exploration_completed",
         "payload": {
             "agent_id": agent_id,
             "location_id": loc_id,
-            "location_name": loc.get("name", loc_id),
-            "found_items": found_items,
+            "location_name": loc_name,
+            "found_items": [],
             "found_artifacts": found_artifacts,
         },
     })
-
-    _add_memory(agent, world_turn, state, "action",
-                f"Исследовал «{loc.get('name', loc_id)}»",
-                summary,
-                {"action_kind": "explore", "items_found": len(found_items), "artifacts_found": len(found_artifacts)})
     return events
 
 
@@ -1271,10 +1318,17 @@ def _bot_pursue_goal(
             agent["current_goal"] = "goal_get_rich_seek_artifacts"
             return _bot_schedule_travel(agent_id, agent, best_art_loc_id, state, world_turn)
 
-        # No artifacts found anywhere.
-        # If the current location already has anomalies, explore it — no random gate so the
-        # agent never bounces between equal-activity neighbours when the roll fails.
-        if loc.get("anomalies"):
+        # No artifacts found anywhere on the map.
+        # Build the set of locations the agent has confirmed as empty through exploration.
+        confirmed_empty: frozenset = frozenset(
+            mem.get("effects", {}).get("location_id")
+            for mem in agent.get("memory", [])
+            if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
+            and mem.get("effects", {}).get("location_id")
+        )
+
+        # If current location has anomalies AND is not yet confirmed empty → explore it.
+        if loc.get("anomalies") and loc_id not in confirmed_empty:
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Исследую зону в ожидании артефактов",
@@ -1289,7 +1343,47 @@ def _bot_pursue_goal(
             agent["action_used"] = True
             return [{"event_type": "exploration_started",
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
-        # Current location has no anomalies — travel to the neighbour with the highest activity.
+
+        # Current location is confirmed empty or has no anomalies.
+        # Try to find a neighbour with anomalies that is NOT confirmed empty.
+        anomaly_neighbors_fresh = [
+            c for c in connections
+            if locations.get(c["to"], {}).get("anomalies")
+            and c["to"] not in confirmed_empty
+        ]
+        if anomaly_neighbors_fresh:
+            # Pick the best by anomaly_activity + small random tiebreak
+            best = max(
+                anomaly_neighbors_fresh,
+                key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0) + rng.random() * 0.5,
+            )
+            best_name = locations.get(best["to"], {}).get("name", best["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Иду в непроверенную аномальную зону «{best_name}»",
+                f"Текущая локация пустая/изучена. Иду в «{best_name}» — там аномалии и возможны артефакты.",
+                {"action_kind": "move_for_anomaly", "destination": best["to"]},
+            )
+            return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+
+        # All reachable anomaly neighbours are confirmed empty — use fallback:
+        # visit a random anomaly location (even confirmed empty) to wait for midnight spawns.
+        all_anomaly_neighbors = [
+            c for c in connections
+            if locations.get(c["to"], {}).get("anomalies")
+        ]
+        if all_anomaly_neighbors:
+            fallback = rng.choice(all_anomaly_neighbors)
+            fallback_name = locations.get(fallback["to"], {}).get("name", fallback["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Все аномальные зоны изучены — иду в «{fallback_name}» ждать",
+                f"Все известные аномальные локации пусты. Возвращаюсь в «{fallback_name}» в ожидании новых артефактов.",
+                {"action_kind": "move_for_anomaly", "destination": fallback["to"]},
+            )
+            return _bot_schedule_travel(agent_id, agent, fallback["to"], state, world_turn)
+
+        # No anomaly neighbours at all — move toward highest anomaly activity.
         if connections:
             best = max(connections,
                        key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
