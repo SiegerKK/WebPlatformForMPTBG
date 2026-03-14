@@ -357,17 +357,25 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
           {Object.keys(agent.equipment).length === 0 ? (
             <span style={s.empty}>Нет снаряжения</span>
           ) : (
-            Object.entries(agent.equipment).map(([slot, item]) => (
-              <div key={slot} style={s.equipRow}>
-                <span style={s.equipSlot}>{slot}</span>
-                <span style={item ? s.equipItem : s.equipEmpty}>
-                  {item ? item.name : '—'}
-                </span>
-                {item?.value != null && (
-                  <span style={s.equipVal}>{item.value} RU</span>
-                )}
-              </div>
-            ))
+            Object.entries(agent.equipment).map(([slot, item]) => {
+              const slotLabel: Record<string, string> = {
+                weapon: '🔫 Оружие',
+                armor: '🛡️ Броня',
+                detector: '📡 Детектор',
+              };
+              const label = slotLabel[slot] ?? slot;
+              return (
+                <div key={slot} style={s.equipRow}>
+                  <span style={s.equipSlot}>{label}</span>
+                  <span style={item ? s.equipItem : s.equipEmpty}>
+                    {item ? item.name : '— пусто —'}
+                  </span>
+                  {item?.value != null && (
+                    <span style={s.equipVal}>{item.value} RU</span>
+                  )}
+                </div>
+              );
+            })
           )}
         </Section>
 
