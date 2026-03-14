@@ -998,172 +998,158 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       <div style={s.canvasWrap}>
         {/* Toolbar */}
         <div style={s.toolbar}>
-          <div style={s.legend}>
-            {Object.entries(TERRAIN_TYPE_COLOR).map(([t, c]) => (
-              <span key={t} style={s.legendItem}>
-                <span style={{ ...s.legendDot, background: c }} />
-                {TERRAIN_TYPE_LABELS[t] ?? t.replace(/_/g, ' ')}
-              </span>
-            ))}
-          </div>
-          <div style={s.toolbarRight}>
-            {/* ── World clock + emission block ── */}
-            <div style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
-              background: '#0f172a', border: '1px solid #1e3a5f',
-              borderRadius: 6, padding: '0.2rem 0.5rem', gap: 1,
-            }}>
-              <span style={{ color: '#60a5fa', fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
-                📅 День {zoneState.world_day} · {String(zoneState.world_hour).padStart(2, '0')}:{String(zoneState.world_minute ?? 0).padStart(2, '0')}
-              </span>
-              <span style={{ color: '#475569', fontSize: '0.62rem', whiteSpace: 'nowrap' }}>
-                Ход {zoneState.world_turn}
-              </span>
-              {zoneState.emission_active ? (
-                <span style={{ color: '#ef4444', fontSize: '0.65rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
-                  ⚡ ВЫБРОС! (ещё {(zoneState.emission_ends_turn ?? 0) - zoneState.world_turn} мин)
+          {/* ── Row 1: legend + world clock + save indicator ── */}
+          <div style={s.toolbarRow1}>
+            <div style={s.legend}>
+              {Object.entries(TERRAIN_TYPE_COLOR).map(([t, c]) => (
+                <span key={t} style={s.legendItem}>
+                  <span style={{ ...s.legendDot, background: c }} />
+                  {TERRAIN_TYPE_LABELS[t] ?? t.replace(/_/g, ' ')}
                 </span>
-              ) : (
-                <span style={{ color: '#f59e0b', fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
-                  ⚡ через {Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn)} мин
-                </span>
-              )}
+              ))}
             </div>
-            <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
-            <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
-              ⚠ Save failed
-            </span>
-            {/* Advance turn */}
-            <button
-              style={s.toolBtn}
-              onClick={handleTick}
-              disabled={ticking || skipping || autoRunning}
-              title="Пропустить 1 ход (1 минута)"
-            >
-              {ticking ? '…' : '⏭ Ход'}
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={handleSkipToDecision}
-              disabled={ticking || autoRunning}
-              title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
-            >
-              {skipping ? '⏹ Остановить' : '⏩ До решения'}
-            </button>
-            <button
-              style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
-              onClick={handleAutoRun}
-              disabled={ticking || skipping}
-              title={autoRunning ? 'Нажмите для паузы' : 'Запустить течение времени до паузы'}
-            >
-              {autoRunning ? '⏸ Пауза' : '▶ Авто'}
-            </button>
-            {/* Trigger emission */}
-            <button
-              style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}
-              onClick={async () => {
-                try { await sendCommand('debug_trigger_emission', {}); }
-                catch { /* ignore */ }
-              }}
-              disabled={zoneState.emission_active}
-              title={zoneState.emission_active ? 'Выброс уже активен' : 'Немедленно запустить выброс (debug)'}
-            >
-              ⚡ Выброс
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={() => setCreatingLoc(true)}
-              title="Create a new location"
-            >
-              ➕ Location
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={handleCreateRegion}
-              title="Create a new region"
-            >
-              ➕ Регион
-            </button>
-            <button
-              style={{
-                ...s.toolBtn,
-                ...(linkMode ? s.toolBtnActive : {}),
-              }}
-              onClick={handleToggleLinkMode}
-              title="Toggle link-editing mode. In link mode: click a location to select it as source, then click another to create/remove a connection."
-            >
-              🔗 {linkMode ? 'Link mode ON' : 'Link mode'}
-            </button>
-            <button
-                style={{ ...s.toolBtn, visibility: Object.keys(dragOverrides).length > 0 ? 'visible' : 'hidden' }}
-                onClick={() => {
-                  setDragOverrides({});
-                  persistMap({}, localConnsRef.current);
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {/* World clock + emission */}
+              <div style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+                background: '#0f172a', border: '1px solid #1e3a5f',
+                borderRadius: 6, padding: '0.2rem 0.5rem', gap: 1,
+              }}>
+                <span style={{ color: '#60a5fa', fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                  📅 День {zoneState.world_day} · {String(zoneState.world_hour).padStart(2, '0')}:{String(zoneState.world_minute ?? 0).padStart(2, '0')}
+                </span>
+                <span style={{ color: '#475569', fontSize: '0.62rem', whiteSpace: 'nowrap' }}>
+                  Ход {zoneState.world_turn}
+                </span>
+                {zoneState.emission_active ? (
+                  <span style={{ color: '#ef4444', fontSize: '0.65rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                    ⚡ ВЫБРОС! (ещё {(zoneState.emission_ends_turn ?? 0) - zoneState.world_turn} мин)
+                  </span>
+                ) : (
+                  <span style={{ color: '#f59e0b', fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
+                    ⚡ через {Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn)} мин
+                  </span>
+                )}
+              </div>
+              <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
+              <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
+                ⚠ Save failed
+              </span>
+            </div>
+          </div>
+          {/* ── Row 2: action buttons in groups ── */}
+          <div style={s.toolbarRow2}>
+            {/* Group: Time controls */}
+            <div style={s.toolbarGroup}>
+              <button
+                style={s.toolBtn}
+                onClick={handleTick}
+                disabled={ticking || skipping || autoRunning}
+                title="Пропустить 1 ход (1 минута)"
+              >
+                {ticking ? '…' : '⏭ Ход'}
+              </button>
+              <button
+                style={s.toolBtn}
+                onClick={handleSkipToDecision}
+                disabled={ticking || autoRunning}
+                title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
+              >
+                {skipping ? '⏹ Стоп' : '⏩ До решения'}
+              </button>
+              <button
+                style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
+                onClick={handleAutoRun}
+                disabled={ticking || skipping}
+                title={autoRunning ? 'Нажмите для паузы' : 'Запустить течение времени до паузы'}
+              >
+                {autoRunning ? '⏸ Пауза' : '▶ Авто'}
+              </button>
+              <button
+                style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}
+                onClick={async () => {
+                  try { await sendCommand('debug_trigger_emission', {}); }
+                  catch { /* ignore */ }
                 }}
-                title="Reset all card positions to the auto-layout"
+                disabled={zoneState.emission_active}
+                title={zoneState.emission_active ? 'Выброс уже активен' : 'Немедленно запустить выброс (debug)'}
               >
-                ↺ Reset layout
+                ⚡ Выброс
               </button>
-            <button
-                style={{ ...s.toolBtn, visibility: (panOffset.x !== 0 || panOffset.y !== 0) ? 'visible' : 'hidden' }}
-                onClick={() => setPanOffset({ x: 0, y: 0 })}
-                title="Re-centre the canvas view"
+            </div>
+            <div style={s.toolbarSep} />
+            {/* Group: Edit tools */}
+            <div style={s.toolbarGroup}>
+              <button style={s.toolBtn} onClick={() => setCreatingLoc(true)} title="Создать новую локацию">
+                ➕ Лок.
+              </button>
+              <button style={s.toolBtn} onClick={handleCreateRegion} title="Создать новый регион">
+                ➕ Рег.
+              </button>
+              <button
+                style={{ ...s.toolBtn, ...(linkMode ? s.toolBtnActive : {}) }}
+                onClick={handleToggleLinkMode}
+                title="Режим связей: кликните локацию-источник, потом цель"
               >
-                ⊙ Re-centre
+                🔗 {linkMode ? 'ON' : 'Связи'}
               </button>
-            {/* Zoom controls */}
-            <button
-              style={s.toolBtn}
-              onClick={() =>
-                setZoom((prev) => Math.max(0.25, +(prev - 0.1).toFixed(2)))
-              }
-              disabled={zoom <= 0.25}
-              title="Zoom out"
-            >
-              –
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={() => setZoom(1.0)}
-              title="Reset zoom to 100%"
-            >
-              {Math.round(zoom * 100)}%
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={() =>
-                setZoom((prev) => Math.min(3, +(prev + 0.1).toFixed(2)))
-              }
-              disabled={zoom >= 3}
-              title="Zoom in"
-            >
-              +
-            </button>
-            {/* Fullscreen */}
-            <button
-              style={s.toolBtn}
-              onClick={handleFullscreen}
-              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen map'}
-              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-            >
-              {isFullscreen ? '⊡' : '⛶'}
-            </button>
-            {/* Export */}
-            <button
-              style={s.toolBtn}
-              onClick={handleExport}
-              title="Экспортировать ВСЮ карту: локации, переходы, регионы, время и выброс в JSON"
-            >
-              📤 Export
-            </button>
-            {/* Import */}
-            <button
-              style={s.toolBtn}
-              onClick={() => importInputRef.current?.click()}
-              title="Импортировать карту из JSON (v3 — полная замена карты; v1/v2 — только позиции/связи)"
-            >
-              📥 Import
-            </button>
+            </div>
+            <div style={s.toolbarSep} />
+            {/* Group: View tools */}
+            <div style={s.toolbarGroup}>
+              {Object.keys(dragOverrides).length > 0 && (
+                <button
+                  style={s.toolBtn}
+                  onClick={() => { setDragOverrides({}); persistMap({}, localConnsRef.current); }}
+                  title="Сбросить позиции карточек к авто-раскладке"
+                >
+                  ↺ Сброс
+                </button>
+              )}
+              {(panOffset.x !== 0 || panOffset.y !== 0) && (
+                <button style={s.toolBtn} onClick={() => setPanOffset({ x: 0, y: 0 })} title="Вернуть центр холста">
+                  ⊙ Центр
+                </button>
+              )}
+              {/* Zoom inline group */}
+              <div style={s.zoomGroup}>
+                <button
+                  style={{ ...s.toolBtn, ...s.zoomBtn }}
+                  onClick={() => setZoom((prev) => Math.max(0.25, +(prev - 0.1).toFixed(2)))}
+                  disabled={zoom <= 0.25}
+                  title="Zoom out"
+                >–</button>
+                <button
+                  style={{ ...s.toolBtn, ...s.zoomBtn, minWidth: 38, borderLeft: 'none', borderRight: 'none', borderRadius: 0 }}
+                  onClick={() => setZoom(1.0)}
+                  title="Сброс масштаба"
+                >{Math.round(zoom * 100)}%</button>
+                <button
+                  style={{ ...s.toolBtn, ...s.zoomBtn, borderLeft: 'none', borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
+                  onClick={() => setZoom((prev) => Math.min(3, +(prev + 0.1).toFixed(2)))}
+                  disabled={zoom >= 3}
+                  title="Zoom in"
+                >+</button>
+              </div>
+              <button
+                style={s.toolBtn}
+                onClick={handleFullscreen}
+                title={isFullscreen ? 'Выйти из полноэкранного режима' : 'Полноэкранный режим'}
+                aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              >
+                {isFullscreen ? '⊡' : '⛶'}
+              </button>
+            </div>
+            <div style={s.toolbarSep} />
+            {/* Group: Data */}
+            <div style={s.toolbarGroup}>
+              <button style={s.toolBtn} onClick={handleExport} title="Экспортировать карту в JSON">
+                📤
+              </button>
+              <button style={s.toolBtn} onClick={() => importInputRef.current?.click()} title="Импортировать карту из JSON">
+                📥
+              </button>
+            </div>
           </div>
         </div>
 
