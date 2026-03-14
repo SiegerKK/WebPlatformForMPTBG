@@ -120,7 +120,21 @@ const MEM_COLORS: Record<string, string> = {
   trade_sell: '#34d399',
 };
 
-// ─── Main component ───────────────────────────────────────────────────────────
+// Map raw backend current_goal IDs to human-readable Russian labels.
+const CURRENT_GOAL_LABELS: Record<string, string> = {
+  gather_resources:             'Сбор ресурсов',
+  goal_get_rich:                'Нажива',
+  goal_get_rich_seek_artifacts: 'Ищу артефакты',
+  sell_artifacts:               'Продаю артефакты',
+  flee_to_safety:               'Бегство',
+  goal_survive:                 'Выживание',
+  goal_explore_zone:            'Исследование зоны',
+  goal_serve_faction:           'Служу фракции',
+};
+
+/** Return a display label for a current_goal identifier. */
+const currentGoalLabel = (raw: string): string =>
+  CURRENT_GOAL_LABELS[raw] ?? raw.replace(/_/g, ' ');
 
 // ─── Decision preview type ───────────────────────────────────────────────────
 
@@ -248,7 +262,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
               <div style={s.goalLine}>
                 🎯 Цель: <strong>{agent.global_goal}</strong>
                 {agent.current_goal && (
-                  <span style={s.subgoal}> → {agent.current_goal}</span>
+                   <span style={s.subgoal}> → {currentGoalLabel(agent.current_goal)}</span>
                 )}
               </div>
             )}
