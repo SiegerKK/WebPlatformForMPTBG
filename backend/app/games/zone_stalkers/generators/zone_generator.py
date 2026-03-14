@@ -222,14 +222,18 @@ def _make_stalker_agent(
         inventory.append(_make_item_instance("medkit", rng))
     if rng.random() < 0.6:
         inventory.append(_make_item_instance("bread", rng))
+    if rng.random() < 0.5:
+        inventory.append(_make_item_instance("water", rng))
+    if rng.random() < 0.4:
+        inventory.append(_make_item_instance("canned_food", rng))
 
     equipment: Dict[str, Any] = {"weapon": None, "armor": None, "detector": None}
     if weapon:
         equip_item = _make_item_instance(weapon, rng)
         equipment["weapon"] = equip_item
-        # Ammo
-        ammo_map = {"pistol": "ammo_9mm", "ak74": "ammo_545", "shotgun": "ammo_12gauge"}
-        ammo_type = ammo_map.get(weapon)
+        # Give ammo for the equipped weapon (use AMMO_FOR_WEAPON for single source of truth)
+        from app.games.zone_stalkers.balance.items import AMMO_FOR_WEAPON as _AMMO_FOR_WEAPON
+        ammo_type = _AMMO_FOR_WEAPON.get(weapon)
         if ammo_type:
             inventory.append(_make_item_instance(ammo_type, rng))
     if armor:

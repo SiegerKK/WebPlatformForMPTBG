@@ -748,7 +748,10 @@ def _write_location_observations(
 # ─────────────────────────────────────────────────────────────────
 
 # Import centralised item-type sets from balance data (single source of truth)
-from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+from app.games.zone_stalkers.balance.items import (
+    HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES,
+    WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_ITEM_TYPES, AMMO_FOR_WEAPON,
+)
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 
 # Set of artifact type keys (used to identify artifacts in inventory)
@@ -1104,6 +1107,110 @@ def _bot_consume(
     }]
 
 
+def _bot_equip_from_inventory(
+    agent_id: str,
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+    slot: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Move a matching item from the agent's inventory into an equipment slot.
+
+    The old item in the slot (if any) is returned to the inventory.
+    Returns a non-empty event list on success, empty list if no matching item found.
+    """
+    inventory = agent.get("inventory", [])
+    item = next((i for i in inventory if i["type"] in item_types), None)
+    if item is None:
+        return []
+    equipment = agent.setdefault("equipment", {})
+    # Return old equipment to inventory (if any)
+    old_item = equipment.get(slot)
+    if old_item:
+        agent["inventory"] = [i for i in inventory if i["id"] != item["id"]] + [old_item]
+    else:
+        agent["inventory"] = [i for i in inventory if i["id"] != item["id"]]
+    equipment[slot] = item
+    agent["action_used"] = True
+    item_name = item.get("name", item["type"])
+    _add_memory(
+        agent, world_turn, state, "action",
+        f"Экипировал «{item_name}»",
+        f"Экипировал «{item_name}» в слот «{slot}».",
+        {"action_kind": "equip", "item_type": item["type"], "slot": slot},
+    )
+    return [{"event_type": "item_equipped",
+             "payload": {"agent_id": agent_id, "item_type": item["type"], "slot": slot}}]
+
+
+def _bot_pickup_item_from_ground(
+    agent_id: str,
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Pick up a matching item from the ground at the agent's current location.
+
+    Removes the item from ``location["items"]`` and adds it to the agent's
+    inventory.  Returns a non-empty event list on success.
+    """
+    loc_id = agent.get("location_id")
+    loc = state.get("locations", {}).get(loc_id, {})
+    ground_items = loc.get("items", [])
+    item = next((i for i in ground_items if i.get("type") in item_types), None)
+    if item is None:
+        return []
+    loc["items"] = [i for i in ground_items if i["id"] != item["id"]]
+    agent.setdefault("inventory", []).append(item)
+    agent["action_used"] = True
+    item_name = item.get("name", item["type"])
+    loc_name = loc.get("name", loc_id)
+    _add_memory(
+        agent, world_turn, state, "action",
+        f"Поднял «{item_name}» с земли",
+        f"Нашёл «{item_name}» на земле в «{loc_name}» и подобрал.",
+        {"action_kind": "pickup_ground", "item_type": item["type"], "location_id": loc_id},
+    )
+    return [{"event_type": "item_picked_up",
+             "payload": {"agent_id": agent_id, "item_type": item["type"],
+                         "item_id": item["id"], "location_id": loc_id}}]
+
+
+def _find_item_memory_location(
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+    state: Dict[str, Any],
+) -> Optional[str]:
+    """Scan agent memory for the most recent observation of a needed item type.
+
+    Returns the ``loc_id`` of the most recently remembered location where
+    one of the requested item types was seen, or ``None`` if no such memory
+    exists.  Only locations that are reachable (non-closed connections) are
+    considered.
+    """
+    locations = state.get("locations", {})
+    # Collect candidate locations from memory (newest first)
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "observation":
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("observed") != "items":
+            continue
+        loc_id = effects.get("location_id")
+        if not loc_id or loc_id not in locations:
+            continue
+        remembered_types = set(effects.get("item_types", []))
+        if not remembered_types.intersection(item_types):
+            continue
+        # Verify that the location still has the item (ground truth check)
+        ground_items = locations.get(loc_id, {}).get("items", [])
+        if any(gi.get("type") in item_types for gi in ground_items):
+            return loc_id
+    return None
+
+
 def _run_bot_action(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1231,6 +1338,160 @@ def _run_bot_action_inner(
                 return bought
         elif trader_loc is not None:
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+
+    # ── EQUIPMENT MAINTENANCE ─────────────────────────────────────────────────
+    # High-priority: ensure the agent is always armed, armored and has basic
+    # supplies.  For each need the cascade is:
+    #   1) Equip/use from inventory
+    #   2) Pick up from the ground at the current location
+    #   3) Travel to a location remembered as having that item (memory)
+    #   4) Buy from a nearby trader / travel to the nearest one
+    equipment = agent.setdefault("equipment", {})
+
+    # Need 1 — Weapon ────────────────────────────────────────────────────────
+    if not equipment.get("weapon"):
+        # a) equip from inventory
+        evs = _bot_equip_from_inventory(agent_id, agent, WEAPON_ITEM_TYPES, "weapon", state, world_turn)
+        if evs:
+            return evs
+        # b) pick up from ground
+        evs = _bot_pickup_item_from_ground(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+        # c) travel to remembered item location
+        mem_loc = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            agent["current_goal"] = "get_weapon"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Ищу оружие по памяти",
+                f"Нет оружия. Помню, что видел его в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "weapon", "destination": mem_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+        # d) buy from trader or travel to one
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+        elif trader_loc is not None:
+            agent["current_goal"] = "get_weapon"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду к торговцу за оружием",
+                f"Нет оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
+                {"action_kind": "seek_item", "item_category": "weapon", "destination": trader_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+
+    # Need 2 — Armor ─────────────────────────────────────────────────────────
+    if not equipment.get("armor"):
+        evs = _bot_equip_from_inventory(agent_id, agent, ARMOR_ITEM_TYPES, "armor", state, world_turn)
+        if evs:
+            return evs
+        evs = _bot_pickup_item_from_ground(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+        mem_loc = _find_item_memory_location(agent, ARMOR_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            agent["current_goal"] = "get_armor"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Ищу броню по памяти",
+                f"Нет брони. Помню, что видел её в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "armor", "destination": mem_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+        elif trader_loc is not None:
+            agent["current_goal"] = "get_armor"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду к торговцу за бронёй",
+                f"Нет брони. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
+                {"action_kind": "seek_item", "item_category": "armor", "destination": trader_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+
+    # Need 3 — Ammo for equipped weapon ───────────────────────────────────────
+    _equipped_weapon = equipment.get("weapon")
+    if _equipped_weapon:
+        _required_ammo = AMMO_FOR_WEAPON.get(_equipped_weapon.get("type", ""))
+        if _required_ammo:
+            _required_ammo_set = frozenset({_required_ammo})
+            _has_ammo = any(i["type"] == _required_ammo for i in agent.get("inventory", []))
+            if not _has_ammo:
+                evs = _bot_pickup_item_from_ground(agent_id, agent, _required_ammo_set, state, world_turn)
+                if evs:
+                    return evs
+                mem_loc = _find_item_memory_location(agent, _required_ammo_set, state)
+                if mem_loc and mem_loc != loc_id:
+                    agent["current_goal"] = "get_ammo"
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "Ищу патроны по памяти",
+                        f"Нет патронов для оружия. Помню, что видел их в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}». Иду туда.",
+                        {"action_kind": "seek_item", "item_category": "ammo",
+                         "ammo_type": _required_ammo, "destination": mem_loc},
+                    )
+                    return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+                trader_loc = _find_nearest_trader_location(loc_id, state)
+                if trader_loc == loc_id:
+                    bought = _bot_buy_from_trader(agent_id, agent, _required_ammo_set, state, world_turn)
+                    if bought:
+                        return bought
+                elif trader_loc is not None:
+                    agent["current_goal"] = "get_ammo"
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "Иду к торговцу за патронами",
+                        f"Нет патронов для оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
+                        {"action_kind": "seek_item", "item_category": "ammo",
+                         "ammo_type": _required_ammo, "destination": trader_loc},
+                    )
+                    return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+
+    # Need 4 — Medicine reserve (proactive; only acts if local trader or ground item available) ──
+    _has_heal = any(i["type"] in HEAL_ITEM_TYPES for i in agent.get("inventory", []))
+    if not _has_heal:
+        evs = _bot_pickup_item_from_ground(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+        # Only buy locally — don't travel just for medicine stockpile
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+
+    # Need 5 — Food reserve (proactive; only when hunger > 30) ────────────────
+    _has_food = any(i["type"] in FOOD_ITEM_TYPES for i in agent.get("inventory", []))
+    if not _has_food and agent.get("hunger", 0) > 30:
+        evs = _bot_pickup_item_from_ground(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+
+    # Need 6 — Water/drink reserve (proactive; only when thirst > 30) ─────────
+    _has_drink = any(i["type"] in DRINK_ITEM_TYPES for i in agent.get("inventory", []))
+    if not _has_drink and agent.get("thirst", 0) > 30:
+        evs = _bot_pickup_item_from_ground(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
 
     # ── SURVIVAL: Sleep ───────────────────────────────────────────────────────
     if agent.get("sleepiness", 0) >= 75:
@@ -1665,7 +1926,7 @@ def _describe_bot_decision_tree(
           "layers": [{"name", "skipped", "action", "reason"}, ...],
         }
 
-    The 7 layers mirror the actual priority order in _run_bot_action_inner.
+    The layers mirror the actual priority order in _run_bot_action_inner.
     """
     hp = agent.get("hp", 100)
     hunger = agent.get("hunger", 0)
@@ -1677,6 +1938,8 @@ def _describe_bot_decision_tree(
     global_goal = agent.get("global_goal", "survive")
     artifacts = _agent_artifacts_in_inventory(agent)
     trader_here = _find_trader_at_location(loc_id, state)
+    equipment = agent.get("equipment", {})
+    inventory = agent.get("inventory", [])
 
     # ── Build layer list ───────────────────────────────────────────────────────
     layers: List[Dict[str, Any]] = []
@@ -1708,46 +1971,69 @@ def _describe_bot_decision_tree(
         "reason": f"Жажда = {thirst} (порог ≥70)" if cond3 else f"Жажда = {thirst}, терпимо",
     })
 
-    # Layer 4: ВЫЖИВАНИЕ: Сон
-    cond4 = sleepiness >= 75
+    # Layer 4: СНАРЯЖЕНИЕ: Обслуживание экипировки
+    _no_weapon = not equipment.get("weapon")
+    _no_armor = not equipment.get("armor")
+    _equipped_weapon = equipment.get("weapon")
+    _required_ammo = AMMO_FOR_WEAPON.get(_equipped_weapon.get("type", "") if _equipped_weapon else "", None)
+    _no_ammo = _required_ammo and not any(i["type"] == _required_ammo for i in inventory)
+    _no_heal = not any(i["type"] in HEAL_ITEM_TYPES for i in inventory)
+    cond4_equip = bool(_no_weapon or _no_armor or _no_ammo)
+    if _no_weapon:
+        equip_reason = "Нет оружия"
+    elif _no_armor:
+        equip_reason = "Нет брони"
+    elif _no_ammo:
+        equip_reason = f"Нет патронов ({_required_ammo})"
+    else:
+        equip_reason = "Снаряжение в порядке"
     layers.append({
-        "name": "ВЫЖИВАНИЕ: Сон",
-        "skipped": not cond4,
-        "action": "Спать 6ч",
-        "reason": f"Усталость = {sleepiness} (порог ≥75)" if cond4 else f"Усталость = {sleepiness}, норма",
+        "name": "СНАРЯЖЕНИЕ: Оружие / броня / патроны",
+        "skipped": not cond4_equip,
+        "action": "Найти/купить снаряжение",
+        "reason": equip_reason,
     })
 
-    # Layer 5: ТОРГОВЛЯ: Продать артефакты
-    cond5 = bool(artifacts) and trader_here is not None
+    # Layer 5: ВЫЖИВАНИЕ: Сон
+    cond5 = sleepiness >= 75
+    layers.append({
+        "name": "ВЫЖИВАНИЕ: Сон",
+        "skipped": not cond5,
+        "action": "Спать 6ч",
+        "reason": f"Усталость = {sleepiness} (порог ≥75)" if cond5 else f"Усталость = {sleepiness}, норма",
+    })
+
+    # Layer 6: ТОРГОВЛЯ: Продать артефакты
+    cond6 = bool(artifacts) and trader_here is not None
     layers.append({
         "name": "ТОРГОВЛЯ: Продать артефакты",
-        "skipped": not cond5,
+        "skipped": not cond6,
         "action": "Продать артефакты",
         "reason": (
             f"{len(artifacts)} артефактов, торговец рядом"
-            if cond5
+            if cond6
             else ("Нет артефактов в инвентаре" if not artifacts else "Нет торговца на локации")
         ),
     })
 
-    # Layer 6: ЦЕЛЬ: Накопить богатство
-    cond6 = wealth < threshold
+    # Layer 7: ЦЕЛЬ: Накопить богатство
+    cond7 = wealth < threshold
     layers.append({
         "name": "ЦЕЛЬ: Накопить богатство",
-        "skipped": not cond6,
+        "skipped": not cond7,
         "action": "Собирать ресурсы",
-        "reason": f"Богатство {wealth} < порог {threshold}" if cond6 else f"Богатство {wealth} ≥ порог {threshold}",
+        "reason": f"Богатство {wealth} < порог {threshold}" if cond7 else f"Богатство {wealth} ≥ порог {threshold}",
     })
 
-    # Layer 7: ЦЕЛЬ: Глобальная цель
-    cond7 = wealth >= threshold
+    # Layer 8: ЦЕЛЬ: Глобальная цель
+    cond8 = wealth >= threshold
     layers.append({
         "name": "ЦЕЛЬ: Глобальная цель",
-        "skipped": not cond7,
+        "skipped": not cond8,
         "action": f"Преследование цели «{global_goal}»",
         "reason": (
             f"Богатство {wealth} ≥ порог {threshold}, цель: {global_goal}"
-            if cond7
+            if cond8
             else f"Богатство {wealth} < порог {threshold}"
         ),
     })
@@ -1784,12 +2070,25 @@ def _describe_bot_decision_tree(
         if etype == "item_consumed":
             item_name = p.get("item_type", "предмет")
             action = f"Использовать: {item_name}"
-            if p.get("item_type") in ("bandage", "medkit"):
+            if p.get("item_type") in ("bandage", "medkit", "stimpack"):
                 reason = f"HP критически низкий ({agent.get('hp', 0)})"
             elif p.get("item_type") in ("bread", "sausage", "canned_food"):
                 reason = f"Голод {agent.get('hunger', 0)}/100"
-            elif p.get("item_type") in ("water", "vodka"):
+            elif p.get("item_type") in ("water", "vodka", "energy_drink"):
                 reason = f"Жажда {agent.get('thirst', 0)}/100"
+            break
+        if etype == "item_equipped":
+            slot = p.get("slot", "слот")
+            action = f"Экипировать: {p.get('item_type', '?')} → {slot}"
+            reason = f"Слот «{slot}» был пуст"
+            break
+        if etype == "item_picked_up":
+            action = f"Подобрать с земли: {p.get('item_type', '?')}"
+            reason = "Предмет лежал на земле рядом"
+            break
+        if etype == "bot_bought_item":
+            action = f"Купить: {p.get('item_type', '?')}"
+            reason = f"Потрачено {p.get('price', 0)} монет"
             break
         if etype == "artifact_picked_up":
             art = p.get("artifact_type", "артефакт")
@@ -1809,6 +2108,8 @@ def _describe_bot_decision_tree(
             reason = f"Голод {hunger}/100"
         elif thirst >= 70:
             reason = f"Жажда {thirst}/100"
+        elif cond4_equip:
+            reason = equip_reason
         elif sleepiness >= 75:
             reason = f"Усталость {sleepiness}/100"
         elif wealth < threshold:
