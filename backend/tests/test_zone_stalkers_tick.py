@@ -254,7 +254,7 @@ class TestTickRules:
             state, _ = self._tick(state)
         memory = state["agents"]["agent_p0"]["memory"]
         assert len(memory) > 0
-        assert any(m["type"] == "travel" for m in memory)
+        assert any(m["type"] == "action" for m in memory)
 
     # Explore completion ─────────────────────────────────────────
 
@@ -274,7 +274,7 @@ class TestTickRules:
         state, _ = self._tick(state)
         memory = state["agents"]["agent_p0"]["memory"]
         assert len(memory) > 0
-        assert any(m["type"] == "explore" for m in memory)
+        assert any(m["type"] == "action" for m in memory)
 
     # Sleep completion ───────────────────────────────────────────
 
@@ -320,7 +320,7 @@ class TestTickRules:
         # 1 turn = 1 minute; sleep(2 hours) = 120 ticks
         for _ in range(2 * 60):
             state, _ = self._tick(state)
-        assert any(m["type"] == "sleep" for m in state["agents"]["agent_p0"]["memory"])
+        assert any(m["type"] == "action" for m in state["agents"]["agent_p0"]["memory"])
 
 
 class TestEventRules:
@@ -748,10 +748,11 @@ class TestArtifactToTraderScenario:
         return tick_zone_map(state)
 
     def _run_until_sold(self, state, sid):
-        """Tick until the stalker has a trade_sell entry in memory or 200 ticks."""
+        """Tick until the stalker has a trade_sell (action) entry in memory or 200 ticks."""
         for _ in range(200):
             agent = state["agents"][sid]
-            if any(m["type"] == "trade_sell" for m in agent.get("memory", [])):
+            if any(m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"
+                   for m in agent.get("memory", [])):
                 return state
             state, _ = self._tick(state)
         return state
@@ -769,7 +770,8 @@ class TestArtifactToTraderScenario:
         state, sid, *_ = _make_trader_scenario()
         new_state, _ = self._tick(state)
         agent = new_state["agents"][sid]
-        pickup_mems = [m for m in agent["memory"] if m["type"] == "pickup"]
+        pickup_mems = [m for m in agent["memory"]
+                       if m["type"] == "action" and m["effects"].get("action_kind") == "pickup"]
         assert len(pickup_mems) >= 1
         mem = pickup_mems[0]
         assert mem["effects"]["artifact_type"] == "soul"
@@ -785,7 +787,8 @@ class TestArtifactToTraderScenario:
         sched = agent.get("scheduled_action")
         assert sched is not None, "Agent should have a scheduled travel action"
         assert sched["type"] == "travel"
-        assert sched["target_id"] == trader_loc
+        # With hop-by-hop travel, target_id is the first hop, final_target_id is the destination
+        assert sched.get("final_target_id") == trader_loc
 
     def test_tick2_travel_decision_recorded_in_memory(self):
         state, sid, *_ = _make_trader_scenario()
@@ -816,7 +819,8 @@ class TestArtifactToTraderScenario:
         assert agent["money"] > initial_stalker_money
         # bot_sold_artifact event was emitted somewhere in the run
         # (checked via memory instead since events are per-tick)
-        sell_mems = [m for m in agent["memory"] if m["type"] == "trade_sell"]
+        sell_mems = [m for m in agent["memory"]
+                     if m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"]
         assert len(sell_mems) >= 1
 
     def test_sell_recorded_in_stalker_memory(self):
@@ -824,7 +828,8 @@ class TestArtifactToTraderScenario:
         state = self._run_until_sold(state, sid)
 
         agent = state["agents"][sid]
-        sell_mems = [m for m in agent["memory"] if m["type"] == "trade_sell"]
+        sell_mems = [m for m in agent["memory"]
+                     if m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"]
         assert len(sell_mems) >= 1
         mem = sell_mems[0]
         assert "soul" in mem["effects"]["items_sold"]
@@ -866,15 +871,22 @@ class TestArtifactToTraderScenario:
 
         agent = state["agents"][sid]
         mem_types = [m["type"] for m in agent["memory"]]
-        assert "pickup" in mem_types
+        action_kinds = [m["effects"].get("action_kind") for m in agent["memory"]
+                        if m["type"] == "action"]
+        assert "action" in mem_types  # at least one action entry (pickup, travel, or sell)
         assert "decision" in mem_types
-        assert "travel" in mem_types
-        assert "trade_sell" in mem_types
-        # Check ordering: pickup before travel before trade_sell
-        p = mem_types.index("pickup")
-        t = mem_types.index("travel")
-        s = mem_types.index("trade_sell")
-        assert p < t < s, f"Expected pickup({p}) < travel({t}) < trade_sell({s}) in memory"
+        assert "pickup" in action_kinds
+        assert "trade_sell" in action_kinds
+        # Check ordering: pickup before travel_arrived before trade_sell
+        def first_idx(kind):
+            for i, m in enumerate(agent["memory"]):
+                if m["type"] == "action" and m["effects"].get("action_kind") == kind:
+                    return i
+            return 999
+        p = first_idx("pickup")
+        t = first_idx("travel_arrived")
+        s = first_idx("trade_sell")
+        assert p < t < s, f"Expected pickup({p}) < travel_arrived({t}) < trade_sell({s})"
 
     # ── Debug spawn trader command ───────────────────────────────────────────
 

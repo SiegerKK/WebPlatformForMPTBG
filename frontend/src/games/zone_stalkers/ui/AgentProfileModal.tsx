@@ -80,6 +80,30 @@ const SCHED_ICONS: Record<string, string> = {
   event: '📖',
 };
 
+// Memory entry type → icon and colour
+const MEM_ICONS: Record<string, string> = {
+  decision: '🧠',
+  action: '⚡',
+  observation: '👁️',
+  // legacy types kept for backwards compat with old save data
+  travel: '🚶',
+  explore: '🔍',
+  sleep: '😴',
+  pickup: '🎁',
+  trade_sell: '💰',
+};
+
+const MEM_COLORS: Record<string, string> = {
+  decision: '#818cf8',   // indigo – the "thought"
+  action: '#34d399',     // emerald – the "deed"
+  observation: '#fbbf24', // amber – the "sight"
+  travel: '#34d399',
+  explore: '#34d399',
+  sleep: '#34d399',
+  pickup: '#34d399',
+  trade_sell: '#34d399',
+};
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 // ─── Decision preview type ───────────────────────────────────────────────────
@@ -262,20 +286,27 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
         {agent.memory && agent.memory.length > 0 && (
           <Section label={`🧠 Память (${agent.memory.length})`}>
             <div style={s.memoryList}>
-              {[...agent.memory].reverse().slice(0, 8).map((m, i) => (
-                <div key={i} style={s.memoryEntry}>
-                  <div style={s.memoryMeta}>
-                    <span style={s.memoryType}>
-                      {SCHED_ICONS[m.type] ?? '📝'} {m.type}
-                    </span>
-                    <span style={s.memoryWhen}>
-                      День {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}
-                    </span>
+              {[...agent.memory].reverse().map((m, i) => {
+                const icon = MEM_ICONS[m.type] ?? '📝';
+                const color = MEM_COLORS[m.type] ?? '#94a3b8';
+                const subLabel = m.effects?.action_kind
+                  ? ` · ${m.effects.action_kind}`
+                  : '';
+                return (
+                  <div key={i} style={{ ...s.memoryEntry, borderLeft: `3px solid ${color}` }}>
+                    <div style={s.memoryMeta}>
+                      <span style={{ ...s.memoryType, color }}>
+                        {icon} {m.type}{subLabel}
+                      </span>
+                      <span style={s.memoryWhen}>
+                        День {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}
+                      </span>
+                    </div>
+                    <div style={s.memoryTitle}>{m.title}</div>
+                    <div style={s.memorySummary}>{m.summary}</div>
                   </div>
-                  <div style={s.memoryTitle}>{m.title}</div>
-                  <div style={s.memorySummary}>{m.summary}</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </Section>
         )}
@@ -494,10 +525,10 @@ const s: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: 6,
-    maxHeight: 260,
+    maxHeight: 480,
     overflowY: 'auto',
   },
-  memoryEntry: { background: '#0f172a', borderRadius: 6, padding: '0.5rem' },
+  memoryEntry: { background: '#0f172a', borderRadius: 6, padding: '0.5rem', paddingLeft: '0.6rem' },
   memoryMeta: { display: 'flex', justifyContent: 'space-between', marginBottom: 3 },
   memoryType: { color: '#94a3b8', fontWeight: 600, fontSize: '0.72rem' },
   memoryWhen: { color: '#475569', fontSize: '0.7rem' },

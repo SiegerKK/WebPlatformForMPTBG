@@ -37,7 +37,7 @@ risk_tolerance    ← 0.2–0.9
 material_threshold← 500–3000 RU  (порог накопления перед переходом к цели)
 scheduled_action  ← активное длительное действие или null
 action_queue[]    ← очередь следующих действий
-memory[]          ← журнал последних 50 событий агента
+memory[]          ← журнал последних 100 событий агента (был 50, увеличен)
 ```
 
 ## 1b. Модель торговца
@@ -313,24 +313,25 @@ if hp ≤ 0       → is_alive = False, event agent_died (starvation_or_thirst)
 | 18 | `travel_hop_completed`: агент теперь в C4 |
 | … | … следующие хопы … |
 | N | `travel_completed`: агент прибыл в G3 |
-| N+1 | **get_rich шаг 3**: артефакт есть — поднимает, memory: `pickup` |
+| N+1 | **get_rich шаг 3**: артефакт есть — поднимает, memory: `action·pickup` |
 | N+2 | **get_rich шаг 4**: >1 артефакта — планирует продажу, memory: `decision` |
 | N+3 | **get_rich шаг 5–6**: BFS → ближайший торговец → travel к нему |
 | … | `travel_hop_completed` × (количество хопов до торговца) |
-| M | **get_rich шаг 7**: торговец здесь → `_bot_sell_to_trader`, memory: `trade_sell` |
+| M | **get_rich шаг 7**: торговец здесь → `_bot_sell_to_trader`, memory: `action·trade_sell` |
 | 60 | Деградация: hunger=23, thirst=25, sleepiness=14 |
 
 ## 7b. Сценарий «артефакт → продажа торговцу»
 
 | Тик | Действие | Запись в память |
 |---|---|---|
-| 1 | G1: Подбирает `Soul` (2000 RU) | `{type:"pickup", artifact_type:"soul", artifact_value:2000}` |
+| 1 | G1: Подбирает `Soul` (2000 RU) | `{type:"action", action_kind:"pickup", artifact_type:"soul"}` |
 | 2 | ТОРГОВЛЯ: артефакт в инвентаре, торговца нет, goal=get_rich → BFS → travel первым хопом | `{type:"decision", destination:"loc_C1", artifacts_count:1}` |
 | 3–8 | `travel_in_progress` (первый хоп) | |
-| 8 | `travel_hop_completed`: прибыл в промежуточную локацию | |
+| 8 | `travel_hop_completed`: прибыл в промежуточную локацию | `observation` записи для того что видит в локации |
 | … | Следующие хопы | |
-| M | `travel_completed`: прибыл к торговцу; тут же `_run_bot_action`: торговец ЗДЕСЬ → продажа | stalker: `{type:"trade_sell", money_gained:1200, items_sold:["soul"]}` |
-| | | trader: `{type:"trade_buy", money_spent:1200, items_bought:["soul"]}` |
+| M | `travel_completed`: прибыл к торговцу | `{type:"action", action_kind:"travel_arrived"}` + `observation` записи |
+|   | тут же `_run_bot_action`: торговец ЗДЕСЬ → продажа | `{type:"action", action_kind:"trade_sell", money_gained:1200}` |
+|   | | торговец: `{type:"trade_buy", money_spent:1200}` |
 
 ---
 
@@ -343,9 +344,17 @@ if hp ≤ 0       → is_alive = False, event agent_died (starvation_or_thirst)
 
 ---
 
-## 9. Память агента и торговца
+## 9. Схема памяти: Decision → Action → Observation
 
-В `memory[]` записываются последние 50 событий. Каждая запись содержит:
+Логика работы памяти НПЦ структурирована по трём типам записей:
+
+```
+НПЦ принял решение   → type="decision"    (что хочет сделать)
+НПЦ выполнил действие → type="action"     (что сделал, с action_kind)
+НПЦ прибыл в локацию → type="observation" (что увидел)
+```
+
+В `memory[]` записываются последние **100** событий (был лимит 50). Каждая запись:
 
 ```json
 {
@@ -353,36 +362,68 @@ if hp ≤ 0       → is_alive = False, event agent_died (starvation_or_thirst)
   "world_day": 1,
   "world_hour": 7,
   "world_minute": 22,
-  "type": "<тип>",
-  "title": "...",
-  "summary": "...",
-  "effects": { ... }
+  "type": "action",
+  "title": "Прибыл в «Деревня новичков»",
+  "summary": "Добрался до цели путешествия.",
+  "effects": {
+    "action_kind": "travel_arrived",
+    "to_loc": "loc_C2",
+    "damage_taken": 0
+  }
 }
 ```
 
-### Типы записей в памяти
+### Тип `"decision"` — принял решение
 
-| `type` | Кто пишет | Что фиксируется |
+| `effects` поле | Значение |
+|---|---|
+| `destination` | Куда решил идти (для travel-решений) |
+| `artifacts_count` | Сколько артефактов при принятии решения продать |
+| *(различается по сценарию)* | |
+
+### Тип `"action"` — выполнил действие
+
+Общий тип для всех завершённых действий. Подтип указывается в `effects.action_kind`:
+
+| `action_kind` | Когда пишется | Дополнительные `effects` поля |
 |---|---|---|
-| `travel` | сталкер | Прибытие в конечную локацию, урон от аномалий |
-| `explore` | сталкер | Результат исследования (предметы, артефакты, встречи с аномалиями) |
-| `sleep` | сталкер | Часы сна, восстановление HP и радиации |
-| `pickup` | сталкер-бот | Подобран артефакт с пола: `{artifact_type, artifact_value, location_id}` |
-| `decision` | сталкер-бот | Решение идти к торговцу: `{destination, artifacts_count}` |
-| `trade_sell` | сталкер-бот | Продажа артефактов: `{money_gained, items_sold[], trader_id}` |
-| `trade_buy` | торговец | Покупка у сталкера: `{money_spent, items_bought[], stalker_id}` |
+| `"travel_arrived"` | Достиг конечной локации | `to_loc`, `damage_taken` |
+| `"explore"` | Завершил исследование локации | `items_found`, `artifacts_found` |
+| `"sleep"` | Проснулся | `hp_gained`, `radiation_reduced` |
+| `"pickup"` | Подобрал артефакт с земли | `artifact_type`, `artifact_value`, `location_id` |
+| `"trade_sell"` | Продал артефакты торговцу | `money_gained`, `items_sold[]`, `trader_id` |
 
-### Сценарий "artifact → sell": полная цепочка памяти
+### Тип `"observation"` — увидел что-то в локации
+
+Пишется каждый раз когда агент **прибывает** в локацию (и при промежуточных хопах).
+Одна запись на каждую непустую категорию:
+
+| `effects.observed` | Когда | Дополнительные поля |
+|---|---|---|
+| `"stalkers"` | В локации есть другие живые сталкеры | `names[]`, `location_id` |
+| `"mutants"` | В локации есть живые мутанты | `names[]`, `location_id` |
+| `"artifacts"` | На земле лежат артефакты | `artifact_types[]`, `location_id` |
+| `"items"` | На земле лежат предметы | `item_types[]`, `location_id` |
+
+> **Будущее**: наблюдения будут способны провоцировать принятие нового решения
+> (например, увидел артефакт → отменить текущий маршрут и подобрать).
+
+### Тип `"trade_buy"` — торговец купил (только в памяти торговца)
+
+| `effects` поле | Значение |
+|---|---|
+| `money_spent` | Сколько потратил |
+| `items_bought[]` | Типы купленных предметов |
+| `stalker_id` | ID сталкера-продавца |
+
+### Пример полной цепочки памяти (get_rich stalker)
 
 ```
-Память сталкера после полного цикла:
-  [0] type="pickup",     title="Поднял артефакт soul...",          effects={artifact_type:"soul", ...}
-  [1] type="decision",   title="Решил продать добычу",             effects={destination:"loc_C1", artifacts_count:1}
-  [2] type="travel",     title="Arrived at Деревня...",            effects={damage_taken:0}
-  [3] type="trade_sell", title="Продал soul торговцу Sid...",      effects={money_gained:1200, items_sold:["soul"], ...}
-
-Память торговца:
-  [0] type="trade_buy",  title="Купил soul у сталкера Test Stalker", effects={money_spent:1200, ...}
+[0] type="action"      action_kind="pickup"        "Подобрал Soul (2000 RU)"
+[1] type="decision"                                 "Ближайший торговец: Sid в loc_C1"
+[2] type="action"      action_kind="travel_arrived" "Прибыл в «Деревня новичков»"
+[3] type="observation" observed="stalkers"          "Вижу сталкеров в «Деревня новичков»"
+[4] type="action"      action_kind="trade_sell"     "Продал 1 артефактов на 1200 денег"
 ```
 
 Память используется алгоритмом `explore_zone`-цели для отслеживания посещённых локаций.
@@ -395,7 +436,7 @@ if hp ≤ 0       → is_alive = False, event agent_died (starvation_or_thirst)
 |---|---|
 | `generators/zone_generator.py` | Создаёт агентов (`_make_stalker_agent`) и торговцев (с `memory: []`) |
 | `generators/fixed_zone_map.py` | Фиксированный граф 32 локаций (C1-C6, G1-G6, A1-A6, D1-D6, S1-S8) с travel_time для каждого ребра |
-| `rules/tick_rules.py` | `tick_zone_map()` + `_run_bot_action()` + `_bot_sell_to_trader()` + `_process_scheduled_action()` + `_bot_schedule_travel()` |
+| `rules/tick_rules.py` | `tick_zone_map()` + `_run_bot_action()` + `_bot_sell_to_trader()` + `_process_scheduled_action()` + `_bot_schedule_travel()` + `_write_location_observations()` |
 | `rules/world_rules.py` | Команды: `travel`, `sleep`, `explore`, `take_control`, `debug_spawn_stalker`, `debug_spawn_trader` |
 | `balance/items.py` | Типы предметов, `HEAL_ITEM_TYPES`, `FOOD_ITEM_TYPES`, `DRINK_ITEM_TYPES` |
 | `balance/artifacts.py` | Типы артефактов и их ценность (ключи = `_ARTIFACT_ITEM_TYPES`) |

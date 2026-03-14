@@ -201,6 +201,8 @@ def _process_scheduled_action(
                         "anomaly_damage": total_dmg,
                     },
                 })
+                # Write observations for what's visible at this intermediate hop
+                _write_location_observations(agent_id, agent, destination, state, world_turn)
             else:
                 # Reached the final destination.
                 events.append({
@@ -213,10 +215,12 @@ def _process_scheduled_action(
                         "anomaly_damage": total_dmg,
                     },
                 })
-                _add_memory(agent, world_turn, state, "travel",
-                            f"Arrived at {state['locations'][destination].get('name', destination)}",
-                            f"Arrived after a journey through the Zone.",
-                            {"damage_taken": total_dmg})
+                _add_memory(agent, world_turn, state, "action",
+                            f"Прибыл в «{state['locations'][destination].get('name', destination)}»",
+                            f"Добрался до цели путешествия.",
+                            {"action_kind": "travel_arrived", "to_loc": destination, "damage_taken": total_dmg})
+                # Write observations for what's visible at the final destination
+                _write_location_observations(agent_id, agent, destination, state, world_turn)
             if agent["hp"] <= 0:
                 agent["is_alive"] = False
                 events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "travel_anomaly"}})
@@ -359,10 +363,10 @@ def _resolve_exploration(
         },
     })
 
-    _add_memory(agent, world_turn, state, "explore",
-                f"Explored {loc.get('name', loc_id)}",
+    _add_memory(agent, world_turn, state, "action",
+                f"Исследовал «{loc.get('name', loc_id)}»",
                 summary,
-                {"items_found": len(found_items), "artifacts_found": len(found_artifacts)})
+                {"action_kind": "explore", "items_found": len(found_items), "artifacts_found": len(found_artifacts)})
     return events
 
 
@@ -383,10 +387,10 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
     # Reset sleepiness
     agent["sleepiness"] = 0
-    _add_memory(agent, world_turn, state, "sleep",
-                f"Slept for {hours} hours",
-                f"Rested well. HP +{hp_regen}, Radiation -{rad_reduce}.",
-                {"hp_gained": hp_regen, "radiation_reduced": rad_reduce})
+    _add_memory(agent, world_turn, state, "action",
+                f"Поспал {hours} ч.",
+                f"Хорошо отдохнул. HP +{hp_regen}, радиация -{rad_reduce}.",
+                {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce})
 
 
 def _add_memory(
@@ -408,10 +412,76 @@ def _add_memory(
         "summary": summary,
         "effects": effects,
     }
-    agent.setdefault("memory", []).append(memory_entry)
-    # Keep only the last 50 memory entries
-    if len(agent["memory"]) > 50:
-        agent["memory"] = agent["memory"][-50:]
+    mem = agent.setdefault("memory", [])
+    mem.append(memory_entry)
+    # Keep only the last 100 memory entries (increased from 50 for richer history)
+    if len(mem) > 100:
+        agent["memory"] = mem[-100:]
+
+
+def _write_location_observations(
+    agent_id: str,
+    agent: Dict[str, Any],
+    loc_id: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> None:
+    """Write 'observation' memory entries for everything the agent notices on arrival."""
+    loc = state.get("locations", {}).get(loc_id, {})
+    loc_name = loc.get("name", loc_id)
+
+    # ── Stalkers at this location (excluding self) ────────────────────────────
+    agents_here = [
+        (aid, ag) for aid, ag in state.get("agents", {}).items()
+        if aid != agent_id
+        and ag.get("location_id") == loc_id
+        and ag.get("is_alive", True)
+        and ag.get("archetype") == "stalker_agent"
+    ]
+    if agents_here:
+        names = [ag.get("name", aid) for aid, ag in agents_here]
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу сталкеров в «{loc_name}»",
+            f"В локации: {', '.join(names)}.",
+            {"observed": "stalkers", "location_id": loc_id, "names": names},
+        )
+
+    # ── Mutants at this location ──────────────────────────────────────────────
+    mutants_here = [
+        m for m in state.get("mutants", {}).values()
+        if m.get("location_id") == loc_id and m.get("is_alive", True)
+    ]
+    if mutants_here:
+        names = [m.get("name", m.get("type", "?")) for m in mutants_here]
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу мутантов в «{loc_name}»",
+            f"Замечены мутанты: {', '.join(names)}.",
+            {"observed": "mutants", "location_id": loc_id, "names": names},
+        )
+
+    # ── Artifacts on the ground ───────────────────────────────────────────────
+    artifacts_here = loc.get("artifacts", [])
+    if artifacts_here:
+        types = [a.get("type", "?") for a in artifacts_here]
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу артефакты в «{loc_name}»",
+            f"На земле: {', '.join(types)} (всего {len(artifacts_here)} шт.).",
+            {"observed": "artifacts", "location_id": loc_id, "artifact_types": types},
+        )
+
+    # ── Loose items on the ground ─────────────────────────────────────────────
+    items_here = loc.get("items", [])
+    if items_here:
+        types = [it.get("type", "?") for it in items_here]
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу предметы в «{loc_name}»",
+            f"На земле: {', '.join(types)} (всего {len(items_here)} шт.).",
+            {"observed": "items", "location_id": loc_id, "item_types": types},
+        )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -592,12 +662,12 @@ def _bot_sell_to_trader(
     trader_name = trader.get("name", trader["id"])
     loc_name = state.get("locations", {}).get(agent.get("location_id", ""), {}).get("name", "?")
     _add_memory(
-        agent, world_turn, state, "trade_sell",
+        agent, world_turn, state, "action",
         f"Продал {len(sold_items)} артефактов на {sell_price_total} денег",
         f"Продал {len(sold_items)} артефактов на {sell_price_total} денег. "
         f"Торговец: {trader_name} в {loc_name}.",
-        {"money_gained": sell_price_total, "items_sold": [i["type"] for i in sold_items],
-         "trader_id": trader["id"]},
+        {"action_kind": "trade_sell", "money_gained": sell_price_total,
+         "items_sold": [i["type"] for i in sold_items], "trader_id": trader["id"]},
     )
 
     # ── Trader memory ─────────────────────────────────────────────
@@ -849,11 +919,11 @@ def _bot_gather_resources(
         art_name = art.get("name", art.get("type", "артефакт"))
         loc_name = loc.get("name", loc_id)
         _add_memory(
-            agent, world_turn, state, "pickup",
+            agent, world_turn, state, "action",
             f"Подобрал {art_name}",
             f"Нашёл и поднял артефакт «{art_name}» в {loc_name}. "
             f"Ценность: {art.get('value', 0)} RU.",
-            {"artifact_id": art["id"], "artifact_type": art["type"],
+            {"action_kind": "pickup", "artifact_id": art["id"], "artifact_type": art["type"],
              "artifact_value": art.get("value", 0), "location_id": loc_id},
         )
         return [{"event_type": "artifact_picked_up",
@@ -952,10 +1022,11 @@ def _bot_pursue_goal(
             agent["action_used"] = True
             art_name = best_art.get("name", best_art.get("type", "артефакт"))
             _add_memory(
-                agent, world_turn, state, "pickup",
+                agent, world_turn, state, "action",
                 f"Поднял артефакт {best_art['type']}",
                 f"Поднял артефакт «{art_name}». Ценность: {best_art.get('value', 0)} RU.",
                 {
+                    "action_kind": "pickup",
                     "artifact_id": best_art["id"],
                     "artifact_type": best_art["type"],
                     "artifact_value": best_art.get("value", 0),
