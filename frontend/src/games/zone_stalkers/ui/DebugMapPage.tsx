@@ -312,27 +312,16 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     }
   };
 
-  // ── Auto-run (течение времени до паузы) ──────────────────────────────────
-  const autoRunCancelRef = useRef(false);
-  const [autoRunning, setAutoRunning] = useState(false);
+  // ── Auto-run (течение времени) — server-side, synced across all tabs ────────
+  // The running state lives in zoneState.debug_auto_tick (server-persisted).
+  // Any tab can start or stop ticking; the server broadcasts state_updated to
+  // all connected clients so every tab sees the correct running/paused state.
+  const autoRunning = zoneState.debug_auto_tick ?? false;
 
-  const handleAutoRun = async () => {
-    if (autoRunning) {
-      autoRunCancelRef.current = true;
-      return;
-    }
-    autoRunCancelRef.current = false;
-    setAutoRunning(true);
-    try {
-      while (!autoRunCancelRef.current) {
-        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
-        await new Promise<void>((r) => setTimeout(r, 300));
-      }
-    } finally {
-      setAutoRunning(false);
-      autoRunCancelRef.current = false;
-    }
-  };
+  const handleToggleAutoTick = useCallback(async () => {
+    const running = zoneState.debug_auto_tick ?? false;
+    await sendCommand('debug_set_auto_tick', { enabled: !running });
+  }, [sendCommand, zoneState.debug_auto_tick]);
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
@@ -1124,9 +1113,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               </button>
               <button
                 style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
-                onClick={handleAutoRun}
+                onClick={handleToggleAutoTick}
                 disabled={ticking || skipping}
-                title={autoRunning ? 'Нажмите для паузы' : 'Запустить течение времени до паузы'}
+                title={autoRunning ? 'Пауза (синхр. со всеми вкладками)' : 'Запустить течение времени (синхр. со всеми вкладками)'}
               >
                 {autoRunning ? '⏸ Пауза' : '▶ Авто'}
               </button>

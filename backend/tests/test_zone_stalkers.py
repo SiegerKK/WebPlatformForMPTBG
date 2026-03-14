@@ -1479,3 +1479,55 @@ class TestUnifiedStalkerModel:
             assert "material_threshold" in agent, f"Agent {aid} missing material_threshold"
             assert isinstance(agent["material_threshold"], int)
             assert agent["material_threshold"] > 0
+
+
+class TestDebugAutoTick:
+    """Tests for the debug_set_auto_tick command."""
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "any_user")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "any_user")
+
+    def _state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    def test_set_auto_tick_true_valid(self):
+        state = self._state()
+        assert self._v("debug_set_auto_tick", {"enabled": True}, state).valid
+
+    def test_set_auto_tick_false_valid(self):
+        state = self._state()
+        assert self._v("debug_set_auto_tick", {"enabled": False}, state).valid
+
+    def test_set_auto_tick_stores_flag(self):
+        state = self._state()
+        new_state, _ = self._r("debug_set_auto_tick", {"enabled": True}, state)
+        assert new_state["debug_auto_tick"] is True
+
+    def test_set_auto_tick_disable_stores_flag(self):
+        state = self._state()
+        new_state, _ = self._r("debug_set_auto_tick", {"enabled": False}, state)
+        assert new_state["debug_auto_tick"] is False
+
+    def test_set_auto_tick_emits_event(self):
+        state = self._state()
+        _, events = self._r("debug_set_auto_tick", {"enabled": True}, state)
+        assert any(e["event_type"] == "debug_auto_tick_changed" for e in events)
+
+    def test_set_auto_tick_event_payload(self):
+        state = self._state()
+        _, events = self._r("debug_set_auto_tick", {"enabled": True}, state)
+        ev = next(e for e in events if e["event_type"] == "debug_auto_tick_changed")
+        assert ev["payload"]["enabled"] is True
+
+    def test_set_auto_tick_does_not_mutate_original_state(self):
+        import copy
+        state = self._state()
+        original = copy.deepcopy(state)
+        self._r("debug_set_auto_tick", {"enabled": True}, state)
+        assert state == original

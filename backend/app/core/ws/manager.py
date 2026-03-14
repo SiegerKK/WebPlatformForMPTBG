@@ -30,6 +30,16 @@ class ConnectionManager:
     def __init__(self) -> None:
         # match_id (str) → set of active WebSocket objects
         self._connections: Dict[str, Set[WebSocket]] = {}
+        # Event loop reference stored at startup for thread-safe scheduling.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """
+        Store the main event loop so that ``notify()`` can schedule broadcasts
+        from worker threads (e.g. ``asyncio.to_thread`` / ``run_in_executor``).
+        Called once at application startup.
+        """
+        self._loop = loop
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -67,17 +77,22 @@ class ConnectionManager:
         """
         Schedule a broadcast from **synchronous** code.
 
-        Safe to call from inside a FastAPI request handler or the asyncio
-        background ticker because both run within the uvicorn event loop.
-        If no event loop is running (e.g. unit-tests) the call is silently
-        skipped.
+        Safe to call from:
+        * Inside a FastAPI request handler (asyncio event loop running).
+        * A worker thread (e.g. ``asyncio.to_thread`` / ``run_in_executor``) —
+          uses ``asyncio.run_coroutine_threadsafe`` with the stored loop.
+        * Unit-test context with no event loop — silently skipped.
         """
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self.broadcast(match_id, data))
+            return
         except RuntimeError:
-            # No running event loop — skip (test context or sync CLI).
             pass
+
+        # Called from a thread — schedule via the stored event loop.
+        if self._loop is not None and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.broadcast(match_id, data), self._loop)
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────────

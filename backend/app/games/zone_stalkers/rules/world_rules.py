@@ -15,6 +15,7 @@ Supported commands:
 - debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?) — edit location params in debug mode (meta)
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_delete_location(loc_id) — remove a location and all its connections in debug mode (meta)
+- debug_set_auto_tick(enabled) — enable/disable server-side auto-tick for this match (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
 - debug_spawn_trader(loc_id, name?) — spawn a trader NPC at a location in debug mode (meta)
@@ -87,7 +88,8 @@ def validate_world_command(
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
                         "debug_set_time", "debug_advance_turns",
-                        "debug_trigger_emission", "debug_import_full_map"):
+                        "debug_trigger_emission", "debug_import_full_map",
+                        "debug_set_auto_tick"):
         return RuleCheckResult(valid=True)
 
     if command_type == "debug_set_agent_money":
@@ -486,6 +488,16 @@ def resolve_world_command(
         events.append({
             "event_type": "debug_agent_money_set",
             "payload": {"agent_id": target_id, "amount": amount},
+        })
+        return state, events
+
+    # ── debug_set_auto_tick: enable/disable server-side auto-tick ─────────────
+    if command_type == "debug_set_auto_tick":
+        enabled = bool(payload.get("enabled", False))
+        state["debug_auto_tick"] = enabled
+        events.append({
+            "event_type": "debug_auto_tick_changed",
+            "payload": {"enabled": enabled},
         })
         return state, events
 

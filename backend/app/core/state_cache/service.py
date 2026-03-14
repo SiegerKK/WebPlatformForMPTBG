@@ -200,3 +200,29 @@ def invalidate_context_state(context_id: Any) -> None:
             logger.warning(
                 "Redis invalidate failed for context %s: %s", context_id, exc
             )
+
+
+def get_context_flag(context_id: Any, flag_name: str, default: Any = None) -> Any:
+    """
+    Read a single flag from the context state stored in Redis.
+
+    Uses the compressed Redis cache for an efficient O(1) read.
+    Returns *default* if Redis is unavailable or the key is not cached.
+    Does **not** fall back to the DB — callers that need a DB fallback should
+    use ``load_context_state`` instead.
+    """
+    r = get_redis()
+    if r is None:
+        return default
+    try:
+        raw = r.get(_state_key(str(context_id)))
+        if raw is None:
+            return default
+        state = _decompress(raw)
+        return state.get(flag_name, default)
+    except Exception as exc:
+        logger.warning(
+            "get_context_flag failed for context %s flag %s: %s",
+            context_id, flag_name, exc,
+        )
+        return default

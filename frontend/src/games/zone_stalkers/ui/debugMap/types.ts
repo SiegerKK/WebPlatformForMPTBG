@@ -75,6 +75,8 @@ export interface ZoneMapState {
     positions: Record<string, { x: number; y: number }>;
     regions?: Record<string, { name: string; colorIndex: number }>;
   };
+  /** True while the server-side debug auto-ticker is advancing this match */
+  debug_auto_tick?: boolean;
 }
 
 export interface DebugMapPageProps {
