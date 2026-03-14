@@ -223,7 +223,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const [ticking, setTicking] = useState(false);
   const handleTick = async () => {
     setTicking(true);
-    try { await sendCommand('end_turn', {}); }
+    try { await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false }); }
     finally { setTicking(false); }
   };
 
