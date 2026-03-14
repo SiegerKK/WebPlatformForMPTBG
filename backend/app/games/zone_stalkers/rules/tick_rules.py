@@ -213,6 +213,16 @@ def _process_scheduled_action(
                         "anomaly_damage": total_dmg,
                     },
                 })
+                # Record the hop as an action so the full travel path appears in memory
+                dest_name = state["locations"].get(destination, {}).get("name", destination)
+                final_name = state["locations"].get(final_target, {}).get("name", final_target)
+                _add_memory(
+                    agent, world_turn, state, "action",
+                    f"Проход через «{dest_name}»",
+                    f"Промежуточная остановка на пути к «{final_name}».",
+                    {"action_kind": "travel_hop", "to_loc": destination,
+                     "final_target": final_target, "damage_taken": total_dmg},
+                )
                 # Write observations for what's visible at this intermediate hop
                 _write_location_observations(agent_id, agent, destination, state, world_turn)
             else:

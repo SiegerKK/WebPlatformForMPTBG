@@ -1064,3 +1064,80 @@ class TestPerTurnObservations:
         obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
                if m["type"] == "observation"]
         assert len(obs) == 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# Travel hop action memory
+# ─────────────────────────────────────────────────────────────────
+
+class TestTravelHopActionMemory:
+    """Each intermediate travel hop must be recorded as an 'action' memory entry."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _setup_two_hop_travel(self):
+        """Create a 3-location chain (A→B→C) and start agent travelling A→B→C."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=1, num_ai_stalkers=0,
+                              num_mutants=0, num_traders=0)
+        locs = list(state["locations"].keys())
+        # Use first three locations; wire A→B→C connections
+        a, b, c = locs[0], locs[1], locs[2]
+        for lid in (a, b, c):
+            state["locations"][lid]["connections"] = []
+        state["locations"][a]["connections"] = [{"to": b, "travel_time": 1}]
+        state["locations"][b]["connections"] = [{"to": c, "travel_time": 1}]
+
+        agent_id = list(state["agents"].keys())[0]
+        agent = state["agents"][agent_id]
+        agent["location_id"] = a
+        agent["memory"] = []
+        # Schedule a 2-hop journey: immediate target = B, final = C, remaining = [C]
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": b,
+            "final_target_id": c,
+            "remaining_route": [c],
+            "started_turn": state.get("world_turn", 1),
+        }
+        return state, agent_id, a, b, c
+
+    def test_hop_recorded_as_action(self):
+        """Completing an intermediate hop writes an action with action_kind='travel_hop'."""
+        state, agent_id, a, b, c = self._setup_two_hop_travel()
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][agent_id]
+        hop_mems = [m for m in agent["memory"]
+                    if m["type"] == "action"
+                    and m["effects"].get("action_kind") == "travel_hop"]
+        assert len(hop_mems) >= 1
+        assert hop_mems[0]["effects"]["to_loc"] == b
+        assert hop_mems[0]["effects"]["final_target"] == c
+
+    def test_hop_title_contains_location_name(self):
+        """The hop action title contains the name of the intermediate location."""
+        state, agent_id, a, b, c = self._setup_two_hop_travel()
+        b_name = state["locations"][b].get("name", b)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][agent_id]
+        hop_mems = [m for m in agent["memory"]
+                    if m["type"] == "action"
+                    and m["effects"].get("action_kind") == "travel_hop"]
+        assert any(b_name in m["title"] for m in hop_mems)
+
+    def test_final_arrival_still_recorded(self):
+        """After all hops, the final arrival is still recorded as travel_arrived."""
+        state, agent_id, a, b, c = self._setup_two_hop_travel()
+        # Tick once to complete A→B hop (schedules B→C), then tick again to complete B→C
+        state, _ = self._tick(state)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][agent_id]
+        arrived = [m for m in agent["memory"]
+                   if m["type"] == "action"
+                   and m["effects"].get("action_kind") == "travel_arrived"]
+        assert len(arrived) >= 1
+        assert arrived[-1]["effects"]["to_loc"] == c
