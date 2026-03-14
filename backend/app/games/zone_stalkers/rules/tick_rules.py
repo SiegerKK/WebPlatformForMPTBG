@@ -20,6 +20,7 @@ MINUTES_PER_TURN = 1
 # Derived constants (update MINUTES_PER_TURN above to rescale the whole system)
 _HOUR_IN_TURNS = 60 // MINUTES_PER_TURN       # turns needed to pass 1 in-game hour
 EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exploration
+DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
 
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -345,7 +346,7 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     * ``turns_total`` – fallback; total turns of the sleep action (converted via
                         ``turns_total // _HOUR_IN_TURNS``).
     """
-    hours = sched.get("hours", sched.get("turns_total", 6 * _HOUR_IN_TURNS) // _HOUR_IN_TURNS)
+    hours = sched.get("hours", sched.get("turns_total", DEFAULT_SLEEP_HOURS * _HOUR_IN_TURNS) // _HOUR_IN_TURNS)
     # Heal HP (15 per hour, max 100)
     hp_regen = min(15 * hours, agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
@@ -935,21 +936,113 @@ def _bot_pursue_goal(
     return []
 
 
-# ─── _describe_bot_decision ───────────────────────────────────────────────────
+# ─── _describe_bot_decision_tree / _describe_bot_decision ────────────────────
 
-def _describe_bot_decision(
+def _describe_bot_decision_tree(
     agent: Dict[str, Any],
     events: List[Dict[str, Any]],
     state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Build a human-readable description of what a bot agent decided to do.
-    Returns a dict: {goal, action, reason}.
+    Build a full decision-tree description for a bot agent.
+
+    Returns:
+        {
+          "goal": str,
+          "chosen": {"action": str, "reason": str},
+          "layers": [{"name", "skipped", "action", "reason"}, ...],
+        }
+
+    The 7 layers mirror the actual priority order in _run_bot_action_inner.
     """
+    hp = agent.get("hp", 100)
+    hunger = agent.get("hunger", 0)
+    thirst = agent.get("thirst", 0)
+    sleepiness = agent.get("sleepiness", 0)
+    loc_id = agent.get("location_id", "")
+    wealth = _agent_wealth(agent)
+    threshold = agent.get("material_threshold", 1000)
+    global_goal = agent.get("global_goal", "survive")
+    artifacts = _agent_artifacts_in_inventory(agent)
+    trader_here = _find_trader_at_location(loc_id, state)
+
+    # ── Build layer list ───────────────────────────────────────────────────────
+    layers: List[Dict[str, Any]] = []
+
+    # Layer 1: EMERGENCY: HP критический
+    cond1 = hp <= 30
+    layers.append({
+        "name": "EMERGENCY: HP критический",
+        "skipped": not cond1,
+        "action": "Лечение/бегство",
+        "reason": f"HP = {hp} (порог ≤30)" if cond1 else f"HP = {hp}, выше критического",
+    })
+
+    # Layer 2: EMERGENCY: Голод
+    cond2 = hunger >= 70
+    layers.append({
+        "name": "EMERGENCY: Голод",
+        "skipped": not cond2,
+        "action": "Поесть",
+        "reason": f"Голод = {hunger} (порог ≥70)" if cond2 else f"Голод = {hunger}, терпимо",
+    })
+
+    # Layer 3: EMERGENCY: Жажда
+    cond3 = thirst >= 70
+    layers.append({
+        "name": "EMERGENCY: Жажда",
+        "skipped": not cond3,
+        "action": "Попить",
+        "reason": f"Жажда = {thirst} (порог ≥70)" if cond3 else f"Жажда = {thirst}, терпимо",
+    })
+
+    # Layer 4: ВЫЖИВАНИЕ: Сон
+    cond4 = sleepiness >= 75
+    layers.append({
+        "name": "ВЫЖИВАНИЕ: Сон",
+        "skipped": not cond4,
+        "action": "Спать 6ч",
+        "reason": f"Усталость = {sleepiness} (порог ≥75)" if cond4 else f"Усталость = {sleepiness}, норма",
+    })
+
+    # Layer 5: ТОРГОВЛЯ: Продать артефакты
+    cond5 = bool(artifacts) and trader_here is not None
+    layers.append({
+        "name": "ТОРГОВЛЯ: Продать артефакты",
+        "skipped": not cond5,
+        "action": "Продать артефакты",
+        "reason": (
+            f"{len(artifacts)} артефактов, торговец рядом"
+            if cond5
+            else ("Нет артефактов в инвентаре" if not artifacts else "Нет торговца на локации")
+        ),
+    })
+
+    # Layer 6: ЦЕЛЬ: Накопить богатство
+    cond6 = wealth < threshold
+    layers.append({
+        "name": "ЦЕЛЬ: Накопить богатство",
+        "skipped": not cond6,
+        "action": "Собирать ресурсы",
+        "reason": f"Богатство {wealth} < порог {threshold}" if cond6 else f"Богатство {wealth} ≥ порог {threshold}",
+    })
+
+    # Layer 7: ЦЕЛЬ: Глобальная цель
+    cond7 = wealth >= threshold
+    layers.append({
+        "name": "ЦЕЛЬ: Глобальная цель",
+        "skipped": not cond7,
+        "action": f"Преследование цели «{global_goal}»",
+        "reason": (
+            f"Богатство {wealth} ≥ порог {threshold}, цель: {global_goal}"
+            if cond7
+            else f"Богатство {wealth} < порог {threshold}"
+        ),
+    })
+
+    # ── Determine chosen action (same logic as original _describe_bot_decision) ─
     goal = agent.get("current_goal", "unknown")
     sched = agent.get("scheduled_action")
-
-    # Determine action description from scheduled_action or events
     action = "Бездействие"
     reason = ""
 
@@ -966,8 +1059,8 @@ def _describe_bot_decision(
             action = f"Спать {hrs}ч"
             reason = "Восстановление сил"
         elif t == "explore":
-            loc_id = sched.get("target_id", "")
-            loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+            loc_id_s = sched.get("target_id", "")
+            loc_name = state.get("locations", {}).get(loc_id_s, {}).get("name", loc_id_s)
             action = f"Исследование {loc_name}"
             reason = "Поиск артефактов и ресурсов"
         else:
@@ -997,18 +1090,7 @@ def _describe_bot_decision(
             reason = f"Выручка: {money} RU"
             break
 
-    # Build reason from agent state if still empty
     if not reason:
-        hp = agent.get("hp", 100)
-        hunger = agent.get("hunger", 0)
-        thirst = agent.get("thirst", 0)
-        sleepiness = agent.get("sleepiness", 0)
-        wealth = agent.get("money", 0) + sum(
-            i.get("value", 0) for i in agent.get("inventory", [])
-        )
-        threshold = agent.get("material_threshold", 1000)
-        global_goal = agent.get("global_goal", "survive")
-
         if hp <= 30:
             reason = f"Критический HP ({hp})"
         elif hunger >= 70:
@@ -1022,4 +1104,22 @@ def _describe_bot_decision(
         else:
             reason = f"Богатство {wealth} ≥ порог {threshold}, преследование цели «{global_goal}»"
 
-    return {"goal": goal, "action": action, "reason": reason}
+    return {
+        "goal": goal,
+        "chosen": {"action": action, "reason": reason},
+        "layers": layers,
+    }
+
+
+def _describe_bot_decision(
+    agent: Dict[str, Any],
+    events: List[Dict[str, Any]],
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build a human-readable description of what a bot agent decided to do.
+    Returns a dict: {goal, action, reason}.
+    Delegates to _describe_bot_decision_tree internally.
+    """
+    tree = _describe_bot_decision_tree(agent, events, state)
+    return {"goal": tree["goal"], "action": tree["chosen"]["action"], "reason": tree["chosen"]["reason"]}

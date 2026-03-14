@@ -477,18 +477,20 @@ def resolve_world_command(
     # ── debug_preview_bot_decision ─────────────────────────────────────────────
     if command_type == "debug_preview_bot_decision":
         import copy
-        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action, _describe_bot_decision
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action, _describe_bot_decision_tree
         agent_id_to_preview = str(payload["agent_id"])
         state_copy = copy.deepcopy(state)
         agent_copy = state_copy["agents"][agent_id_to_preview]
         world_turn = state_copy.get("world_turn", 1)
         preview_evs = _run_bot_action(agent_id_to_preview, agent_copy, state_copy, world_turn)
-        decision_desc = _describe_bot_decision(agent_copy, preview_evs, state_copy)
+        decision_tree = _describe_bot_decision_tree(agent_copy, preview_evs, state_copy)
+        decision_desc = {"goal": decision_tree["goal"], "action": decision_tree["chosen"]["action"], "reason": decision_tree["chosen"]["reason"]}
         events.append({
             "event_type": "debug_bot_decision_preview",
             "payload": {
                 "agent_id": agent_id_to_preview,
                 "decision": decision_desc,
+                "decision_tree": decision_tree,
             },
         })
         return state, events

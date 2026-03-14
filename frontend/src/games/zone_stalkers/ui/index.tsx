@@ -1443,6 +1443,25 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                       ))}
                     </div>
                   )}
+                  {/* ── Stalkers at this location ── */}
+                  {(() => {
+                    const stalkersHere = currentLoc.agents
+                      .map((aid) => zoneState?.agents[aid])
+                      .filter((a): a is NonNullable<typeof a> => !!a && a.is_alive && a.id !== myAgentId);
+                    return stalkersHere.length > 0 ? (
+                      <div style={styles.locDetailSection}>
+                        <div style={styles.locDetailLabel}>👥 Сталкеры здесь</div>
+                        {stalkersHere.map((a) => (
+                          <AgentRow
+                            key={a.id}
+                            agent={a as unknown as AgentForProfile}
+                            locations={zoneState?.locations}
+                            sendCommand={sendCommand}
+                          />
+                        ))}
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
               )}
             </>

@@ -47,6 +47,7 @@ export interface AgentForProfile {
   skill_social?: number;
   global_goal?: string;
   current_goal?: string | null;
+  material_threshold?: number;
   risk_tolerance?: number;
   reputation?: number;
   memory?: Array<{
@@ -81,21 +82,40 @@ const SCHED_ICONS: Record<string, string> = {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
+// ─── Decision preview type ───────────────────────────────────────────────────
+
+type DecisionPreview = {
+  goal: string;
+  action: string;
+  reason: string;
+  layers?: Array<{ name: string; skipped: boolean; action: string; reason: string }>;
+};
+
 export default function AgentProfileModal({ agent, locationName, onClose, sendCommand }: Props) {
-  const [decisionPreview, setDecisionPreview] = React.useState<{
-    goal: string; action: string; reason: string;
-  } | null>(null);
+  // Initialise immediately with the client-side hint so the panel renders on
+  // first paint without needing a button click.
+  const [decisionPreview, setDecisionPreview] = React.useState<DecisionPreview | null>(() => {
+    if (sendCommand && agent.controller.kind === 'bot') {
+      return _clientSideDecisionHint(agent);
+    }
+    return null;
+  });
   const [loadingDecision, setLoadingDecision] = React.useState(false);
+  const [showAllLayers, setShowAllLayers] = React.useState(false);
+
+  // Fire the backend preview command whenever the displayed agent changes.
+  // The result is discarded here — we rely on the client-side hint for
+  // immediate display; the backend call keeps server-side state in sync.
+  React.useEffect(() => {
+    if (!sendCommand || agent.controller.kind !== 'bot') return;
+    sendCommand('debug_preview_bot_decision', { agent_id: agent.id }).catch(() => {});
+  }, [agent.id, agent.controller.kind]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePreviewDecision = async () => {
     if (!sendCommand) return;
     setLoadingDecision(true);
     try {
       await sendCommand('debug_preview_bot_decision', { agent_id: agent.id });
-      // The result comes back as a state update via the event stream.
-      // We poll the agent's current_goal as a fallback, but the best approach
-      // is to collect the event response. Since sendCommand doesn't return events
-      // directly, we show an immediate client-side preview based on agent fields.
       setDecisionPreview(_clientSideDecisionHint(agent));
     } finally {
       setLoadingDecision(false);
@@ -264,19 +284,64 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
         {sendCommand && agent.controller.kind === 'bot' && (
           <Section label="🤖 Решение в этом ходу">
             {decisionPreview ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={s.decisionRow}>
-                  <span style={s.decisionLabel}>Цель:</span>
-                  <span style={s.decisionVal}>{decisionPreview.goal}</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {/* Chosen action — highlighted in green */}
+                <div style={s.decisionChosen}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>✅</span>
+                    <span style={s.decisionChosenAction}>{decisionPreview.action}</span>
+                  </div>
+                  <div style={s.decisionChosenReason}>{decisionPreview.reason}</div>
+                  <div style={s.decisionChosenGoal}>🎯 Цель: {decisionPreview.goal}</div>
                 </div>
-                <div style={s.decisionRow}>
-                  <span style={s.decisionLabel}>Действие:</span>
-                  <span style={s.decisionVal}>{decisionPreview.action}</span>
-                </div>
-                <div style={s.decisionRow}>
-                  <span style={s.decisionLabel}>Причина:</span>
-                  <span style={{ ...s.decisionVal, color: '#94a3b8' }}>{decisionPreview.reason}</span>
-                </div>
+
+                {/* Collapsible all-layers list */}
+                {decisionPreview.layers && decisionPreview.layers.length > 0 && (
+                  <div>
+                    <button
+                      style={s.decisionToggleBtn}
+                      onClick={() => setShowAllLayers(!showAllLayers)}
+                    >
+                      {showAllLayers ? '▲ Скрыть варианты' : '▼ Все варианты'}
+                    </button>
+                    {showAllLayers && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
+                        {decisionPreview.layers.map((layer, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              display: 'flex',
+                              gap: 6,
+                              alignItems: 'flex-start',
+                              padding: '0.3rem 0.5rem',
+                              borderRadius: 6,
+                              background: layer.skipped ? 'transparent' : '#052e16',
+                              border: layer.skipped ? '1px solid #1e293b' : '1px solid #22c55e',
+                              opacity: layer.skipped ? 0.6 : 1,
+                            }}
+                          >
+                            <span style={{ flexShrink: 0, fontSize: '0.8rem' }}>
+                              {layer.skipped ? '⏭' : '✅'}
+                            </span>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                              <span style={{
+                                color: layer.skipped ? '#64748b' : '#86efac',
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                              }}>
+                                {layer.name} → {layer.action}
+                              </span>
+                              <span style={{ color: '#475569', fontSize: '0.68rem' }}>
+                                {layer.reason}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <button
                   style={s.decisionRefreshBtn}
                   onClick={handlePreviewDecision}
@@ -442,6 +507,37 @@ const s: Record<string, React.CSSProperties> = {
   decisionRow: { display: 'flex', gap: 8, alignItems: 'flex-start' },
   decisionLabel: { color: '#64748b', fontSize: '0.75rem', minWidth: 68, flexShrink: 0, paddingTop: 1 },
   decisionVal: { color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.5 },
+  decisionChosen: {
+    border: '1px solid #22c55e',
+    borderRadius: 8,
+    padding: '0.5rem 0.75rem',
+    background: '#052e16',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 4,
+  },
+  decisionChosenAction: {
+    color: '#86efac',
+    fontWeight: 700,
+    fontSize: '0.85rem',
+  },
+  decisionChosenReason: {
+    color: '#94a3b8',
+    fontSize: '0.75rem',
+  },
+  decisionChosenGoal: {
+    color: '#475569',
+    fontSize: '0.7rem',
+  },
+  decisionToggleBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#64748b',
+    borderRadius: 6,
+    padding: '0.2rem 0.55rem',
+    fontSize: '0.72rem',
+    cursor: 'pointer',
+  },
   decisionPreviewBtn: {
     background: '#1e3a5f',
     border: '1px solid #3b82f6',
@@ -465,31 +561,152 @@ const s: Record<string, React.CSSProperties> = {
   },
 };
 
-// ─── Client-side decision hint (approximates backend _describe_bot_decision) ─
-// Used to show an immediate result after triggering debug_preview_bot_decision.
-function _clientSideDecisionHint(agent: AgentForProfile): { goal: string; action: string; reason: string } {
+// ─── Client-side decision hint (approximates backend _describe_bot_decision_tree) ─
+// Used to show an immediate result on mount before the backend responds.
+// Known artifact item types (mirrors Python ARTIFACT_ITEM_TYPES in tick_rules.py).
+const _ARTIFACT_TYPES = new Set([
+  'artifact', 'fireball', 'jellyfish', 'moonlight', 'soul', 'gravi',
+  'goldfish', 'night_star', 'stone_blood', 'spring',
+]);
+
+/**
+ * Client-side approximation of the backend `_describe_bot_decision_tree` logic.
+ *
+ * Evaluates the same 7-layer priority tree using agent fields available in the
+ * frontend state, returning an immediate result that is displayed before (or
+ * instead of) a backend round-trip.  The backend version is authoritative;
+ * this function is used only for instantaneous UI feedback.
+ *
+ * @param agent - The bot agent whose decision should be previewed.
+ * @returns A `DecisionPreview` with `goal`, `action`, `reason`, and the full
+ *          `layers` array (each layer marked `skipped: true` if its condition
+ *          was not met).
+ */
+function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const hp = agent.hp;
   const hunger = agent.hunger;
   const thirst = agent.thirst;
   const sleepiness = agent.sleepiness;
   const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
-  // Use the agent's own material_threshold when available; fall back to 1000
-  const threshold = (agent as AgentForProfile & { material_threshold?: number }).material_threshold ?? 1000;
+  const threshold = agent.material_threshold ?? 1000;
   const goal = agent.current_goal ?? '—';
   const scheduled = agent.scheduled_action;
+  const globalGoal = agent.global_goal ?? 'survive';
+  const artifactCount = agent.inventory.filter((i) => _ARTIFACT_TYPES.has(i.type)).length;
+
+  type Layer = { name: string; skipped: boolean; action: string; reason: string };
+  const layers: Layer[] = [];
+
+  // Layer 1: EMERGENCY: HP критический
+  const cond1 = hp <= 30;
+  layers.push({
+    name: 'EMERGENCY: HP критический',
+    skipped: !cond1,
+    action: 'Лечение/бегство',
+    reason: cond1 ? `HP = ${hp} (порог ≤30)` : `HP = ${hp}, выше критического`,
+  });
+
+  // Layer 2: EMERGENCY: Голод
+  const cond2 = hunger >= 70;
+  layers.push({
+    name: 'EMERGENCY: Голод',
+    skipped: !cond2,
+    action: 'Поесть',
+    reason: cond2 ? `Голод = ${hunger} (порог ≥70)` : `Голод = ${hunger}, терпимо`,
+  });
+
+  // Layer 3: EMERGENCY: Жажда
+  const cond3 = thirst >= 70;
+  layers.push({
+    name: 'EMERGENCY: Жажда',
+    skipped: !cond3,
+    action: 'Попить',
+    reason: cond3 ? `Жажда = ${thirst} (порог ≥70)` : `Жажда = ${thirst}, терпимо`,
+  });
+
+  // Layer 4: ВЫЖИВАНИЕ: Сон
+  const cond4 = sleepiness >= 75;
+  layers.push({
+    name: 'ВЫЖИВАНИЕ: Сон',
+    skipped: !cond4,
+    action: 'Спать 6ч',
+    reason: cond4 ? `Усталость = ${sleepiness} (порог ≥75)` : `Усталость = ${sleepiness}, норма`,
+  });
+
+  // Layer 5: ТОРГОВЛЯ: Продать артефакты
+  // Note: client-side can't check for a trader at the location, so we only check inventory.
+  const cond5 = artifactCount > 0;
+  layers.push({
+    name: 'ТОРГОВЛЯ: Продать артефакты',
+    skipped: !cond5,
+    action: 'Продать артефакты',
+    reason: cond5
+      ? `${artifactCount} артефактов (наличие торговца неизвестно)`
+      : 'Нет артефактов в инвентаре',
+  });
+
+  // Layer 6: ЦЕЛЬ: Накопить богатство
+  const cond6 = wealth < threshold;
+  layers.push({
+    name: 'ЦЕЛЬ: Накопить богатство',
+    skipped: !cond6,
+    action: 'Собирать ресурсы',
+    reason: cond6
+      ? `Богатство ${wealth} < порог ${threshold}`
+      : `Богатство ${wealth} ≥ порог ${threshold}`,
+  });
+
+  // Layer 7: ЦЕЛЬ: Глобальная цель
+  const cond7 = wealth >= threshold;
+  layers.push({
+    name: 'ЦЕЛЬ: Глобальная цель',
+    skipped: !cond7,
+    action: `Преследование цели «${globalGoal}»`,
+    reason: cond7
+      ? `Богатство ${wealth} ≥ порог ${threshold}, цель: ${globalGoal}`
+      : `Богатство ${wealth} < порог ${threshold}`,
+  });
+
+  // Determine chosen action/reason (priority: scheduled_action > stat conditions)
+  let action = 'Бездействие';
+  let reason = '—';
 
   if (scheduled) {
     const t = scheduled.type;
-    if (t === 'travel') return { goal, action: `Движение (${scheduled.turns_remaining} мин осталось)`, reason: 'Запланированное перемещение' };
-    if (t === 'sleep') return { goal, action: `Спать`, reason: 'Запланированный отдых' };
-    if (t === 'explore') return { goal, action: `Исследование`, reason: 'Запланированное исследование' };
+    if (t === 'travel') {
+      action = `Движение (${scheduled.turns_remaining} мин осталось)`;
+      reason = 'Запланированное перемещение';
+    } else if (t === 'sleep') {
+      action = 'Спать';
+      reason = 'Запланированный отдых';
+    } else if (t === 'explore') {
+      action = 'Исследование';
+      reason = 'Запланированное исследование';
+    }
+  } else if (cond1) {
+    action = 'Лечение или бегство';
+    reason = `HP критически низкий (${hp})`;
+  } else if (cond2) {
+    action = 'Поиск еды';
+    reason = `Голод ${hunger}/100`;
+  } else if (cond3) {
+    action = 'Поиск воды';
+    reason = `Жажда ${thirst}/100`;
+  } else if (cond4) {
+    action = 'Спать 6 часов';
+    reason = `Усталость ${sleepiness}/100`;
+  } else if (cond5) {
+    action = 'Продажа или путь к торговцу';
+    reason = `${artifactCount} артефактов в инвентаре`;
+  } else if (cond6) {
+    action = 'Сбор ресурсов';
+    reason = `Богатство ${wealth} < порог ${threshold}`;
+  } else {
+    action = 'Преследование глобальной цели';
+    reason = `Цель: ${globalGoal}`;
   }
-  if (hp <= 30) return { goal, action: 'Лечение или бегство', reason: `HP критически низкий (${hp})` };
-  if (hunger >= 70) return { goal, action: 'Поиск еды', reason: `Голод ${hunger}/100` };
-  if (thirst >= 70) return { goal, action: 'Поиск воды', reason: `Жажда ${thirst}/100` };
-  if (sleepiness >= 75) return { goal, action: 'Спать 6 часов', reason: `Усталость ${sleepiness}/100` };
-  if (wealth < threshold) return { goal, action: 'Сбор ресурсов', reason: `Богатство ${wealth} < порог ${threshold}` };
-  return { goal, action: 'Преследование глобальной цели', reason: `Цель: ${agent.global_goal ?? 'survive'}` };
+
+  return { goal, action, reason, layers };
 }
 
 // ─── AgentCreateModal ─────────────────────────────────────────────────────────

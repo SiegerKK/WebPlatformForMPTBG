@@ -30,6 +30,11 @@ export interface StalkerAgent {
   faction: string;
   is_alive: boolean;
   controller: { kind: string; participant_id?: string | null };
+  scheduled_action?: {
+    type: string;
+    target_id?: string;
+    turns_remaining?: number;
+  } | null;
 }
 
 export interface ZoneMapState {

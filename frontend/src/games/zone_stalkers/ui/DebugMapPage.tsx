@@ -13,7 +13,7 @@
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
-import type { DebugMapPageProps, LocationConn, ZoneLocation } from './debugMap/types';
+import type { DebugMapPageProps, LocationConn, ZoneLocation, ZoneMapState } from './debugMap/types';
 import {
   CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
@@ -39,6 +39,43 @@ function getRegionColors(
       border: REGION_BORDER_COLOR[region] ?? '#334155',
     }
   );
+}
+
+/** Snapshot the scheduled_action of all bot agents. */
+function snapBotScheduledActions(
+  state: ZoneMapState,
+): Map<string, { type: string; target_id?: string } | null> {
+  const snap = new Map<string, { type: string; target_id?: string } | null>();
+  for (const [id, agent] of Object.entries(state.agents)) {
+    if (agent.controller.kind === 'bot') {
+      snap.set(
+        id,
+        agent.scheduled_action
+          ? { type: agent.scheduled_action.type, target_id: agent.scheduled_action.target_id }
+          : null,
+      );
+    }
+  }
+  return snap;
+}
+
+/** Returns true if any bot agent gained or changed a scheduled_action. */
+function botDecisionMade(
+  before: Map<string, { type: string; target_id?: string } | null>,
+  after: Map<string, { type: string; target_id?: string } | null>,
+): boolean {
+  for (const [id, afterAction] of after) {
+    const beforeAction = before.get(id);
+    if (!beforeAction && afterAction) return true;
+    if (beforeAction && afterAction) {
+      if (
+        beforeAction.type !== afterAction.type ||
+        beforeAction.target_id !== afterAction.target_id
+      )
+        return true;
+    }
+  }
+  return false;
 }
 
 export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
@@ -185,11 +222,42 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     finally { setTicking(false); }
   };
 
+  const skipCancelRef = useRef(false);
   const [skipping, setSkipping] = useState(false);
+
+  // Keep a ref to the latest zoneState so the skip loop can read fresh state
+  const zoneStateRef = useRef(zoneState);
+  useEffect(() => { zoneStateRef.current = zoneState; }, [zoneState]);
+
   const handleSkipToDecision = async () => {
+    if (skipping) {
+      // Already running — cancel the loop
+      skipCancelRef.current = true;
+      return;
+    }
+    skipCancelRef.current = false;
     setSkipping(true);
-    try { await sendCommand('debug_advance_turns', { max_n: 200, stop_on_decision: true }); }
-    finally { setSkipping(false); }
+    try {
+      for (let i = 0; i < 500; i++) {
+        if (skipCancelRef.current) break;
+
+        // Snapshot scheduled actions before the tick
+        const beforeSnap = snapBotScheduledActions(zoneStateRef.current);
+
+        await sendCommand('end_turn', {});
+        // sendCommand triggers a state refresh; wait for React to propagate it
+        await new Promise<void>((r) => setTimeout(r, 200));
+
+        if (skipCancelRef.current) break;
+
+        // Check if any bot made a new decision after the tick
+        const afterSnap = snapBotScheduledActions(zoneStateRef.current);
+        if (botDecisionMade(beforeSnap, afterSnap)) break;
+      }
+    } finally {
+      setSkipping(false);
+      skipCancelRef.current = false;
+    }
   };
 
   // Build the serializable connections map (all locations) and call backend
@@ -790,10 +858,10 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             <button
               style={s.toolBtn}
               onClick={handleSkipToDecision}
-              disabled={ticking || skipping}
-              title="Пропустить ходы до следующего решения НПЦ (до 200 ходов)"
+              disabled={ticking}
+              title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
             >
-              {skipping ? '…' : '⏩ До решения'}
+              {skipping ? '⏹ Остановить' : '⏩ До решения'}
             </button>
             <button
               style={s.toolBtn}
