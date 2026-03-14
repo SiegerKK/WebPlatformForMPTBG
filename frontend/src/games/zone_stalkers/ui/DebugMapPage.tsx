@@ -28,6 +28,19 @@ import type { AgentForProfile } from './AgentProfileModal';
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
+/** Format a count of game turns (minutes) as "X д Y ч Z мин". */
+function formatTurns(turns: number): string {
+  if (turns <= 0) return '0 мин';
+  const days = Math.floor(turns / (60 * 24));
+  const hours = Math.floor((turns % (60 * 24)) / 60);
+  const mins = turns % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} д`);
+  if (hours > 0) parts.push(`${hours} ч`);
+  if (mins > 0 || parts.length === 0) parts.push(`${mins} мин`);
+  return parts.join(' ');
+}
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
 /** Resolves the bg/border colours for a region, falling back to static maps. */
@@ -1023,11 +1036,11 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                 </span>
                 {zoneState.emission_active ? (
                   <span style={{ color: '#ef4444', fontSize: '0.65rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
-                    ⚡ ВЫБРОС! (ещё {(zoneState.emission_ends_turn ?? 0) - zoneState.world_turn} мин)
+                    ⚡ ВЫБРОС! (ещё {formatTurns((zoneState.emission_ends_turn ?? 0) - zoneState.world_turn)})
                   </span>
                 ) : (
                   <span style={{ color: '#f59e0b', fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
-                    ⚡ через {Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn)} мин
+                    ⚡ через {formatTurns(Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn))}
                   </span>
                 )}
               </div>
@@ -1399,7 +1412,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                     )}
                   </div>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
-                    {isCurrent && <Badge bg="#166534" color="#86efac">📍 You</Badge>}
                     {aliveAgents > 0 && <Badge bg="#334155" color="#94a3b8">👥 {aliveAgents}</Badge>}
                     {aliveMutantsOnCard > 0 && <Badge bg="#7f1d1d" color="#fca5a5">☣️ {aliveMutantsOnCard}</Badge>}
                     {traderCount > 0 && <Badge bg="#1e293b" color="#94a3b8">🏪 {traderCount}</Badge>}

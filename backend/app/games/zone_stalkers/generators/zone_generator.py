@@ -281,6 +281,8 @@ def _make_stalker_agent(
         "skill_trade": 1,
         "skill_medicine": 1,
         "skill_social": 1,
+        "skill_survival":    1,
+        "skill_survival_xp": 0.0,
         # ─── Goals & Psychology ───
         "global_goal": chosen_global_goal,
         "current_goal": None,

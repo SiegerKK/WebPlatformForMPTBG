@@ -492,6 +492,26 @@ def _resolve_exploration(
             f"Во время обыска нашёл и поднял «{art_name}» на локации «{loc_name}».",
             {"action_kind": "pickup", "artifact_type": art["type"], "location_id": loc_id},
         )
+        # ── Survival skill XP gain ────────────────────────────────────────────
+        art_value = art.get("value", 0)
+        xp_gain = art_value / 100.0
+        agent["skill_survival_xp"] = agent.get("skill_survival_xp", 0.0) + xp_gain
+        # Level up: cost = current_level * 10 XP; cap at 20 level-ups per tick to guard against corrupt data
+        for _ in range(20):
+            current_level = int(agent.get("skill_survival", 1))
+            xp_needed = current_level * 10
+            if agent["skill_survival_xp"] >= xp_needed:
+                agent["skill_survival_xp"] -= xp_needed
+                agent["skill_survival"] = current_level + 1
+                events.append({
+                    "event_type": "skill_leveled_up",
+                    "payload": {
+                        "agent_id": agent_id, "skill": "survival",
+                        "new_level": agent["skill_survival"],
+                    },
+                })
+            else:
+                break
         events.append({
             "event_type": "exploration_found_artifact",
             "payload": {"agent_id": agent_id, "artifact": art},
@@ -786,34 +806,36 @@ def _find_trader_at_location(loc_id: str, state: Dict[str, Any]) -> Any:
     return None
 
 
-def _find_nearest_trader_location(from_loc_id: str, state: Dict[str, Any]) -> Any:
+def _find_nearest_trader_location(
+    from_loc_id: str,
+    state: Dict[str, Any],
+) -> Optional[str]:
+    """BFS to find the nearest location with at least one living trader.
+
+    Returns the ``loc_id`` of the nearest trader location, or ``None`` if
+    no reachable trader exists within 20 hops.  Skips closed connections.
     """
-    BFS over the location graph to find the id of the closest location
-    that contains a trader.  Returns None if no trader exists in the world.
-    """
-    trader_locs = set()
-    for trader in state.get("traders", {}).values():
-        tl = trader.get("location_id")
-        if tl:
-            trader_locs.add(tl)
-    if not trader_locs:
-        return None
+    traders = state.get("traders", {})
+    locations = state.get("locations", {})
+    trader_locs: set = {
+        t["location_id"] for t in traders.values() if t.get("is_alive", True)
+    }
     if from_loc_id in trader_locs:
         return from_loc_id
-
-    locations = state.get("locations", {})
-    visited = {from_loc_id}
-    queue = [from_loc_id]
+    queue: collections.deque = collections.deque([(from_loc_id, 0)])
+    seen = {from_loc_id}
     while queue:
-        current = queue.pop(0)
+        current, dist = queue.popleft()
+        if dist >= 20:
+            continue
         for conn in locations.get(current, {}).get("connections", []):
             nxt = conn.get("to")
-            if not nxt or conn.get("closed") or nxt in visited:
+            if not nxt or conn.get("closed") or nxt in seen:
                 continue
+            seen.add(nxt)
             if nxt in trader_locs:
                 return nxt
-            visited.add(nxt)
-            queue.append(nxt)
+            queue.append((nxt, dist + 1))
     return None
 
 
@@ -1008,6 +1030,75 @@ def _bot_schedule_travel(
     }]
 
 
+def _bot_buy_from_trader(
+    agent_id: str,
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Buy the cheapest available item from a trader at the agent's current location.
+
+    Implements an infinite-stock stub: the trader does not need to have the
+    item in their inventory — they always can supply it.  The agent is
+    charged 150 % of the item's base value.
+
+    Returns a non-empty event list on success, empty list when the agent
+    cannot afford anything or no trader is present.
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+
+    loc_id = agent.get("location_id")
+    traders = state.get("traders", {})
+
+    # Find a living trader at the same location
+    trader = next(
+        (t for t in traders.values()
+         if t.get("location_id") == loc_id and t.get("is_alive", True)),
+        None,
+    )
+    if trader is None:
+        return []
+
+    # Pick the cheapest buyable item the agent can afford
+    candidates = sorted(
+        ((k, ITEM_TYPES[k].get("value", 100)) for k in item_types if k in ITEM_TYPES),
+        key=lambda x: x[1],
+    )
+    for item_type, base_value in candidates:
+        buy_price = int(base_value * 1.5)
+        if agent.get("money", 0) < buy_price:
+            continue
+        # Transaction — deduct from agent, credit trader
+        agent["money"] = agent.get("money", 0) - buy_price
+        trader["money"] = trader.get("money", 0) + buy_price
+        # Create a fresh item instance and place it in agent inventory
+        new_item: Dict[str, Any] = {
+            "id": f"{item_type}_{agent_id}_{world_turn}",
+            "type": item_type,
+            "name": ITEM_TYPES[item_type].get("name", item_type),
+            "value": base_value,
+        }
+        agent.setdefault("inventory", []).append(new_item)
+        agent["action_used"] = True
+        item_name = ITEM_TYPES[item_type].get("name", item_type)
+        trader_name = trader.get("name", trader["id"])
+        _add_memory(
+            agent, world_turn, state, "action",
+            f"Купил «{item_name}» у торговца",
+            f"Купил «{item_name}» у {trader_name} за {buy_price} монет.",
+            {"action_kind": "trade_buy", "item_type": item_type, "price": buy_price},
+        )
+        return [{
+            "event_type": "bot_bought_item",
+            "payload": {
+                "agent_id": agent_id, "trader_id": trader["id"],
+                "item_type": item_type, "price": buy_price,
+            },
+        }]
+    return []
+
+
 def _bot_consume(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1117,61 +1208,53 @@ def _run_bot_action_inner(
     if agent.get("hp", 100) <= 30:
         heal_item = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
         if heal_item:
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Срочно лечусь",
-                f"HP критически низкий ({agent.get('hp', 0)}). Применяю аптечку.",
-                {"action_kind": "emergency_heal", "hp": agent.get("hp", 0)},
-            )
             return _bot_consume(agent_id, agent, heal_item, world_turn, state, "consume_heal")
-        # No healing: move toward a safe location (low anomaly_activity)
+        # No heal item — try to buy from a nearby trader
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+        elif trader_loc is not None:
+            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+        # No trader reachable — flee to low-anomaly neighbor
         safe_neighbors = [
             c["to"] for c in loc.get("connections", [])
-            if not c.get("closed") and
-               locations.get(c["to"], {}).get("anomaly_activity", 5) <= 3
+            if not c.get("closed")
+            and locations.get(c["to"], {}).get("anomaly_activity", 5) <= 3
         ]
         if safe_neighbors:
-            target = rng.choice(safe_neighbors)
-            agent["current_goal"] = "flee_to_safety"
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Бегство в безопасную локацию",
-                f"HP критически низкий ({agent.get('hp', 0)}), аптечек нет. Бегу в безопасное место.",
-                {"action_kind": "flee", "hp": agent.get("hp", 0)},
+            return _bot_schedule_travel(
+                agent_id, agent, rng.choice(safe_neighbors), state, world_turn
             )
-            return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
-        _add_memory(
-            agent, world_turn, state, "decision",
-            "Нет аптечек и безопасных путей",
-            f"HP критически низкий ({agent.get('hp', 0)}), нет аптечек и некуда бежать.",
-            {"action_kind": "emergency_stuck", "hp": agent.get("hp", 0)},
-        )
-        agent["action_used"] = True
-        return events
 
     # ── EMERGENCY: Eat ────────────────────────────────────────────────────────
     if agent.get("hunger", 0) >= 70:
         food = next((i for i in inventory if i["type"] in FOOD_ITEM_TYPES), None)
         if food:
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Срочно ем",
-                f"Сильный голод ({agent.get('hunger', 0)}%). Ем.",
-                {"action_kind": "emergency_eat", "hunger": agent.get("hunger", 0)},
-            )
             return _bot_consume(agent_id, agent, food, world_turn, state, "consume_food")
+        # No food — try to buy from a nearby trader
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+        elif trader_loc is not None:
+            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── EMERGENCY: Drink ──────────────────────────────────────────────────────
     if agent.get("thirst", 0) >= 70:
         drink = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
         if drink:
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Срочно пью",
-                f"Сильная жажда ({agent.get('thirst', 0)}%). Пью.",
-                {"action_kind": "emergency_drink", "thirst": agent.get("thirst", 0)},
-            )
             return _bot_consume(agent_id, agent, drink, world_turn, state, "consume_drink")
+        # No drink — try to buy from a nearby trader
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc == loc_id:
+            bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
+            if bought:
+                return bought
+        elif trader_loc is not None:
+            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── SURVIVAL: Sleep ───────────────────────────────────────────────────────
     if agent.get("sleepiness", 0) >= 75:
@@ -1496,7 +1579,8 @@ def _bot_pursue_goal(
 
         # Current location confirmed empty or no anomaly activity here.
         # BFS up to _ANOMALY_SEARCH_MAX_HOPS hops to find the best anomaly location not yet confirmed empty.
-        reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_ANOMALY_SEARCH_MAX_HOPS)
+        _max_anomaly_search_hops = 1 + int(agent.get("skill_survival", 1))
+        reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_anomaly_search_hops)
 
         def _anomaly_candidate_score(lid: str, dist: int) -> float:
             return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY + rng.random() * _ANOMALY_SCORE_NOISE

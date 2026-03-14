@@ -205,6 +205,19 @@ const TERRAIN_TYPE_LABELS: Record<string, string> = {
 
 const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 
+/** Format a count of game turns (minutes) as "X д Y ч Z мин". */
+function formatTurns(turns: number): string {
+  if (turns <= 0) return '0 мин';
+  const days = Math.floor(turns / (60 * 24));
+  const hours = Math.floor((turns % (60 * 24)) / 60);
+  const mins = turns % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} д`);
+  if (hours > 0) parts.push(`${hours} ч`);
+  if (mins > 0 || parts.length === 0) parts.push(`${mins} мин`);
+  return parts.join(' ');
+}
+
 const SCHED_ICONS: Record<string, string> = {
   travel: '🚶',
   explore: '🔍',
@@ -1225,12 +1238,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
     // Compute turns until next emission for display
     const turnsUntilEmission = (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn;
-    const emissionHours = Math.floor(turnsUntilEmission / 60);
-    const emissionMins = turnsUntilEmission % 60;
     const emissionLabel = zoneState.emission_active
-      ? `⚡ ВЫБРОС АКТИВЕН! (ещё ${(zoneState.emission_ends_turn ?? 0) - zoneState.world_turn} мин)`
+      ? `⚡ ВЫБРОС АКТИВЕН! (ещё ${formatTurns((zoneState.emission_ends_turn ?? 0) - zoneState.world_turn)})`
       : turnsUntilEmission > 0
-        ? `⚡ Выброс через: ${emissionHours > 0 ? `${emissionHours} ч ` : ''}${emissionMins} мин`
+        ? `⚡ Выброс через: ${formatTurns(turnsUntilEmission)}`
         : '⚡ Выброс скоро…';
 
     return (
