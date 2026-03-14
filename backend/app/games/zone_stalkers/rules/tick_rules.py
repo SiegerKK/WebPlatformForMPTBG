@@ -455,6 +455,31 @@ def _find_nearest_trader_location(from_loc_id: str, state: Dict[str, Any]) -> An
     return None
 
 
+def _find_richest_artifact_location(
+    state: dict,
+    exclude_loc_id: str | None = None,
+) -> tuple:
+    """
+    Survey every location and return *(loc_id, total_artifact_value)* for the
+    location whose artifacts have the highest combined base value.
+
+    Returns *(None, 0)* when no artifacts exist anywhere on the map.
+    The caller's current location can be excluded via *exclude_loc_id*.
+    """
+    best_loc_id = None
+    best_value = 0
+    for loc_id, loc in state.get("locations", {}).items():
+        if exclude_loc_id and loc_id == exclude_loc_id:
+            continue
+        arts = loc.get("artifacts", [])
+        if arts:
+            total = sum(a.get("value", 0) for a in arts)
+            if total > best_value:
+                best_value = total
+                best_loc_id = loc_id
+    return best_loc_id, best_value
+
+
 def _add_trader_memory(
     trader: Dict[str, Any],
     world_turn: int,
@@ -534,15 +559,15 @@ def _bot_sell_to_trader(
     agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] not in sold_ids]
     agent["action_used"] = True
 
-    # ── Stalker memory ────────────────────────────────────────────
+    # ── Stalker memory (Step 7) ───────────────────────────────────
     item_names = ", ".join(i.get("name", i.get("type", "?")) for i in sold_items)
     trader_name = trader.get("name", trader["id"])
     loc_name = state.get("locations", {}).get(agent.get("location_id", ""), {}).get("name", "?")
     _add_memory(
         agent, world_turn, state, "trade_sell",
-        f"Продал {item_names} торговцу {trader_name}",
-        f"Заработал {sell_price_total} RU, продав {len(sold_items)} артефакт(ов) торговцу "
-        f"{trader_name} в локации {loc_name}.",
+        f"Продал {len(sold_items)} артефактов на {sell_price_total} денег",
+        f"Продал {len(sold_items)} артефактов на {sell_price_total} денег. "
+        f"Торговец: {trader_name} в {loc_name}.",
         {"money_gained": sell_price_total, "items_sold": [i["type"] for i in sold_items],
          "trader_id": trader["id"]},
     )
@@ -714,14 +739,38 @@ def _run_bot_action_inner(
             trader_loc = _find_nearest_trader_location(loc_id, state)
             if trader_loc and trader_loc != loc_id:
                 agent["current_goal"] = "sell_artifacts"
-                items_desc = ", ".join(a.get("name", a.get("type", "?")) for a in artifacts_held)
                 trader_loc_name = state.get("locations", {}).get(trader_loc, {}).get("name", trader_loc)
+                # Resolve the trader's name for personalised memories
+                trader_obj = _find_trader_at_location(trader_loc, state)
+                trader_name = trader_obj.get("name", "торговец") if trader_obj else "торговец"
+
+                # Step 4 — plan which artifacts to sell (only when carrying more than one)
+                if len(artifacts_held) > 1:
+                    art_types = ", ".join(a.get("type", "?") for a in artifacts_held)
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "Планирую продать артефакты",
+                        f"Планирую продать: {art_types}.",
+                        {"artifact_types": [a.get("type") for a in artifacts_held]},
+                    )
+
+                # Step 5 — record the nearest trader found via BFS
                 _add_memory(
                     agent, world_turn, state, "decision",
-                    f"Решил продать добычу",
-                    f"В инвентаре: {items_desc}. Иду к торговцу в {trader_loc_name}.",
-                    {"destination": trader_loc, "artifacts_count": len(artifacts_held)},
+                    f"Ближайший торговец: {trader_name}",
+                    f"Ближайший торговец: {trader_name} в {trader_loc_name}.",
+                    {"trader_location": trader_loc, "trader_name": trader_name,
+                     "artifacts_count": len(artifacts_held)},
                 )
+
+                # Step 6 — commit to navigating toward the trader
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"Иду к торговцу {trader_name}",
+                    f"Иду к торговцу {trader_name}.",
+                    {"destination": trader_loc},
+                )
+
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── GOAL SELECTION ─────────────────────────────────────────────────────────
@@ -729,14 +778,17 @@ def _run_bot_action_inner(
     threshold = agent.get("material_threshold", 1000)
     global_goal = agent.get("global_goal", "survive")
 
-    if wealth < threshold:
-        # Phase 1: Accumulate resources before pursuing global goal
-        agent["current_goal"] = "gather_resources"
-        return _bot_gather_resources(agent_id, agent, loc_id, loc, state, world_turn, rng)
-    else:
+    # get_rich agents always follow the goal-directed pursuit path — the goal
+    # itself handles both artifact gathering and selling, so the generic
+    # resource-accumulation phase would only slow them down.
+    if global_goal == "get_rich" or wealth >= threshold:
         # Phase 2: Pursue global goal
         agent["current_goal"] = f"goal_{global_goal}"
         return _bot_pursue_goal(agent_id, agent, global_goal, loc_id, loc, state, world_turn, rng)
+    else:
+        # Phase 1: Accumulate resources before pursuing global goal
+        agent["current_goal"] = "gather_resources"
+        return _bot_gather_resources(agent_id, agent, loc_id, loc, state, world_turn, rng)
 
 
 def _bot_gather_resources(
@@ -857,18 +909,57 @@ def _bot_pursue_goal(
                      "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
     elif global_goal == "get_rich":
-        # Aggressively collect artifacts; move to high-anomaly zones
+        # ── Step 3: Pick up the most-valuable artifact at current location ──────
         artifacts = loc.get("artifacts", [])
         if artifacts:
-            art = artifacts[0]
-            loc["artifacts"] = artifacts[1:]
-            agent.setdefault("inventory", []).append(art)
+            best_art = max(artifacts, key=lambda a: a.get("value", 0))
+            loc["artifacts"] = [a for a in artifacts if a["id"] != best_art["id"]]
+            agent.setdefault("inventory", []).append(best_art)
             agent["action_used"] = True
+            art_name = best_art.get("name", best_art.get("type", "артефакт"))
+            _add_memory(
+                agent, world_turn, state, "pickup",
+                f"Поднял артефакт {best_art['type']}",
+                f"Поднял артефакт «{art_name}». Ценность: {best_art.get('value', 0)} RU.",
+                {
+                    "artifact_id": best_art["id"],
+                    "artifact_type": best_art["type"],
+                    "artifact_value": best_art.get("value", 0),
+                    "location_id": loc_id,
+                },
+            )
             return [{"event_type": "artifact_picked_up",
-                     "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
+                     "payload": {"agent_id": agent_id, "artifact_id": best_art["id"],
+                                 "artifact_type": best_art["type"]}}]
+
+        # ── Steps 1-2: Survey ALL locations; travel to the richest artifact spot ─
+        best_art_loc_id, best_art_value = _find_richest_artifact_location(
+            state, exclude_loc_id=loc_id
+        )
+        if best_art_loc_id:
+            best_loc_name = locations.get(best_art_loc_id, {}).get("name", best_art_loc_id)
+            # Step 1 — record the global survey finding
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Ищу ценные предметы",
+                f"Ищу ценные предметы. Лучшая локация: {best_loc_name}.",
+                {"target_location": best_art_loc_id, "estimated_value": best_art_value},
+            )
+            # Step 2 — commit to travelling there
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Иду на {best_loc_name}",
+                f"Иду на {best_loc_name} за артефактами.",
+                {"destination": best_art_loc_id},
+            )
+            agent["current_goal"] = "goal_get_rich_seek_artifacts"
+            return _bot_schedule_travel(agent_id, agent, best_art_loc_id, state, world_turn)
+
+        # No artifacts found anywhere — explore current location hoping to spawn some
         if loc.get("anomalies") and rng.random() < 0.65:
             agent["scheduled_action"] = {
-                "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
+                "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS,
+                "turns_total": EXPLORE_DURATION_TURNS,
                 "target_id": loc_id, "started_turn": world_turn,
             }
             agent["action_used"] = True
