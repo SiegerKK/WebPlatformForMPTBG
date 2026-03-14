@@ -977,7 +977,7 @@ class TestDebugLocationCommands:
         state = self._state()
         # Force existing "loc_debug_N" IDs to trigger the collision-avoidance path
         n = len(state["locations"])
-        state["locations"][f"loc_debug_{n}"] = {"id": f"loc_debug_{n}", "name": "X", "type": "ruins", "danger_level": 1, "connections": [], "anomalies": [], "artifacts": [], "agents": [], "items": []}
+        state["locations"][f"loc_debug_{n}"] = {"id": f"loc_debug_{n}", "name": "X", "type": "ruins", "danger_level": 1, "connections": [], "artifacts": [], "agents": [], "items": []}
         new_state, evts = self._r("debug_create_location", {"name": "Y", "type": "ruins", "danger_level": 2}, state)
         assert len(set(new_state["locations"].keys())) == len(new_state["locations"])  # no duplicate ids
         assert any(e["event_type"] == "debug_location_created" for e in evts)

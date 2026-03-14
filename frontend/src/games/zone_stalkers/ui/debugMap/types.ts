@@ -15,7 +15,6 @@ export interface ZoneLocation {
   anomaly_activity?: number;
   dominant_anomaly_type?: string | null;
   connections: LocationConn[];
-  anomalies: Array<{ id: string; type: string; name: string; active?: boolean }>;
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];

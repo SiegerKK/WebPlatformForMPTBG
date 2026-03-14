@@ -167,7 +167,6 @@ class ZoneStalkersGame(GameDefinition):
                 display_name="Anomaly",
                 allowed_components=[
                     _cs("position", True),
-                    _cs("anomaly_type", True),
                     _cs("danger_radius", True),
                     _cs("damage_profile", True),
                     _cs("activation_state"),

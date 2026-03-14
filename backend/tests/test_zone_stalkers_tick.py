@@ -1161,7 +1161,6 @@ def _make_minimal_state(locations_cfg, agent_loc_id="A"):
             "agents": [],
             "mutants": [],
             "artifacts": cfg.get("artifacts", []),
-            "anomalies": [],
             "anomaly_activity": 0,
             "connections": cfg.get("connections", []),
         }

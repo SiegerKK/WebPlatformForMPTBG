@@ -231,7 +231,6 @@ def resolve_world_command(
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
             "connections": [],
-            "anomalies": [],
             "artifacts": [],
             "agents": [],
             "items": [],
@@ -563,26 +562,26 @@ def resolve_world_command(
                 "to": target_loc_id,
             },
         })
-        loc_anomalies = new_loc_data.get("anomalies", [])
-        if loc_anomalies:
-            from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
-            for anom in loc_anomalies:
-                anom_info = ANOMALY_TYPES.get(anom["type"], {})
-                dmg = anom_info.get("damage", 0) // 2
-                if dmg > 0:
-                    agent["hp"] = max(0, agent["hp"] - dmg)
-                    events.append({
-                        "event_type": "anomaly_damage",
-                        "payload": {
-                            "agent_id": agent_id,
-                            "anomaly_type": anom["type"],
-                            "damage": dmg,
-                            "hp_remaining": agent["hp"],
-                        },
-                    })
-            if agent["hp"] <= 0:
-                agent["is_alive"] = False
-                events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
+        move_anomaly_activity = new_loc_data.get("anomaly_activity", 0)
+        if move_anomaly_activity > 0:
+            import random as _move_rng
+            _rng = _move_rng.Random(state.get("seed", 0) + state.get("world_turn", 0))
+            if _rng.random() < move_anomaly_activity / 20.0:
+                dmg = 5 + move_anomaly_activity
+                agent["hp"] = max(0, agent["hp"] - dmg)
+                anomaly_type = new_loc_data.get("dominant_anomaly_type") or "unknown"
+                events.append({
+                    "event_type": "anomaly_damage",
+                    "payload": {
+                        "agent_id": agent_id,
+                        "anomaly_type": anomaly_type,
+                        "damage": dmg,
+                        "hp_remaining": agent["hp"],
+                    },
+                })
+                if agent["hp"] <= 0:
+                    agent["is_alive"] = False
+                    events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
 
     elif command_type == "travel":
         target_loc_id = payload["target_location_id"]

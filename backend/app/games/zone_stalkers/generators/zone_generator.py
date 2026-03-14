@@ -6,7 +6,7 @@ defined in ``fixed_zone_map.FIXED_ZONE_LOCATIONS``.
 
 The topology (location names, regions, terrain, anomaly_activity, and
 connections with travel_time) is fixed.  Only the runtime contents
-(anomalies, artifacts, items, agents, mutants, traders) are generated
+(artifacts, items, agents, mutants, traders) are generated
 randomly from *seed*.
 """
 import copy
@@ -51,7 +51,6 @@ def generate_zone(
     for loc_id, blueprint in FIXED_ZONE_LOCATIONS.items():
         loc = copy.deepcopy(blueprint)
         loc["dominant_anomaly_type"] = None
-        loc["anomalies"] = []
         loc["artifacts"] = []
         loc["agents"] = []
         loc["items"] = []
@@ -59,37 +58,19 @@ def generate_zone(
 
     loc_ids: List[str] = list(locations.keys())
 
-    # 2. Place anomalies (more in high-anomaly-activity locations)
+    # 2. Set dominant_anomaly_type based on anomaly_activity
     anomaly_type_keys = list(ANOMALY_TYPES.keys())
     for loc_id, loc in locations.items():
-        num_anomalies = 0
-        anom_act = loc["anomaly_activity"]
-        if anom_act >= 6:
-            num_anomalies = rng.randint(2, 4)
-        elif anom_act >= 2:
-            num_anomalies = rng.randint(0, 2)
-        else:
-            num_anomalies = rng.randint(0, 1)
-        for _ in range(num_anomalies):
-            anom_type = rng.choice(anomaly_type_keys)
-            loc["anomalies"].append({
-                "id": _make_id("anom", rng),
-                "type": anom_type,
-                "name": ANOMALY_TYPES[anom_type]["name"],
-                "active": True,
-            })
-        # Set dominant_anomaly_type from the most common anomaly type present
-        if loc["anomalies"]:
-            counts: Dict[str, int] = {}
-            for a in loc["anomalies"]:
-                counts[a["type"]] = counts.get(a["type"], 0) + 1
-            loc["dominant_anomaly_type"] = max(counts, key=lambda k: counts[k])
+        if loc.get("anomaly_activity", 0) > 0:
+            loc["dominant_anomaly_type"] = rng.choice(anomaly_type_keys)
+        # else dominant_anomaly_type stays None (set above)
 
-    # 3. Place artifacts near anomalies
+    # 3. Place artifacts in locations with anomaly activity
     artifact_type_keys = list(ARTIFACT_TYPES.keys())
     for loc in locations.values():
-        if loc["anomalies"]:
-            num_artifacts = rng.randint(0, len(loc["anomalies"]))
+        anom_act = loc.get("anomaly_activity", 0)
+        if anom_act > 0:
+            num_artifacts = rng.randint(0, max(1, anom_act // 3))
             for _ in range(num_artifacts):
                 art_type = rng.choice(artifact_type_keys)
                 art_info = ARTIFACT_TYPES[art_type]

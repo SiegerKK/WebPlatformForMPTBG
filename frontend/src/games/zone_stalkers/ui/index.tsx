@@ -72,7 +72,6 @@ interface ZoneLocation {
   anomaly_activity?: number;
   dominant_anomaly_type?: string | null;
   connections: LocationConn[];
-  anomalies: Array<{ id: string; type: string; name: string }>;
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];
@@ -1392,7 +1391,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                         {agentHere > 0 && <span style={styles.locBadge}>👥 {agentHere}</span>}
                         {tradersHere > 0 && <span style={styles.locBadge}>🏪 Trader</span>}
                         {loc.artifacts.length > 0 && <span style={styles.locBadgeArt}>💎 {loc.artifacts.length}</span>}
-                        {loc.anomalies.length > 0 && <span style={styles.locBadgeAnom}>☢ {loc.anomalies.length}</span>}
+                        {loc.anomaly_activity > 0 && <span style={styles.locBadgeAnom}>☢ {loc.anomaly_activity}</span>}
                       </div>
                       {isSelected && isConnected && <div style={styles.moveHint}>Click again to move →</div>}
                     </div>
@@ -1435,12 +1434,12 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                       ))}
                     </div>
                   )}
-                  {currentLoc.anomalies.length > 0 && (
+                  {currentLoc.anomaly_activity > 0 && (
                     <div style={styles.locDetailSection}>
-                      <div style={styles.locDetailLabel}>☢ Anomalies</div>
-                      {currentLoc.anomalies.map((a) => (
-                        <div key={a.id} style={{ ...styles.locDetailItem, color: '#a855f7' }}>{a.name}</div>
-                      ))}
+                      <div style={styles.locDetailLabel}>☢ Аномальная активность</div>
+                      <div style={{ ...styles.locDetailItem, color: '#a855f7' }}>
+                        {currentLoc.anomaly_activity}/10{currentLoc.dominant_anomaly_type ? ` (${currentLoc.dominant_anomaly_type})` : ''}
+                      </div>
                     </div>
                   )}
                   {/* ── Stalkers at this location ── */}

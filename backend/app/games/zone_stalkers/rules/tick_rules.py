@@ -74,7 +74,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             state.get("seed", 0) + state.get("world_day", 1) * 1000
         )
         for _mid_loc_id, _mid_loc in state.get("locations", {}).items():
-            if not _mid_loc.get("anomalies"):
+            if _mid_loc.get("anomaly_activity", 0) <= 0:
                 continue
             _spawn_chance = _mid_loc.get("anomaly_activity", 0) / 10.0
             if _midnight_rng.random() < _spawn_chance:
@@ -209,13 +209,14 @@ def _process_scheduled_action(
             if agent_id not in new_loc_data.get("agents", []):
                 new_loc_data.setdefault("agents", []).append(agent_id)
             # Apply anomaly damage for this single hop
-            from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
+            hop_loc = state["locations"].get(destination, {})
+            hop_anomaly_activity = hop_loc.get("anomaly_activity", 0)
             total_dmg = 0
-            for anom in state["locations"].get(destination, {}).get("anomalies", []):
-                anom_info = ANOMALY_TYPES.get(anom["type"], {})
-                total_dmg += anom_info.get("damage", 0) // 4
-            if total_dmg > 0:
-                agent["hp"] = max(0, agent["hp"] - total_dmg)
+            if hop_anomaly_activity > 0:
+                _hop_rng = random.Random(agent_id + str(world_turn) + destination)
+                if _hop_rng.random() < hop_anomaly_activity / 20.0:
+                    total_dmg = 5 + hop_anomaly_activity
+                    agent["hp"] = max(0, agent["hp"] - total_dmg)
             if remaining_route:
                 # More hops to go — verify the pre-computed next hop is still accessible.
                 next_hop = remaining_route[0]
@@ -448,17 +449,17 @@ def _resolve_exploration(
         {"action_kind": "explore", "location_id": loc_id, "artifacts_found": len(found_artifacts)},
     )
 
-    # ── Possible anomaly encounter during exploration (unchanged) ─────────────
-    if loc.get("anomalies") and rng.random() < 0.15 * (loc.get("anomaly_activity", 5) / 10):
-        anom = rng.choice(loc["anomalies"])
-        anom_info = ANOMALY_TYPES.get(anom["type"], {})
-        dmg = anom_info.get("damage", 10)
+    # ── Possible anomaly encounter during exploration ────────────────────────
+    anomaly_activity = loc.get("anomaly_activity", 0)
+    if anomaly_activity > 0 and rng.random() < 0.15 * (anomaly_activity / 10):
+        dmg = 5 + anomaly_activity
         agent["hp"] = max(0, agent["hp"] - dmg)
+        anomaly_type = loc.get("dominant_anomaly_type") or "unknown"
         events.append({
             "event_type": "anomaly_damage",
             "payload": {
                 "agent_id": agent_id,
-                "anomaly_type": anom["type"],
+                "anomaly_type": anomaly_type,
                 "damage": dmg,
                 "hp_remaining": agent["hp"],
             },
@@ -1146,7 +1147,7 @@ def _bot_gather_resources(
                  "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
     # G2 — Explore if anomalies are present AND activity > 0 (otherwise no artifacts ever spawn)
-    if loc.get("anomalies") and loc.get("anomaly_activity", 0) > 0 and rng.random() < 0.50:
+    if loc.get("anomaly_activity", 0) > 0 and rng.random() < 0.50:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую аномальную зону",
@@ -1328,7 +1329,7 @@ def _bot_pursue_goal(
         )
 
         # If current location has anomalies AND activity > 0 AND is not yet confirmed empty → explore it.
-        if loc.get("anomalies") and loc.get("anomaly_activity", 0) > 0 and loc_id not in confirmed_empty:
+        if loc.get("anomaly_activity", 0) > 0 and loc_id not in confirmed_empty:
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Исследую зону в ожидании артефактов",
@@ -1348,8 +1349,7 @@ def _bot_pursue_goal(
         # Try to find a neighbour with anomalies AND activity > 0 that is NOT confirmed empty.
         anomaly_neighbors_fresh = [
             c for c in connections
-            if locations.get(c["to"], {}).get("anomalies")
-            and locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
+            if locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
             and c["to"] not in confirmed_empty
         ]
         if anomaly_neighbors_fresh:
@@ -1371,8 +1371,7 @@ def _bot_pursue_goal(
         # visit a random anomaly location with activity > 0 (even confirmed empty) to wait for midnight spawns.
         all_anomaly_neighbors = [
             c for c in connections
-            if locations.get(c["to"], {}).get("anomalies")
-            and locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
+            if locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
         ]
         if all_anomaly_neighbors:
             fallback = rng.choice(all_anomaly_neighbors)
