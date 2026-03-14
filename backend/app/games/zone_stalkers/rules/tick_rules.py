@@ -845,6 +845,9 @@ def _bot_consume(
     agent_id: str,
     agent: Dict[str, Any],
     item: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    action_kind: str = "consume",
 ) -> List[Dict[str, Any]]:
     """Apply a consumable item to agent and remove it from inventory. Returns events."""
     from app.games.zone_stalkers.balance.items import ITEM_TYPES
@@ -854,6 +857,13 @@ def _bot_consume(
     _apply_item_effects(agent, effects)
     agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] != item["id"]]
     agent["action_used"] = True
+    item_name = item_info.get("name", item.get("name", item["type"]))
+    _add_memory(
+        agent, world_turn, state, "action",
+        f"Использовал «{item_name}»",
+        f"Применил «{item_name}».",
+        {"action_kind": action_kind, "item_type": item["type"]},
+    )
     return [{
         "event_type": "item_consumed",
         "payload": {"agent_id": agent_id, "item_id": item["id"], "item_type": item["type"], "effects": effects},
@@ -910,7 +920,13 @@ def _run_bot_action_inner(
     if agent.get("hp", 100) <= 30:
         heal_item = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
         if heal_item:
-            return _bot_consume(agent_id, agent, heal_item)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Срочно лечусь",
+                f"HP критически низкий ({agent.get('hp', 0)}). Применяю аптечку.",
+                {"action_kind": "emergency_heal", "hp": agent.get("hp", 0)},
+            )
+            return _bot_consume(agent_id, agent, heal_item, world_turn, state, "consume_heal")
         # No healing: move toward a safe location (low anomaly_activity)
         safe_neighbors = [
             c["to"] for c in loc.get("connections", [])
@@ -920,7 +936,19 @@ def _run_bot_action_inner(
         if safe_neighbors:
             target = rng.choice(safe_neighbors)
             agent["current_goal"] = "flee_to_safety"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Бегство в безопасную локацию",
+                f"HP критически низкий ({agent.get('hp', 0)}), аптечек нет. Бегу в безопасное место.",
+                {"action_kind": "flee", "hp": agent.get("hp", 0)},
+            )
             return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "Нет аптечек и безопасных путей",
+            f"HP критически низкий ({agent.get('hp', 0)}), нет аптечек и некуда бежать.",
+            {"action_kind": "emergency_stuck", "hp": agent.get("hp", 0)},
+        )
         agent["action_used"] = True
         return events
 
@@ -928,17 +956,35 @@ def _run_bot_action_inner(
     if agent.get("hunger", 0) >= 70:
         food = next((i for i in inventory if i["type"] in FOOD_ITEM_TYPES), None)
         if food:
-            return _bot_consume(agent_id, agent, food)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Срочно ем",
+                f"Сильный голод ({agent.get('hunger', 0)}%). Ем.",
+                {"action_kind": "emergency_eat", "hunger": agent.get("hunger", 0)},
+            )
+            return _bot_consume(agent_id, agent, food, world_turn, state, "consume_food")
 
     # ── EMERGENCY: Drink ──────────────────────────────────────────────────────
     if agent.get("thirst", 0) >= 70:
         drink = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
         if drink:
-            return _bot_consume(agent_id, agent, drink)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Срочно пью",
+                f"Сильная жажда ({agent.get('thirst', 0)}%). Пью.",
+                {"action_kind": "emergency_drink", "thirst": agent.get("thirst", 0)},
+            )
+            return _bot_consume(agent_id, agent, drink, world_turn, state, "consume_drink")
 
     # ── SURVIVAL: Sleep ───────────────────────────────────────────────────────
     if agent.get("sleepiness", 0) >= 75:
         _sleep_hours = 6
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "Ложусь спать",
+            f"Сильная усталость (сонливость {agent.get('sleepiness', 0)}%). Ложусь спать на {_sleep_hours} ч.",
+            {"action_kind": "sleep_decision", "sleepiness": agent.get("sleepiness", 0), "hours": _sleep_hours},
+        )
         agent["scheduled_action"] = {
             "type": "sleep",
             "turns_remaining": _sleep_hours * _HOUR_IN_TURNS,
@@ -1054,6 +1100,12 @@ def _bot_gather_resources(
 
     # G2 — Explore if anomalies are present (good chance of finding artifacts)
     if loc.get("anomalies") and rng.random() < 0.50:
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "Исследую аномальную зону",
+            f"В «{loc.get('name', loc_id)}» есть аномалии — возможно найду артефакты.",
+            {"action_kind": "explore_decision", "location_id": loc_id},
+        )
         agent["scheduled_action"] = {
             "type": "explore",
             "turns_remaining": EXPLORE_DURATION_TURNS,
@@ -1074,10 +1126,23 @@ def _bot_gather_resources(
             return nb.get("anomaly_activity", 0) * 2 + len(nb.get("artifacts", [])) * 3
         best = max(connections, key=loc_score)
         if rng.random() < 0.70:
+            best_nb_name = locations.get(best["to"], {}).get("name", best["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Двигаюсь за ресурсами",
+                f"Иду в «{best_nb_name}» — там выше аномальная активность и больше лута.",
+                {"action_kind": "move_for_resources", "destination": best["to"]},
+            )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
     # G4 — Fallback: explore current location anyway
     if rng.random() < 0.40:
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "Исследую текущую локацию",
+            f"Некуда идти — исследую «{loc.get('name', loc_id)}» в надежде найти что-нибудь ценное.",
+            {"action_kind": "explore_decision", "location_id": loc_id},
+        )
         agent["scheduled_action"] = {
             "type": "explore",
             "turns_remaining": EXPLORE_DURATION_TURNS,
@@ -1115,9 +1180,23 @@ def _bot_pursue_goal(
             safe_conn = [c for c in connections
                          if locations.get(c["to"], {}).get("anomaly_activity", 5) <= 3]
             if safe_conn:
-                return _bot_schedule_travel(agent_id, agent, rng.choice(safe_conn)["to"], state, world_turn)
+                chosen = rng.choice(safe_conn)
+                safe_name = locations.get(chosen["to"], {}).get("name", chosen["to"])
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "Ухожу в безопасную зону",
+                    f"Аномальная активность слишком высокая. Ухожу в «{safe_name}».",
+                    {"action_kind": "move_to_safety", "destination": chosen["to"]},
+                )
+                return _bot_schedule_travel(agent_id, agent, chosen["to"], state, world_turn)
         if agent.get("sleepiness", 0) >= 40:
             _sleep_hours = 4
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Ложусь спать",
+                f"Устал (сонливость {agent.get('sleepiness', 0)}%). Ложусь поспать на {_sleep_hours} ч.",
+                {"action_kind": "sleep_decision", "sleepiness": agent.get("sleepiness", 0), "hours": _sleep_hours},
+            )
             agent["scheduled_action"] = {
                 "type": "sleep", "turns_remaining": _sleep_hours * _HOUR_IN_TURNS,
                 "turns_total": _sleep_hours * _HOUR_IN_TURNS, "hours": _sleep_hours,
@@ -1132,6 +1211,15 @@ def _bot_pursue_goal(
             loc["artifacts"] = artifacts[1:]
             agent.setdefault("inventory", []).append(art)
             agent["action_used"] = True
+            art_name = art.get("name", art.get("type", "артефакт"))
+            _add_memory(
+                agent, world_turn, state, "action",
+                f"Подобрал {art_name}",
+                f"Подобрал артефакт «{art_name}» в «{loc.get('name', loc_id)}». "
+                f"Ценность: {art.get('value', 0)} RU.",
+                {"action_kind": "pickup", "artifact_id": art["id"], "artifact_type": art["type"],
+                 "artifact_value": art.get("value", 0), "location_id": loc_id},
+            )
             return [{"event_type": "artifact_picked_up",
                      "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
@@ -1146,8 +1234,8 @@ def _bot_pursue_goal(
             art_name = best_art.get("name", best_art.get("type", "артефакт"))
             _add_memory(
                 agent, world_turn, state, "action",
-                f"Поднял артефакт {best_art['type']}",
-                f"Поднял артефакт «{art_name}». Ценность: {best_art.get('value', 0)} RU.",
+                f"Подобрал {art_name}",
+                f"Подобрал артефакт «{art_name}». Ценность: {best_art.get('value', 0)} RU.",
                 {
                     "action_kind": "pickup",
                     "artifact_id": best_art["id"],
