@@ -80,7 +80,7 @@ class ZoneStalkerRuleSet(RuleSet):
         from datetime import datetime
         from app.core.contexts.models import GameContext, ContextStatus
         from app.core.events.models import GameEvent
-        from app.core.events.service import get_next_sequence_number
+        from app.core.events.service import allocate_sequence_numbers
         from app.core.matches.models import Match, MatchStatus
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         from app.games.zone_stalkers.rules.event_rules import start_event, bot_choose_option
@@ -106,17 +106,18 @@ class ZoneStalkerRuleSet(RuleSet):
         zone_ctx.state_version += 1
 
         emitted = []
-        for ev_data in map_events:
-            seq = get_next_sequence_number(zone_ctx.id, db)
-            ev = GameEvent(
-                match_id=match.id,
-                context_id=zone_ctx.id,
-                event_type=ev_data.get("event_type", "tick"),
-                payload=ev_data.get("payload", {}),
-                sequence_no=seq,
-            )
-            db.add(ev)
-            emitted.append(ev_data)
+        if map_events:
+            seq_range = allocate_sequence_numbers(zone_ctx.id, len(map_events), db)
+            for ev_data, seq in zip(map_events, seq_range):
+                ev = GameEvent(
+                    match_id=match.id,
+                    context_id=zone_ctx.id,
+                    event_type=ev_data.get("event_type", "tick"),
+                    payload=ev_data.get("payload", {}),
+                    sequence_no=seq,
+                )
+                db.add(ev)
+                emitted.append(ev_data)
 
         # ── Process active zone_event child contexts ──────────────────
         event_ctxs = db.query(GameContext).filter(
@@ -154,8 +155,6 @@ class ZoneStalkerRuleSet(RuleSet):
                             entry = {
                                 **memory_template,
                                 "world_turn": new_state.get("world_turn", 1),
-                                "world_day": new_state.get("world_day", 1),
-                                "world_hour": new_state.get("world_hour", 0),
                             }
                             agent.setdefault("memory", []).append(entry)
                             if len(agent["memory"]) > 50:
@@ -246,9 +245,11 @@ class ZoneStalkerRuleSet(RuleSet):
 
 def _emit_events(ctx, match, event_dicts: list, emitted: list, db) -> None:
     from app.core.events.models import GameEvent
-    from app.core.events.service import get_next_sequence_number
-    for ev_data in event_dicts:
-        seq = get_next_sequence_number(ctx.id, db)
+    from app.core.events.service import allocate_sequence_numbers
+    if not event_dicts:
+        return
+    seq_range = allocate_sequence_numbers(ctx.id, len(event_dicts), db)
+    for ev_data, seq in zip(event_dicts, seq_range):
         ev = GameEvent(
             match_id=match.id,
             context_id=ctx.id,

@@ -603,9 +603,6 @@ def _add_memory(
 ) -> None:
     memory_entry = {
         "world_turn": world_turn,
-        "world_day": state.get("world_day", 1),
-        "world_hour": state.get("world_hour", 0),
-        "world_minute": state.get("world_minute", 0),
         "type": memory_type,
         "title": title,
         "summary": summary,
@@ -877,9 +874,6 @@ def _add_trader_memory(
     """Append a memory entry to a trader NPC (same structure as agent memory)."""
     entry = {
         "world_turn": world_turn,
-        "world_day": state.get("world_day", 1),
-        "world_hour": state.get("world_hour", 0),
-        "world_minute": state.get("world_minute", 0),
         "type": memory_type,
         "title": title,
         "summary": summary,

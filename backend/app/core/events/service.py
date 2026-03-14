@@ -23,6 +23,18 @@ def get_next_sequence_number(context_id: uuid.UUID, db: Session) -> int:
     result = db.query(func.max(GameEvent.sequence_no)).filter(GameEvent.context_id == context_id).scalar()
     return (result or 0) + 1
 
+def allocate_sequence_numbers(context_id: uuid.UUID, count: int, db: Session) -> range:
+    """Reserve a contiguous block of `count` sequence numbers in one DB round-trip.
+
+    Returns a range object [base+1, base+count+1) that callers can zip with their
+    event list to assign sequence numbers without issuing one SELECT MAX per event.
+    """
+    if count <= 0:
+        return range(0, 0)
+    result = db.query(func.max(GameEvent.sequence_no)).filter(GameEvent.context_id == context_id).scalar()
+    base = result or 0
+    return range(base + 1, base + count + 1)
+
 def get_match_events(match_id: uuid.UUID, db: Session, limit: Optional[int] = None) -> List[GameEvent]:
     q = db.query(GameEvent).filter(GameEvent.match_id == match_id).order_by(GameEvent.created_at.desc(), GameEvent.sequence_no.desc())
     if limit is not None:

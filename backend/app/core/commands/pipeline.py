@@ -7,7 +7,7 @@ from .schemas import CommandEnvelope, CommandResult
 from app.core.auth.models import User
 from app.core.contexts.models import GameContext
 from app.core.events.models import GameEvent
-from app.core.events.service import get_next_sequence_number
+from app.core.events.service import get_next_sequence_number, allocate_sequence_numbers
 
 # Game rule registry: game_id -> RuleSet instance
 _rule_registry: dict = {}
@@ -109,18 +109,19 @@ class CommandPipeline:
 
             # 9. Emit events
             emitted = []
-            for ev_data in new_events:
-                seq = get_next_sequence_number(context.id, db)
-                event = GameEvent(
-                    match_id=envelope.match_id,
-                    context_id=envelope.context_id,
-                    event_type=ev_data.get("event_type", "unknown"),
-                    payload=ev_data.get("payload", {}),
-                    causation_command_id=command.id,
-                    sequence_no=seq,
-                )
-                db.add(event)
-                emitted.append(ev_data)
+            if new_events:
+                seq_range = allocate_sequence_numbers(context.id, len(new_events), db)
+                for ev_data, seq in zip(new_events, seq_range):
+                    event = GameEvent(
+                        match_id=envelope.match_id,
+                        context_id=envelope.context_id,
+                        event_type=ev_data.get("event_type", "unknown"),
+                        payload=ev_data.get("payload", {}),
+                        causation_command_id=command.id,
+                        sequence_no=seq,
+                    )
+                    db.add(event)
+                    emitted.append(ev_data)
 
             command.status = CommandStatus.RESOLVED
             command.executed_at = datetime.utcnow()
