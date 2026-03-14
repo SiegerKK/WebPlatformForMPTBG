@@ -53,6 +53,7 @@ export interface AgentForProfile {
     world_turn: number;
     world_day: number;
     world_hour: number;
+    world_minute?: number;
     type: string;
     title: string;
     summary: string;
@@ -69,7 +70,7 @@ interface Props {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const HOUR_LABEL = (h: number) => `${String(h).padStart(2, '0')}:00`;
+const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 
 const SCHED_ICONS: Record<string, string> = {
   travel: '🚶',
@@ -132,7 +133,12 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
           {agent.scheduled_action && (
             <div style={s.schedLine}>
               {SCHED_ICONS[agent.scheduled_action.type] ?? '⏳'}{' '}
-              {agent.scheduled_action.type} — {agent.scheduled_action.turns_remaining}ч осталось
+              {agent.scheduled_action.type === 'travel'
+                ? `travel — ${agent.scheduled_action.turns_remaining} мин осталось`
+                : agent.scheduled_action.type === 'sleep'
+                  ? `sleep — ${Math.ceil(agent.scheduled_action.turns_remaining / 60)} ч осталось`
+                  : `${agent.scheduled_action.type} — ${agent.scheduled_action.turns_remaining} мин осталось`
+              }
             </div>
           )}
         </Section>
@@ -243,7 +249,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
                       {SCHED_ICONS[m.type] ?? '📝'} {m.type}
                     </span>
                     <span style={s.memoryWhen}>
-                      День {m.world_day} · {HOUR_LABEL(m.world_hour)}
+                      День {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}
                     </span>
                   </div>
                   <div style={s.memoryTitle}>{m.title}</div>
@@ -474,7 +480,7 @@ function _clientSideDecisionHint(agent: AgentForProfile): { goal: string; action
 
   if (scheduled) {
     const t = scheduled.type;
-    if (t === 'travel') return { goal, action: `Движение (${scheduled.turns_remaining}ч осталось)`, reason: 'Запланированное перемещение' };
+    if (t === 'travel') return { goal, action: `Движение (${scheduled.turns_remaining} мин осталось)`, reason: 'Запланированное перемещение' };
     if (t === 'sleep') return { goal, action: `Спать`, reason: 'Запланированный отдых' };
     if (t === 'explore') return { goal, action: `Исследование`, reason: 'Запланированное исследование' };
   }

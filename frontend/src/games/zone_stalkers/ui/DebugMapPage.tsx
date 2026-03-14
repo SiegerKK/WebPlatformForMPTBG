@@ -771,6 +771,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             ))}
           </div>
           <div style={s.toolbarRight}>
+            <span style={{ color: '#94a3b8', fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
+              📅 Д{zoneState.world_day} · {String(zoneState.world_hour).padStart(2, '0')}:{String(zoneState.world_minute ?? 0).padStart(2, '0')} · Ход {zoneState.world_turn}
+            </span>
             <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
             <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
               ⚠ Save failed
