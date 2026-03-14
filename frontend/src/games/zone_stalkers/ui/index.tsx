@@ -156,6 +156,7 @@ interface ZoneMapState {
   player_agents: Record<string, string>;
   active_events: string[];
   game_over: boolean;
+  auto_tick_enabled?: boolean;
 }
 
 interface ZoneEventState {
@@ -414,6 +415,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     if (pollRef.current) clearInterval(pollRef.current);
     // Only poll when WS is unavailable — WS push handles updates otherwise.
     if (isActive && !zoneState?.game_over && !wsConnected) {
+      // When auto-tick is running (500 ms per turn), a 5 s poll would only
+      // refresh the UI every 10 turns.  Match the auto-tick interval so
+      // every turn is visible even without a working WebSocket connection.
+      const interval = zoneState?.auto_tick_enabled ? 500 : 5000;
       pollRef.current = setInterval(async () => {
         try {
           const mRes = await matchesApi.get(match.id);
@@ -425,11 +430,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             onMatchDeleted(match.id);
         }
         await refresh();
-      }, 5000);
+      }, interval);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, zoneState?.game_over, match.id, refresh, wsConnected]);
+  }, [isActive, zoneState?.game_over, zoneState?.auto_tick_enabled, match.id, refresh, wsConnected]);
 
   // ─── commands ────────────────────────────────────────────────────────────
   const sendCommand = useCallback(async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {
