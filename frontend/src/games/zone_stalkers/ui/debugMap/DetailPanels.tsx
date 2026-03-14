@@ -8,7 +8,7 @@ import type { ZoneLocation, ZoneMapState, LocationConn } from './types';
 import { TERRAIN_TYPE_LABELS, REGION_COLOR_PALETTE } from './constants';
 import { s } from './styles';
 import { Badge, Section, DetailRow, EmptyRow } from './UIKit';
-import { SpawnMutantModal } from './Modals';
+import { SpawnMutantModal, SpawnArtifactModal } from './Modals';
 
 // ─── LocationDetailPanel ──────────────────────────────────────────────────────
 
@@ -20,10 +20,14 @@ export function LocationDetailPanel({
   onClose,
   onEdit,
   onSpawnStalker,
+  onSpawnTrader,
   onSpawnMutant,
+  onSpawnArtifact,
   onDeleteConnection,
   onUpdateConnectionWeight,
   onToggleConnectionClosed,
+  onAgentClick,
+  onTraderClick,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -37,18 +41,40 @@ export function LocationDetailPanel({
   onClose: () => void;
   onEdit: () => void;
   onSpawnStalker: (name: string, faction: string, globalGoal: string) => Promise<void>;
+  onSpawnTrader: (name: string) => Promise<void>;
   onSpawnMutant: (mutantType: string) => Promise<void>;
+  onSpawnArtifact: (artifactType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
   onUpdateConnectionWeight: (toId: string, travelTime: number) => void;
   onToggleConnectionClosed: (toId: string) => void;
+  /** Called when the user clicks a stalker row; opens their profile. */
+  onAgentClick?: (agentId: string) => void;
+  /** Called when the user clicks a trader row; opens their profile. */
+  onTraderClick?: (traderId: string) => void;
 }) {
-  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'mutant' | null>(null);
+  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | null>(null);
 
-  const stalkers = loc.agents.map((id) => zoneState.agents[id]).filter(Boolean);
+  // Build a unified person list from loc.agents — IDs may belong to agents OR traders.
+  type PersonEntry = {
+    id: string;
+    name: string;
+    isTrader: boolean;
+    hp: number;
+    max_hp: number;
+    is_alive: boolean;
+    controller: { kind: string };
+  };
+  const allPersons: PersonEntry[] = loc.agents.flatMap((id): PersonEntry[] => {
+    const stalker = zoneState.agents[id];
+    if (stalker) return [{ id: stalker.id, name: stalker.name, isTrader: false, hp: stalker.hp, max_hp: stalker.max_hp, is_alive: stalker.is_alive, controller: stalker.controller }];
+    const trader = zoneState.traders[id];
+    if (trader) return [{ id: trader.id, name: trader.name, isTrader: true, hp: 100, max_hp: 100, is_alive: true, controller: { kind: 'npc' } }];
+    return [];
+  });
+
   const mutants = loc.agents.map((id) => zoneState.mutants[id]).filter(Boolean);
   const aliveMutants = mutants.filter((m) => m.is_alive);
   const deadMutants = mutants.filter((m) => !m.is_alive);
-  const traders = Object.values(zoneState.traders).filter((t) => t.location_id === loc.id);
 
   return (
     <div style={s.detail}>
@@ -175,32 +201,47 @@ export function LocationDetailPanel({
         )}
       </Section>
 
-      {/* Stalkers */}
-      <Section label={`🧍 Сталкеры (${stalkers.length})`}>
-        {stalkers.length === 0 ? (
+      {/* Stalkers + Traders (unified) */}
+      <Section label={`🧍 Персонажи (${allPersons.length})`}>
+        {allPersons.length === 0 ? (
           <EmptyRow />
         ) : (
-          stalkers.map((a) => (
-            <DetailRow key={a.id}>
-              <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem', flex: 1 }}>
-                {a.name}
-                {!a.is_alive && (
-                  <span style={{ color: '#ef4444', fontSize: '0.65rem', marginLeft: 4 }}>(мёртв)</span>
+          allPersons.map((a) => {
+            const isClickable = a.isTrader ? !!onTraderClick : !!onAgentClick;
+            const handleClick = a.isTrader
+              ? (onTraderClick ? () => onTraderClick(a.id) : undefined)
+              : (onAgentClick ? () => onAgentClick(a.id) : undefined);
+            return (
+              <DetailRow
+                key={a.id}
+                style={isClickable ? { cursor: 'pointer' } : undefined}
+                onClick={handleClick}
+              >
+                <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem', flex: 1 }}>
+                  {a.name}
+                  {!a.is_alive && (
+                    <span style={{ color: '#ef4444', fontSize: '0.65rem', marginLeft: 4 }}>(мёртв)</span>
+                  )}
+                  {a.isTrader && (
+                    <span style={{ fontSize: '0.75rem', marginLeft: 5 }} title="Торговец">🏪</span>
+                  )}
+                </span>
+                {!a.isTrader && (
+                  <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{a.hp}/{a.max_hp} HP</span>
                 )}
-              </span>
-              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{a.hp}/{a.max_hp} HP</span>
-              <span style={{
-                background: a.controller.kind === 'human' ? '#1d4ed8' : '#1e293b',
-                color: a.controller.kind === 'human' ? '#bfdbfe' : '#475569',
-                borderRadius: 4,
-                padding: '0 0.3rem',
-                fontSize: '0.62rem',
-                flexShrink: 0,
-              }}>
-                {a.controller.kind === 'human' ? '👤' : '🤖'}
-              </span>
-            </DetailRow>
-          ))
+                <span style={{
+                  background: a.isTrader ? '#78350f' : (a.controller.kind === 'human' ? '#1d4ed8' : '#1e293b'),
+                  color: a.isTrader ? '#fde68a' : (a.controller.kind === 'human' ? '#bfdbfe' : '#475569'),
+                  borderRadius: 4,
+                  padding: '0 0.3rem',
+                  fontSize: '0.62rem',
+                  flexShrink: 0,
+                }}>
+                  {a.isTrader ? '🏪' : (a.controller.kind === 'human' ? '👤' : '🤖')}
+                </span>
+              </DetailRow>
+            );
+          })
         )}
       </Section>
 
@@ -228,17 +269,6 @@ export function LocationDetailPanel({
         )}
       </Section>
 
-      {/* Traders */}
-      {traders.length > 0 && (
-        <Section label="🏪 Traders">
-          {traders.map((t) => (
-            <DetailRow key={t.id}>
-              <span style={{ color: '#fbbf24', fontSize: '0.8rem' }}>{t.name}</span>
-            </DetailRow>
-          ))}
-        </Section>
-      )}
-
       {/* Artifacts */}
       {loc.artifacts.length > 0 && (
         <Section label="💎 Artifacts">
@@ -265,12 +295,18 @@ export function LocationDetailPanel({
 
       {/* Spawn controls */}
       <Section label="⚡ Spawn">
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <button style={s.spawnBtn} onClick={() => setShowSpawnModal('stalker')}>
-            👤 Spawn Stalker
+            👤 Сталкер
+          </button>
+          <button style={{ ...s.spawnBtn, color: '#f59e0b' }} onClick={() => setShowSpawnModal('trader')}>
+            🏪 Торговец
           </button>
           <button style={s.spawnBtn} onClick={() => setShowSpawnModal('mutant')}>
-            ☣️ Spawn Mutant
+            ☣️ Мутант
+          </button>
+          <button style={{ ...s.spawnBtn, color: '#a5b4fc' }} onClick={() => setShowSpawnModal('artifact')}>
+            💎 Артефакт
           </button>
         </div>
       </Section>
@@ -280,16 +316,36 @@ export function LocationDetailPanel({
       {showSpawnModal === 'stalker' && (
         <AgentCreateModal
           onClose={() => setShowSpawnModal(null)}
-          onSave={async (name, faction, globalGoal) => {
-            await onSpawnStalker(name, faction, globalGoal);
+          onSave={async (name, faction, globalGoal, isTrader) => {
+            if (isTrader) {
+              await onSpawnTrader(name);
+            } else {
+              await onSpawnStalker(name, faction, globalGoal);
+            }
             setShowSpawnModal(null);
           }}
+        />
+      )}
+      {showSpawnModal === 'trader' && (
+        <AgentCreateModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (name, _faction, _globalGoal, _isTrader) => {
+            await onSpawnTrader(name);
+            setShowSpawnModal(null);
+          }}
+          defaultIsTrader
         />
       )}
       {showSpawnModal === 'mutant' && (
         <SpawnMutantModal
           onClose={() => setShowSpawnModal(null)}
           onSave={async (mutantType) => { await onSpawnMutant(mutantType); setShowSpawnModal(null); }}
+        />
+      )}
+      {showSpawnModal === 'artifact' && (
+        <SpawnArtifactModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (artifactType) => { await onSpawnArtifact(artifactType); setShowSpawnModal(null); }}
         />
       )}
     </div>

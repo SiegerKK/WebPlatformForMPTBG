@@ -61,7 +61,7 @@ export function Section({
 
 // ─── DetailRow ────────────────────────────────────────────────────────────────
 
-export function DetailRow({ children }: { children: React.ReactNode }) {
+export function DetailRow({ children, style, onClick }: { children: React.ReactNode; style?: React.CSSProperties; onClick?: () => void }) {
   return (
     <div
       style={{
@@ -72,7 +72,9 @@ export function DetailRow({ children }: { children: React.ReactNode }) {
         borderRadius: 5,
         padding: '0.25rem 0.5rem',
         gap: 6,
+        ...style,
       }}
+      onClick={onClick}
     >
       {children}
     </div>

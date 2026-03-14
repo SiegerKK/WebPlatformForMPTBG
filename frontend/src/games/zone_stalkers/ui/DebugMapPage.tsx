@@ -13,7 +13,7 @@
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
-import type { DebugMapPageProps, LocationConn, ZoneLocation } from './debugMap/types';
+import type { DebugMapPageProps, LocationConn, ZoneLocation, ZoneMapState } from './debugMap/types';
 import {
   CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
@@ -23,8 +23,23 @@ import {
 import { s } from './debugMap/styles';
 import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from './debugMap/DetailPanels';
 import { LocationModal } from './debugMap/Modals';
+import AgentProfileModal from './AgentProfileModal';
+import type { AgentForProfile } from './AgentProfileModal';
 
 // ─── Main component ───────────────────────────────────────────────────────────
+
+/** Format a count of game turns (minutes) as "X д Y ч Z мин". */
+function formatTurns(turns: number): string {
+  if (turns <= 0) return '0 мин';
+  const days = Math.floor(turns / (60 * 24));
+  const hours = Math.floor((turns % (60 * 24)) / 60);
+  const mins = turns % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} д`);
+  if (hours > 0) parts.push(`${hours} ч`);
+  if (mins > 0 || parts.length === 0) parts.push(`${mins} мин`);
+  return parts.join(' ');
+}
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
@@ -41,9 +56,51 @@ function getRegionColors(
   );
 }
 
+/** Snapshot the scheduled_action of all bot agents. */
+function snapBotScheduledActions(
+  state: ZoneMapState,
+): Map<string, { type: string; target_id?: string } | null> {
+  const snap = new Map<string, { type: string; target_id?: string } | null>();
+  for (const [id, agent] of Object.entries(state.agents)) {
+    if (agent.controller.kind === 'bot') {
+      snap.set(
+        id,
+        agent.scheduled_action
+          ? { type: agent.scheduled_action.type, target_id: agent.scheduled_action.target_id }
+          : null,
+      );
+    }
+  }
+  return snap;
+}
+
+/** Returns true if any bot agent gained or changed a scheduled_action. */
+function botDecisionMade(
+  before: Map<string, { type: string; target_id?: string } | null>,
+  after: Map<string, { type: string; target_id?: string } | null>,
+): boolean {
+  for (const [id, afterAction] of after) {
+    const beforeAction = before.get(id);
+    if (!beforeAction && afterAction) return true;
+    if (beforeAction && afterAction) {
+      if (
+        beforeAction.type !== afterAction.type ||
+        beforeAction.target_id !== afterAction.target_id
+      )
+        return true;
+    }
+  }
+  return false;
+}
+
 export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+
+  // ── Agent profile modal (click stalker in location detail panel) ──────────
+  const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  // ── Trader profile modal (click trader row in location detail panel) ───────
+  const [profileTraderId, setProfileTraderId] = useState<string | null>(null);
 
   // ── Location edit / create modals ─────────────────────────────────────────
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
@@ -181,8 +238,73 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const [ticking, setTicking] = useState(false);
   const handleTick = async () => {
     setTicking(true);
-    try { await sendCommand('end_turn', {}); }
+    try { await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false }); }
     finally { setTicking(false); }
+  };
+
+  const skipCancelRef = useRef(false);
+  const [skipping, setSkipping] = useState(false);
+
+  // Keep a ref to the latest zoneState so the skip loop can read fresh state
+  const zoneStateRef = useRef(zoneState);
+  useEffect(() => { zoneStateRef.current = zoneState; }, [zoneState]);
+
+  const handleSkipToDecision = async () => {
+    if (skipping) {
+      // Already running — cancel the loop
+      skipCancelRef.current = true;
+      return;
+    }
+    skipCancelRef.current = false;
+    setSkipping(true);
+    try {
+      for (let i = 0; i < 500; i++) {
+        if (skipCancelRef.current) break;
+
+        // Snapshot scheduled actions before the tick
+        const beforeSnap = snapBotScheduledActions(zoneStateRef.current);
+
+        // Use debug_advance_turns with max_n=1 — this directly calls tick_zone_map
+        // on the backend (one world tick per call) rather than end_turn which is a
+        // player action and doesn't guarantee a world tick in debug mode.
+        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
+        // sendCommand triggers refresh(); wait for React to commit the new state
+        // into zoneStateRef via the useEffect below.
+        await new Promise<void>((r) => setTimeout(r, 200));
+
+        if (skipCancelRef.current) break;
+
+        // Stop the loop if any bot agent gained or changed a scheduled_action
+        // (i.e. it just made a new decision).
+        const afterSnap = snapBotScheduledActions(zoneStateRef.current);
+        if (botDecisionMade(beforeSnap, afterSnap)) break;
+      }
+    } finally {
+      setSkipping(false);
+      skipCancelRef.current = false;
+    }
+  };
+
+  // ── Auto-run (течение времени до паузы) ──────────────────────────────────
+  const autoRunCancelRef = useRef(false);
+  const [autoRunning, setAutoRunning] = useState(false);
+
+  const handleAutoRun = async () => {
+    if (autoRunning) {
+      autoRunCancelRef.current = true;
+      return;
+    }
+    autoRunCancelRef.current = false;
+    setAutoRunning(true);
+    try {
+      while (!autoRunCancelRef.current) {
+        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
+        await new Promise<void>((r) => setTimeout(r, 300));
+      }
+    } finally {
+      setAutoRunning(false);
+      autoRunCancelRef.current = false;
+    }
   };
 
   // Build the serializable connections map (all locations) and call backend
@@ -571,13 +693,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     }
   }, []);
 
-  // ── Export layout ─────────────────────────────────────────────────────────
+  // ── Export full map ───────────────────────────────────────────────────────
   const handleExport = useCallback(() => {
     const exportData = {
-      version: 2,
+      version: 3,
+      // Canvas layout
       positions: effectivePosRef.current,
-      connections: localConnsRef.current,
       regions: localRegionsRef.current,
+      // Full location data (IDs, connections, terrain, anomalies, region)
       locations: Object.fromEntries(
         Object.entries(zoneState.locations).map(([id, loc]) => [
           id,
@@ -587,21 +710,38 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             anomaly_activity: loc.anomaly_activity,
             dominant_anomaly_type: loc.dominant_anomaly_type ?? null,
             region: loc.region ?? null,
+            // Use the live canvas connections (may differ from zoneState if unsaved)
+            connections: (localConnsRef.current[id] ?? loc.connections ?? []).map((c) => ({
+              to: c.to,
+              travel_time: c.travel_time,
+              type: c.type ?? 'normal',
+              closed: c.closed ?? false,
+            })),
+            artifacts: loc.artifacts ?? [],
           },
         ]),
       ),
+      // World time
+      world_turn: zoneState.world_turn,
+      world_day: zoneState.world_day,
+      world_hour: zoneState.world_hour,
+      world_minute: zoneState.world_minute ?? 0,
+      // Emission state
+      emission_active: zoneState.emission_active,
+      emission_scheduled_turn: zoneState.emission_scheduled_turn ?? null,
+      emission_ends_turn: zoneState.emission_ends_turn ?? null,
     };
     const json = JSON.stringify(exportData, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'zone_layout.json';
+    a.download = `zone_map_day${zoneState.world_day}_turn${zoneState.world_turn}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [zoneState.locations]);
+  }, [zoneState]);
 
-  // ── Import layout ─────────────────────────────────────────────────────────
+  // ── Import full map ────────────────────────────────────────────────────────
   const handleImportFile = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -612,22 +752,145 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           parsed = JSON.parse(text) as Record<string, unknown>;
         } catch {
           setSaveError('Import failed: invalid JSON');
+          e.target.value = '';
           return;
         }
+
+        // Full-map import (v3)
+        if (
+          parsed.version === 3 &&
+          parsed.locations &&
+          typeof parsed.locations === 'object' &&
+          !Array.isArray(parsed.locations)
+        ) {
+          const locCount = Object.keys(parsed.locations as object).length;
+          const confirmed = window.confirm(
+            `⚠️ Полный импорт карты!\n\n` +
+            `Это заменит ВСЕ локации (${locCount}), переходы, регионы, ` +
+            `время и состояние выброса.\n\n` +
+            `Персонажи и предметы в совпадающих локациях будут сохранены, ` +
+            `остальные могут стать недоступны.\n\n` +
+            `Продолжить?`
+          );
+          if (!confirmed) { e.target.value = ''; return; }
+
+          // Send the whole thing to the backend in a single atomic command
+          await sendCommand('debug_import_full_map', {
+            locations: parsed.locations,
+            positions: parsed.positions ?? {},
+            regions: parsed.regions ?? {},
+            world_turn: parsed.world_turn,
+            world_day: parsed.world_day,
+            world_hour: parsed.world_hour,
+            world_minute: parsed.world_minute,
+            emission_active: parsed.emission_active,
+            emission_scheduled_turn: parsed.emission_scheduled_turn,
+            emission_ends_turn: parsed.emission_ends_turn,
+          });
+
+          // Sync local canvas state
+          const newPositions = (parsed.positions ?? {}) as Record<string, { x: number; y: number }>;
+          const newConns = {} as Record<string, LocationConn[]>;
+          for (const [id, locData] of Object.entries(parsed.locations as Record<string, Record<string, unknown>>)) {
+            if (Array.isArray(locData.connections)) {
+              newConns[id] = locData.connections as LocationConn[];
+            }
+          }
+          const newRegions = (typeof parsed.regions === 'object' && !Array.isArray(parsed.regions) && parsed.regions !== null)
+            ? parsed.regions as Record<string, { name: string; colorIndex: number }>
+            : {};
+          setDragOverrides(newPositions);
+          setLocalConns(newConns);
+          setLocalRegions(newRegions);
+          e.target.value = '';
+          return;
+        }
+
+        // Legacy v1/v2 import — positions + connections + per-location metadata only
         if (!parsed.positions || typeof parsed.positions !== 'object' || Array.isArray(parsed.positions)) {
           setSaveError('Import failed: JSON must have a "positions" object');
+          e.target.value = '';
           return;
         }
         const newPositions = parsed.positions as Record<string, { x: number; y: number }>;
+
+        // Detect if the legacy file has location IDs that don't exist in the current map.
+        // In that case the legacy "update only existing" path cannot create those cards,
+        // so we treat it as a full-map replacement (same as v3).
+        const legacyLocsData = (
+          parsed.locations &&
+          typeof parsed.locations === 'object' &&
+          !Array.isArray(parsed.locations)
+        ) ? parsed.locations as Record<string, {
+              name?: string;
+              terrain_type?: string;
+              anomaly_activity?: number;
+              dominant_anomaly_type?: string | null;
+              region?: string | null;
+            }>
+          : null;
+
+        const legacyConnsData = (
+          parsed.connections &&
+          typeof parsed.connections === 'object' &&
+          !Array.isArray(parsed.connections)
+        ) ? parsed.connections as Record<string, LocationConn[]> : null;
+
+        if (legacyLocsData) {
+          const unknownIds = Object.keys(legacyLocsData).filter((id) => !(id in zoneState.locations));
+          if (unknownIds.length > 0) {
+            // Some location IDs in the file don't exist on this map.
+            // Build embedded-connection location objects and run a full import.
+            const locCount = Object.keys(legacyLocsData).length;
+            const confirmed = window.confirm(
+              `⚠️ Полный импорт карты!\n\n` +
+              `Файл содержит ${unknownIds.length} из ${locCount} локаций, которых нет на текущей карте.\n` +
+              `Это заменит ВСЕ текущие локации (${locCount} в файле).\n\n` +
+              `Продолжить?`
+            );
+            if (!confirmed) { e.target.value = ''; return; }
+
+            // Build locations with embedded connections (combine v2 metadata + top-level connections)
+            const mergedLocations: Record<string, Record<string, unknown>> = {};
+            for (const [id, locData] of Object.entries(legacyLocsData)) {
+              mergedLocations[id] = {
+                ...locData,
+                connections: legacyConnsData?.[id] ?? [],
+                artifacts: [],
+              };
+            }
+            const newRegionsForFullImport = (
+              typeof parsed.regions === 'object' && !Array.isArray(parsed.regions) && parsed.regions !== null
+            ) ? parsed.regions as Record<string, { name: string; colorIndex: number }> : {};
+
+            await sendCommand('debug_import_full_map', {
+              locations: mergedLocations,
+              positions: newPositions,
+              regions: newRegionsForFullImport,
+            });
+
+            setDragOverrides(newPositions);
+            const newConnsForFull = {} as Record<string, LocationConn[]>;
+            for (const [id, locData] of Object.entries(mergedLocations)) {
+              if (Array.isArray(locData.connections)) {
+                newConnsForFull[id] = locData.connections as LocationConn[];
+              }
+            }
+            setLocalConns(newConnsForFull);
+            setLocalRegions(newRegionsForFullImport);
+            e.target.value = '';
+            return;
+          }
+        }
+
         setDragOverrides(newPositions);
 
         let newConns = localConnsRef.current;
-        if (parsed.connections && typeof parsed.connections === 'object' && !Array.isArray(parsed.connections)) {
-          newConns = parsed.connections as Record<string, LocationConn[]>;
+        if (legacyConnsData) {
+          newConns = legacyConnsData;
           setLocalConns(newConns);
         }
 
-        // Restore regions if present (v2+)
         let newRegions: Record<string, { name: string; colorIndex: number }> | undefined;
         if (parsed.regions && typeof parsed.regions === 'object' && !Array.isArray(parsed.regions)) {
           newRegions = parsed.regions as Record<string, { name: string; colorIndex: number }>;
@@ -636,16 +899,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
         await persistMap(newPositions, newConns, newRegions);
 
-        // Restore per-location metadata (name, terrain_type, etc.) via backend (v2+)
-        if (parsed.locations && typeof parsed.locations === 'object' && !Array.isArray(parsed.locations)) {
-          const locsData = parsed.locations as Record<string, {
-            name?: string;
-            terrain_type?: string;
-            anomaly_activity?: number;
-            dominant_anomaly_type?: string | null;
-            region?: string | null;
-          }>;
-          for (const [locId, locData] of Object.entries(locsData)) {
+        if (legacyLocsData) {
+          for (const [locId, locData] of Object.entries(legacyLocsData)) {
             if (locId in zoneState.locations) {
               await sendCommand('debug_update_location', {
                 loc_id: locId,
@@ -666,7 +921,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     [persistMap, sendCommand, zoneState.locations],
   );
 
-  // ── Location CRUD ─────────────────────────────────────────────────────────
+
   const handleSaveEdit = useCallback(
     async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
       if (!editingLocId) return;
@@ -694,6 +949,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
         terrain_type: data.terrainType,
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
+        region: data.region || null,
         position: pos,
       });
     },
@@ -755,122 +1011,158 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
       <div style={s.canvasWrap}>
         {/* Toolbar */}
         <div style={s.toolbar}>
-          <div style={s.legend}>
-            {Object.entries(TERRAIN_TYPE_COLOR).map(([t, c]) => (
-              <span key={t} style={s.legendItem}>
-                <span style={{ ...s.legendDot, background: c }} />
-                {TERRAIN_TYPE_LABELS[t] ?? t.replace(/_/g, ' ')}
+          {/* ── Row 1: legend + world clock + save indicator ── */}
+          <div style={s.toolbarRow1}>
+            <div style={s.legend}>
+              {Object.entries(TERRAIN_TYPE_COLOR).map(([t, c]) => (
+                <span key={t} style={s.legendItem}>
+                  <span style={{ ...s.legendDot, background: c }} />
+                  {TERRAIN_TYPE_LABELS[t] ?? t.replace(/_/g, ' ')}
+                </span>
+              ))}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {/* World clock + emission */}
+              <div style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+                background: '#0f172a', border: '1px solid #1e3a5f',
+                borderRadius: 6, padding: '0.2rem 0.5rem', gap: 1,
+              }}>
+                <span style={{ color: '#60a5fa', fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                  📅 День {zoneState.world_day} · {String(zoneState.world_hour).padStart(2, '0')}:{String(zoneState.world_minute ?? 0).padStart(2, '0')}
+                </span>
+                <span style={{ color: '#475569', fontSize: '0.62rem', whiteSpace: 'nowrap' }}>
+                  Ход {zoneState.world_turn}
+                </span>
+                {zoneState.emission_active ? (
+                  <span style={{ color: '#ef4444', fontSize: '0.65rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                    ⚡ ВЫБРОС! (ещё {formatTurns((zoneState.emission_ends_turn ?? 0) - zoneState.world_turn)})
+                  </span>
+                ) : (
+                  <span style={{ color: '#f59e0b', fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
+                    ⚡ через {formatTurns(Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn))}
+                  </span>
+                )}
+              </div>
+              <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
+              <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
+                ⚠ Save failed
               </span>
-            ))}
+            </div>
           </div>
-          <div style={s.toolbarRight}>
-            <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
-            <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
-              ⚠ Save failed
-            </span>
-            {/* Advance turn */}
-            <button
-              style={s.toolBtn}
-              onClick={handleTick}
-              disabled={ticking}
-              title="Advance world by one turn (end_turn command)"
-            >
-              {ticking ? '…' : '⏭ Ход'}
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={() => setCreatingLoc(true)}
-              title="Create a new location"
-            >
-              ➕ Location
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={handleCreateRegion}
-              title="Create a new region"
-            >
-              ➕ Регион
-            </button>
-            <button
-              style={{
-                ...s.toolBtn,
-                ...(linkMode ? s.toolBtnActive : {}),
-              }}
-              onClick={handleToggleLinkMode}
-              title="Toggle link-editing mode. In link mode: click a location to select it as source, then click another to create/remove a connection."
-            >
-              🔗 {linkMode ? 'Link mode ON' : 'Link mode'}
-            </button>
-            <button
-                style={{ ...s.toolBtn, visibility: Object.keys(dragOverrides).length > 0 ? 'visible' : 'hidden' }}
-                onClick={() => {
-                  setDragOverrides({});
-                  persistMap({}, localConnsRef.current);
+          {/* ── Row 2: action buttons in groups ── */}
+          <div style={s.toolbarRow2}>
+            {/* Group: Time controls */}
+            <div style={s.toolbarGroup}>
+              <button
+                style={s.toolBtn}
+                onClick={handleTick}
+                disabled={ticking || skipping || autoRunning}
+                title="Пропустить 1 ход (1 минута)"
+              >
+                {ticking ? '…' : '⏭ Ход'}
+              </button>
+              <button
+                style={s.toolBtn}
+                onClick={handleSkipToDecision}
+                disabled={ticking || autoRunning}
+                title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
+              >
+                {skipping ? '⏹ Стоп' : '⏩ До решения'}
+              </button>
+              <button
+                style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
+                onClick={handleAutoRun}
+                disabled={ticking || skipping}
+                title={autoRunning ? 'Нажмите для паузы' : 'Запустить течение времени до паузы'}
+              >
+                {autoRunning ? '⏸ Пауза' : '▶ Авто'}
+              </button>
+              <button
+                style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}
+                onClick={async () => {
+                  try { await sendCommand('debug_trigger_emission', {}); }
+                  catch { /* ignore */ }
                 }}
-                title="Reset all card positions to the auto-layout"
+                disabled={zoneState.emission_active}
+                title={zoneState.emission_active ? 'Выброс уже активен' : 'Немедленно запустить выброс (debug)'}
               >
-                ↺ Reset layout
+                ⚡ Выброс
               </button>
-            <button
-                style={{ ...s.toolBtn, visibility: (panOffset.x !== 0 || panOffset.y !== 0) ? 'visible' : 'hidden' }}
-                onClick={() => setPanOffset({ x: 0, y: 0 })}
-                title="Re-centre the canvas view"
+            </div>
+            <div style={s.toolbarSep} />
+            {/* Group: Edit tools */}
+            <div style={s.toolbarGroup}>
+              <button style={s.toolBtn} onClick={() => setCreatingLoc(true)} title="Создать новую локацию">
+                ➕ Лок.
+              </button>
+              <button style={s.toolBtn} onClick={handleCreateRegion} title="Создать новый регион">
+                ➕ Рег.
+              </button>
+              <button
+                style={{ ...s.toolBtn, ...(linkMode ? s.toolBtnActive : {}) }}
+                onClick={handleToggleLinkMode}
+                title="Режим связей: кликните локацию-источник, потом цель"
               >
-                ⊙ Re-centre
+                🔗 {linkMode ? 'ON' : 'Связи'}
               </button>
-            {/* Zoom controls */}
-            <button
-              style={s.toolBtn}
-              onClick={() =>
-                setZoom((prev) => Math.max(0.25, +(prev - 0.1).toFixed(2)))
-              }
-              disabled={zoom <= 0.25}
-              title="Zoom out"
-            >
-              –
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={() => setZoom(1.0)}
-              title="Reset zoom to 100%"
-            >
-              {Math.round(zoom * 100)}%
-            </button>
-            <button
-              style={s.toolBtn}
-              onClick={() =>
-                setZoom((prev) => Math.min(3, +(prev + 0.1).toFixed(2)))
-              }
-              disabled={zoom >= 3}
-              title="Zoom in"
-            >
-              +
-            </button>
-            {/* Fullscreen */}
-            <button
-              style={s.toolBtn}
-              onClick={handleFullscreen}
-              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen map'}
-              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-            >
-              {isFullscreen ? '⊡' : '⛶'}
-            </button>
-            {/* Export */}
-            <button
-              style={s.toolBtn}
-              onClick={handleExport}
-              title="Export current layout as zone_layout.json"
-            >
-              📤 Export
-            </button>
-            {/* Import */}
-            <button
-              style={s.toolBtn}
-              onClick={() => importInputRef.current?.click()}
-              title="Import a previously-exported zone_layout.json"
-            >
-              📥 Import
-            </button>
+            </div>
+            <div style={s.toolbarSep} />
+            {/* Group: View tools */}
+            <div style={s.toolbarGroup}>
+              {Object.keys(dragOverrides).length > 0 && (
+                <button
+                  style={s.toolBtn}
+                  onClick={() => { setDragOverrides({}); persistMap({}, localConnsRef.current); }}
+                  title="Сбросить позиции карточек к авто-раскладке"
+                >
+                  ↺ Сброс
+                </button>
+              )}
+              {(panOffset.x !== 0 || panOffset.y !== 0) && (
+                <button style={s.toolBtn} onClick={() => setPanOffset({ x: 0, y: 0 })} title="Вернуть центр холста">
+                  ⊙ Центр
+                </button>
+              )}
+              {/* Zoom inline group */}
+              <div style={s.zoomGroup}>
+                <button
+                  style={{ ...s.toolBtn, ...s.zoomBtn }}
+                  onClick={() => setZoom((prev) => Math.max(0.25, +(prev - 0.1).toFixed(2)))}
+                  disabled={zoom <= 0.25}
+                  title="Zoom out"
+                >–</button>
+                <button
+                  style={{ ...s.toolBtn, ...s.zoomBtn, minWidth: 38, borderLeft: 'none', borderRight: 'none', borderRadius: 0 }}
+                  onClick={() => setZoom(1.0)}
+                  title="Сброс масштаба"
+                >{Math.round(zoom * 100)}%</button>
+                <button
+                  style={{ ...s.toolBtn, ...s.zoomBtn, borderLeft: 'none', borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
+                  onClick={() => setZoom((prev) => Math.min(3, +(prev + 0.1).toFixed(2)))}
+                  disabled={zoom >= 3}
+                  title="Zoom in"
+                >+</button>
+              </div>
+              <button
+                style={s.toolBtn}
+                onClick={handleFullscreen}
+                title={isFullscreen ? 'Выйти из полноэкранного режима' : 'Полноэкранный режим'}
+                aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              >
+                {isFullscreen ? '⊡' : '⛶'}
+              </button>
+            </div>
+            <div style={s.toolbarSep} />
+            {/* Group: Data */}
+            <div style={s.toolbarGroup}>
+              <button style={s.toolBtn} onClick={handleExport} title="Экспортировать карту в JSON">
+                📤
+              </button>
+              <button style={s.toolBtn} onClick={() => importInputRef.current?.click()} title="Импортировать карту из JSON">
+                📥
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1120,7 +1412,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
                     )}
                   </div>
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
-                    {isCurrent && <Badge bg="#166534" color="#86efac">📍 You</Badge>}
                     {aliveAgents > 0 && <Badge bg="#334155" color="#94a3b8">👥 {aliveAgents}</Badge>}
                     {aliveMutantsOnCard > 0 && <Badge bg="#7f1d1d" color="#fca5a5">☣️ {aliveMutantsOnCard}</Badge>}
                     {traderCount > 0 && <Badge bg="#1e293b" color="#94a3b8">🏪 {traderCount}</Badge>}
@@ -1164,12 +1455,20 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             onSpawnStalker={async (name, faction, globalGoal) => {
               await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name, faction, global_goal: globalGoal });
             }}
+            onSpawnTrader={async (name) => {
+              await sendCommand('debug_spawn_trader', { loc_id: selectedLocId!, name });
+            }}
             onSpawnMutant={async (mutantType) => {
               await sendCommand('debug_spawn_mutant', { loc_id: selectedLocId!, mutant_type: mutantType });
+            }}
+            onSpawnArtifact={async (artifactType) => {
+              await sendCommand('debug_spawn_artifact', { loc_id: selectedLocId!, artifact_type: artifactType });
             }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
             onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}
             onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
+            onAgentClick={(agentId) => setProfileAgentId(agentId)}
+            onTraderClick={(traderId) => setProfileTraderId(traderId)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel
@@ -1212,6 +1511,54 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           onSave={handleSaveCreate}
         />
       )}
+
+      {/* ── Agent profile modal (from clicking a stalker in the location panel) ── */}
+      {profileAgentId && zoneState.agents[profileAgentId] && (
+        <AgentProfileModal
+          agent={zoneState.agents[profileAgentId] as unknown as AgentForProfile}
+          locationName={
+            zoneState.locations[zoneState.agents[profileAgentId].location_id]?.name ??
+            zoneState.agents[profileAgentId].location_id
+          }
+          locations={zoneState.locations}
+          onClose={() => setProfileAgentId(null)}
+          sendCommand={sendCommand}
+        />
+      )}
+
+      {/* ── Trader profile modal (from clicking a trader row in the location panel) ── */}
+      {profileTraderId && zoneState.traders[profileTraderId] && (() => {
+        const t = zoneState.traders[profileTraderId];
+        const traderAsAgent: AgentForProfile = {
+          id: t.id,
+          name: t.name,
+          location_id: t.location_id,
+          hp: 100,
+          max_hp: 100,
+          radiation: 0,
+          hunger: 0,
+          thirst: 0,
+          sleepiness: 0,
+          money: t.money ?? 0,
+          faction: 'trader',
+          inventory: t.inventory ?? [],
+          equipment: {},
+          is_alive: true,
+          action_used: false,
+          scheduled_action: null,
+          controller: { kind: 'npc' },
+          memory: t.memory ?? [],
+        };
+        return (
+          <AgentProfileModal
+            agent={traderAsAgent}
+            locationName={zoneState.locations[t.location_id]?.name ?? t.location_id}
+            locations={zoneState.locations}
+            onClose={() => setProfileTraderId(null)}
+            sendCommand={sendCommand}
+          />
+        );
+      })()}
     </div>
   );
 }

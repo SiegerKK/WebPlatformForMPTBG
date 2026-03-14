@@ -16,6 +16,16 @@ Supported commands:
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
+- debug_spawn_trader(loc_id, name?) — spawn a trader NPC at a location in debug mode (meta)
+- debug_spawn_artifact(loc_id, artifact_type?) — spawn an artifact at a location in debug mode (meta)
+- debug_delete_all_npcs() — remove all bot-controlled stalker NPCs (meta)
+- debug_delete_all_mutants() — remove all mutants (meta)
+- debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
+- debug_delete_all_traders() — remove all traders (meta)
+- debug_delete_agent(agent_id) — remove any single agent/mutant/trader by id (meta)
+- debug_set_time(day?, hour?, minute?) — override current world time (meta)
+- debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
+- debug_preview_bot_decision(agent_id) — dry-run bot decision logic and return decision description without mutating state (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -30,6 +40,10 @@ _MIN_SLEEP_HOURS = 2
 _VALID_TERRAIN_TYPES = frozenset([
     "plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings",
     "hamlet", "farm", "field_camp", "dungeon", "x_lab",
+])
+
+_VALID_GLOBAL_GOALS = frozenset([
+    "get_rich", "explore_zone", "survive", "help_others", "find_wish",
 ])
 
 
@@ -59,6 +73,27 @@ def validate_world_command(
 
     if command_type == "debug_spawn_mutant":
         return _validate_debug_spawn_mutant(payload, state)
+
+    if command_type == "debug_spawn_trader":
+        return _validate_debug_spawn_trader(payload, state)
+
+    if command_type == "debug_spawn_artifact":
+        return _validate_debug_spawn_artifact(payload, state)
+
+    if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
+                        "debug_delete_all_artifacts", "debug_delete_all_traders",
+                        "debug_set_time", "debug_advance_turns",
+                        "debug_trigger_emission", "debug_import_full_map"):
+        return RuleCheckResult(valid=True)
+
+    if command_type == "debug_set_agent_money":
+        return _validate_debug_set_agent_money(payload, state)
+
+    if command_type == "debug_delete_agent":
+        return _validate_debug_delete_agent(payload, state)
+
+    if command_type == "debug_preview_bot_decision":
+        return _validate_debug_preview_bot_decision(payload, state)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -121,9 +156,9 @@ def resolve_world_command(
     # ── take_control: meta-command, no action cost ────────────────────────────
     if command_type == "take_control":
         target_agent_id = payload["agent_id"]
-        # Release current agent back to AI if the player had one
+        # Release current agent back to bot AI if the player had one
         if agent_id and agent_id in state.get("agents", {}):
-            state["agents"][agent_id]["controller"] = {"kind": "ai", "participant_id": None}
+            state["agents"][agent_id]["controller"] = {"kind": "bot", "participant_id": None}
         # Assign the new agent to this player
         state.setdefault("player_agents", {})[player_id] = target_agent_id
         state["agents"][target_agent_id]["controller"] = {"kind": "human", "participant_id": player_id}
@@ -190,14 +225,15 @@ def resolve_world_command(
         while new_id in existing_ids:
             n += 1
             new_id = f"loc_debug_{n}"
+        region_val = payload.get("region")
         new_loc = {
             "id": new_id,
             "name": str(payload["name"]).strip(),
             "terrain_type": payload.get("terrain_type", "plain"),
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
+            "region": region_val if region_val else None,
             "connections": [],
-            "anomalies": [],
             "artifacts": [],
             "agents": [],
             "items": [],
@@ -226,13 +262,15 @@ def resolve_world_command(
             new_agent_id = f"agent_debug_{n}"
         name = str(payload.get("name", "")).strip() or f"Сталкер #{n}"
         rng = _random.Random(new_agent_id)
+        global_goal = str(payload.get("global_goal", "")).strip() or None
         agent = _make_stalker_agent(
             agent_id=new_agent_id,
             name=name,
             location_id=loc_id,
-            controller_kind="ai",
+            controller_kind="bot",
             participant_id=None,
             rng=rng,
+            global_goal=global_goal,
         )
         state.setdefault("agents", {})[new_agent_id] = agent
         state["locations"][loc_id]["agents"].append(new_agent_id)
@@ -271,26 +309,319 @@ def resolve_world_command(
         events.append({"event_type": "debug_mutant_spawned", "payload": {"mutant_id": new_mutant_id, "loc_id": loc_id}})
         return state, events
 
+    # ── debug_spawn_trader: meta-command, spawn a trader NPC ─────────────────
+    if command_type == "debug_spawn_trader":
+        loc_id = payload["loc_id"]
+        existing_traders = state.get("traders", {})
+        n = len(existing_traders)
+        new_trader_id = f"trader_debug_{n}"
+        while new_trader_id in existing_traders:
+            n += 1
+            new_trader_id = f"trader_debug_{n}"
+        trader_names = ["Sidorovich", "Barkeep", "Nimble", "Sakharov", "Wolf", "Petrenko"]
+        name = str(payload.get("name", "")).strip() or trader_names[n % len(trader_names)]
+        import random as _random
+        from app.games.zone_stalkers.generators.zone_generator import _generate_trader_inventory
+        rng = _random.Random(new_trader_id)
+        trader_inv = _generate_trader_inventory(rng)
+        trader = {
+            "id": new_trader_id,
+            "archetype": "trader_npc",
+            "name": name,
+            "location_id": loc_id,
+            "inventory": trader_inv,
+            "money": rng.randint(3000, 8000),
+            "memory": [],
+        }
+        state.setdefault("traders", {})[new_trader_id] = trader
+        state["locations"][loc_id]["agents"].append(new_trader_id)
+        events.append({"event_type": "debug_trader_spawned", "payload": {"trader_id": new_trader_id, "loc_id": loc_id}})
+        return state, events
+
+    # ── debug_spawn_artifact: meta-command, place an artifact on the ground ──
+    if command_type == "debug_spawn_artifact":
+        import random as _random
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        loc_id = payload["loc_id"]
+        artifact_type = str(payload.get("artifact_type", "")).strip()
+        rng = _random.Random(str(state.get("world_turn", 1)) + loc_id + artifact_type)
+        if not artifact_type:
+            artifact_type = rng.choice(list(ARTIFACT_TYPES.keys()))
+        art_info = ARTIFACT_TYPES[artifact_type]
+        art_id = f"art_debug_{loc_id}_{rng.randint(1000, 9999)}"
+        artifact = {
+            "id": art_id,
+            "type": artifact_type,
+            "name": art_info["name"],
+            "value": art_info["value"],
+        }
+        state["locations"][loc_id]["artifacts"].append(artifact)
+        events.append({"event_type": "debug_artifact_spawned",
+                       "payload": {"artifact_id": art_id, "artifact_type": artifact_type, "loc_id": loc_id}})
+        return state, events
+
+    # ── debug_delete_all_npcs ─────────────────────────────────────────────────
+    if command_type == "debug_delete_all_npcs":
+        removed = []
+        for aid in list(state.get("agents", {}).keys()):
+            a = state["agents"][aid]
+            if a.get("archetype") == "stalker_agent" and a.get("controller", {}).get("kind") != "human":
+                for loc in state.get("locations", {}).values():
+                    if aid in loc.get("agents", []):
+                        loc["agents"].remove(aid)
+                del state["agents"][aid]
+                removed.append(aid)
+        events.append({"event_type": "debug_npcs_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_delete_all_mutants ──────────────────────────────────────────────
+    if command_type == "debug_delete_all_mutants":
+        removed = list(state.get("mutants", {}).keys())
+        for mid in removed:
+            m = state["mutants"][mid]
+            loc_id = m.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if mid in loc.get("agents", []):
+                    loc["agents"].remove(mid)
+        state["mutants"] = {}
+        events.append({"event_type": "debug_mutants_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_delete_all_artifacts ────────────────────────────────────────────
+    if command_type == "debug_delete_all_artifacts":
+        total = 0
+        for loc in state.get("locations", {}).values():
+            total += len(loc.get("artifacts", []))
+            loc["artifacts"] = []
+        events.append({"event_type": "debug_artifacts_deleted", "payload": {"count": total}})
+        return state, events
+
+    # ── debug_delete_all_traders ──────────────────────────────────────────────
+    if command_type == "debug_delete_all_traders":
+        removed = list(state.get("traders", {}).keys())
+        for tid in removed:
+            t = state["traders"][tid]
+            loc_id = t.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if tid in loc.get("agents", []):
+                    loc["agents"].remove(tid)
+        state["traders"] = {}
+        events.append({"event_type": "debug_traders_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_set_time ────────────────────────────────────────────────────────
+    if command_type == "debug_set_time":
+        if "day" in payload:
+            state["world_day"] = max(1, int(payload["day"]))
+        if "hour" in payload:
+            state["world_hour"] = max(0, min(23, int(payload["hour"])))
+        if "minute" in payload:
+            state["world_minute"] = max(0, min(59, int(payload["minute"])))
+        events.append({
+            "event_type": "debug_time_set",
+            "payload": {
+                "world_day": state["world_day"],
+                "world_hour": state["world_hour"],
+                "world_minute": state.get("world_minute", 0),
+            },
+        })
+        return state, events
+
+    # ── debug_delete_agent ────────────────────────────────────────────────────
+    if command_type == "debug_delete_agent":
+        agent_id_to_del = str(payload["agent_id"])
+        # Remove from agents dict
+        if agent_id_to_del in state.get("agents", {}):
+            for loc in state.get("locations", {}).values():
+                if agent_id_to_del in loc.get("agents", []):
+                    loc["agents"].remove(agent_id_to_del)
+            del state["agents"][agent_id_to_del]
+        # Remove from mutants dict
+        elif agent_id_to_del in state.get("mutants", {}):
+            m = state["mutants"].pop(agent_id_to_del)
+            loc_id = m.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if agent_id_to_del in loc.get("agents", []):
+                    loc["agents"].remove(agent_id_to_del)
+        # Remove from traders dict
+        elif agent_id_to_del in state.get("traders", {}):
+            t = state["traders"].pop(agent_id_to_del)
+            loc_id = t.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if agent_id_to_del in loc.get("agents", []):
+                    loc["agents"].remove(agent_id_to_del)
+        events.append({"event_type": "debug_agent_deleted", "payload": {"agent_id": agent_id_to_del}})
+        return state, events
+
+    # ── debug_set_agent_money: meta-command, set agent's money directly ─────
+    if command_type == "debug_set_agent_money":
+        target_id = str(payload["agent_id"])
+        amount = int(payload["amount"])
+        if target_id in state.get("agents", {}):
+            state["agents"][target_id]["money"] = amount
+        elif target_id in state.get("traders", {}):
+            state["traders"][target_id]["money"] = amount
+        events.append({
+            "event_type": "debug_agent_money_set",
+            "payload": {"agent_id": target_id, "amount": amount},
+        })
+        return state, events
+
+    # ── debug_advance_turns ───────────────────────────────────────────────────
+    if command_type == "debug_advance_turns":
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        max_n = int(payload.get("max_n", 100))
+        stop_on_decision = bool(payload.get("stop_on_decision", True))
+        turns_advanced = 0
+        decision_event: Dict[str, Any] | None = None
+        for _ in range(max(1, min(max_n, 500))):
+            state, tick_evs = tick_zone_map(state)
+            events.extend(tick_evs)
+            turns_advanced += 1
+            if stop_on_decision:
+                for ev in tick_evs:
+                    if ev.get("event_type") == "bot_decision":
+                        decision_event = ev
+                        break
+                if decision_event:
+                    break
+        events.append({
+            "event_type": "debug_turns_advanced",
+            "payload": {
+                "turns_advanced": turns_advanced,
+                "stopped_on_decision": decision_event is not None,
+                "decision_event": decision_event,
+            },
+        })
+        return state, events
+
+    # ── debug_trigger_emission ────────────────────────────────────────────────
+    if command_type == "debug_trigger_emission":
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        world_turn = state.get("world_turn", 1)
+        # Schedule emission for right now and tick once so the emission logic fires
+        state["emission_scheduled_turn"] = world_turn
+        state["emission_active"] = False
+        state, tick_evs = tick_zone_map(state)
+        events.extend(tick_evs)
+        events.append({
+            "event_type": "debug_emission_triggered",
+            "payload": {
+                "emission_active": state.get("emission_active", False),
+                "emission_ends_turn": state.get("emission_ends_turn", 0),
+            },
+        })
+        return state, events
+
+    # ── debug_import_full_map ─────────────────────────────────────────────────
+    if command_type == "debug_import_full_map":
+        """
+        Replaces the entire map state from a previously exported full-map JSON.
+        Expected payload keys:
+          locations: {id: {name, terrain_type, anomaly_activity, dominant_anomaly_type, region, connections, artifacts}}
+          positions: {id: {x, y}}
+          regions: {id: {name, colorIndex}}
+          world_turn, world_day, world_hour, world_minute
+          emission_active, emission_scheduled_turn, emission_ends_turn
+        Agents, mutants, traders and player state are preserved as-is.
+        """
+        new_locs_data = payload.get("locations", {})
+        new_positions = payload.get("positions", {})
+        new_regions = payload.get("regions", {})
+
+        # Build fresh locations dict, preserving agent/mutant lists from any
+        # existing location with the same id (so live NPCs don't become orphans).
+        old_locations = state.get("locations", {})
+        new_locations: Dict[str, Any] = {}
+        for loc_id, loc_data in new_locs_data.items():
+            old = old_locations.get(loc_id, {})
+            new_locations[loc_id] = {
+                "id": loc_id,
+                "name": str(loc_data.get("name", loc_id)).strip(),
+                "terrain_type": loc_data.get("terrain_type", "plain"),
+                "anomaly_activity": int(loc_data.get("anomaly_activity", 0)),
+                "dominant_anomaly_type": loc_data.get("dominant_anomaly_type") or None,
+                "region": loc_data.get("region") or None,
+                "connections": [
+                    {
+                        "to": c["to"],
+                        "travel_time": int(c.get("travel_time", 15)),
+                        "type": c.get("type", "normal"),
+                        "closed": bool(c.get("closed", False)),
+                    }
+                    for c in loc_data.get("connections", [])
+                    if "to" in c and c["to"] in new_locs_data
+                ],
+                "artifacts": list(loc_data.get("artifacts", [])),
+                "agents": list(old.get("agents", [])),
+                "items": list(old.get("items", [])),
+            }
+        state["locations"] = new_locations
+
+        # Canvas layout
+        debug_layout = state.setdefault("debug_layout", {})
+        debug_layout["positions"] = new_positions
+        debug_layout["regions"] = new_regions
+
+        # World time
+        if "world_turn" in payload:
+            state["world_turn"] = int(payload["world_turn"])
+        if "world_day" in payload:
+            state["world_day"] = max(1, int(payload["world_day"]))
+        if "world_hour" in payload:
+            state["world_hour"] = max(0, min(23, int(payload["world_hour"])))
+        if "world_minute" in payload:
+            state["world_minute"] = max(0, min(59, int(payload["world_minute"])))
+
+        # Emission state
+        if "emission_active" in payload:
+            state["emission_active"] = bool(payload["emission_active"])
+        if "emission_scheduled_turn" in payload and payload["emission_scheduled_turn"] is not None:
+            state["emission_scheduled_turn"] = int(payload["emission_scheduled_turn"])
+        if "emission_ends_turn" in payload and payload["emission_ends_turn"] is not None:
+            state["emission_ends_turn"] = int(payload["emission_ends_turn"])
+
+        events.append({
+            "event_type": "debug_full_map_imported",
+            "payload": {"location_count": len(new_locations)},
+        })
+        return state, events
+
+    # ── debug_preview_bot_decision ─────────────────────────────────────────────
+    if command_type == "debug_preview_bot_decision":
+        import copy
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action, _describe_bot_decision_tree
+        agent_id_to_preview = str(payload["agent_id"])
+        state_copy = copy.deepcopy(state)
+        agent_copy = state_copy["agents"][agent_id_to_preview]
+        world_turn = state_copy.get("world_turn", 1)
+        preview_evs = _run_bot_action(agent_id_to_preview, agent_copy, state_copy, world_turn)
+        decision_tree = _describe_bot_decision_tree(agent_copy, preview_evs, state_copy)
+        decision_desc = {"goal": decision_tree["goal"], "action": decision_tree["chosen"]["action"], "reason": decision_tree["chosen"]["reason"]}
+        events.append({
+            "event_type": "debug_bot_decision_preview",
+            "payload": {
+                "agent_id": agent_id_to_preview,
+                "decision": decision_desc,
+                "decision_tree": decision_tree,
+            },
+        })
+        return state, events
+
     if command_type == "end_turn":
         # Mark this player's agent as having acted
         if agent_id and agent_id in state.get("agents", {}):
             state["agents"][agent_id]["action_used"] = True
         events.append({"event_type": "turn_submitted", "payload": {"participant_id": player_id}})
 
-        # Check whether all alive human agents have now ended their turns.
-        # If so, auto-advance the world by one tick.
-        player_agents = state.get("player_agents", {})  # {user_id: agent_id}
-        all_human_acted = True
-        for _uid, aid in player_agents.items():
-            agent_data = state.get("agents", {}).get(aid)
-            if agent_data and agent_data.get("is_alive", True) and not agent_data.get("action_used"):
-                all_human_acted = False
-                break
-
-        if all_human_acted:
-            from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
-            state, tick_events = tick_zone_map(state)
-            events.extend(tick_events)
+        # Always advance the world by one tick (bot-only mode — no player waiting).
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state, tick_events = tick_zone_map(state)
+        events.extend(tick_events)
 
         return state, events
 
@@ -316,26 +647,26 @@ def resolve_world_command(
                 "to": target_loc_id,
             },
         })
-        loc_anomalies = new_loc_data.get("anomalies", [])
-        if loc_anomalies:
-            from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
-            for anom in loc_anomalies:
-                anom_info = ANOMALY_TYPES.get(anom["type"], {})
-                dmg = anom_info.get("damage", 0) // 2
-                if dmg > 0:
-                    agent["hp"] = max(0, agent["hp"] - dmg)
-                    events.append({
-                        "event_type": "anomaly_damage",
-                        "payload": {
-                            "agent_id": agent_id,
-                            "anomaly_type": anom["type"],
-                            "damage": dmg,
-                            "hp_remaining": agent["hp"],
-                        },
-                    })
-            if agent["hp"] <= 0:
-                agent["is_alive"] = False
-                events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
+        move_anomaly_activity = new_loc_data.get("anomaly_activity", 0)
+        if move_anomaly_activity > 0:
+            import random as _move_rng
+            _rng = _move_rng.Random(str(state.get("seed", 0)) + str(state.get("world_turn", 0)))
+            if _rng.random() < move_anomaly_activity / 20.0:
+                dmg = 5 + move_anomaly_activity
+                agent["hp"] = max(0, agent["hp"] - dmg)
+                anomaly_type = new_loc_data.get("dominant_anomaly_type") or "unknown"
+                events.append({
+                    "event_type": "anomaly_damage",
+                    "payload": {
+                        "agent_id": agent_id,
+                        "anomaly_type": anomaly_type,
+                        "damage": dmg,
+                        "hp_remaining": agent["hp"],
+                    },
+                })
+                if agent["hp"] <= 0:
+                    agent["is_alive"] = False
+                    events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
 
     elif command_type == "travel":
         target_loc_id = payload["target_location_id"]
@@ -343,13 +674,19 @@ def resolve_world_command(
         if not route:
             events.append({"event_type": "travel_failed", "payload": {"agent_id": agent_id, "reason": "no_route"}})
         else:
-            turns = _route_travel_turns(route, state["locations"], agent["location_id"])
+            first_hop = route[0]
+            conns = state["locations"].get(agent["location_id"], {}).get("connections", [])
+            hop_time = next(
+                (c.get("travel_time", 12) for c in conns if c["to"] == first_hop),
+                12,
+            )
             agent["scheduled_action"] = {
                 "type": "travel",
-                "turns_remaining": turns,
-                "turns_total": turns,
-                "target_id": target_loc_id,
-                "route": route,  # ordered list of loc IDs (excluding start)
+                "turns_remaining": hop_time,
+                "turns_total": hop_time,
+                "target_id": first_hop,
+                "final_target_id": target_loc_id,
+                "remaining_route": route[1:],
                 "started_turn": state.get("world_turn", 1),
             }
             events.append({
@@ -358,7 +695,7 @@ def resolve_world_command(
                     "agent_id": agent_id,
                     "player_id": player_id,
                     "destination": target_loc_id,
-                    "turns_required": turns,
+                    "turns_required": hop_time,
                     "route": route,
                 },
             })
@@ -385,10 +722,12 @@ def resolve_world_command(
 
     elif command_type == "sleep":
         hours = max(_MIN_SLEEP_HOURS, min(_MAX_SLEEP_HOURS, int(payload.get("hours", _DEFAULT_SLEEP_HOURS))))
+        turns = hours * 60  # 1 turn = 1 minute
         agent["scheduled_action"] = {
             "type": "sleep",
-            "turns_remaining": hours,
-            "turns_total": hours,
+            "turns_remaining": turns,
+            "turns_total": turns,
+            "hours": hours,
             "target_id": agent["location_id"],
             "started_turn": state.get("world_turn", 1),
         }
@@ -570,7 +909,10 @@ def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
 
 
 def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
-    """Return ordered list of location IDs from start (exclusive) to goal (inclusive), or [] if unreachable."""
+    """Return ordered list of location IDs from start (exclusive) to goal (inclusive), or [] if unreachable.
+
+    Closed connections (conn["closed"] == True) are treated as impassable.
+    """
     if start == goal:
         return []
     visited = {start}
@@ -579,12 +921,14 @@ def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
         current, path = queue.popleft()
         for conn in locations.get(current, {}).get("connections", []):
             nxt = conn["to"]
-            if nxt not in visited:
-                new_path = path + [nxt]
-                if nxt == goal:
-                    return new_path
-                visited.add(nxt)
-                queue.append((nxt, new_path))
+            # Skip closed connections (impassable) and already-visited nodes.
+            if conn.get("closed") or nxt in visited:
+                continue
+            new_path = path + [nxt]
+            if nxt == goal:
+                return new_path
+            visited.add(nxt)
+            queue.append((nxt, new_path))
     return []
 
 
@@ -593,7 +937,7 @@ def _route_travel_turns(
     locations: Dict[str, Any],
     start_loc_id: str = None,
 ) -> int:
-    """Sum travel_time (minutes) across all hops and convert to turns (1 turn = 60 min).
+    """Sum travel_time (minutes) across all hops. 1 turn = 1 minute.
 
     *route* is an ordered list of location IDs [waypoint1, ..., destination],
     NOT including the starting location.  *start_loc_id* is the agent's current
@@ -601,11 +945,10 @@ def _route_travel_turns(
     Falls back to 12 min/hop if *start_loc_id* is unknown or a connection weight
     is missing.
     """
-    import math
     if not route:
         return 1
     if start_loc_id is None:
-        return max(1, math.ceil(len(route) * 12 / 60))
+        return max(1, len(route) * 12)
     total_minutes = 0
     current = start_loc_id
     for next_loc in route:
@@ -616,7 +959,7 @@ def _route_travel_turns(
         )
         total_minutes += travel_time
         current = next_loc
-    return max(1, math.ceil(total_minutes / 60))
+    return max(1, total_minutes)
 
 
 def _validate_take_control(
@@ -632,7 +975,7 @@ def _validate_take_control(
     if not agent:
         return RuleCheckResult(valid=False, error="Agent not found")
     controller = agent.get("controller", {})
-    if controller.get("kind") != "ai":
+    if controller.get("kind") != "bot":
         return RuleCheckResult(valid=False, error="Agent is already controlled by a player")
     if not agent.get("is_alive", True):
         return RuleCheckResult(valid=False, error="Cannot take control of a dead agent")
@@ -707,6 +1050,9 @@ def _validate_debug_spawn_stalker(
         return RuleCheckResult(valid=False, error="loc_id is required")
     if loc_id not in state.get("locations", {}):
         return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    global_goal = payload.get("global_goal")
+    if global_goal is not None and global_goal not in _VALID_GLOBAL_GOALS:
+        return RuleCheckResult(valid=False, error=f"Invalid global_goal '{global_goal}'; must be one of {sorted(_VALID_GLOBAL_GOALS)}")
     return RuleCheckResult(valid=True)
 
 
@@ -723,4 +1069,89 @@ def _validate_debug_spawn_mutant(
     mutant_type = payload.get("mutant_type")
     if not mutant_type or mutant_type not in MUTANT_TYPES:
         return RuleCheckResult(valid=False, error=f"Invalid mutant_type '{mutant_type}'; must be one of {sorted(MUTANT_TYPES.keys())}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_trader(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_artifact(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    artifact_type = payload.get("artifact_type", "")
+    if artifact_type and artifact_type not in ARTIFACT_TYPES:
+        return RuleCheckResult(
+            valid=False,
+            error=f"Invalid artifact_type '{artifact_type}'; must be one of {sorted(ARTIFACT_TYPES.keys())}"
+        )
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_delete_agent(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    exists = (
+        agent_id in state.get("agents", {}) or
+        agent_id in state.get("mutants", {}) or
+        agent_id in state.get("traders", {})
+    )
+    if not exists:
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_preview_bot_decision(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    agent = state.get("agents", {}).get(agent_id)
+    if not agent:
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    if agent.get("controller", {}).get("kind") != "bot":
+        return RuleCheckResult(valid=False, error="Agent is not bot-controlled")
+    return RuleCheckResult(valid=True)
+
+def _validate_debug_set_agent_money(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    exists = (
+        agent_id in state.get("agents", {}) or
+        agent_id in state.get("traders", {})
+    )
+    if not exists:
+        return RuleCheckResult(valid=False, error=f"Agent/trader not found: {agent_id}")
+    amount = payload.get("amount")
+    if amount is None:
+        return RuleCheckResult(valid=False, error="amount is required")
+    try:
+        int(amount)
+    except (TypeError, ValueError):
+        return RuleCheckResult(valid=False, error="amount must be an integer")
     return RuleCheckResult(valid=True)

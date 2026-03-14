@@ -18,14 +18,46 @@ export const s: Record<string, React.CSSProperties> = {
   },
   toolbar: {
     display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
+    flexDirection: 'column',
+    gap: 6,
     padding: '6px 10px',
     background: '#060b14',
     borderRadius: 8,
     border: '1px solid #1e293b',
+  },
+  toolbarRow1: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  toolbarRow2: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  toolbarGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+  },
+  toolbarSep: {
+    width: 1,
+    height: 22,
+    background: '#1e293b',
+    flexShrink: 0,
+  },
+  zoomGroup: {
+    display: 'flex',
+    alignItems: 'center',
+  },
+  zoomBtn: {
+    borderRadius: 7,
+    padding: '0.25rem 0.4rem',
+    minWidth: 26,
+    textAlign: 'center' as const,
   },
   legend: {
     display: 'flex',
@@ -43,12 +75,6 @@ export const s: Record<string, React.CSSProperties> = {
     width: 8,
     height: 8,
     borderRadius: '50%',
-    flexShrink: 0,
-  },
-  toolbarRight: {
-    display: 'flex',
-    gap: 6,
-    alignItems: 'center',
     flexShrink: 0,
   },
   toolBtn: {

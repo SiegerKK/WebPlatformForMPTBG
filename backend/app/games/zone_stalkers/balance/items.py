@@ -73,6 +73,11 @@ ITEM_TYPES: dict = {
         "weight": 0.3, "value": 20,
         "effects": {"stamina": 20, "hunger": -35},
     },
+    "water": {
+        "name": "Вода (0.5л)", "type": "consumable",
+        "weight": 0.5, "value": 30,
+        "effects": {"thirst": -50},
+    },
     "energy_drink": {
         "name": "Energy Drink", "type": "consumable",
         "weight": 0.3, "value": 80,

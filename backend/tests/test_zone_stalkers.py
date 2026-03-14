@@ -977,7 +977,7 @@ class TestDebugLocationCommands:
         state = self._state()
         # Force existing "loc_debug_N" IDs to trigger the collision-avoidance path
         n = len(state["locations"])
-        state["locations"][f"loc_debug_{n}"] = {"id": f"loc_debug_{n}", "name": "X", "type": "ruins", "danger_level": 1, "connections": [], "anomalies": [], "artifacts": [], "agents": [], "items": []}
+        state["locations"][f"loc_debug_{n}"] = {"id": f"loc_debug_{n}", "name": "X", "type": "ruins", "danger_level": 1, "connections": [], "artifacts": [], "agents": [], "items": []}
         new_state, evts = self._r("debug_create_location", {"name": "Y", "type": "ruins", "danger_level": 2}, state)
         assert len(set(new_state["locations"].keys())) == len(new_state["locations"])  # no duplicate ids
         assert any(e["event_type"] == "debug_location_created" for e in evts)
@@ -1171,3 +1171,311 @@ class TestDebugLocationCommands:
         for mt in ("blind_dog", "flesh", "zombie", "bloodsucker", "psi_controller"):
             result = self._v("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": mt}, state)
             assert result.valid, f"Expected valid for mutant_type={mt}"
+
+    # ── debug_spawn_artifact ─────────────────────────────────────────────────
+
+    def test_spawn_artifact_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": "soul"}, state)
+        assert result.valid
+
+    def test_spawn_artifact_no_type_is_valid(self):
+        """artifact_type is optional; omitting it picks a random type."""
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_artifact", {"loc_id": loc_id}, state)
+        assert result.valid
+
+    def test_spawn_artifact_adds_to_location(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        before = len(state["locations"][loc_id]["artifacts"])
+        new_state, events = self._r("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": "gravi"}, state)
+        after = len(new_state["locations"][loc_id]["artifacts"])
+        assert after == before + 1
+        art = new_state["locations"][loc_id]["artifacts"][-1]
+        assert art["type"] == "gravi"
+        assert art["value"] > 0
+        assert art["id"].startswith("art_debug_")
+        assert any(e["event_type"] == "debug_artifact_spawned" for e in events)
+
+    def test_spawn_artifact_random_type_when_omitted(self):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_artifact", {"loc_id": loc_id}, state)
+        art = new_state["locations"][loc_id]["artifacts"][-1]
+        assert art["type"] in ARTIFACT_TYPES
+
+    def test_spawn_artifact_invalid_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": "dragon_egg"}, state)
+        assert not result.valid
+
+    def test_spawn_artifact_invalid_no_loc(self):
+        state = self._state()
+        result = self._v("debug_spawn_artifact", {}, state)
+        assert not result.valid
+
+    def test_spawn_artifact_all_types(self):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        for art_type in ARTIFACT_TYPES:
+            result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": art_type}, state)
+            assert result.valid, f"Expected valid for artifact_type={art_type}"
+
+    # ── debug_delete_agent ───────────────────────────────────────────────────
+
+    def test_delete_agent_valid(self):
+        state = self._state()
+        agent_id = next(iter(state["agents"]))
+        result = self._v("debug_delete_agent", {"agent_id": agent_id}, state)
+        assert result.valid
+
+    def test_delete_agent_removes_from_state(self):
+        state = self._state()
+        agent_id = next(iter(state["agents"]))
+        new_state, events = self._r("debug_delete_agent", {"agent_id": agent_id}, state)
+        assert agent_id not in new_state["agents"]
+        assert any(e["event_type"] == "debug_agent_deleted" for e in events)
+
+    def test_delete_agent_removes_from_location(self):
+        state = self._state()
+        agent_id = next(iter(state["agents"]))
+        loc_id = state["agents"][agent_id]["location_id"]
+        assert agent_id in state["locations"][loc_id]["agents"]
+        new_state, _ = self._r("debug_delete_agent", {"agent_id": agent_id}, state)
+        assert agent_id not in new_state["locations"][loc_id]["agents"]
+
+    def test_delete_agent_invalid_no_id(self):
+        state = self._state()
+        result = self._v("debug_delete_agent", {}, state)
+        assert not result.valid
+
+    def test_delete_agent_invalid_not_found(self):
+        state = self._state()
+        result = self._v("debug_delete_agent", {"agent_id": "nonexistent"}, state)
+        assert not result.valid
+
+    def test_delete_mutant(self):
+        state = self._state()
+        new_state, _ = self._r(
+            "debug_spawn_mutant", {"loc_id": next(iter(state["locations"])), "mutant_type": "zombie"}, state
+        )
+        mutant_id = next(iter(new_state["mutants"]))
+        new_state2, events = self._r("debug_delete_agent", {"agent_id": mutant_id}, new_state)
+        assert mutant_id not in new_state2["mutants"]
+        assert any(e["event_type"] == "debug_agent_deleted" for e in events)
+
+    def test_delete_trader(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_trader", {"loc_id": loc_id}, state)
+        trader_id = next(iter(new_state["traders"]))
+        new_state2, events = self._r("debug_delete_agent", {"agent_id": trader_id}, new_state)
+        assert trader_id not in new_state2["traders"]
+        assert any(e["event_type"] == "debug_agent_deleted" for e in events)
+
+    # ── debug_advance_turns ──────────────────────────────────────────────────
+
+    def test_advance_turns_valid(self):
+        state = self._state()
+        result = self._v("debug_advance_turns", {"max_n": 5}, state)
+        assert result.valid
+
+    def test_advance_turns_advances_world_turn(self):
+        state = self._state()
+        initial_turn = state["world_turn"]
+        new_state, events = self._r("debug_advance_turns", {"max_n": 3, "stop_on_decision": False}, state)
+        assert new_state["world_turn"] == initial_turn + 3
+        assert any(e["event_type"] == "debug_turns_advanced" for e in events)
+        adv_ev = next(e for e in events if e["event_type"] == "debug_turns_advanced")
+        assert adv_ev["payload"]["turns_advanced"] == 3
+
+    def test_advance_turns_no_game_over_when_unlimited(self):
+        """With max_turns=0 (unlimited), advancing many turns should not trigger game_over."""
+        state = self._state()
+        assert state.get("max_turns") == 0  # generator sets 0 = unlimited
+        new_state, events = self._r("debug_advance_turns", {"max_n": 10, "stop_on_decision": False}, state)
+        assert not new_state.get("game_over"), "game_over should not be triggered with unlimited turns"
+
+    # ── debug_preview_bot_decision ───────────────────────────────────────────
+
+    def test_preview_bot_decision_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        bot_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "bot"
+        )
+        result = self._v("debug_preview_bot_decision", {"agent_id": bot_id}, state)
+        assert result.valid
+
+    def test_preview_bot_decision_invalid_human(self):
+        state = self._state()
+        human_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "human"
+        )
+        result = self._v("debug_preview_bot_decision", {"agent_id": human_id}, state)
+        assert not result.valid
+
+    def test_preview_bot_decision_returns_decision(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        bot_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "bot"
+        )
+        new_state, events = self._r("debug_preview_bot_decision", {"agent_id": bot_id}, state)
+        preview_ev = next((e for e in events if e["event_type"] == "debug_bot_decision_preview"), None)
+        assert preview_ev is not None
+        decision = preview_ev["payload"]["decision"]
+        assert "goal" in decision
+        assert "action" in decision
+        assert "reason" in decision
+        # State must NOT be mutated (agent still present)
+        assert bot_id in new_state["agents"]
+
+    def test_preview_bot_decision_does_not_mutate_world_turn(self):
+        """Dry-running the bot decision must not advance the world turn."""
+        state = self._state()
+        initial_turn = state["world_turn"]
+        loc_id = next(iter(state["locations"]))
+        state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        bot_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "bot"
+        )
+        new_state, _ = self._r("debug_preview_bot_decision", {"agent_id": bot_id}, state)
+        assert new_state["world_turn"] == initial_turn
+
+
+# ─────────────────────────────────────────────────────────────────
+# Unified stalker model — controller.kind consistency
+# ─────────────────────────────────────────────────────────────────
+
+class TestUnifiedStalkerModel:
+    """
+    All stalker agents (player and NPC) use the same _make_stalker_agent factory.
+    The only distinction is controller.kind = 'human' | 'bot'.
+    """
+
+    def _state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=42, num_players=1, num_ai_stalkers=2, num_mutants=0, num_traders=0)
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "player1")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "player1")
+
+    # ── controller.kind values ────────────────────────────────────────────────
+
+    def test_player_agent_controller_kind_is_human(self):
+        state = self._state()
+        agent = state["agents"]["agent_p0"]
+        assert agent["controller"]["kind"] == "human"
+
+    def test_npc_agent_controller_kind_is_bot(self):
+        state = self._state()
+        agent = state["agents"]["agent_ai_0"]
+        assert agent["controller"]["kind"] == "bot"
+
+    def test_debug_spawn_stalker_controller_kind_is_bot(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        new_id = (set(new_state["agents"]) - set(state["agents"])).pop()
+        assert new_state["agents"][new_id]["controller"]["kind"] == "bot"
+
+    def test_take_control_sets_controller_to_human(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        npc_id = "agent_ai_0"
+        new_state, events = self._r("take_control", {"agent_id": npc_id}, state)
+        assert new_state["agents"][npc_id]["controller"]["kind"] == "human"
+        assert new_state["agents"][npc_id]["controller"]["participant_id"] == "player1"
+        assert any(e["event_type"] == "agent_control_taken" for e in events)
+
+    def test_take_control_releases_previous_agent_to_bot(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        npc_id = "agent_ai_0"
+        new_state, _ = self._r("take_control", {"agent_id": npc_id}, state)
+        # Previous player agent should be released back to bot
+        assert new_state["agents"]["agent_p0"]["controller"]["kind"] == "bot"
+        assert new_state["agents"]["agent_p0"]["controller"]["participant_id"] is None
+
+    def test_take_control_validates_bot_only(self):
+        state = self._state()
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        # Taking control of a human-controlled agent should fail
+        result = self._v("take_control", {"agent_id": "agent_p0"}, state)
+        assert not result.valid
+        assert "player" in result.error.lower()
+
+    # ── same fields on player and NPC agents ─────────────────────────────────
+
+    _REQUIRED_FIELDS = [
+        "id", "archetype", "name", "location_id", "hp", "max_hp", "radiation",
+        "hunger", "thirst", "sleepiness", "money", "inventory", "equipment",
+        "faction", "controller", "is_alive", "action_used",
+        "experience", "skill_combat", "skill_stalker", "skill_trade",
+        "skill_medicine", "skill_social",
+        "global_goal", "current_goal", "risk_tolerance", "material_threshold",
+        "scheduled_action", "action_queue", "memory",
+    ]
+
+    def test_player_agent_has_all_required_fields(self):
+        state = self._state()
+        agent = state["agents"]["agent_p0"]
+        for field in self._REQUIRED_FIELDS:
+            assert field in agent, f"Player agent missing field: {field}"
+
+    def test_npc_agent_has_all_required_fields(self):
+        state = self._state()
+        agent = state["agents"]["agent_ai_0"]
+        for field in self._REQUIRED_FIELDS:
+            assert field in agent, f"NPC agent missing field: {field}"
+
+    def test_player_and_npc_have_same_field_set(self):
+        state = self._state()
+        player_fields = set(state["agents"]["agent_p0"].keys())
+        npc_fields = set(state["agents"]["agent_ai_0"].keys())
+        assert player_fields == npc_fields, (
+            f"Field mismatch — only in player: {player_fields - npc_fields}, "
+            f"only in NPC: {npc_fields - player_fields}"
+        )
+
+    # ── global_goal present for all agents ────────────────────────────────────
+
+    def test_player_agent_has_global_goal(self):
+        state = self._state()
+        agent = state["agents"]["agent_p0"]
+        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+
+    def test_npc_agent_has_global_goal(self):
+        state = self._state()
+        agent = state["agents"]["agent_ai_0"]
+        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+
+    def test_all_agents_have_material_threshold(self):
+        state = self._state()
+        for aid, agent in state["agents"].items():
+            assert "material_threshold" in agent, f"Agent {aid} missing material_threshold"
+            assert isinstance(agent["material_threshold"], int)
+            assert agent["material_threshold"] > 0

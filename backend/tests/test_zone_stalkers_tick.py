@@ -144,7 +144,7 @@ class TestWorldRulesNewCommands:
         new_state, events = self._r("sleep", {"hours": 6}, state)
         scheduled = new_state["agents"]["agent_p0"]["scheduled_action"]
         assert scheduled["type"] == "sleep"
-        assert scheduled["turns_remaining"] == 6
+        assert scheduled["turns_remaining"] == 6 * 60  # 1 turn = 1 minute
         assert any(e["event_type"] == "sleep_started" for e in events)
 
     # join_event ─────────────────────────────────────────────────
@@ -187,12 +187,15 @@ class TestTickRules:
     def test_tick_advances_world_hour(self):
         state = _make_world()
         initial_hour = state.get("world_hour", 0)
-        new_state, _ = self._tick(state)
-        assert new_state["world_hour"] == initial_hour + 1
+        # 1 tick = 1 minute; need 60 ticks to advance 1 hour
+        for _ in range(60):
+            state, _ = self._tick(state)
+        assert state["world_hour"] == initial_hour + 1
 
     def test_tick_day_rollover(self):
         state = _make_world()
         state["world_hour"] = 23
+        state["world_minute"] = 59
         state["world_day"] = 1
         new_state, events = self._tick(state)
         assert new_state["world_hour"] == 0
@@ -251,7 +254,7 @@ class TestTickRules:
             state, _ = self._tick(state)
         memory = state["agents"]["agent_p0"]["memory"]
         assert len(memory) > 0
-        assert any(m["type"] == "travel" for m in memory)
+        assert any(m["type"] == "action" for m in memory)
 
     # Explore completion ─────────────────────────────────────────
 
@@ -271,7 +274,7 @@ class TestTickRules:
         state, _ = self._tick(state)
         memory = state["agents"]["agent_p0"]["memory"]
         assert len(memory) > 0
-        assert any(m["type"] == "explore" for m in memory)
+        assert any(m["type"] == "action" for m in memory)
 
     # Sleep completion ───────────────────────────────────────────
 
@@ -285,7 +288,8 @@ class TestTickRules:
             pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 4}, state, "player1")
-        for _ in range(4):
+        # 1 turn = 1 minute; sleep(4 hours) = 240 ticks
+        for _ in range(4 * 60):
             state, _ = self._tick(state)
         assert state["agents"]["agent_p0"]["hp"] > 50
 
@@ -299,7 +303,8 @@ class TestTickRules:
             pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 4}, state, "player1")
-        for _ in range(4):
+        # 1 turn = 1 minute; sleep(4 hours) = 240 ticks
+        for _ in range(4 * 60):
             state, _ = self._tick(state)
         assert state["agents"]["agent_p0"]["radiation"] < 50
 
@@ -312,9 +317,10 @@ class TestTickRules:
             pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 2}, state, "player1")
-        for _ in range(2):
+        # 1 turn = 1 minute; sleep(2 hours) = 120 ticks
+        for _ in range(2 * 60):
             state, _ = self._tick(state)
-        assert any(m["type"] == "sleep" for m in state["agents"]["agent_p0"]["memory"])
+        assert any(m["type"] == "action" for m in state["agents"]["agent_p0"]["memory"])
 
 
 class TestEventRules:
@@ -532,7 +538,9 @@ class TestNeedsDegradation:
         return tick_zone_map(state)
 
     def test_hunger_increases_each_tick(self):
+        # Survival needs degrade once per in-game hour (every 60 ticks)
         state = _make_world()
+        state["world_minute"] = 59  # next tick crosses hour boundary
         agent = state["agents"]["agent_p0"]
         initial_hunger = agent.get("hunger", 0)
         new_state, _ = self._tick(state)
@@ -540,12 +548,14 @@ class TestNeedsDegradation:
 
     def test_thirst_increases_each_tick(self):
         state = _make_world()
+        state["world_minute"] = 59
         initial_thirst = state["agents"]["agent_p0"].get("thirst", 0)
         new_state, _ = self._tick(state)
         assert new_state["agents"]["agent_p0"]["thirst"] > initial_thirst
 
     def test_sleepiness_increases_each_tick(self):
         state = _make_world()
+        state["world_minute"] = 59
         initial_sleep = state["agents"]["agent_p0"].get("sleepiness", 0)
         new_state, _ = self._tick(state)
         assert new_state["agents"]["agent_p0"]["sleepiness"] > initial_sleep
@@ -560,6 +570,7 @@ class TestNeedsDegradation:
 
     def test_thirst_critical_damages_hp(self):
         state = _make_world()
+        state["world_minute"] = 59  # next tick crosses hour boundary → degradation applied
         state["agents"]["agent_p0"]["thirst"] = 80
         state["agents"]["agent_p0"]["hunger"] = 0
         initial_hp = state["agents"]["agent_p0"]["hp"]
@@ -568,6 +579,7 @@ class TestNeedsDegradation:
 
     def test_hunger_critical_damages_hp(self):
         state = _make_world()
+        state["world_minute"] = 59  # next tick crosses hour boundary → degradation applied
         state["agents"]["agent_p0"]["hunger"] = 80
         state["agents"]["agent_p0"]["thirst"] = 0
         initial_hp = state["agents"]["agent_p0"]["hp"]
@@ -577,8 +589,29 @@ class TestNeedsDegradation:
     def test_sleep_resets_sleepiness(self):
         from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
         agent = {"hp": 60, "max_hp": 100, "radiation": 10, "sleepiness": 90}
-        sched = {"turns_total": 6}
+        sched = {"hours": 6}  # hours field used by _resolve_sleep
         _resolve_sleep(agent, sched, 5, {})
+        assert agent["sleepiness"] == 0
+
+    def test_sleep_resolve_hours_field(self):
+        """_resolve_sleep heals correctly when scheduled with the 'hours' key."""
+        from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
+        agent = {"hp": 50, "max_hp": 100, "radiation": 30, "sleepiness": 80, "memory": []}
+        _resolve_sleep(agent, {"hours": 4}, 1, {"world_day": 1, "world_hour": 6, "world_minute": 0})
+        assert agent["hp"] == min(50 + 15 * 4, 100)  # 110 → capped at max_hp=100
+        assert agent["radiation"] == 30 - 5 * 4     # 10
+        assert agent["sleepiness"] == 0
+
+    def test_sleep_resolve_turns_total_fallback(self):
+        """_resolve_sleep falls back to turns_total when 'hours' key is absent (legacy saves)."""
+        from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep, _HOUR_IN_TURNS
+        agent = {"hp": 70, "max_hp": 100, "radiation": 20, "sleepiness": 75, "memory": []}
+        # Simulate legacy scheduled action that used turns_total=360 (= 6 h × 60 turns/h)
+        sched = {"turns_total": 6 * _HOUR_IN_TURNS}
+        _resolve_sleep(agent, sched, 1, {"world_day": 1, "world_hour": 0, "world_minute": 0})
+        # 6 hours → same result as hours=6
+        assert agent["hp"] == 100          # 70 + 6*15 = 160 → capped at 100
+        assert agent["radiation"] == 0     # 20 - 6*5 = -10 → clamped to 0
         assert agent["sleepiness"] == 0
 
 
@@ -642,3 +675,761 @@ class TestActionQueue:
 
         new_state, _ = self._tick(state)
         assert new_state["agents"]["agent_p0"]["scheduled_action"] is None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Artifact → Sell → Trader scenario (ALIVe behaviour)
+# ─────────────────────────────────────────────────────────────────
+
+def _make_trader_scenario():
+    """
+    Build a minimal world state for the trader scenario:
+
+    - One NPC stalker (global_goal="get_rich", wealth < threshold so
+      it will try to gather resources / sell artifacts)
+    - One trader in a DIFFERENT location (so the stalker has to travel)
+    - ONLY our test artifact placed at the stalker's starting location
+
+    Location layout (two connected locations):
+        stalker_loc ──► trader_loc
+    """
+    from app.games.zone_stalkers.generators.zone_generator import generate_zone
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+
+    # Generate a world with no bots/traders (we'll add them manually)
+    state = generate_zone(seed=99, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    # Pick two connected locations
+    locs = list(state["locations"].keys())
+    stalker_loc = locs[0]
+    # Find a connected neighbor for the trader
+    conns = state["locations"][stalker_loc].get("connections", [])
+    trader_loc = conns[0]["to"] if conns else locs[1]
+
+    # Spawn the stalker
+    from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
+    import random
+    rng = random.Random(1)
+    stalker = _make_stalker_agent(
+        agent_id="bot_stalker",
+        name="Test Stalker",
+        location_id=stalker_loc,
+        controller_kind="bot",
+        participant_id=None,
+        rng=rng,
+    )
+    stalker["global_goal"] = "get_rich"
+    stalker["material_threshold"] = 999999  # always in "gather" phase initially
+    stalker["inventory"] = []  # clear inventory so wealth is just money
+    stalker["money"] = 100
+    state["agents"]["bot_stalker"] = stalker
+    state["locations"][stalker_loc]["agents"].append("bot_stalker")
+
+    # Place ONLY our test artifact at the stalker's location (clear any generator artifacts)
+    art_type = "soul"
+    art_info = ARTIFACT_TYPES[art_type]
+    artifact = {
+        "id": "art_test_001",
+        "type": art_type,
+        "name": art_info["name"],
+        "value": art_info["value"],
+    }
+    state["locations"][stalker_loc]["artifacts"] = [artifact]  # replace, not append
+    # Artifacts only spawn in anomaly zones; ensure the location has activity so exploration triggers
+    state["locations"][stalker_loc].setdefault("anomaly_activity", 5)
+
+    # Spawn a trader at trader_loc
+    trader = {
+        "id": "trader_test",
+        "archetype": "trader_npc",
+        "name": "Sidorovich",
+        "location_id": trader_loc,
+        "inventory": [],
+        "money": 10000,
+        "memory": [],
+    }
+    state.setdefault("traders", {})["trader_test"] = trader
+    state["locations"][trader_loc]["agents"].append("trader_test")
+
+    return state, "bot_stalker", "trader_test", stalker_loc, trader_loc, artifact
+
+
+class TestArtifactToTraderScenario:
+    """
+    Verify that a bot stalker with global_goal='get_rich':
+      1. Starts exploration (artifacts must be found via explore, not picked up directly)
+      2. After exploration completes, artifact may be found and is recorded in memory
+      3. Decides to travel to the trader's location once artifact is in inventory
+      4. After arriving, sells the artifact to the trader (both sides record it in memory)
+
+    Note: the sell action fires in the SAME tick as travel completion (bot AI
+    decision step runs in the same tick immediately after the scheduled action
+    clears), so we use _run_until_sold() to advance through the whole cycle.
+    """
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _run_until_artifact_acquired(self, state, sid, artifact_id, max_ticks=300):
+        """Tick until the stalker has the artifact in inventory or max_ticks reached."""
+        for _ in range(max_ticks):
+            agent = state["agents"][sid]
+            if any(i["id"] == artifact_id for i in agent.get("inventory", [])):
+                return state
+            state, _ = self._tick(state)
+        return state
+
+    def _run_until_sold(self, state, sid, max_ticks=400):
+        """Tick until the stalker has a trade_sell (action) entry in memory or max_ticks."""
+        for _ in range(max_ticks):
+            agent = state["agents"][sid]
+            if any(m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"
+                   for m in agent.get("memory", [])):
+                return state
+            state, _ = self._tick(state)
+        return state
+
+    # ── Phase 1: Exploration start ────────────────────────────────────────────
+
+    def test_tick1_starts_exploration(self):
+        """Artifacts must be found via explore — NPC starts exploration on tick 1."""
+        state, sid, *_ = _make_trader_scenario()
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have a scheduled action"
+        assert sched["type"] == "explore", (
+            f"Agent should start exploring, not '{sched['type']}' "
+            "(artifacts must be obtained through explore, not direct pickup)"
+        )
+        assert any(e["event_type"] == "exploration_started" for e in events)
+
+    def test_tick1_explore_decision_recorded_in_memory(self):
+        """Decision to explore should be recorded on tick 1."""
+        state, sid, *_ = _make_trader_scenario()
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][sid]
+        explore_mems = [m for m in agent["memory"]
+                        if m["type"] == "decision"
+                        and m["effects"].get("action_kind") == "explore_decision"]
+        assert len(explore_mems) >= 1
+
+    def test_artifact_found_via_explore(self):
+        """After explore completes, artifact must appear in inventory (via explore, not direct pickup)."""
+        state, sid, _, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_artifact_acquired(state, sid, artifact["id"])
+        agent = state["agents"][sid]
+        assert any(i["id"] == artifact["id"] for i in agent.get("inventory", [])), \
+            "Artifact should eventually be found via exploration"
+        # Verify it was found through explore action, not direct pickup
+        pickup_mems = [m for m in agent["memory"]
+                       if m["type"] == "action" and m["effects"].get("action_kind") == "pickup"
+                       and m["effects"].get("artifact_type") == "soul"]
+        assert len(pickup_mems) >= 1
+        mem = pickup_mems[0]
+        assert mem["effects"]["artifact_value"] > 0
+
+    # ── Phase 2: Travel decision toward trader ────────────────────────────────
+
+    def test_decides_to_travel_to_trader_after_explore(self):
+        """After explore finds the artifact, agent should plan to travel to trader."""
+        state, sid, _, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        # Run until artifact is acquired via explore
+        state = self._run_until_artifact_acquired(state, sid, artifact["id"])
+        # One more tick for the travel decision
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have a scheduled travel action after acquiring artifact"
+        assert sched["type"] == "travel"
+        assert sched.get("final_target_id") == trader_loc
+
+    def test_travel_decision_recorded_in_memory(self):
+        """Travel-to-trader decision must be recorded in memory after artifact is found."""
+        state, sid, _, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_artifact_acquired(state, sid, artifact["id"])
+        # Run one more tick for travel decision
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][sid]
+        decision_mems = [m for m in agent["memory"] if m["type"] == "decision"]
+        assert len(decision_mems) >= 1
+        # The artifacts_count memory is written in the trading opportunity check
+        trader_decision_mems = [m for m in decision_mems
+                                 if m["effects"].get("artifacts_count", 0) >= 1]
+        assert len(trader_decision_mems) >= 1
+
+    # ── Phase 3: Sell to trader ───────────────────────────────────────────────
+
+    def test_sell_completes_full_cycle(self):
+        """Full scenario: pickup → travel → sell."""
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        initial_stalker_money = state["agents"][sid]["money"]
+        initial_trader_money = state["traders"][tid]["money"]
+
+        state = self._run_until_sold(state, sid)
+
+        agent = state["agents"][sid]
+        # Stalker reached trader location
+        assert agent["location_id"] == trader_loc
+        # Artifact gone from inventory
+        assert not any(i["id"] == artifact["id"] for i in agent["inventory"])
+        # Stalker earned money
+        assert agent["money"] > initial_stalker_money
+        # bot_sold_artifact event was emitted somewhere in the run
+        # (checked via memory instead since events are per-tick)
+        sell_mems = [m for m in agent["memory"]
+                     if m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"]
+        assert len(sell_mems) >= 1
+
+    def test_sell_recorded_in_stalker_memory(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        agent = state["agents"][sid]
+        sell_mems = [m for m in agent["memory"]
+                     if m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"]
+        assert len(sell_mems) >= 1
+        mem = sell_mems[0]
+        assert "soul" in mem["effects"]["items_sold"]
+        assert mem["effects"]["money_gained"] > 0
+        assert mem["effects"]["trader_id"] == tid
+
+    def test_sell_recorded_in_trader_memory(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        trader = state["traders"][tid]
+        buy_mems = [m for m in trader.get("memory", []) if m["type"] == "trade_buy"]
+        assert len(buy_mems) >= 1
+        mem = buy_mems[0]
+        assert "soul" in mem["effects"]["items_bought"]
+        assert mem["effects"]["money_spent"] > 0
+        assert mem["effects"]["stalker_id"] == sid
+
+    def test_trader_receives_artifact(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        trader = state["traders"][tid]
+        assert any(i.get("type") == "soul" for i in trader["inventory"]), \
+            "Trader should have the soul artifact after purchase"
+
+    def test_trader_money_decreased(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        initial_trader_money = state["traders"][tid]["money"]
+        state = self._run_until_sold(state, sid)
+
+        trader = state["traders"][tid]
+        assert trader["money"] < initial_trader_money
+
+    def test_stalker_memory_has_full_chain(self):
+        """Stalker memory must contain pickup → decision → travel → trade_sell."""
+        state, sid, *_ = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        agent = state["agents"][sid]
+        mem_types = [m["type"] for m in agent["memory"]]
+        action_kinds = [m["effects"].get("action_kind") for m in agent["memory"]
+                        if m["type"] == "action"]
+        assert "action" in mem_types  # at least one action entry (pickup, travel, or sell)
+        assert "decision" in mem_types
+        assert "pickup" in action_kinds
+        assert "trade_sell" in action_kinds
+        # Check ordering: pickup before travel_arrived before trade_sell
+        def first_idx(kind):
+            for i, m in enumerate(agent["memory"]):
+                if m["type"] == "action" and m["effects"].get("action_kind") == kind:
+                    return i
+            return 999
+        p = first_idx("pickup")
+        t = first_idx("travel_arrived")
+        s = first_idx("trade_sell")
+        assert p < t < s, f"Expected pickup({p}) < travel_arrived({t}) < trade_sell({s})"
+
+    # ── Debug spawn trader command ───────────────────────────────────────────
+
+    def test_debug_spawn_trader_valid(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        loc_id = next(iter(state["locations"]))
+        result = validate_world_command("debug_spawn_trader", {"loc_id": loc_id}, state, "any")
+        assert result.valid
+
+    def test_debug_spawn_trader_invalid_no_loc(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        result = validate_world_command("debug_spawn_trader", {}, state, "any")
+        assert not result.valid
+
+    def test_debug_spawn_trader_creates_trader_with_memory(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command, resolve_world_command
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        loc_id = next(iter(state["locations"]))
+        new_state, events = resolve_world_command(
+            "debug_spawn_trader", {"loc_id": loc_id, "name": "TestTrader"}, state, "any"
+        )
+        new_tid = (set(new_state["traders"]) - set(state["traders"])).pop()
+        trader = new_state["traders"][new_tid]
+        assert trader["name"] == "TestTrader"
+        assert trader["location_id"] == loc_id
+        assert "memory" in trader
+        assert isinstance(trader["memory"], list)
+        assert any(e["event_type"] == "debug_trader_spawned" for e in events)
+
+    def test_trader_has_memory_field_from_generator(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=2)
+        for tid, trader in state["traders"].items():
+            assert "memory" in trader, f"Trader {tid} missing memory field"
+            assert isinstance(trader["memory"], list)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Per-turn location observations
+# ─────────────────────────────────────────────────────────────────
+
+class TestPerTurnObservations:
+    """_write_location_observations is called every tick and uses deduplication."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def test_observation_written_when_other_agent_present(self):
+        """An agent ticking in the same location as another agent writes a stalkers observation."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=2, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        # Force both agents to the same location
+        agents = list(state["agents"].keys())
+        a0, a1 = agents[0], agents[1]
+        shared_loc = state["agents"][a0]["location_id"]
+        state["agents"][a1]["location_id"] = shared_loc
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"][a0]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "stalkers"]
+        assert len(obs) >= 1
+        assert state["agents"][a1]["name"] in obs[0]["effects"]["names"]
+
+    def test_no_artifact_observation_on_tick_arrival(self):
+        """Artifacts at a location do NOT generate an 'artifacts' observation on arrival/tick.
+        Artifact observations are only written when an artifact is found via explore."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        state["locations"][loc_id].setdefault("artifacts", []).append(
+            {"id": "art_obs_001", "type": "fire", "value": 100}
+        )
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
+        assert len(obs) == 0, "Artifacts should NOT be observed passively; only via explore."
+
+    def test_observation_deduplicated_on_second_tick(self):
+        """Identical observations are NOT re-written on the next tick — deduplication works.
+        Test uses loose items since artifacts are no longer passively observed on tick."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        state["locations"][loc_id].setdefault("items", []).append(
+            {"id": "item_dedup_001", "type": "medkit", "value": 50}
+        )
+        state1, _ = self._tick(state)
+        count_after_tick1 = sum(
+            1 for m in state1["agents"]["agent_p0"]["memory"]
+            if m["type"] == "observation" and m["effects"].get("observed") == "items"
+        )
+        state2, _ = self._tick(state1)
+        count_after_tick2 = sum(
+            1 for m in state2["agents"]["agent_p0"]["memory"]
+            if m["type"] == "observation" and m["effects"].get("observed") == "items"
+        )
+        # Should NOT have added a duplicate entry on the second tick
+        assert count_after_tick2 == count_after_tick1
+
+    def test_no_artifact_observation_on_content_change(self):
+        """Adding more artifacts to a location still does NOT generate artifact observations
+        on tick. Only explore can produce artifact observations."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        state["locations"][loc_id].setdefault("artifacts", []).append(
+            {"id": "art_change_001", "type": "fire", "value": 100}
+        )
+        state1, _ = self._tick(state)
+        # Add a second artifact before the next tick
+        state1["locations"][loc_id]["artifacts"].append(
+            {"id": "art_change_002", "type": "soul", "value": 200}
+        )
+        state2, _ = self._tick(state1)
+        obs = [m for m in state2["agents"]["agent_p0"]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
+        # No artifact observations should exist — not written on tick
+        assert len(obs) == 0
+
+    def test_trader_visible_in_stalker_observations(self):
+        """Traders at the same location appear in the 'stalkers' observation entry."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=1, num_ai_stalkers=0,
+                              num_mutants=0, num_traders=1)
+        state["player_agents"]["player1"] = list(state["agents"].keys())[0]
+        agent_id = state["player_agents"]["player1"]
+        agent = state["agents"][agent_id]
+        loc_id = agent["location_id"]
+        # Move the trader to the agent's location
+        trader_id = list(state["traders"].keys())[0]
+        state["traders"][trader_id]["location_id"] = loc_id
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"][agent_id]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "stalkers"]
+        trader_name = state["traders"][trader_id]["name"]
+        assert any(trader_name in o["effects"]["names"] for o in obs)
+
+    def test_no_observation_when_location_empty(self):
+        """No observation entries are written when the location is completely empty."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        # Ensure location is clean
+        state["locations"][loc_id]["artifacts"] = []
+        state["locations"][loc_id]["items"] = []
+        state["locations"][loc_id].pop("agents", None)
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
+               if m["type"] == "observation"]
+        assert len(obs) == 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# Travel hop action memory
+# ─────────────────────────────────────────────────────────────────
+
+class TestTravelHopActionMemory:
+    """Each intermediate travel hop must be recorded as an 'action' memory entry."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _setup_two_hop_travel(self):
+        """Create a 3-location chain (A→B→C) and start agent travelling A→B→C."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=1, num_ai_stalkers=0,
+                              num_mutants=0, num_traders=0)
+        locs = list(state["locations"].keys())
+        # Use first three locations; wire A→B→C connections
+        a, b, c = locs[0], locs[1], locs[2]
+        for lid in (a, b, c):
+            state["locations"][lid]["connections"] = []
+        state["locations"][a]["connections"] = [{"to": b, "travel_time": 1}]
+        state["locations"][b]["connections"] = [{"to": c, "travel_time": 1}]
+
+        agent_id = list(state["agents"].keys())[0]
+        agent = state["agents"][agent_id]
+        agent["location_id"] = a
+        agent["memory"] = []
+        # Schedule a 2-hop journey: immediate target = B, final = C, remaining = [C]
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": b,
+            "final_target_id": c,
+            "remaining_route": [c],
+            "started_turn": state.get("world_turn", 1),
+        }
+        return state, agent_id, a, b, c
+
+    def test_hop_recorded_as_action(self):
+        """Completing an intermediate hop writes an action with action_kind='travel_hop'."""
+        state, agent_id, a, b, c = self._setup_two_hop_travel()
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][agent_id]
+        hop_mems = [m for m in agent["memory"]
+                    if m["type"] == "action"
+                    and m["effects"].get("action_kind") == "travel_hop"]
+        assert len(hop_mems) >= 1
+        assert hop_mems[0]["effects"]["to_loc"] == b
+        assert hop_mems[0]["effects"]["final_target"] == c
+
+    def test_hop_title_contains_location_name(self):
+        """The hop action title contains the name of the intermediate location."""
+        state, agent_id, a, b, c = self._setup_two_hop_travel()
+        b_name = state["locations"][b].get("name", b)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][agent_id]
+        hop_mems = [m for m in agent["memory"]
+                    if m["type"] == "action"
+                    and m["effects"].get("action_kind") == "travel_hop"]
+        assert any(b_name in m["title"] for m in hop_mems)
+
+    def test_final_arrival_still_recorded(self):
+        """After all hops, the final arrival is still recorded as travel_arrived."""
+        state, agent_id, a, b, c = self._setup_two_hop_travel()
+        # Tick once to complete A→B hop (schedules B→C), then tick again to complete B→C
+        state, _ = self._tick(state)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][agent_id]
+        arrived = [m for m in agent["memory"]
+                   if m["type"] == "action"
+                   and m["effects"].get("action_kind") == "travel_arrived"]
+        assert len(arrived) >= 1
+        assert arrived[-1]["effects"]["to_loc"] == c
+
+
+# ─────────────────────────────────────────────────────────────────
+# Unreachable-target handling
+# ─────────────────────────────────────────────────────────────────
+
+def _make_minimal_state(locations_cfg, agent_loc_id="A"):
+    """Build a minimal game state with only the provided locations and one stalker agent.
+
+    *locations_cfg* is a dict:
+        { loc_id: {"connections": [...], "artifacts": [...], ...}, ... }
+    All other state fields are set to safe defaults.
+    """
+    locations = {}
+    for lid, cfg in locations_cfg.items():
+        locations[lid] = {
+            "name": f"Loc {lid}",
+            "agents": [],
+            "mutants": [],
+            "artifacts": cfg.get("artifacts", []),
+            "anomaly_activity": 0,
+            "connections": cfg.get("connections", []),
+        }
+    agent_id = "test_agent"
+    agent = {
+        "id": agent_id,
+        "name": "Test Stalker",
+        "location_id": agent_loc_id,
+        "hp": 100,
+        "hunger": 0,
+        "thirst": 0,
+        "sleepiness": 0,
+        "is_alive": True,
+        "inventory": [],
+        "money": 0,
+        "memory": [],
+        "scheduled_action": None,
+        "action_used": False,
+        "controller": {"kind": "bot", "participant_id": None},
+        "global_goal": "survive",
+        "current_goal": None,
+        "material_threshold": 1000,
+        "risk_tolerance": 0.5,
+        "faction": "loner",
+    }
+    locations[agent_loc_id].setdefault("agents", []).append(agent_id)
+    return {
+        "locations": locations,
+        "agents": {agent_id: agent},
+        "traders": {},
+        "mutants": {},
+        "world_turn": 1,
+        "world_day": 1,
+        "world_hour": 6,
+        "world_minute": 0,
+        "max_turns": 0,
+        "active_events": [],
+        "player_agents": {},
+    }
+
+
+class TestUnreachableTargetHandling:
+    """Tests for closed-connection / unreachable-target scenarios."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    # ── Part 1: _bfs_route respects closed connections ─────────────────────────
+
+    def test_bfs_route_skips_closed_connection(self):
+        """_bfs_route returns [] when the only path uses a closed connection."""
+        from app.games.zone_stalkers.rules.world_rules import _bfs_route
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1, "closed": True}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {},
+        }, agent_loc_id="A")
+        route = _bfs_route(state["locations"], "A", "C")
+        assert route == [], f"Expected no route, got {route}"
+
+    def test_bfs_route_uses_open_connection(self):
+        """_bfs_route succeeds when connections are open."""
+        from app.games.zone_stalkers.rules.world_rules import _bfs_route
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {},
+        }, agent_loc_id="A")
+        route = _bfs_route(state["locations"], "A", "C")
+        assert route == ["B", "C"]
+
+    def test_bfs_route_finds_alternative_around_closed(self):
+        """_bfs_route finds an alternate path when one connection is closed."""
+        from app.games.zone_stalkers.rules.world_rules import _bfs_route
+        state = _make_minimal_state({
+            "A": {"connections": [
+                {"to": "B", "travel_time": 1, "closed": True},
+                {"to": "C", "travel_time": 2},
+            ]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {},
+        }, agent_loc_id="A")
+        route = _bfs_route(state["locations"], "A", "C")
+        assert route == ["C"], "Should reach C via direct connection, skipping closed B path"
+
+    # ── Part 2: _find_richest_artifact_location respects reachability ──────────
+
+    def test_find_richest_skips_unreachable_location(self):
+        """When a rich artifact location is cut off by a closed connection, it is ignored."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_richest_artifact_location
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1, "closed": True}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}],
+                  "artifacts": [{"id": "art1", "type": "fireball", "value": 9999}]},
+            "C": {},
+        }, agent_loc_id="A")
+        best_id, best_val = _find_richest_artifact_location(
+            state, exclude_loc_id="A", from_loc_id="A"
+        )
+        assert best_id is None, f"Expected None, got {best_id}"
+
+    def test_find_richest_returns_reachable_location(self):
+        """When a rich artifact location is reachable, it is returned."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_richest_artifact_location
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {"artifacts": [{"id": "art2", "type": "fireball", "value": 500}]},
+        }, agent_loc_id="A")
+        best_id, best_val = _find_richest_artifact_location(
+            state, exclude_loc_id="A", from_loc_id="A"
+        )
+        assert best_id == "C"
+        assert best_val == 500
+
+    def test_find_richest_prefers_reachable_over_richer_unreachable(self):
+        """A reachable location with lower value beats an unreachable richer one."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_richest_artifact_location
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            # B is reachable but low value
+            "B": {"artifacts": [{"id": "art1", "type": "sparks", "value": 100}]},
+            # C is unreachable (no connection from A or B to C)
+            "C": {"artifacts": [{"id": "art2", "type": "fireball", "value": 9999}]},
+        }, agent_loc_id="A")
+        best_id, best_val = _find_richest_artifact_location(
+            state, exclude_loc_id="A", from_loc_id="A"
+        )
+        assert best_id == "B"
+        assert best_val == 100
+
+    # ── Part 3: Mid-travel blockage detection ──────────────────────────────────
+
+    def _state_agent_at_a_travelling_to_c_via_b(self, close_bc=False):
+        """Agent at A, scheduled: target_id=B, final_target_id=C, remaining=[C]."""
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1, "closed": close_bc}]},
+            "C": {},
+        }, agent_loc_id="A")
+        agent = state["agents"]["test_agent"]
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": "B",
+            "final_target_id": "C",
+            "remaining_route": ["C"],
+            "started_turn": 1,
+        }
+        return state
+
+    def test_mid_travel_abort_writes_decision_memory(self):
+        """When next hop is blocked and target is unreachable, a decision memory is written."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=True)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"]["test_agent"]
+        decision_mems = [
+            m for m in agent["memory"]
+            if m["type"] == "decision"
+            and m["effects"].get("action_kind") == "goal_cancelled"
+        ]
+        assert len(decision_mems) >= 1, "Expected a goal_cancelled decision memory"
+        assert decision_mems[0]["effects"]["cancelled_target"] == "C"
+
+    def test_mid_travel_abort_emits_travel_aborted_event(self):
+        """When route is blocked, a travel_aborted event is emitted."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=True)
+        new_state, events = self._tick(state)
+        aborted = [e for e in events if e["event_type"] == "travel_aborted"]
+        assert len(aborted) >= 1
+        assert aborted[0]["payload"]["final_target"] == "C"
+
+    def test_mid_travel_abort_clears_scheduled_action(self):
+        """After aborting, the agent is no longer travelling toward C."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=True)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"]["test_agent"]
+        sa = agent.get("scheduled_action")
+        # The travel-toward-C must be gone; if a new action was scheduled by the
+        # bot AI it must NOT be a travel with final_target_id == "C".
+        if sa is not None and sa.get("type") == "travel":
+            assert sa.get("final_target_id") != "C", \
+                "Agent should not be travelling toward the unreachable target anymore"
+
+    def test_mid_travel_normal_continues(self):
+        """When B→C is open, travel continues normally."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=False)
+        new_state, events = self._tick(state)
+        aborted = [e for e in events if e["event_type"] == "travel_aborted"]
+        assert len(aborted) == 0, "Should not abort when route is clear"
+        agent = new_state["agents"]["test_agent"]
+        sa = agent.get("scheduled_action")
+        assert sa is not None, "Agent should still be travelling"
+        assert sa["target_id"] == "C"
+
+    def test_mid_travel_reroutes_when_alternative_exists(self):
+        """When B→C is blocked but B→D→C is open, agent re-routes and writes a decision memory."""
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [
+                {"to": "C", "travel_time": 1, "closed": True},
+                {"to": "D", "travel_time": 1},
+            ]},
+            "C": {},
+            "D": {"connections": [{"to": "C", "travel_time": 1}]},
+        }, agent_loc_id="A")
+        agent = state["agents"]["test_agent"]
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": "B",
+            "final_target_id": "C",
+            "remaining_route": ["C"],
+            "started_turn": 1,
+        }
+        new_state, events = self._tick(state)
+        aborted = [e for e in events if e["event_type"] == "travel_aborted"]
+        assert len(aborted) == 0, "Should not abort when an alternative route exists"
+        agent_after = new_state["agents"]["test_agent"]
+        sa = agent_after.get("scheduled_action")
+        assert sa is not None, "Agent should still be travelling"
+        assert sa["final_target_id"] == "C"
+        # Re-route should write a decision memory entry
+        reroute_mems = [
+            m for m in agent_after["memory"]
+            if m["type"] == "decision"
+            and m["effects"].get("action_kind") == "route_changed"
+        ]
+        assert len(reroute_mems) >= 1, "Expected a route_changed decision memory"
+        assert reroute_mems[0]["effects"]["final_target"] == "C"
+        assert reroute_mems[0]["effects"]["rerouted_at"] == "B"
+

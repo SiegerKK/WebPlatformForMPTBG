@@ -15,7 +15,6 @@ export interface ZoneLocation {
   anomaly_activity?: number;
   dominant_anomaly_type?: string | null;
   connections: LocationConn[];
-  anomalies: Array<{ id: string; type: string; name: string; active?: boolean }>;
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];
@@ -30,17 +29,44 @@ export interface StalkerAgent {
   faction: string;
   is_alive: boolean;
   controller: { kind: string; participant_id?: string | null };
+  scheduled_action?: {
+    type: string;
+    target_id?: string;
+    turns_remaining?: number;
+  } | null;
 }
 
 export interface ZoneMapState {
   context_type: string;
   world_turn: number;
   world_hour: number;
+  world_minute: number;
   world_day: number;
+  max_turns?: number;
+  /** Emission (Выброс) mechanic */
+  emission_active: boolean;
+  emission_scheduled_turn: number;
+  emission_ends_turn: number;
   locations: Record<string, ZoneLocation>;
   agents: Record<string, StalkerAgent>;
   mutants: Record<string, { id: string; name: string; location_id: string; hp: number; max_hp: number; is_alive: boolean }>;
-  traders: Record<string, { id: string; name: string; location_id: string }>;
+  traders: Record<string, {
+    id: string;
+    name: string;
+    location_id: string;
+    money?: number;
+    inventory?: Array<{ id: string; type: string; name: string; value?: number }>;
+    memory?: Array<{
+      world_turn: number;
+      world_day: number;
+      world_hour: number;
+      world_minute?: number;
+      type: string;
+      title: string;
+      summary: string;
+      effects?: Record<string, unknown>;
+    }>;
+  }>;
   player_agents: Record<string, string>;
   active_events: string[];
   game_over: boolean;

@@ -6,7 +6,7 @@ defined in ``fixed_zone_map.FIXED_ZONE_LOCATIONS``.
 
 The topology (location names, regions, terrain, anomaly_activity, and
 connections with travel_time) is fixed.  Only the runtime contents
-(anomalies, artifacts, items, agents, mutants, traders) are generated
+(artifacts, items, agents, mutants, traders) are generated
 randomly from *seed*.
 """
 import copy
@@ -51,7 +51,6 @@ def generate_zone(
     for loc_id, blueprint in FIXED_ZONE_LOCATIONS.items():
         loc = copy.deepcopy(blueprint)
         loc["dominant_anomaly_type"] = None
-        loc["anomalies"] = []
         loc["artifacts"] = []
         loc["agents"] = []
         loc["items"] = []
@@ -59,37 +58,19 @@ def generate_zone(
 
     loc_ids: List[str] = list(locations.keys())
 
-    # 2. Place anomalies (more in high-anomaly-activity locations)
+    # 2. Set dominant_anomaly_type based on anomaly_activity
     anomaly_type_keys = list(ANOMALY_TYPES.keys())
     for loc_id, loc in locations.items():
-        num_anomalies = 0
-        anom_act = loc["anomaly_activity"]
-        if anom_act >= 6:
-            num_anomalies = rng.randint(2, 4)
-        elif anom_act >= 2:
-            num_anomalies = rng.randint(0, 2)
-        else:
-            num_anomalies = rng.randint(0, 1)
-        for _ in range(num_anomalies):
-            anom_type = rng.choice(anomaly_type_keys)
-            loc["anomalies"].append({
-                "id": _make_id("anom", rng),
-                "type": anom_type,
-                "name": ANOMALY_TYPES[anom_type]["name"],
-                "active": True,
-            })
-        # Set dominant_anomaly_type from the most common anomaly type present
-        if loc["anomalies"]:
-            counts: Dict[str, int] = {}
-            for a in loc["anomalies"]:
-                counts[a["type"]] = counts.get(a["type"], 0) + 1
-            loc["dominant_anomaly_type"] = max(counts, key=lambda k: counts[k])
+        if loc.get("anomaly_activity", 0) > 0:
+            loc["dominant_anomaly_type"] = rng.choice(anomaly_type_keys)
+        # else dominant_anomaly_type stays None (set above)
 
-    # 3. Place artifacts near anomalies
+    # 3. Place artifacts in locations with anomaly activity
     artifact_type_keys = list(ARTIFACT_TYPES.keys())
     for loc in locations.values():
-        if loc["anomalies"]:
-            num_artifacts = rng.randint(0, len(loc["anomalies"]))
+        anom_act = loc.get("anomaly_activity", 0)
+        if anom_act > 0:
+            num_artifacts = rng.randint(0, max(1, anom_act // 3))
             for _ in range(num_artifacts):
                 art_type = rng.choice(artifact_type_keys)
                 art_info = ARTIFACT_TYPES[art_type]
@@ -191,6 +172,7 @@ def generate_zone(
             "location_id": spawn_loc,
             "inventory": trader_inventory,
             "money": rng.randint(3000, 8000),
+            "memory": [],   # list of {world_turn, world_day, world_hour, type, title, summary, effects}
         }
         locations[spawn_loc]["agents"].append(trader_id)
 
@@ -198,8 +180,9 @@ def generate_zone(
         "context_type": "zone_map",
         "world_turn": 1,
         "world_hour": 6,    # Game starts at 06:00
+        "world_minute": 0,  # Minute within current hour (0-59)
         "world_day": 1,
-        "max_turns": 50,
+        "max_turns": 0,  # 0 = unlimited
         "seed": seed,
         "locations": locations,
         "agents": agents,
@@ -211,6 +194,11 @@ def generate_zone(
         "winner": None,
         "scores": {},
         "global_events": [],
+        # Emission (Выброс) mechanic: first emission 1-2 days after start
+        # 1 game day = 1440 turns (1 turn = 1 minute)
+        "emission_active": False,
+        "emission_scheduled_turn": rng.randint(1440, 2880),
+        "emission_ends_turn": 0,
     }
 
 
@@ -221,6 +209,7 @@ def _make_stalker_agent(
     controller_kind: str,
     participant_id,
     rng: random.Random,
+    global_goal: str | None = None,
 ) -> Dict[str, Any]:
     faction = rng.choice(["loner", "loner", "loner", "military", "duty", "freedom"])
     weapon = rng.choice([None, "pistol", "pistol", "ak74"])
@@ -245,6 +234,18 @@ def _make_stalker_agent(
             inventory.append(_make_item_instance(ammo_type, rng))
     if armor:
         equipment["armor"] = _make_item_instance(armor, rng)
+
+    # Choose global goal first so the material_threshold can be calibrated to it.
+    # get_rich agents aim for a large wealth target; others just need a modest buffer.
+    chosen_global_goal = global_goal if global_goal else rng.choice(
+        ["survive", "get_rich", "explore", "serve_faction"]
+    )
+    if chosen_global_goal == "get_rich":
+        # High threshold: agent pursues the global goal once truly wealthy
+        chosen_threshold = rng.randint(50_000, 1_000_000)
+    else:
+        # Modest buffer before switching to the global goal
+        chosen_threshold = rng.randint(3_000, 10_000)
 
     return {
         "id": agent_id,
@@ -280,10 +281,15 @@ def _make_stalker_agent(
         "skill_trade": 1,
         "skill_medicine": 1,
         "skill_social": 1,
+        "skill_survival":    1,
+        "skill_survival_xp": 0.0,
         # ─── Goals & Psychology ───
-        "global_goal": "survive",   # "survive" | "get_rich" | "explore" | "serve_faction"
+        "global_goal": chosen_global_goal,
         "current_goal": None,
-        "risk_tolerance": 0.5,      # 0.0–1.0
+        "risk_tolerance": round(rng.uniform(0.2, 0.9), 2),
+        # Wealth target: for get_rich agents this is a high bar (50k–1M);
+        # for others it's a modest buffer (3k–10k) before pursuing their global goal.
+        "material_threshold": chosen_threshold,
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one
