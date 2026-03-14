@@ -196,9 +196,18 @@ def _process_scheduled_action(
                     from app.games.zone_stalkers.rules.world_rules import _bfs_route
                     new_route = _bfs_route(state["locations"], destination, final_target)
                     if new_route:
-                        # Alternative path found — silently re-route.
+                        # Alternative path found — record the re-route decision and continue.
                         next_hop = new_route[0]
                         remaining_route = new_route[1:]
+                        final_name_rr = state["locations"].get(final_target, {}).get("name", final_target)
+                        dest_name_rr = state["locations"].get(destination, {}).get("name", destination)
+                        _add_memory(
+                            agent, world_turn, state, "decision",
+                            "Смена маршрута из-за недоступности перехода",
+                            f"Переход из «{dest_name_rr}» заблокирован. Нашёл альтернативный путь к «{final_name_rr}».",
+                            {"action_kind": "route_changed", "rerouted_at": destination,
+                             "final_target": final_target, "new_next_hop": next_hop},
+                        )
                     else:
                         # Final target is completely unreachable — cancel travel.
                         final_name = state["locations"].get(final_target, {}).get("name", final_target)
@@ -1174,7 +1183,13 @@ def _bot_pursue_goal(
             agent["current_goal"] = "goal_get_rich_seek_artifacts"
             return _bot_schedule_travel(agent_id, agent, best_art_loc_id, state, world_turn)
 
-        # No artifacts found anywhere — explore current location hoping to spawn some
+        # No artifacts found anywhere — record the decision and explore/wander
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "Нет доступных артефактов",
+            "На карте нет доступных артефактов. Продолжаю поиск.",
+            {"action_kind": "seek_artifacts_none_found"},
+        )
         if loc.get("anomalies") and rng.random() < 0.65:
             agent["scheduled_action"] = {
                 "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS,

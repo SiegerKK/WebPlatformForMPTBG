@@ -1360,7 +1360,7 @@ class TestUnreachableTargetHandling:
         assert sa["target_id"] == "C"
 
     def test_mid_travel_reroutes_when_alternative_exists(self):
-        """When B→C is blocked but B→D→C is open, agent re-routes silently."""
+        """When B→C is blocked but B→D→C is open, agent re-routes and writes a decision memory."""
         state = _make_minimal_state({
             "A": {"connections": [{"to": "B", "travel_time": 1}]},
             "B": {"connections": [
@@ -1387,4 +1387,13 @@ class TestUnreachableTargetHandling:
         sa = agent_after.get("scheduled_action")
         assert sa is not None, "Agent should still be travelling"
         assert sa["final_target_id"] == "C"
+        # Re-route should write a decision memory entry
+        reroute_mems = [
+            m for m in agent_after["memory"]
+            if m["type"] == "decision"
+            and m["effects"].get("action_kind") == "route_changed"
+        ]
+        assert len(reroute_mems) >= 1, "Expected a route_changed decision memory"
+        assert reroute_mems[0]["effects"]["final_target"] == "C"
+        assert reroute_mems[0]["effects"]["rerouted_at"] == "B"
 
