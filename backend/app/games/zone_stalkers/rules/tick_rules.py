@@ -1183,13 +1183,7 @@ def _bot_pursue_goal(
             agent["current_goal"] = "goal_get_rich_seek_artifacts"
             return _bot_schedule_travel(agent_id, agent, best_art_loc_id, state, world_turn)
 
-        # No artifacts found anywhere — record the decision and explore/wander
-        _add_memory(
-            agent, world_turn, state, "decision",
-            "Нет доступных артефактов",
-            "На карте нет доступных артефактов. Продолжаю поиск.",
-            {"action_kind": "seek_artifacts_none_found"},
-        )
+        # No artifacts found anywhere — explore current location hoping to spawn some
         if loc.get("anomalies") and rng.random() < 0.65:
             agent["scheduled_action"] = {
                 "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS,
