@@ -225,12 +225,14 @@ def resolve_world_command(
         while new_id in existing_ids:
             n += 1
             new_id = f"loc_debug_{n}"
+        region_val = payload.get("region")
         new_loc = {
             "id": new_id,
             "name": str(payload["name"]).strip(),
             "terrain_type": payload.get("terrain_type", "plain"),
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
+            "region": region_val if region_val else None,
             "connections": [],
             "artifacts": [],
             "agents": [],

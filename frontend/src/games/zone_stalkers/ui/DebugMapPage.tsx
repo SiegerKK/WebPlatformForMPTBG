@@ -778,11 +778,81 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           return;
         }
         const newPositions = parsed.positions as Record<string, { x: number; y: number }>;
+
+        // Detect if the legacy file has location IDs that don't exist in the current map.
+        // In that case the legacy "update only existing" path cannot create those cards,
+        // so we treat it as a full-map replacement (same as v3).
+        const legacyLocsData = (
+          parsed.locations &&
+          typeof parsed.locations === 'object' &&
+          !Array.isArray(parsed.locations)
+        ) ? parsed.locations as Record<string, {
+              name?: string;
+              terrain_type?: string;
+              anomaly_activity?: number;
+              dominant_anomaly_type?: string | null;
+              region?: string | null;
+            }>
+          : null;
+
+        const legacyConnsData = (
+          parsed.connections &&
+          typeof parsed.connections === 'object' &&
+          !Array.isArray(parsed.connections)
+        ) ? parsed.connections as Record<string, LocationConn[]> : null;
+
+        if (legacyLocsData) {
+          const unknownIds = Object.keys(legacyLocsData).filter((id) => !(id in zoneState.locations));
+          if (unknownIds.length > 0) {
+            // Some location IDs in the file don't exist on this map.
+            // Build embedded-connection location objects and run a full import.
+            const locCount = Object.keys(legacyLocsData).length;
+            const confirmed = window.confirm(
+              `⚠️ Полный импорт карты!\n\n` +
+              `Файл содержит ${unknownIds.length} из ${locCount} локаций, которых нет на текущей карте.\n` +
+              `Это заменит ВСЕ текущие локации (${locCount} в файле).\n\n` +
+              `Продолжить?`
+            );
+            if (!confirmed) { e.target.value = ''; return; }
+
+            // Build locations with embedded connections (combine v2 metadata + top-level connections)
+            const mergedLocations: Record<string, Record<string, unknown>> = {};
+            for (const [id, locData] of Object.entries(legacyLocsData)) {
+              mergedLocations[id] = {
+                ...locData,
+                connections: legacyConnsData?.[id] ?? [],
+                artifacts: [],
+              };
+            }
+            const newRegionsForFullImport = (
+              typeof parsed.regions === 'object' && !Array.isArray(parsed.regions) && parsed.regions !== null
+            ) ? parsed.regions as Record<string, { name: string; colorIndex: number }> : {};
+
+            await sendCommand('debug_import_full_map', {
+              locations: mergedLocations,
+              positions: newPositions,
+              regions: newRegionsForFullImport,
+            });
+
+            setDragOverrides(newPositions);
+            const newConnsForFull = {} as Record<string, LocationConn[]>;
+            for (const [id, locData] of Object.entries(mergedLocations)) {
+              if (Array.isArray(locData.connections)) {
+                newConnsForFull[id] = locData.connections as LocationConn[];
+              }
+            }
+            setLocalConns(newConnsForFull);
+            setLocalRegions(newRegionsForFullImport);
+            e.target.value = '';
+            return;
+          }
+        }
+
         setDragOverrides(newPositions);
 
         let newConns = localConnsRef.current;
-        if (parsed.connections && typeof parsed.connections === 'object' && !Array.isArray(parsed.connections)) {
-          newConns = parsed.connections as Record<string, LocationConn[]>;
+        if (legacyConnsData) {
+          newConns = legacyConnsData;
           setLocalConns(newConns);
         }
 
@@ -794,15 +864,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
         await persistMap(newPositions, newConns, newRegions);
 
-        if (parsed.locations && typeof parsed.locations === 'object' && !Array.isArray(parsed.locations)) {
-          const locsData = parsed.locations as Record<string, {
-            name?: string;
-            terrain_type?: string;
-            anomaly_activity?: number;
-            dominant_anomaly_type?: string | null;
-            region?: string | null;
-          }>;
-          for (const [locId, locData] of Object.entries(locsData)) {
+        if (legacyLocsData) {
+          for (const [locId, locData] of Object.entries(legacyLocsData)) {
             if (locId in zoneState.locations) {
               await sendCommand('debug_update_location', {
                 loc_id: locId,
@@ -851,6 +914,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
         terrain_type: data.terrainType,
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
+        region: data.region || null,
         position: pos,
       });
     },
