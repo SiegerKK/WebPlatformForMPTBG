@@ -185,9 +185,44 @@ def _process_scheduled_action(
             if total_dmg > 0:
                 agent["hp"] = max(0, agent["hp"] - total_dmg)
             if remaining_route:
-                # More hops to go — schedule the next hop immediately.
+                # More hops to go — verify the pre-computed next hop is still accessible.
                 next_hop = remaining_route[0]
                 conns = state["locations"].get(destination, {}).get("connections", [])
+                conn_to_next = next(
+                    (c for c in conns if c["to"] == next_hop), None
+                )
+                if conn_to_next is None or conn_to_next.get("closed"):
+                    # The pre-planned route is blocked — try to re-route from here.
+                    from app.games.zone_stalkers.rules.world_rules import _bfs_route
+                    new_route = _bfs_route(state["locations"], destination, final_target)
+                    if new_route:
+                        # Alternative path found — silently re-route.
+                        next_hop = new_route[0]
+                        remaining_route = new_route[1:]
+                    else:
+                        # Final target is completely unreachable — cancel travel.
+                        final_name = state["locations"].get(final_target, {}).get("name", final_target)
+                        dest_name_hop = state["locations"].get(destination, {}).get("name", destination)
+                        _add_memory(
+                            agent, world_turn, state, "decision",
+                            "Смена решения из-за недоступности цели",
+                            f"Цель «{final_name}» стала недоступна: маршрут заблокирован в «{dest_name_hop}».",
+                            {"action_kind": "goal_cancelled", "cancelled_target": final_target,
+                             "blocked_at": destination},
+                        )
+                        events.append({
+                            "event_type": "travel_aborted",
+                            "payload": {
+                                "agent_id": agent_id,
+                                "at": destination,
+                                "final_target": final_target,
+                                "reason": "route_blocked",
+                            },
+                        })
+                        # Write observations for what's visible at the current location
+                        _write_location_observations(agent_id, agent, destination, state, world_turn)
+                        return events
+
                 hop_time = next(
                     (c.get("travel_time", 12) for c in conns if c["to"] == next_hop),
                     12,
@@ -609,6 +644,7 @@ def _find_nearest_trader_location(from_loc_id: str, state: Dict[str, Any]) -> An
 def _find_richest_artifact_location(
     state: dict,
     exclude_loc_id: str | None = None,
+    from_loc_id: str | None = None,
 ) -> tuple:
     """
     Survey every location and return *(loc_id, total_artifact_value)* for the
@@ -616,11 +652,29 @@ def _find_richest_artifact_location(
 
     Returns *(None, 0)* when no artifacts exist anywhere on the map.
     The caller's current location can be excluded via *exclude_loc_id*.
+    When *from_loc_id* is provided, only locations reachable (via non-closed
+    connections) from that location are considered.
     """
+    # Build reachability set when a starting location is given
+    reachable: set | None = None
+    if from_loc_id:
+        locations_map = state.get("locations", {})
+        reachable = {from_loc_id}
+        queue = [from_loc_id]
+        while queue:
+            current = queue.pop(0)
+            for conn in locations_map.get(current, {}).get("connections", []):
+                nxt = conn.get("to")
+                if nxt and not conn.get("closed") and nxt not in reachable:
+                    reachable.add(nxt)
+                    queue.append(nxt)
+
     best_loc_id = None
     best_value = 0
     for loc_id, loc in state.get("locations", {}).items():
         if exclude_loc_id and loc_id == exclude_loc_id:
+            continue
+        if reachable is not None and loc_id not in reachable:
             continue
         arts = loc.get("artifacts", [])
         if arts:
@@ -1099,7 +1153,7 @@ def _bot_pursue_goal(
 
         # ── Steps 1-2: Survey ALL locations; travel to the richest artifact spot ─
         best_art_loc_id, best_art_value = _find_richest_artifact_location(
-            state, exclude_loc_id=loc_id
+            state, exclude_loc_id=loc_id, from_loc_id=loc_id
         )
         if best_art_loc_id:
             best_loc_name = locations.get(best_art_loc_id, {}).get("name", best_art_loc_id)

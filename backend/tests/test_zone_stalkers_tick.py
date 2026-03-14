@@ -1141,3 +1141,250 @@ class TestTravelHopActionMemory:
                    and m["effects"].get("action_kind") == "travel_arrived"]
         assert len(arrived) >= 1
         assert arrived[-1]["effects"]["to_loc"] == c
+
+
+# ─────────────────────────────────────────────────────────────────
+# Unreachable-target handling
+# ─────────────────────────────────────────────────────────────────
+
+def _make_minimal_state(locations_cfg, agent_loc_id="A"):
+    """Build a minimal game state with only the provided locations and one stalker agent.
+
+    *locations_cfg* is a dict:
+        { loc_id: {"connections": [...], "artifacts": [...], ...}, ... }
+    All other state fields are set to safe defaults.
+    """
+    locations = {}
+    for lid, cfg in locations_cfg.items():
+        locations[lid] = {
+            "name": f"Loc {lid}",
+            "agents": [],
+            "mutants": [],
+            "artifacts": cfg.get("artifacts", []),
+            "anomalies": [],
+            "anomaly_activity": 0,
+            "connections": cfg.get("connections", []),
+        }
+    agent_id = "test_agent"
+    agent = {
+        "id": agent_id,
+        "name": "Test Stalker",
+        "location_id": agent_loc_id,
+        "hp": 100,
+        "hunger": 0,
+        "thirst": 0,
+        "sleepiness": 0,
+        "is_alive": True,
+        "inventory": [],
+        "money": 0,
+        "memory": [],
+        "scheduled_action": None,
+        "action_used": False,
+        "controller": {"kind": "bot", "participant_id": None},
+        "global_goal": "survive",
+        "current_goal": None,
+        "material_threshold": 1000,
+        "risk_tolerance": 0.5,
+        "faction": "loner",
+    }
+    locations[agent_loc_id].setdefault("agents", []).append(agent_id)
+    return {
+        "locations": locations,
+        "agents": {agent_id: agent},
+        "traders": {},
+        "mutants": {},
+        "world_turn": 1,
+        "world_day": 1,
+        "world_hour": 6,
+        "world_minute": 0,
+        "max_turns": 0,
+        "active_events": [],
+        "player_agents": {},
+    }
+
+
+class TestUnreachableTargetHandling:
+    """Tests for closed-connection / unreachable-target scenarios."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    # ── Part 1: _bfs_route respects closed connections ─────────────────────────
+
+    def test_bfs_route_skips_closed_connection(self):
+        """_bfs_route returns [] when the only path uses a closed connection."""
+        from app.games.zone_stalkers.rules.world_rules import _bfs_route
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1, "closed": True}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {},
+        }, agent_loc_id="A")
+        route = _bfs_route(state["locations"], "A", "C")
+        assert route == [], f"Expected no route, got {route}"
+
+    def test_bfs_route_uses_open_connection(self):
+        """_bfs_route succeeds when connections are open."""
+        from app.games.zone_stalkers.rules.world_rules import _bfs_route
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {},
+        }, agent_loc_id="A")
+        route = _bfs_route(state["locations"], "A", "C")
+        assert route == ["B", "C"]
+
+    def test_bfs_route_finds_alternative_around_closed(self):
+        """_bfs_route finds an alternate path when one connection is closed."""
+        from app.games.zone_stalkers.rules.world_rules import _bfs_route
+        state = _make_minimal_state({
+            "A": {"connections": [
+                {"to": "B", "travel_time": 1, "closed": True},
+                {"to": "C", "travel_time": 2},
+            ]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {},
+        }, agent_loc_id="A")
+        route = _bfs_route(state["locations"], "A", "C")
+        assert route == ["C"], "Should reach C via direct connection, skipping closed B path"
+
+    # ── Part 2: _find_richest_artifact_location respects reachability ──────────
+
+    def test_find_richest_skips_unreachable_location(self):
+        """When a rich artifact location is cut off by a closed connection, it is ignored."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_richest_artifact_location
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1, "closed": True}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}],
+                  "artifacts": [{"id": "art1", "type": "fireball", "value": 9999}]},
+            "C": {},
+        }, agent_loc_id="A")
+        best_id, best_val = _find_richest_artifact_location(
+            state, exclude_loc_id="A", from_loc_id="A"
+        )
+        assert best_id is None, f"Expected None, got {best_id}"
+
+    def test_find_richest_returns_reachable_location(self):
+        """When a rich artifact location is reachable, it is returned."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_richest_artifact_location
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1}]},
+            "C": {"artifacts": [{"id": "art2", "type": "fireball", "value": 500}]},
+        }, agent_loc_id="A")
+        best_id, best_val = _find_richest_artifact_location(
+            state, exclude_loc_id="A", from_loc_id="A"
+        )
+        assert best_id == "C"
+        assert best_val == 500
+
+    def test_find_richest_prefers_reachable_over_richer_unreachable(self):
+        """A reachable location with lower value beats an unreachable richer one."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_richest_artifact_location
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            # B is reachable but low value
+            "B": {"artifacts": [{"id": "art1", "type": "sparks", "value": 100}]},
+            # C is unreachable (no connection from A or B to C)
+            "C": {"artifacts": [{"id": "art2", "type": "fireball", "value": 9999}]},
+        }, agent_loc_id="A")
+        best_id, best_val = _find_richest_artifact_location(
+            state, exclude_loc_id="A", from_loc_id="A"
+        )
+        assert best_id == "B"
+        assert best_val == 100
+
+    # ── Part 3: Mid-travel blockage detection ──────────────────────────────────
+
+    def _state_agent_at_a_travelling_to_c_via_b(self, close_bc=False):
+        """Agent at A, scheduled: target_id=B, final_target_id=C, remaining=[C]."""
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [{"to": "C", "travel_time": 1, "closed": close_bc}]},
+            "C": {},
+        }, agent_loc_id="A")
+        agent = state["agents"]["test_agent"]
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": "B",
+            "final_target_id": "C",
+            "remaining_route": ["C"],
+            "started_turn": 1,
+        }
+        return state
+
+    def test_mid_travel_abort_writes_decision_memory(self):
+        """When next hop is blocked and target is unreachable, a decision memory is written."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=True)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"]["test_agent"]
+        decision_mems = [
+            m for m in agent["memory"]
+            if m["type"] == "decision"
+            and m["effects"].get("action_kind") == "goal_cancelled"
+        ]
+        assert len(decision_mems) >= 1, "Expected a goal_cancelled decision memory"
+        assert decision_mems[0]["effects"]["cancelled_target"] == "C"
+
+    def test_mid_travel_abort_emits_travel_aborted_event(self):
+        """When route is blocked, a travel_aborted event is emitted."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=True)
+        new_state, events = self._tick(state)
+        aborted = [e for e in events if e["event_type"] == "travel_aborted"]
+        assert len(aborted) >= 1
+        assert aborted[0]["payload"]["final_target"] == "C"
+
+    def test_mid_travel_abort_clears_scheduled_action(self):
+        """After aborting, the agent is no longer travelling toward C."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=True)
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"]["test_agent"]
+        sa = agent.get("scheduled_action")
+        # The travel-toward-C must be gone; if a new action was scheduled by the
+        # bot AI it must NOT be a travel with final_target_id == "C".
+        if sa is not None and sa.get("type") == "travel":
+            assert sa.get("final_target_id") != "C", \
+                "Agent should not be travelling toward the unreachable target anymore"
+
+    def test_mid_travel_normal_continues(self):
+        """When B→C is open, travel continues normally."""
+        state = self._state_agent_at_a_travelling_to_c_via_b(close_bc=False)
+        new_state, events = self._tick(state)
+        aborted = [e for e in events if e["event_type"] == "travel_aborted"]
+        assert len(aborted) == 0, "Should not abort when route is clear"
+        agent = new_state["agents"]["test_agent"]
+        sa = agent.get("scheduled_action")
+        assert sa is not None, "Agent should still be travelling"
+        assert sa["target_id"] == "C"
+
+    def test_mid_travel_reroutes_when_alternative_exists(self):
+        """When B→C is blocked but B→D→C is open, agent re-routes silently."""
+        state = _make_minimal_state({
+            "A": {"connections": [{"to": "B", "travel_time": 1}]},
+            "B": {"connections": [
+                {"to": "C", "travel_time": 1, "closed": True},
+                {"to": "D", "travel_time": 1},
+            ]},
+            "C": {},
+            "D": {"connections": [{"to": "C", "travel_time": 1}]},
+        }, agent_loc_id="A")
+        agent = state["agents"]["test_agent"]
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": "B",
+            "final_target_id": "C",
+            "remaining_route": ["C"],
+            "started_turn": 1,
+        }
+        new_state, events = self._tick(state)
+        aborted = [e for e in events if e["event_type"] == "travel_aborted"]
+        assert len(aborted) == 0, "Should not abort when an alternative route exists"
+        agent_after = new_state["agents"]["test_agent"]
+        sa = agent_after.get("scheduled_action")
+        assert sa is not None, "Agent should still be travelling"
+        assert sa["final_target_id"] == "C"
+

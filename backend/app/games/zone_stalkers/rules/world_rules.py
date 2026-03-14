@@ -808,7 +808,10 @@ def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
 
 
 def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
-    """Return ordered list of location IDs from start (exclusive) to goal (inclusive), or [] if unreachable."""
+    """Return ordered list of location IDs from start (exclusive) to goal (inclusive), or [] if unreachable.
+
+    Closed connections (conn["closed"] == True) are treated as impassable.
+    """
     if start == goal:
         return []
     visited = {start}
@@ -817,12 +820,14 @@ def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
         current, path = queue.popleft()
         for conn in locations.get(current, {}).get("connections", []):
             nxt = conn["to"]
-            if nxt not in visited:
-                new_path = path + [nxt]
-                if nxt == goal:
-                    return new_path
-                visited.add(nxt)
-                queue.append((nxt, new_path))
+            # Skip closed connections (impassable) and already-visited nodes.
+            if conn.get("closed") or nxt in visited:
+                continue
+            new_path = path + [nxt]
+            if nxt == goal:
+                return new_path
+            visited.add(nxt)
+            queue.append((nxt, new_path))
     return []
 
 
