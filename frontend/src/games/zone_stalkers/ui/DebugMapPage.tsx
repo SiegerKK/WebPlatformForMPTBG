@@ -272,6 +272,28 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     }
   };
 
+  // ── Auto-run (течение времени до паузы) ──────────────────────────────────
+  const autoRunCancelRef = useRef(false);
+  const [autoRunning, setAutoRunning] = useState(false);
+
+  const handleAutoRun = async () => {
+    if (autoRunning) {
+      autoRunCancelRef.current = true;
+      return;
+    }
+    autoRunCancelRef.current = false;
+    setAutoRunning(true);
+    try {
+      while (!autoRunCancelRef.current) {
+        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
+        await new Promise<void>((r) => setTimeout(r, 300));
+      }
+    } finally {
+      setAutoRunning(false);
+      autoRunCancelRef.current = false;
+    }
+  };
+
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
     async (
@@ -1015,18 +1037,26 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             <button
               style={s.toolBtn}
               onClick={handleTick}
-              disabled={ticking || skipping}
-              title="Advance world by one turn (end_turn command)"
+              disabled={ticking || skipping || autoRunning}
+              title="Пропустить 1 ход (1 минута)"
             >
               {ticking ? '…' : '⏭ Ход'}
             </button>
             <button
               style={s.toolBtn}
               onClick={handleSkipToDecision}
-              disabled={ticking}
+              disabled={ticking || autoRunning}
               title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
             >
               {skipping ? '⏹ Остановить' : '⏩ До решения'}
+            </button>
+            <button
+              style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
+              onClick={handleAutoRun}
+              disabled={ticking || skipping}
+              title={autoRunning ? 'Нажмите для паузы' : 'Запустить течение времени до паузы'}
+            >
+              {autoRunning ? '⏸ Пауза' : '▶ Авто'}
             </button>
             {/* Trigger emission */}
             <button

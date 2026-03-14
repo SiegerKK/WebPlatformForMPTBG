@@ -618,20 +618,10 @@ def resolve_world_command(
             state["agents"][agent_id]["action_used"] = True
         events.append({"event_type": "turn_submitted", "payload": {"participant_id": player_id}})
 
-        # Check whether all alive human agents have now ended their turns.
-        # If so, auto-advance the world by one tick.
-        player_agents = state.get("player_agents", {})  # {user_id: agent_id}
-        all_human_acted = True
-        for _uid, aid in player_agents.items():
-            agent_data = state.get("agents", {}).get(aid)
-            if agent_data and agent_data.get("is_alive", True) and not agent_data.get("action_used"):
-                all_human_acted = False
-                break
-
-        if all_human_acted:
-            from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
-            state, tick_events = tick_zone_map(state)
-            events.extend(tick_events)
+        # Always advance the world by one tick (bot-only mode — no player waiting).
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state, tick_events = tick_zone_map(state)
+        events.extend(tick_events)
 
         return state, events
 
@@ -660,7 +650,7 @@ def resolve_world_command(
         move_anomaly_activity = new_loc_data.get("anomaly_activity", 0)
         if move_anomaly_activity > 0:
             import random as _move_rng
-            _rng = _move_rng.Random(state.get("seed", 0) + state.get("world_turn", 0))
+            _rng = _move_rng.Random(str(state.get("seed", 0)) + str(state.get("world_turn", 0)))
             if _rng.random() < move_anomaly_activity / 20.0:
                 dmg = 5 + move_anomaly_activity
                 agent["hp"] = max(0, agent["hp"] - dmg)

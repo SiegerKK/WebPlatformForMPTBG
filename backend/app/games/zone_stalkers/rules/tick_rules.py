@@ -87,7 +87,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     # 2b. Emission (Выброс) mechanic — replaces the old midnight artifact spawn.
     # The emission spawns artifacts in anomaly locations, kills stalkers on open
     # terrain (plains / hills), and notifies all alive stalkers via memory.
-    _emission_rng = random.Random(state.get("seed", 0) + world_turn * 7919)
+    _emission_rng = random.Random(str(state.get("seed", 0)) + str(world_turn))
 
     # ── Start emission when the scheduled turn is reached ──────────────────────
     if not state.get("emission_active", False) and state.get("emission_scheduled_turn") == world_turn:
