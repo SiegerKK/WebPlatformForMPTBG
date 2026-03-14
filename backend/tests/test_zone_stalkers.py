@@ -1488,6 +1488,30 @@ class TestAutoTickCore:
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
         return generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
 
+    # ── tick() return value includes world_minute ─────────────────────────────
+
+    def test_tick_zone_map_returns_world_minute(self):
+        """tick_zone_map must include world_minute so the WS push can carry it."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._state()
+        new_state, _ = tick_zone_map(state)
+        # world_minute must be present in the state after a tick
+        assert "world_minute" in new_state
+
+    def test_tick_zone_map_increments_world_minute(self):
+        """Each call to tick_zone_map advances world_minute by 1 (wraps at 60)."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._state()
+        minute_before = state.get("world_minute", 0)
+        hour_before = state.get("world_hour", 6)
+        new_state, _ = tick_zone_map(state)
+        if minute_before == 59:
+            assert new_state["world_minute"] == 0
+            assert new_state["world_hour"] == (hour_before + 1) % 24
+        else:
+            assert new_state["world_minute"] == minute_before + 1
+            assert new_state["world_hour"] == hour_before
+
     # ── pipeline sets auto_tick_enabled flag ────────────────────────────────
 
     def _simulate_pipeline_set_auto_tick(self, state: dict, enabled: bool) -> dict:

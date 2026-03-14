@@ -185,6 +185,7 @@ class ZoneStalkerRuleSet(RuleSet):
             "world_turn": new_state.get("world_turn"),
             "world_hour": new_state.get("world_hour"),
             "world_day": new_state.get("world_day"),
+            "world_minute": new_state.get("world_minute"),
             "events_emitted": len(emitted),
         }
 

@@ -53,6 +53,9 @@ def tick_match(match_id_str: str, db: Session) -> dict:
             "type": "ticked",
             "match_id": match_id_str,
             "world_turn": result.get("world_turn"),
+            "world_hour": result.get("world_hour"),
+            "world_day": result.get("world_day"),
+            "world_minute": result.get("world_minute"),
         })
 
     return result

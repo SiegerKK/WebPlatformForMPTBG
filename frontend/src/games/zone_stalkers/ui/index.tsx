@@ -339,7 +339,33 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     match.id,
     wsToken,
     useCallback((msg) => {
-      if (msg.type === 'ticked' || msg.type === 'state_updated') {
+      if (msg.type === 'ticked') {
+        // Immediately patch the 4 time fields in the local context state so the
+        // clock display updates on every single tick without waiting for a full
+        // API round-trip. The full refresh() call below handles the rest of the
+        // state (agent positions, items, etc.).
+        const wt = msg.world_turn as number | undefined;
+        const wh = msg.world_hour as number | undefined;
+        const wd = msg.world_day as number | undefined;
+        const wm = msg.world_minute as number | undefined;
+        if (wt !== undefined) {
+          setContext((prev) => {
+            if (!prev) return prev;
+            const blob = (prev.state_blob as Record<string, unknown>) ?? {};
+            return {
+              ...prev,
+              state_blob: {
+                ...blob,
+                world_turn: wt,
+                ...(wh !== undefined ? { world_hour: wh } : {}),
+                ...(wd !== undefined ? { world_day: wd } : {}),
+                ...(wm !== undefined ? { world_minute: wm } : {}),
+              },
+            };
+          });
+        }
+        refresh();
+      } else if (msg.type === 'state_updated') {
         refresh();
       }
     }, [refresh]), // eslint-disable-line react-hooks/exhaustive-deps
