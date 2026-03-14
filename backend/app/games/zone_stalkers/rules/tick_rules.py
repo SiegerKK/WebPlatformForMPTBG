@@ -1145,8 +1145,8 @@ def _bot_gather_resources(
         return [{"event_type": "artifact_picked_up",
                  "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
-    # G2 — Explore if anomalies are present (good chance of finding artifacts)
-    if loc.get("anomalies") and rng.random() < 0.50:
+    # G2 — Explore if anomalies are present AND activity > 0 (otherwise no artifacts ever spawn)
+    if loc.get("anomalies") and loc.get("anomaly_activity", 0) > 0 and rng.random() < 0.50:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую аномальную зону",
@@ -1327,8 +1327,8 @@ def _bot_pursue_goal(
             and mem.get("effects", {}).get("location_id")
         )
 
-        # If current location has anomalies AND is not yet confirmed empty → explore it.
-        if loc.get("anomalies") and loc_id not in confirmed_empty:
+        # If current location has anomalies AND activity > 0 AND is not yet confirmed empty → explore it.
+        if loc.get("anomalies") and loc.get("anomaly_activity", 0) > 0 and loc_id not in confirmed_empty:
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Исследую зону в ожидании артефактов",
@@ -1344,11 +1344,12 @@ def _bot_pursue_goal(
             return [{"event_type": "exploration_started",
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-        # Current location is confirmed empty or has no anomalies.
-        # Try to find a neighbour with anomalies that is NOT confirmed empty.
+        # Current location is confirmed empty or has no active anomalies.
+        # Try to find a neighbour with anomalies AND activity > 0 that is NOT confirmed empty.
         anomaly_neighbors_fresh = [
             c for c in connections
             if locations.get(c["to"], {}).get("anomalies")
+            and locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
             and c["to"] not in confirmed_empty
         ]
         if anomaly_neighbors_fresh:
@@ -1367,10 +1368,11 @@ def _bot_pursue_goal(
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
         # All reachable anomaly neighbours are confirmed empty — use fallback:
-        # visit a random anomaly location (even confirmed empty) to wait for midnight spawns.
+        # visit a random anomaly location with activity > 0 (even confirmed empty) to wait for midnight spawns.
         all_anomaly_neighbors = [
             c for c in connections
             if locations.get(c["to"], {}).get("anomalies")
+            and locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
         ]
         if all_anomaly_neighbors:
             fallback = rng.choice(all_anomaly_neighbors)
