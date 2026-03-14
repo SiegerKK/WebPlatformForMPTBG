@@ -1172,6 +1172,61 @@ class TestDebugLocationCommands:
             result = self._v("debug_spawn_mutant", {"loc_id": loc_id, "mutant_type": mt}, state)
             assert result.valid, f"Expected valid for mutant_type={mt}"
 
+    # ── debug_spawn_artifact ─────────────────────────────────────────────────
+
+    def test_spawn_artifact_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": "soul"}, state)
+        assert result.valid
+
+    def test_spawn_artifact_no_type_is_valid(self):
+        """artifact_type is optional; omitting it picks a random type."""
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_artifact", {"loc_id": loc_id}, state)
+        assert result.valid
+
+    def test_spawn_artifact_adds_to_location(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        before = len(state["locations"][loc_id]["artifacts"])
+        new_state, events = self._r("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": "gravi"}, state)
+        after = len(new_state["locations"][loc_id]["artifacts"])
+        assert after == before + 1
+        art = new_state["locations"][loc_id]["artifacts"][-1]
+        assert art["type"] == "gravi"
+        assert art["value"] > 0
+        assert art["id"].startswith("art_debug_")
+        assert any(e["event_type"] == "debug_artifact_spawned" for e in events)
+
+    def test_spawn_artifact_random_type_when_omitted(self):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_artifact", {"loc_id": loc_id}, state)
+        art = new_state["locations"][loc_id]["artifacts"][-1]
+        assert art["type"] in ARTIFACT_TYPES
+
+    def test_spawn_artifact_invalid_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": "dragon_egg"}, state)
+        assert not result.valid
+
+    def test_spawn_artifact_invalid_no_loc(self):
+        state = self._state()
+        result = self._v("debug_spawn_artifact", {}, state)
+        assert not result.valid
+
+    def test_spawn_artifact_all_types(self):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        for art_type in ARTIFACT_TYPES:
+            result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": art_type}, state)
+            assert result.valid, f"Expected valid for artifact_type={art_type}"
+
 
 # ─────────────────────────────────────────────────────────────────
 # Unified stalker model — controller.kind consistency

@@ -8,7 +8,7 @@ import type { ZoneLocation, ZoneMapState, LocationConn } from './types';
 import { TERRAIN_TYPE_LABELS, REGION_COLOR_PALETTE } from './constants';
 import { s } from './styles';
 import { Badge, Section, DetailRow, EmptyRow } from './UIKit';
-import { SpawnMutantModal } from './Modals';
+import { SpawnMutantModal, SpawnArtifactModal } from './Modals';
 
 // ─── LocationDetailPanel ──────────────────────────────────────────────────────
 
@@ -20,7 +20,9 @@ export function LocationDetailPanel({
   onClose,
   onEdit,
   onSpawnStalker,
+  onSpawnTrader,
   onSpawnMutant,
+  onSpawnArtifact,
   onDeleteConnection,
   onUpdateConnectionWeight,
   onToggleConnectionClosed,
@@ -37,12 +39,14 @@ export function LocationDetailPanel({
   onClose: () => void;
   onEdit: () => void;
   onSpawnStalker: (name: string, faction: string, globalGoal: string) => Promise<void>;
+  onSpawnTrader: (name: string) => Promise<void>;
   onSpawnMutant: (mutantType: string) => Promise<void>;
+  onSpawnArtifact: (artifactType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
   onUpdateConnectionWeight: (toId: string, travelTime: number) => void;
   onToggleConnectionClosed: (toId: string) => void;
 }) {
-  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'mutant' | null>(null);
+  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | null>(null);
 
   const stalkers = loc.agents.map((id) => zoneState.agents[id]).filter(Boolean);
   const mutants = loc.agents.map((id) => zoneState.mutants[id]).filter(Boolean);
@@ -265,12 +269,18 @@ export function LocationDetailPanel({
 
       {/* Spawn controls */}
       <Section label="⚡ Spawn">
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <button style={s.spawnBtn} onClick={() => setShowSpawnModal('stalker')}>
-            👤 Spawn Stalker
+            👤 Сталкер
+          </button>
+          <button style={{ ...s.spawnBtn, color: '#f59e0b' }} onClick={() => setShowSpawnModal('trader')}>
+            🏪 Торговец
           </button>
           <button style={s.spawnBtn} onClick={() => setShowSpawnModal('mutant')}>
-            ☣️ Spawn Mutant
+            ☣️ Мутант
+          </button>
+          <button style={{ ...s.spawnBtn, color: '#a5b4fc' }} onClick={() => setShowSpawnModal('artifact')}>
+            💎 Артефакт
           </button>
         </div>
       </Section>
@@ -280,16 +290,36 @@ export function LocationDetailPanel({
       {showSpawnModal === 'stalker' && (
         <AgentCreateModal
           onClose={() => setShowSpawnModal(null)}
-          onSave={async (name, faction, globalGoal) => {
-            await onSpawnStalker(name, faction, globalGoal);
+          onSave={async (name, faction, globalGoal, isTrader) => {
+            if (isTrader) {
+              await onSpawnTrader(name);
+            } else {
+              await onSpawnStalker(name, faction, globalGoal);
+            }
             setShowSpawnModal(null);
           }}
+        />
+      )}
+      {showSpawnModal === 'trader' && (
+        <AgentCreateModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (name) => {
+            await onSpawnTrader(name);
+            setShowSpawnModal(null);
+          }}
+          defaultIsTrader
         />
       )}
       {showSpawnModal === 'mutant' && (
         <SpawnMutantModal
           onClose={() => setShowSpawnModal(null)}
           onSave={async (mutantType) => { await onSpawnMutant(mutantType); setShowSpawnModal(null); }}
+        />
+      )}
+      {showSpawnModal === 'artifact' && (
+        <SpawnArtifactModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (artifactType) => { await onSpawnArtifact(artifactType); setShowSpawnModal(null); }}
         />
       )}
     </div>

@@ -228,3 +228,68 @@ export function SpawnMutantModal({
     </div>
   );
 }
+
+// ─── SpawnArtifactModal ───────────────────────────────────────────────────────
+
+export const ARTIFACT_TYPE_OPTIONS = [
+  'soul', 'stone_flower', 'flash', 'fireball', 'gravi', 'moonlight', 'battery', 'urchin',
+] as const;
+
+export const ARTIFACT_TYPE_LABELS: Record<string, string> = {
+  soul:         'Soul (душа)',
+  stone_flower: 'Stone Flower (каменный цветок)',
+  flash:        'Flash (вспышка)',
+  fireball:     'Fireball (огненный шар)',
+  gravi:        'Gravi (гравий)',
+  moonlight:    'Moonlight (лунный свет)',
+  battery:      'Battery (батарея)',
+  urchin:       'Urchin (ёж)',
+};
+
+export function SpawnArtifactModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (artifactType: string) => Promise<void>;
+}) {
+  const [artifactType, setArtifactType] = useState<string>(ARTIFACT_TYPE_OPTIONS[0]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true); setErr(null);
+    try {
+      await onSave(artifactType);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Spawn failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>💎 Spawn Artifact</h3>
+        <label style={s.modalLabel}>Тип артефакта</label>
+        <select
+          style={s.modalInput}
+          value={artifactType}
+          onChange={(e) => setArtifactType(e.target.value)}
+          autoFocus
+        >
+          {ARTIFACT_TYPE_OPTIONS.map((t) => (
+            <option key={t} value={t}>{ARTIFACT_TYPE_LABELS[t] ?? t}</option>
+          ))}
+        </select>
+        {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
+          <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Spawning…' : 'Spawn'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

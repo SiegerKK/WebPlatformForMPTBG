@@ -1164,8 +1164,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             onSpawnStalker={async (name, faction, globalGoal) => {
               await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name, faction, global_goal: globalGoal });
             }}
+            onSpawnTrader={async (name) => {
+              await sendCommand('debug_spawn_trader', { loc_id: selectedLocId!, name });
+            }}
             onSpawnMutant={async (mutantType) => {
               await sendCommand('debug_spawn_mutant', { loc_id: selectedLocId!, mutant_type: mutantType });
+            }}
+            onSpawnArtifact={async (artifactType) => {
+              await sendCommand('debug_spawn_artifact', { loc_id: selectedLocId!, artifact_type: artifactType });
             }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
             onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}

@@ -379,7 +379,9 @@ const s: Record<string, React.CSSProperties> = {
 
 export interface AgentCreateProps {
   onClose: () => void;
-  onSave: (name: string, faction: string, globalGoal: string) => Promise<void>;
+  onSave: (name: string, faction: string, globalGoal: string, isTrader: boolean) => Promise<void>;
+  /** When true, the modal opens with the Trader checkbox pre-checked. */
+  defaultIsTrader?: boolean;
 }
 
 const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
@@ -389,10 +391,11 @@ const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'freedom',  label: 'Свобода'  },
 ];
 
-export function AgentCreateModal({ onClose, onSave }: AgentCreateProps) {
+export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: AgentCreateProps) {
   const [name,       setName]       = useState('');
   const [faction,    setFaction]    = useState('loner');
   const [globalGoal, setGlobalGoal] = useState('');
+  const [isTrader,   setIsTrader]   = useState(defaultIsTrader);
   const [saving,     setSaving]     = useState(false);
   const [err,        setErr]        = useState<string | null>(null);
 
@@ -400,7 +403,7 @@ export function AgentCreateModal({ onClose, onSave }: AgentCreateProps) {
     setSaving(true);
     setErr(null);
     try {
-      await onSave(name.trim(), faction, globalGoal.trim());
+      await onSave(name.trim(), faction, globalGoal.trim(), isTrader);
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Ошибка создания');
       setSaving(false);
@@ -413,10 +416,25 @@ export function AgentCreateModal({ onClose, onSave }: AgentCreateProps) {
         {/* Header */}
         <div style={s.header}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: '1.5rem' }}>👤</span>
-            <span style={s.name}>Создать сталкера</span>
+            <span style={{ fontSize: '1.5rem' }}>{isTrader ? '🏪' : '👤'}</span>
+            <span style={s.name}>{isTrader ? 'Создать торговца' : 'Создать сталкера'}</span>
           </div>
           <button style={s.closeBtn} onClick={onClose} title="Закрыть">✕</button>
+        </div>
+
+        {/* Trader toggle */}
+        <div style={{ ...s.section, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={isTrader}
+              onChange={(e) => setIsTrader(e.target.checked)}
+              style={{ accentColor: '#f59e0b', width: 16, height: 16 }}
+            />
+            <span style={{ ...cs.traderLabel, color: isTrader ? '#f59e0b' : '#94a3b8' }}>
+              🏪 Торговец (фиксирован на локации, покупает при наличии средств)
+            </span>
+          </label>
         </div>
 
         {/* Name */}
@@ -431,30 +449,34 @@ export function AgentCreateModal({ onClose, onSave }: AgentCreateProps) {
           />
         </div>
 
-        {/* Faction */}
-        <div style={s.section}>
-          <div style={s.sectionLabel}>Фракция</div>
-          <select
-            style={cs.input}
-            value={faction}
-            onChange={(e) => setFaction(e.target.value)}
-          >
-            {FACTION_OPTIONS.map(({ value, label }) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
-        </div>
+        {/* Faction — hidden for traders (traders are neutral) */}
+        {!isTrader && (
+          <div style={s.section}>
+            <div style={s.sectionLabel}>Фракция</div>
+            <select
+              style={cs.input}
+              value={faction}
+              onChange={(e) => setFaction(e.target.value)}
+            >
+              {FACTION_OPTIONS.map(({ value, label }) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
-        {/* Global goal */}
-        <div style={s.section}>
-          <div style={s.sectionLabel}>Глобальная цель</div>
-          <textarea
-            style={{ ...cs.input, minHeight: 64, resize: 'vertical' as const }}
-            value={globalGoal}
-            onChange={(e) => setGlobalGoal(e.target.value)}
-            placeholder="Глобальная цель в Зоне…"
-          />
-        </div>
+        {/* Global goal — hidden for traders */}
+        {!isTrader && (
+          <div style={s.section}>
+            <div style={s.sectionLabel}>Глобальная цель</div>
+            <textarea
+              style={{ ...cs.input, minHeight: 64, resize: 'vertical' as const }}
+              value={globalGoal}
+              onChange={(e) => setGlobalGoal(e.target.value)}
+              placeholder="Глобальная цель в Зоне…"
+            />
+          </div>
+        )}
 
         {err && (
           <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: -4 }}>{err}</div>
@@ -466,7 +488,7 @@ export function AgentCreateModal({ onClose, onSave }: AgentCreateProps) {
             Отмена
           </button>
           <button style={cs.saveBtn} onClick={handleSubmit} disabled={saving}>
-            {saving ? '…' : 'Создать'}
+            {saving ? '…' : isTrader ? 'Создать торговца' : 'Создать'}
           </button>
         </div>
       </div>
@@ -485,6 +507,11 @@ const cs: Record<string, React.CSSProperties> = {
     fontSize: '0.82rem',
     padding: '0.4rem 0.55rem',
     boxSizing: 'border-box',
+  },
+  traderLabel: {
+    fontSize: '0.78rem',
+    fontWeight: 500,
+    userSelect: 'none',
   },
   saveBtn: {
     padding: '0.4rem 1rem',

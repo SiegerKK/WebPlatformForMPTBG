@@ -17,6 +17,7 @@ Supported commands:
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
 - debug_spawn_trader(loc_id, name?) — spawn a trader NPC at a location in debug mode (meta)
+- debug_spawn_artifact(loc_id, artifact_type?) — spawn an artifact at a location in debug mode (meta)
 - debug_delete_all_npcs() — remove all bot-controlled stalker NPCs (meta)
 - debug_delete_all_mutants() — remove all mutants (meta)
 - debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
@@ -68,6 +69,9 @@ def validate_world_command(
 
     if command_type == "debug_spawn_trader":
         return _validate_debug_spawn_trader(payload, state)
+
+    if command_type == "debug_spawn_artifact":
+        return _validate_debug_spawn_artifact(payload, state)
 
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
@@ -312,6 +316,28 @@ def resolve_world_command(
         state.setdefault("traders", {})[new_trader_id] = trader
         state["locations"][loc_id]["agents"].append(new_trader_id)
         events.append({"event_type": "debug_trader_spawned", "payload": {"trader_id": new_trader_id, "loc_id": loc_id}})
+        return state, events
+
+    # ── debug_spawn_artifact: meta-command, place an artifact on the ground ──
+    if command_type == "debug_spawn_artifact":
+        import random as _random
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        loc_id = payload["loc_id"]
+        artifact_type = str(payload.get("artifact_type", "")).strip()
+        rng = _random.Random(str(state.get("world_turn", 1)) + loc_id + artifact_type)
+        if not artifact_type:
+            artifact_type = rng.choice(list(ARTIFACT_TYPES.keys()))
+        art_info = ARTIFACT_TYPES[artifact_type]
+        art_id = f"art_debug_{loc_id}_{rng.randint(1000, 9999)}"
+        artifact = {
+            "id": art_id,
+            "type": artifact_type,
+            "name": art_info["name"],
+            "value": art_info["value"],
+        }
+        state["locations"][loc_id]["artifacts"].append(artifact)
+        events.append({"event_type": "debug_artifact_spawned",
+                       "payload": {"artifact_id": art_id, "artifact_type": artifact_type, "loc_id": loc_id}})
         return state, events
 
     # ── debug_delete_all_npcs ─────────────────────────────────────────────────
@@ -848,4 +874,23 @@ def _validate_debug_spawn_trader(
         return RuleCheckResult(valid=False, error="loc_id is required")
     if loc_id not in state.get("locations", {}):
         return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_artifact(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    artifact_type = payload.get("artifact_type", "")
+    if artifact_type and artifact_type not in ARTIFACT_TYPES:
+        return RuleCheckResult(
+            valid=False,
+            error=f"Invalid artifact_type '{artifact_type}'; must be one of {sorted(ARTIFACT_TYPES.keys())}"
+        )
     return RuleCheckResult(valid=True)
