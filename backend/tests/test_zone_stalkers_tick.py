@@ -948,3 +948,119 @@ class TestArtifactToTraderScenario:
         for tid, trader in state["traders"].items():
             assert "memory" in trader, f"Trader {tid} missing memory field"
             assert isinstance(trader["memory"], list)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Per-turn location observations
+# ─────────────────────────────────────────────────────────────────
+
+class TestPerTurnObservations:
+    """_write_location_observations is called every tick and uses deduplication."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def test_observation_written_when_other_agent_present(self):
+        """An agent ticking in the same location as another agent writes a stalkers observation."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=2, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        # Force both agents to the same location
+        agents = list(state["agents"].keys())
+        a0, a1 = agents[0], agents[1]
+        shared_loc = state["agents"][a0]["location_id"]
+        state["agents"][a1]["location_id"] = shared_loc
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"][a0]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "stalkers"]
+        assert len(obs) >= 1
+        assert state["agents"][a1]["name"] in obs[0]["effects"]["names"]
+
+    def test_observation_written_when_artifact_present(self):
+        """An agent whose location has an artifact writes an artifacts observation each tick."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        state["locations"][loc_id].setdefault("artifacts", []).append(
+            {"id": "art_obs_001", "type": "fire", "value": 100}
+        )
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
+        assert len(obs) >= 1
+        assert "fire" in obs[0]["effects"]["artifact_types"]
+
+    def test_observation_deduplicated_on_second_tick(self):
+        """Identical observations are NOT re-written on the next tick — deduplication works."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        state["locations"][loc_id].setdefault("artifacts", []).append(
+            {"id": "art_dedup_001", "type": "fire", "value": 100}
+        )
+        state1, _ = self._tick(state)
+        count_after_tick1 = sum(
+            1 for m in state1["agents"]["agent_p0"]["memory"]
+            if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"
+        )
+        state2, _ = self._tick(state1)
+        count_after_tick2 = sum(
+            1 for m in state2["agents"]["agent_p0"]["memory"]
+            if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"
+        )
+        # Should NOT have added a duplicate entry on the second tick
+        assert count_after_tick2 == count_after_tick1
+
+    def test_new_observation_written_when_content_changes(self):
+        """A new observation IS written when a second artifact appears (content changed)."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        state["locations"][loc_id].setdefault("artifacts", []).append(
+            {"id": "art_change_001", "type": "fire", "value": 100}
+        )
+        state1, _ = self._tick(state)
+        # Add a second artifact before the next tick
+        state1["locations"][loc_id]["artifacts"].append(
+            {"id": "art_change_002", "type": "soul", "value": 200}
+        )
+        state2, _ = self._tick(state1)
+        obs = [m for m in state2["agents"]["agent_p0"]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
+        # Two distinct observation entries (different content each tick)
+        assert len(obs) >= 2
+        # The latest observation should contain both artifact types
+        latest = obs[-1]
+        assert "soul" in latest["effects"]["artifact_types"]
+
+    def test_trader_visible_in_stalker_observations(self):
+        """Traders at the same location appear in the 'stalkers' observation entry."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=1, num_ai_stalkers=0,
+                              num_mutants=0, num_traders=1)
+        state["player_agents"]["player1"] = list(state["agents"].keys())[0]
+        agent_id = state["player_agents"]["player1"]
+        agent = state["agents"][agent_id]
+        loc_id = agent["location_id"]
+        # Move the trader to the agent's location
+        trader_id = list(state["traders"].keys())[0]
+        state["traders"][trader_id]["location_id"] = loc_id
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"][agent_id]["memory"]
+               if m["type"] == "observation" and m["effects"].get("observed") == "stalkers"]
+        trader_name = state["traders"][trader_id]["name"]
+        assert any(trader_name in o["effects"]["names"] for o in obs)
+
+    def test_no_observation_when_location_empty(self):
+        """No observation entries are written when the location is completely empty."""
+        state = _make_world()
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        # Ensure location is clean
+        state["locations"][loc_id]["artifacts"] = []
+        state["locations"][loc_id]["items"] = []
+        state["locations"][loc_id].pop("agents", None)
+        new_state, _ = self._tick(state)
+        obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
+               if m["type"] == "observation"]
+        assert len(obs) == 0

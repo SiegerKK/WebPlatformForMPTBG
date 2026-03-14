@@ -11,7 +11,7 @@ Processes:
 """
 import copy
 import random
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # 1 game turn = 1 real minute
@@ -76,6 +76,18 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         bot_evs = _run_bot_action(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
+
+    # 3b. Per-turn location observations for every alive stalker agent.
+    # Writes a new observation entry only when content has changed since the last
+    # entry of the same category (deduplication prevents memory flooding).
+    for agent_id, agent in state.get("agents", {}).items():
+        if not agent.get("is_alive", True):
+            continue
+        if agent.get("archetype") != "stalker_agent":
+            continue
+        loc_id = agent.get("location_id")
+        if loc_id:
+            _write_location_observations(agent_id, agent, loc_id, state, world_turn)
 
     # 4. Advance world time (1 tick = 1 minute)
     world_minute = state.get("world_minute", 0)
@@ -425,6 +437,24 @@ def _add_memory(
         agent["memory"] = mem[-100:]
 
 
+def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Optional[List[str]]:
+    """Return the content list from the most recent observation of *obs_type* at *loc_id*.
+
+    Returns ``None`` when no such entry exists yet.  Used for deduplication so that
+    identical observations are not written to memory on every turn.
+    """
+    key = "names" if obs_type in ("stalkers", "mutants") else (
+        "artifact_types" if obs_type == "artifacts" else "item_types"
+    )
+    for entry in reversed(agent.get("memory", [])):
+        if entry.get("type") != "observation":
+            continue
+        fx = entry.get("effects", {})
+        if fx.get("observed") == obs_type and fx.get("location_id") == loc_id:
+            return fx.get(key)
+    return None
+
+
 def _write_location_observations(
     agent_id: str,
     agent: Dict[str, Any],
@@ -432,61 +462,68 @@ def _write_location_observations(
     state: Dict[str, Any],
     world_turn: int,
 ) -> None:
-    """Write 'observation' memory entries for everything the agent notices on arrival."""
+    """Write 'observation' memory entries for everything the agent currently sees.
+
+    Called both on arrival AND each turn so that observations stay up-to-date as
+    entities enter or leave the agent's location.  Deduplication ensures a new entry
+    is only appended when the observed content has changed since the last entry of the
+    same category.
+    """
     loc = state.get("locations", {}).get(loc_id, {})
     loc_name = loc.get("name", loc_id)
 
-    # ── Stalkers at this location (excluding self) ────────────────────────────
-    agents_here = [
-        (aid, ag) for aid, ag in state.get("agents", {}).items()
-        if aid != agent_id
-        and ag.get("location_id") == loc_id
-        and ag.get("is_alive", True)
-        and ag.get("archetype") == "stalker_agent"
-    ]
-    if agents_here:
-        names = [ag.get("name", aid) for aid, ag in agents_here]
+    # ── Stalkers + traders at this location (excluding self) ──────────────────
+    stalker_names: List[str] = []
+    for aid, ag in state.get("agents", {}).items():
+        if (aid != agent_id
+                and ag.get("location_id") == loc_id
+                and ag.get("is_alive", True)
+                and ag.get("archetype") == "stalker_agent"):
+            stalker_names.append(ag.get("name", aid))
+    for tid, tr in state.get("traders", {}).items():
+        if tr.get("location_id") == loc_id:
+            stalker_names.append(tr.get("name", tid))
+    stalker_names.sort()
+    if stalker_names and stalker_names != _last_obs_content(agent, "stalkers", loc_id):
         _add_memory(
             agent, world_turn, state, "observation",
-            f"Вижу сталкеров в «{loc_name}»",
-            f"В локации: {', '.join(names)}.",
-            {"observed": "stalkers", "location_id": loc_id, "names": names},
+            f"Вижу персонажей в «{loc_name}»",
+            f"В локации: {', '.join(stalker_names)}.",
+            {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
         )
 
     # ── Mutants at this location ──────────────────────────────────────────────
-    mutants_here = [
-        m for m in state.get("mutants", {}).values()
+    mutant_names = sorted(
+        m.get("name", m.get("type", "?"))
+        for m in state.get("mutants", {}).values()
         if m.get("location_id") == loc_id and m.get("is_alive", True)
-    ]
-    if mutants_here:
-        names = [m.get("name", m.get("type", "?")) for m in mutants_here]
+    )
+    if mutant_names and mutant_names != _last_obs_content(agent, "mutants", loc_id):
         _add_memory(
             agent, world_turn, state, "observation",
             f"Вижу мутантов в «{loc_name}»",
-            f"Замечены мутанты: {', '.join(names)}.",
-            {"observed": "mutants", "location_id": loc_id, "names": names},
+            f"Замечены мутанты: {', '.join(mutant_names)}.",
+            {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
         )
 
     # ── Artifacts on the ground ───────────────────────────────────────────────
-    artifacts_here = loc.get("artifacts", [])
-    if artifacts_here:
-        types = [a.get("type", "?") for a in artifacts_here]
+    artifact_types = sorted(a.get("type", "?") for a in loc.get("artifacts", []))
+    if artifact_types and artifact_types != _last_obs_content(agent, "artifacts", loc_id):
         _add_memory(
             agent, world_turn, state, "observation",
             f"Вижу артефакты в «{loc_name}»",
-            f"На земле: {', '.join(types)} (всего {len(artifacts_here)} шт.).",
-            {"observed": "artifacts", "location_id": loc_id, "artifact_types": types},
+            f"На земле: {', '.join(artifact_types)} (всего {len(artifact_types)} шт.).",
+            {"observed": "artifacts", "location_id": loc_id, "artifact_types": artifact_types},
         )
 
     # ── Loose items on the ground ─────────────────────────────────────────────
-    items_here = loc.get("items", [])
-    if items_here:
-        types = [it.get("type", "?") for it in items_here]
+    item_types = sorted(it.get("type", "?") for it in loc.get("items", []))
+    if item_types and item_types != _last_obs_content(agent, "items", loc_id):
         _add_memory(
             agent, world_turn, state, "observation",
             f"Вижу предметы в «{loc_name}»",
-            f"На земле: {', '.join(types)} (всего {len(items_here)} шт.).",
-            {"observed": "items", "location_id": loc_id, "item_types": types},
+            f"На земле: {', '.join(item_types)} (всего {len(item_types)} шт.).",
+            {"observed": "items", "location_id": loc_id, "item_types": item_types},
         )
 
 
