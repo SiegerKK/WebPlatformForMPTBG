@@ -573,13 +573,19 @@ def resolve_world_command(
         if not route:
             events.append({"event_type": "travel_failed", "payload": {"agent_id": agent_id, "reason": "no_route"}})
         else:
-            turns = _route_travel_turns(route, state["locations"], agent["location_id"])
+            first_hop = route[0]
+            conns = state["locations"].get(agent["location_id"], {}).get("connections", [])
+            hop_time = next(
+                (c.get("travel_time", 12) for c in conns if c["to"] == first_hop),
+                12,
+            )
             agent["scheduled_action"] = {
                 "type": "travel",
-                "turns_remaining": turns,
-                "turns_total": turns,
-                "target_id": target_loc_id,
-                "route": route,  # ordered list of loc IDs (excluding start)
+                "turns_remaining": hop_time,
+                "turns_total": hop_time,
+                "target_id": first_hop,
+                "final_target_id": target_loc_id,
+                "remaining_route": route[1:],
                 "started_turn": state.get("world_turn", 1),
             }
             events.append({
@@ -588,7 +594,7 @@ def resolve_world_command(
                     "agent_id": agent_id,
                     "player_id": player_id,
                     "destination": target_loc_id,
-                    "turns_required": turns,
+                    "turns_required": hop_time,
                     "route": route,
                 },
             })

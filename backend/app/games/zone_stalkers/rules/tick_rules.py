@@ -149,46 +149,74 @@ def _process_scheduled_action(
     agent["scheduled_action"] = None
 
     if action_type == "travel":
-        route = sched.get("route", [])
+        # target_id is the IMMEDIATE next hop; final_target_id is the ultimate goal.
+        # remaining_route lists hops that come AFTER target_id.
         destination = sched.get("target_id")
+        final_target = sched.get("final_target_id", destination)
+        remaining_route = sched.get("remaining_route", [])
         if destination and destination in state.get("locations", {}):
-            # Move agent along the whole route (just teleport to destination for simplicity)
             old_loc = agent["location_id"]
-            # Remove from old location
+            # Move agent to this hop's location
             old_loc_data = state["locations"].get(old_loc, {})
             if agent_id in old_loc_data.get("agents", []):
                 old_loc_data["agents"].remove(agent_id)
-            # Add to destination
             agent["location_id"] = destination
             new_loc_data = state["locations"].get(destination, {})
             if agent_id not in new_loc_data.get("agents", []):
                 new_loc_data.setdefault("agents", []).append(agent_id)
-            # Apply anomaly damage for each hop
+            # Apply anomaly damage for this single hop
             from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
             total_dmg = 0
-            for hop_loc_id in route:
-                hop_loc = state["locations"].get(hop_loc_id, {})
-                for anom in hop_loc.get("anomalies", []):
-                    anom_info = ANOMALY_TYPES.get(anom["type"], {})
-                    dmg = anom_info.get("damage", 0) // 4  # quarter damage while passing
-                    total_dmg += dmg
+            for anom in state["locations"].get(destination, {}).get("anomalies", []):
+                anom_info = ANOMALY_TYPES.get(anom["type"], {})
+                total_dmg += anom_info.get("damage", 0) // 4
             if total_dmg > 0:
                 agent["hp"] = max(0, agent["hp"] - total_dmg)
-            events.append({
-                "event_type": "travel_completed",
-                "payload": {
-                    "agent_id": agent_id,
-                    "from": old_loc,
-                    "to": destination,
-                    "route": route,
-                    "anomaly_damage": total_dmg,
-                },
-            })
-            # Write memory
-            _add_memory(agent, world_turn, state, "travel",
-                        f"Travelled to {state['locations'][destination].get('name', destination)}",
-                        f"Arrived after a long journey through the Zone.",
-                        {"damage_taken": total_dmg})
+            if remaining_route:
+                # More hops to go — schedule the next hop immediately.
+                next_hop = remaining_route[0]
+                conns = state["locations"].get(destination, {}).get("connections", [])
+                hop_time = next(
+                    (c.get("travel_time", 12) for c in conns if c["to"] == next_hop),
+                    12,
+                )
+                # Override the None set above — agent is still travelling.
+                agent["scheduled_action"] = {
+                    "type": "travel",
+                    "turns_remaining": hop_time,
+                    "turns_total": hop_time,
+                    "target_id": next_hop,
+                    "final_target_id": final_target,
+                    "remaining_route": remaining_route[1:],
+                    "started_turn": world_turn,
+                }
+                events.append({
+                    "event_type": "travel_hop_completed",
+                    "payload": {
+                        "agent_id": agent_id,
+                        "from": old_loc,
+                        "to": destination,
+                        "final_target": final_target,
+                        "hops_remaining": len(remaining_route),
+                        "anomaly_damage": total_dmg,
+                    },
+                })
+            else:
+                # Reached the final destination.
+                events.append({
+                    "event_type": "travel_completed",
+                    "payload": {
+                        "agent_id": agent_id,
+                        "from": old_loc,
+                        "to": destination,
+                        "route": [],
+                        "anomaly_damage": total_dmg,
+                    },
+                })
+                _add_memory(agent, world_turn, state, "travel",
+                            f"Arrived at {state['locations'][destination].get('name', destination)}",
+                            f"Arrived after a journey through the Zone.",
+                            {"damage_taken": total_dmg})
             if agent["hp"] <= 0:
                 agent["is_alive"] = False
                 events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "travel_anomaly"}})
@@ -593,24 +621,30 @@ def _bot_schedule_travel(
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Schedule a travel action for a bot toward target_loc_id. Returns events."""
-    from app.games.zone_stalkers.rules.world_rules import _bfs_route, _route_travel_turns
+    """Schedule hop-by-hop travel for a bot toward target_loc_id. Returns events."""
+    from app.games.zone_stalkers.rules.world_rules import _bfs_route
     route = _bfs_route(state["locations"], agent["location_id"], target_loc_id)
     if not route:
         return []
-    turns = _route_travel_turns(route, state["locations"], agent["location_id"])
+    first_hop = route[0]
+    conns = state["locations"].get(agent["location_id"], {}).get("connections", [])
+    hop_time = next(
+        (c.get("travel_time", 12) for c in conns if c["to"] == first_hop),
+        12,
+    )
     agent["scheduled_action"] = {
         "type": "travel",
-        "turns_remaining": turns,
-        "turns_total": turns,
-        "target_id": target_loc_id,
-        "route": route,
+        "turns_remaining": hop_time,
+        "turns_total": hop_time,
+        "target_id": first_hop,
+        "final_target_id": target_loc_id,
+        "remaining_route": route[1:],
         "started_turn": world_turn,
     }
     agent["action_used"] = True
     return [{
         "event_type": "agent_travel_started",
-        "payload": {"agent_id": agent_id, "destination": target_loc_id, "turns": turns, "bot": True},
+        "payload": {"agent_id": agent_id, "destination": target_loc_id, "turns": hop_time, "bot": True},
     }]
 
 
@@ -970,7 +1004,7 @@ def _bot_pursue_goal(
                        key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
-    elif global_goal == "explore":
+    elif global_goal == "explore_zone":
         # Visit as many unique locations as possible
         visited = {mem.get("effects", {}).get("to_loc") for mem in agent.get("memory", [])
                    if mem.get("type") == "travel"}
