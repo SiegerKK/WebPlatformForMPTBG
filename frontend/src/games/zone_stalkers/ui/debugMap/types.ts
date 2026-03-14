@@ -75,9 +75,13 @@ export interface ZoneMapState {
     positions: Record<string, { x: number; y: number }>;
     regions?: Record<string, { name: string; colorIndex: number }>;
   };
+  /** True while the server-side auto-ticker is advancing this match (core flag) */
+  auto_tick_enabled?: boolean;
 }
 
 export interface DebugMapPageProps {
+  /** Match ID — used to persist viewport position per-match in localStorage */
+  matchId: string;
   zoneState: ZoneMapState;
   currentLocId: string | null;
   /** Send a command to the backend (uses the zone_map context id automatically) */

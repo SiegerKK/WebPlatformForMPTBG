@@ -14,6 +14,7 @@ Supported commands:
 - debug_update_map(positions, connections, regions?) — persist debug canvas layout (meta, no action cost)
 - debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?) — edit location params in debug mode (meta)
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
+- debug_delete_location(loc_id) — remove a location and all its connections in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
 - debug_spawn_trader(loc_id, name?) — spawn a trader NPC at a location in debug mode (meta)
@@ -40,6 +41,8 @@ _MIN_SLEEP_HOURS = 2
 _VALID_TERRAIN_TYPES = frozenset([
     "plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings",
     "hamlet", "farm", "field_camp", "dungeon", "x_lab",
+    # Additional types supported for custom imported maps
+    "urban", "tunnel", "swamp", "scientific_bunker", "underground",
 ])
 
 _VALID_GLOBAL_GOALS = frozenset([
@@ -67,6 +70,9 @@ def validate_world_command(
 
     if command_type == "debug_create_location":
         return _validate_debug_create_location(payload)
+
+    if command_type == "debug_delete_location":
+        return _validate_debug_delete_location(payload, state)
 
     if command_type == "debug_spawn_stalker":
         return _validate_debug_spawn_stalker(payload, state)
@@ -249,7 +255,21 @@ def resolve_world_command(
         events.append({"event_type": "debug_location_created", "payload": {"loc_id": new_id}})
         return state, events
 
-    # ── debug_spawn_stalker: meta-command, spawn NPC stalker ──────────────────
+    # ── debug_delete_location: meta-command, remove a location ────────────────
+    if command_type == "debug_delete_location":
+        loc_id_to_del = str(payload["loc_id"])
+        # Remove all connections pointing TO this location from other locations
+        for other_loc in state.get("locations", {}).values():
+            other_loc["connections"] = [
+                c for c in other_loc.get("connections", [])
+                if c.get("to") != loc_id_to_del
+            ]
+        # Remove the location itself
+        del state["locations"][loc_id_to_del]
+        # Remove persisted canvas position if present
+        state.get("debug_layout", {}).get("positions", {}).pop(loc_id_to_del, None)
+        events.append({"event_type": "debug_location_deleted", "payload": {"loc_id": loc_id_to_del}})
+        return state, events
     if command_type == "debug_spawn_stalker":
         import random as _random
         from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
@@ -1038,6 +1058,18 @@ def _validate_debug_create_location(
     name = str(payload.get("name", "")).strip()
     if not name:
         return RuleCheckResult(valid=False, error="name must be non-empty")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_delete_location(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
     return RuleCheckResult(valid=True)
 
 

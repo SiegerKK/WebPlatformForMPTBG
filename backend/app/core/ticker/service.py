@@ -7,11 +7,22 @@ POST /api/matches/{id}/tick endpoint (testing / admin).
 Game-specific tick logic lives in each game's RuleSet.tick() implementation.
 """
 import logging
+import time
+from typing import Dict
+
 from sqlalchemy.orm import Session
 
 from app.core.matches.models import Match, MatchStatus
 
 logger = logging.getLogger(__name__)
+
+# ── Debug auto-tick context cache ────────────────────────────────────────────
+# Maps context_id → match_id for all active zone_map contexts.
+# Refreshed from the DB at most every _DEBUG_CACHE_TTL seconds to avoid
+# hammering the database from the 500 ms debug ticker.
+_debug_ctx_cache: Dict[str, str] = {}
+_debug_ctx_cache_ts: float = 0.0
+_DEBUG_CACHE_TTL: float = 5.0  # seconds between DB refreshes
 
 
 def tick_match(match_id_str: str, db: Session) -> dict:
@@ -33,7 +44,21 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     if not ruleset:
         return {"error": f"no ruleset registered for game '{match.game_id}'"}
 
-    return ruleset.tick(match_id_str, db)
+    result = ruleset.tick(match_id_str, db)
+
+    # Notify connected WebSocket clients that the state changed.
+    if "error" not in result:
+        from app.core.ws.manager import ws_manager
+        ws_manager.notify(match_id_str, {
+            "type": "ticked",
+            "match_id": match_id_str,
+            "world_turn": result.get("world_turn"),
+            "world_hour": result.get("world_hour"),
+            "world_day": result.get("world_day"),
+            "world_minute": result.get("world_minute"),
+        })
+
+    return result
 
 
 def tick_all_active_matches(db: Session) -> dict:
@@ -50,4 +75,83 @@ def tick_all_active_matches(db: Session) -> dict:
             results.append({"match_id": str(match.id), "error": str(exc)})
 
     return {"ticked": len(results), "results": results}
+
+
+# ── Debug auto-tick (fast background ticker) ──────────────────────────────────
+
+def _refresh_debug_context_cache(db: Session) -> Dict[str, str]:
+    """
+    Return {context_id: match_id} for all active zone_map contexts.
+    Result is cached for up to *_DEBUG_CACHE_TTL* seconds.
+    """
+    global _debug_ctx_cache, _debug_ctx_cache_ts
+    now = time.monotonic()
+    if now - _debug_ctx_cache_ts < _DEBUG_CACHE_TTL:
+        return _debug_ctx_cache
+
+    try:
+        from app.core.contexts.models import GameContext, ContextStatus
+
+        rows = (
+            db.query(GameContext.id, GameContext.match_id)
+            .join(Match, Match.id == GameContext.match_id)
+            .filter(
+                GameContext.context_type == "zone_map",
+                GameContext.status == ContextStatus.ACTIVE,
+                Match.status == MatchStatus.ACTIVE,
+            )
+            .all()
+        )
+        _debug_ctx_cache = {str(r.id): str(r.match_id) for r in rows}
+        _debug_ctx_cache_ts = now
+    except Exception as exc:
+        logger.warning("debug ctx cache refresh failed: %s", exc)
+    return _debug_ctx_cache
+
+
+def tick_debug_auto_matches() -> dict:
+    """
+    Tick every active context that has the auto-tick flag set in its game
+    state.  Checks for ``auto_tick_enabled`` (core generic flag set by the
+    ``set_auto_tick`` platform meta-command) or the legacy
+    ``debug_auto_tick`` flag (Zone Stalkers backward compat).
+
+    Designed to be called from a fast background task (every ~500 ms) via
+    ``asyncio.to_thread`` so that the asyncio event loop is not blocked.
+
+    Opens and closes its own database session so that the SQLAlchemy session
+    lifecycle is entirely contained within the worker thread.
+
+    Uses ``get_context_flag`` for an efficient single Redis GET per match
+    (no full state deserialisation unless the flag is set).
+    """
+    from app.core.state_cache.service import get_context_flag
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        ctx_map = _refresh_debug_context_cache(db)
+        if not ctx_map:
+            return {"ticked": 0}
+
+        ticked = 0
+        for ctx_id, match_id in ctx_map.items():
+            try:
+                # Support both the generic core flag and the legacy game flag.
+                if not (get_context_flag(ctx_id, "auto_tick_enabled", default=False)
+                        or get_context_flag(ctx_id, "debug_auto_tick", default=False)):
+                    continue
+                result = tick_match(match_id, db)
+                if "error" not in result:
+                    ticked += 1
+                else:
+                    # Match or context no longer valid — force cache refresh.
+                    global _debug_ctx_cache_ts
+                    _debug_ctx_cache_ts = 0.0
+            except Exception as exc:
+                logger.warning("debug auto-tick failed for match %s: %s", match_id, exc)
+
+        return {"ticked": ticked}
+    finally:
+        db.close()
 

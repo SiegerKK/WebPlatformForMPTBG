@@ -54,8 +54,8 @@ export interface AgentForProfile {
   reputation?: number;
   memory?: Array<{
     world_turn: number;
-    world_day: number;
-    world_hour: number;
+    world_day?: number;
+    world_hour?: number;
     world_minute?: number;
     type: string;
     title: string;
@@ -81,6 +81,20 @@ const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${St
 /** 1 game turn = 1 real minute (mirrors MINUTES_PER_TURN in tick_rules.py) */
 const MINUTES_PER_TURN = 1;
 const TURNS_PER_HOUR = 60 / MINUTES_PER_TURN;
+
+/**
+ * Derive game day/hour/minute from world_turn.
+ * The game starts at turn 1 = day 1, 06:00.
+ * Mirrors the time-advancement logic in tick_rules.py.
+ */
+const turnToTime = (worldTurn: number): { world_day: number; world_hour: number; world_minute: number } => {
+  const totalMinutes = 6 * 60 + (worldTurn - 1) * MINUTES_PER_TURN;
+  return {
+    world_day: 1 + Math.floor(totalMinutes / (24 * 60)),
+    world_hour: Math.floor(totalMinutes / 60) % 24,
+    world_minute: totalMinutes % 60,
+  };
+};
 
 /**
  * Format a scheduled-action countdown for display.
@@ -386,6 +400,9 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 const subLabel = m.effects?.action_kind
                   ? ` · ${m.effects.action_kind}`
                   : '';
+                const t = m.world_day !== undefined
+                  ? { world_day: m.world_day, world_hour: m.world_hour ?? 0, world_minute: m.world_minute ?? 0 }
+                  : turnToTime(m.world_turn);
                 return (
                   <div key={i} style={{ ...s.memoryEntry, borderLeft: `3px solid ${color}` }}>
                     <div style={s.memoryMeta}>
@@ -393,7 +410,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                         {icon} {m.type}{subLabel}
                       </span>
                       <span style={s.memoryWhen}>
-                        День {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}
+                        День {t.world_day} · {TIME_LABEL(t.world_hour, t.world_minute)}
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>

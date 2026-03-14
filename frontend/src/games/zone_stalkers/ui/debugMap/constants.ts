@@ -89,6 +89,12 @@ export const TERRAIN_TYPE_COLOR: Record<string, string> = {
   field_camp: '#2dd4bf',
   dungeon: '#7c3aed',
   x_lab: '#06b6d4',
+  // Extended types for custom imported maps
+  urban: '#94a3b8',
+  tunnel: '#475569',
+  swamp: '#65a30d',
+  scientific_bunker: '#0ea5e9',
+  underground: '#312e81',
 };
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {

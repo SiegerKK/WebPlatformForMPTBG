@@ -253,15 +253,6 @@ def _process_scheduled_action(
     sched["turns_remaining"] = turns_remaining
 
     if turns_remaining > 0:
-        # Still in progress — emit progress event
-        events.append({
-            "event_type": f"{action_type}_in_progress",
-            "payload": {
-                "agent_id": agent_id,
-                "turns_remaining": turns_remaining,
-                "action_type": action_type,
-            },
-        })
         return events
 
     # Action complete — resolve effects
@@ -612,9 +603,6 @@ def _add_memory(
 ) -> None:
     memory_entry = {
         "world_turn": world_turn,
-        "world_day": state.get("world_day", 1),
-        "world_hour": state.get("world_hour", 0),
-        "world_minute": state.get("world_minute", 0),
         "type": memory_type,
         "title": title,
         "summary": summary,
@@ -886,9 +874,6 @@ def _add_trader_memory(
     """Append a memory entry to a trader NPC (same structure as agent memory)."""
     entry = {
         "world_turn": world_turn,
-        "world_day": state.get("world_day", 1),
-        "world_hour": state.get("world_hour", 0),
-        "world_minute": state.get("world_minute", 0),
         "type": memory_type,
         "title": title,
         "summary": summary,

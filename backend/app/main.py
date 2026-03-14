@@ -12,6 +12,7 @@ from app.core.turns.router import router as turns_router
 from app.core.events.router import router as events_router
 from app.core.admin.router import router as admin_router
 from app.core.ticker.router import router as ticker_router
+from app.core.ws.router import router as ws_router
 from app.core.commands.pipeline import register_ruleset
 from app.games.tictactoe.rules import TicTacToeRuleSet
 from app.games.zone_stalkers.ruleset import ZoneStalkerRuleSet
@@ -38,18 +39,51 @@ async def _background_ticker(interval_seconds: int) -> None:
             logger.error("Background ticker error: %s", exc)
 
 
+async def _debug_auto_ticker() -> None:
+    """
+    Fast ticker (500 ms) for matches that have ``debug_auto_tick = True``
+    stored in their game state.
+
+    Runs ``tick_debug_auto_matches`` in a thread pool via
+    ``asyncio.to_thread`` so that the DB/Redis I/O does not block the
+    asyncio event loop.  The function manages its own DB session internally.
+    WebSocket notifications from the worker thread use ``ws_manager``'s
+    thread-safe scheduling path (``run_coroutine_threadsafe``).
+    """
+    from app.core.ticker.service import tick_debug_auto_matches
+    while True:
+        await asyncio.sleep(0.5)
+        try:
+            result = await asyncio.to_thread(tick_debug_auto_matches)
+            if result.get("ticked"):
+                logger.debug("Debug auto-tick: %s match(es) ticked", result["ticked"])
+        except Exception as exc:
+            logger.error("Debug auto-ticker error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.config import settings
-    task = None
+    from app.core.ws.manager import ws_manager
+
+    # Bind the running event loop to ws_manager so that worker threads
+    # (debug auto-ticker) can schedule WebSocket broadcasts safely.
+    ws_manager.bind_loop(asyncio.get_running_loop())
+
+    tasks = []
     if settings.AUTO_TICK_ENABLED:
-        task = asyncio.create_task(_background_ticker(settings.TICK_INTERVAL_SECONDS))
+        tasks.append(asyncio.create_task(_background_ticker(settings.TICK_INTERVAL_SECONDS)))
         logger.info(
             "World ticker started (interval=%ds, 1 game-hour per tick)",
             settings.TICK_INTERVAL_SECONDS,
         )
+    # Debug auto-ticker always runs (checks per-match flag in Redis state).
+    tasks.append(asyncio.create_task(_debug_auto_ticker()))
+    logger.info("Debug auto-ticker started (500 ms interval)")
+
     yield
-    if task:
+
+    for task in tasks:
         task.cancel()
         try:
             await task
@@ -72,6 +106,7 @@ app.include_router(turns_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(ticker_router, prefix="/api")
+app.include_router(ws_router, prefix="/api")
 # Game-specific routers — each game may expose its own endpoints
 app.include_router(zone_stalkers_router, prefix="/api")
 

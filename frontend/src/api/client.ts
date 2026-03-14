@@ -89,8 +89,10 @@ export const commandsApi = {
 };
 
 export const eventsApi = {
-  listForMatch: (matchId: string) => apiClient.get(`/matches/${matchId}/events`),
-  listForContext: (contextId: string) => apiClient.get(`/contexts/${contextId}/events`),
+  listForMatch: (matchId: string, params?: { limit?: number }) =>
+    apiClient.get(`/matches/${matchId}/events`, { params }),
+  listForContext: (contextId: string, params?: { limit?: number }) =>
+    apiClient.get(`/contexts/${contextId}/events`, { params }),
 };
 
 export const turnsApi = {

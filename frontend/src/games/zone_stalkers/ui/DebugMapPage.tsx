@@ -93,7 +93,7 @@ function botDecisionMade(
   return false;
 }
 
-export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
+export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
 
@@ -106,13 +106,28 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [creatingLoc, setCreatingLoc] = useState(false);
 
+  // ── Viewport persistence (pan + zoom saved per-match in localStorage) ────────
+  const _vpKey = `zs_viewport_${matchId}`;
+  const _loadVp = (): { x: number; y: number; zoom: number } => {
+    try {
+      const raw = localStorage.getItem(_vpKey);
+      if (raw) {
+        const v = JSON.parse(raw) as { x?: number; y?: number; zoom?: number };
+        return { x: v.x ?? 0, y: v.y ?? 0, zoom: v.zoom ?? 1.0 };
+      }
+    } catch { /* ignore */ }
+    return { x: 0, y: 0, zoom: 1.0 };
+  };
+  const _savedVp = _loadVp();
+  const _vpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // ── Canvas pan ────────────────────────────────────────────────────────────
   // panOffset is the translation (in px) of the canvas viewport.
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [panOffset, setPanOffset] = useState({ x: _savedVp.x, y: _savedVp.y });
   const [isPanning, setIsPanning] = useState(false);
 
   // ── Zoom ─────────────────────────────────────────────────────────────────
-  const [zoom, setZoom] = useState(1.0);
+  const [zoom, setZoom] = useState(_savedVp.zoom);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const canvasScrollRef = useRef<HTMLDivElement>(null);
@@ -133,6 +148,18 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   } | null>(null);
   const panOffsetRef = useRef(panOffset);
   panOffsetRef.current = panOffset;
+
+  // ── Persist pan + zoom to localStorage (debounced 400 ms) ─────────────────
+  useEffect(() => {
+    if (_vpTimerRef.current) clearTimeout(_vpTimerRef.current);
+    _vpTimerRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(_vpKey, JSON.stringify({ x: panOffset.x, y: panOffset.y, zoom }));
+      } catch { /* storage full or unavailable — ignore */ }
+    }, 400);
+    return () => { if (_vpTimerRef.current) clearTimeout(_vpTimerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panOffset.x, panOffset.y, zoom]);
 
   // ── Drag ─────────────────────────────────────────────────────────────────
   // dragOverrides: user-defined card CENTER positions in canvas-space pixels.
@@ -285,27 +312,16 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     }
   };
 
-  // ── Auto-run (течение времени до паузы) ──────────────────────────────────
-  const autoRunCancelRef = useRef(false);
-  const [autoRunning, setAutoRunning] = useState(false);
+  // ── Auto-run (течение времени) — server-side, synced across all tabs ────────
+  // The running state lives in zoneState.auto_tick_enabled (core flag, set by
+  // the platform meta-command "set_auto_tick").  Any tab / any game can use
+  // this — no game-specific implementation required.
+  const autoRunning = zoneState.auto_tick_enabled ?? false;
 
-  const handleAutoRun = async () => {
-    if (autoRunning) {
-      autoRunCancelRef.current = true;
-      return;
-    }
-    autoRunCancelRef.current = false;
-    setAutoRunning(true);
-    try {
-      while (!autoRunCancelRef.current) {
-        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
-        await new Promise<void>((r) => setTimeout(r, 300));
-      }
-    } finally {
-      setAutoRunning(false);
-      autoRunCancelRef.current = false;
-    }
-  };
+  const handleToggleAutoTick = useCallback(async () => {
+    const running = zoneState.auto_tick_enabled ?? false;
+    await sendCommand('set_auto_tick', { enabled: !running });
+  }, [sendCommand, zoneState.auto_tick_enabled]);
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
@@ -939,10 +955,17 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
   const handleSaveCreate = useCallback(
     async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
-      // Place the new card just below the current canvas bottom-center so it's visible
+      // Place the new card at the center of the currently visible viewport area.
+      // The canvas transform is: translate(panOffset.x, panOffset.y) scale(zoom)
+      // So the visible center in canvas-space is:
+      //   canvasCX = (-panOffset.x + viewportW/2) / zoom
+      //   canvasCY = (-panOffset.y + viewportH/2) / zoom
+      const vpEl = canvasScrollRef.current;
+      const vpW = vpEl ? vpEl.clientWidth : 800;
+      const vpH = vpEl ? vpEl.clientHeight : 600;
       const pos = {
-        x: Math.max(CARD_W / 2 + CANVAS_PAD, canvasW / 2),
-        y: canvasH + CARD_H / 2 + CANVAS_PAD,
+        x: Math.max(CARD_W / 2 + CANVAS_PAD, (-panOffsetRef.current.x + vpW / 2) / zoomRef.current),
+        y: Math.max(CARD_H / 2 + CANVAS_PAD, (-panOffsetRef.current.y + vpH / 2) / zoomRef.current),
       };
       await sendCommand('debug_create_location', {
         name: data.name,
@@ -953,8 +976,26 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
         position: pos,
       });
     },
-    [sendCommand, canvasW, canvasH],
+    [sendCommand],
   );
+
+  const handleDeleteLoc = useCallback(async (locId: string) => {
+    if (!window.confirm(`Удалить локацию "${zoneState.locations[locId]?.name ?? locId}"? Все связи с ней будут разорваны.`)) return;
+    // Clean up local state immediately so UI is responsive before the server round-trip
+    setSelectedLocId(null);
+    setDragOverrides((prev) => {
+      const next = { ...prev };
+      delete next[locId];
+      return next;
+    });
+    const nextConns = { ...localConnsRef.current };
+    delete nextConns[locId];
+    for (const id of Object.keys(nextConns)) {
+      nextConns[id] = nextConns[id].filter((c) => c.to !== locId);
+    }
+    setLocalConns(nextConns);
+    await sendCommand('debug_delete_location', { loc_id: locId });
+  }, [sendCommand, zoneState.locations]);
 
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
   const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
@@ -1072,9 +1113,9 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
               </button>
               <button
                 style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
-                onClick={handleAutoRun}
+                onClick={handleToggleAutoTick}
                 disabled={ticking || skipping}
-                title={autoRunning ? 'Нажмите для паузы' : 'Запустить течение времени до паузы'}
+                title={autoRunning ? 'Пауза (синхр. со всеми вкладками)' : 'Запустить течение времени (синхр. со всеми вкладками)'}
               >
                 {autoRunning ? '⏸ Пауза' : '▶ Авто'}
               </button>
@@ -1469,6 +1510,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
             onAgentClick={(agentId) => setProfileAgentId(agentId)}
             onTraderClick={(traderId) => setProfileTraderId(traderId)}
+            onDeleteLoc={() => handleDeleteLoc(selectedLocId!)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel

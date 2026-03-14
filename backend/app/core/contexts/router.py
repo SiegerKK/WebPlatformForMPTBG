@@ -32,12 +32,20 @@ def create(data: GameContextCreate, current_user: User = Depends(get_current_use
 
 @router.get("/contexts/{context_id}", response_model=GameContextRead)
 def get(context_id: uuid.UUID, db: Session = Depends(get_db)):
-    return get_context(context_id, db)
+    ctx = get_context(context_id, db)
+    # Serve the authoritative state (Redis if ahead of DB, otherwise DB).
+    from app.core.state_cache.service import load_context_state
+    ctx.state_blob = load_context_state(ctx.id, ctx)
+    return ctx
 
 
 @router.get("/matches/{match_id}/contexts", response_model=List[GameContextRead])
 def get_tree(match_id: uuid.UUID, db: Session = Depends(get_db)):
-    return get_context_tree(match_id, db)
+    ctxs = get_context_tree(match_id, db)
+    from app.core.state_cache.service import load_context_state
+    for ctx in ctxs:
+        ctx.state_blob = load_context_state(ctx.id, ctx)
+    return ctxs
 
 
 @router.get("/contexts/{context_id}/projection")

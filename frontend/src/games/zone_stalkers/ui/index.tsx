@@ -4,6 +4,7 @@ import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../.
 import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';
+import { useMatchWebSocket } from '../../../hooks/useMatchWebSocket';
 
 // ─── DebugTimeControl ────────────────────────────────────────────────────────
 function DebugTimeControl({
@@ -155,6 +156,7 @@ interface ZoneMapState {
   player_agents: Record<string, string>;
   active_events: string[];
   game_over: boolean;
+  auto_tick_enabled?: boolean;
 }
 
 interface ZoneEventState {
@@ -189,6 +191,12 @@ const TERRAIN_TYPE_COLOR: Record<string, string> = {
   hamlet: '#9a3412',
   farm: '#14532d',
   field_camp: '#134e4a',
+  // Extended types for custom imported maps
+  urban: '#334155',
+  tunnel: '#1e293b',
+  swamp: '#365314',
+  scientific_bunker: '#075985',
+  underground: '#1e1b4b',
 };
 
 const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -321,10 +329,48 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         setActiveEventCtx(null);
       }
 
-      const evRes = await eventsApi.listForMatch(match.id);
+      const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
       setEvents(evRes.data as GameEvent[]);
     } catch { /* ignore */ }
   }, [match.id]);
+
+  // ─── WebSocket push — replaces polling when connected ────────────────────
+  const wsToken = localStorage.getItem('access_token');
+  const { connected: wsConnected } = useMatchWebSocket(
+    match.id,
+    wsToken,
+    useCallback((msg) => {
+      if (msg.type === 'ticked') {
+        // Immediately patch the 4 time fields in the local context state so the
+        // clock display updates on every single tick without waiting for a full
+        // API round-trip. The full refresh() call below handles the rest of the
+        // state (agent positions, items, etc.).
+        const wt = msg.world_turn as number | undefined;
+        const wh = msg.world_hour as number | undefined;
+        const wd = msg.world_day as number | undefined;
+        const wm = msg.world_minute as number | undefined;
+        if (wt !== undefined) {
+          setContext((prev) => {
+            if (!prev) return prev;
+            const blob = (prev.state_blob as Record<string, unknown>) ?? {};
+            return {
+              ...prev,
+              state_blob: {
+                ...blob,
+                world_turn: wt,
+                ...(wh !== undefined ? { world_hour: wh } : {}),
+                ...(wd !== undefined ? { world_day: wd } : {}),
+                ...(wm !== undefined ? { world_minute: wm } : {}),
+              },
+            };
+          });
+        }
+        refresh();
+      } else if (msg.type === 'state_updated') {
+        refresh();
+      }
+    }, [refresh]), // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   // ─── ensure zone_map context exists ─────────────────────────────────────
   const ensureContext = useCallback(async () => {
@@ -364,10 +410,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWaiting, match.id, match.status]);
 
-  // ─── active polling ──────────────────────────────────────────────────────
+  // ─── active polling (fallback when WebSocket is not connected) ──────────
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
-    if (isActive && !zoneState?.game_over) {
+    // Only poll when WS is unavailable — WS push handles updates otherwise.
+    if (isActive && !zoneState?.game_over && !wsConnected) {
+      // When auto-tick is running (500 ms per turn), a 5 s poll would only
+      // refresh the UI every 10 turns.  Match the auto-tick interval so
+      // every turn is visible even without a working WebSocket connection.
+      const interval = zoneState?.auto_tick_enabled ? 500 : 5000;
       pollRef.current = setInterval(async () => {
         try {
           const mRes = await matchesApi.get(match.id);
@@ -379,11 +430,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             onMatchDeleted(match.id);
         }
         await refresh();
-      }, 5000);
+      }, interval);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, zoneState?.game_over, match.id, refresh]);
+  }, [isActive, zoneState?.game_over, zoneState?.auto_tick_enabled, match.id, refresh, wsConnected]);
 
   // ─── commands ────────────────────────────────────────────────────────────
   const sendCommand = useCallback(async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {
@@ -1666,7 +1717,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
 
         {debugTab === 'map' && (
-          <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
+          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
