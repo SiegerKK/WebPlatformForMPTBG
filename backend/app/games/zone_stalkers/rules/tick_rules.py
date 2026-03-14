@@ -9,6 +9,7 @@ Processes:
   - Turn reset (action_used → False)
   - Random event spawning
 """
+import collections
 import copy
 import random
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +22,14 @@ MINUTES_PER_TURN = 1
 _HOUR_IN_TURNS = 60 // MINUTES_PER_TURN       # turns needed to pass 1 in-game hour
 EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exploration
 DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
+
+# Agent memory cap — oldest entries are dropped when this limit is exceeded.
+MAX_AGENT_MEMORY = 500
+
+# Anomaly search parameters for the get_rich NPC goal path
+_ANOMALY_SEARCH_MAX_HOPS = 5      # BFS radius (in hops) when looking for anomaly locations
+_ANOMALY_DISTANCE_PENALTY = 5.0   # Score reduction per hop of distance
+_ANOMALY_SCORE_NOISE = 0.5        # Small random jitter to break ties between equal-scoring locations
 
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -534,9 +543,53 @@ def _add_memory(
     }
     mem = agent.setdefault("memory", [])
     mem.append(memory_entry)
-    # Keep only the last 100 memory entries (increased from 50 for richer history)
-    if len(mem) > 100:
-        agent["memory"] = mem[-100:]
+    # Keep only the last MAX_AGENT_MEMORY memory entries
+    if len(mem) > MAX_AGENT_MEMORY:
+        agent["memory"] = mem[-MAX_AGENT_MEMORY:]
+
+
+def _score_location(loc: Dict[str, Any], goal_kind: str) -> float:
+    """Score a location for a given goal kind.
+
+    goal_kind="artifacts": weighted by anomaly_activity and already-present artifacts.
+    goal_kind="loot"      : weighted by total value of items present (future use).
+
+    The scores are intentionally comparable so future goal branches can pick the
+    highest-scoring option across goal kinds.
+    """
+    if goal_kind == "artifacts":
+        return loc.get("anomaly_activity", 0) * 10.0 + len(loc.get("artifacts", [])) * 50.0
+    if goal_kind == "loot":
+        # TODO: expand when item loot collection is implemented
+        return sum(item.get("value", 0) for item in loc.get("items", []))
+    return 0.0
+
+
+def _bfs_reachable_locations(
+    from_loc_id: str,
+    locations: Dict[str, Any],
+    max_hops: int = 5,
+) -> Dict[str, int]:
+    """Return {loc_id: distance} for every location reachable from *from_loc_id*
+    within *max_hops* hops via open (non-closed) connections.
+
+    *from_loc_id* itself is not included in the result.
+    """
+    visited: Dict[str, int] = {}
+    queue: collections.deque = collections.deque([(from_loc_id, 0)])
+    seen = {from_loc_id}
+    while queue:
+        current, dist = queue.popleft()
+        if dist >= max_hops:
+            continue
+        for conn in locations.get(current, {}).get("connections", []):
+            nxt = conn["to"]
+            if conn.get("closed") or nxt in seen:
+                continue
+            seen.add(nxt)
+            visited[nxt] = dist + 1
+            queue.append((nxt, dist + 1))
+    return visited
 
 
 def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Optional[List[str]]:
@@ -1345,46 +1398,46 @@ def _bot_pursue_goal(
             return [{"event_type": "exploration_started",
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-        # Current location is confirmed empty or has no active anomalies.
-        # Try to find a neighbour with anomalies AND activity > 0 that is NOT confirmed empty.
-        anomaly_neighbors_fresh = [
-            c for c in connections
-            if locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
-            and c["to"] not in confirmed_empty
+        # Current location confirmed empty or no anomaly activity here.
+        # BFS up to _ANOMALY_SEARCH_MAX_HOPS hops to find the best anomaly location not yet confirmed empty.
+        reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_ANOMALY_SEARCH_MAX_HOPS)
+
+        def _anomaly_candidate_score(lid: str, dist: int) -> float:
+            return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY + rng.random() * _ANOMALY_SCORE_NOISE
+
+        fresh_candidates = [
+            (lid, dist) for lid, dist in reachable.items()
+            if locations.get(lid, {}).get("anomaly_activity", 0) > 0
+            and lid not in confirmed_empty
         ]
-        if anomaly_neighbors_fresh:
-            # Pick the best by anomaly_activity + small random tiebreak
-            best = max(
-                anomaly_neighbors_fresh,
-                key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0) + rng.random() * 0.5,
-            )
-            best_name = locations.get(best["to"], {}).get("name", best["to"])
+        if fresh_candidates:
+            best_lid, best_dist = max(fresh_candidates, key=lambda t: _anomaly_candidate_score(*t))
+            best_name = locations.get(best_lid, {}).get("name", best_lid)
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"Иду в непроверенную аномальную зону «{best_name}»",
-                f"Текущая локация пустая/изучена. Иду в «{best_name}» — там аномалии и возможны артефакты.",
-                {"action_kind": "move_for_anomaly", "destination": best["to"]},
+                f"Ищу аномальные зоны. Лучший вариант в радиусе 5 переходов: «{best_name}» (активность {locations.get(best_lid, {}).get('anomaly_activity', 0)}, расстояние {best_dist}).",
+                {"action_kind": "move_for_anomaly", "destination": best_lid},
             )
-            return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+            return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
-        # All reachable anomaly neighbours are confirmed empty — use fallback:
-        # visit a random anomaly location with activity > 0 (even confirmed empty) to wait for midnight spawns.
-        all_anomaly_neighbors = [
-            c for c in connections
-            if locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
+        # All anomaly locations within 5 hops are confirmed empty — go to the best one to wait for midnight spawns.
+        all_anomaly_candidates = [
+            (lid, dist) for lid, dist in reachable.items()
+            if locations.get(lid, {}).get("anomaly_activity", 0) > 0
         ]
-        if all_anomaly_neighbors:
-            fallback = rng.choice(all_anomaly_neighbors)
-            fallback_name = locations.get(fallback["to"], {}).get("name", fallback["to"])
+        if all_anomaly_candidates:
+            best_lid, best_dist = max(all_anomaly_candidates, key=lambda t: _anomaly_candidate_score(*t))
+            best_name = locations.get(best_lid, {}).get("name", best_lid)
             _add_memory(
                 agent, world_turn, state, "decision",
-                f"Все аномальные зоны изучены — иду в «{fallback_name}» ждать",
-                f"Все известные аномальные локации пусты. Возвращаюсь в «{fallback_name}» в ожидании новых артефактов.",
-                {"action_kind": "move_for_anomaly", "destination": fallback["to"]},
+                f"Все аномальные зоны изучены — иду в «{best_name}» ждать",
+                f"Все известные аномальные локации в радиусе 5 переходов пусты. Иду в «{best_name}» в ожидании новых артефактов.",
+                {"action_kind": "move_for_anomaly", "destination": best_lid},
             )
-            return _bot_schedule_travel(agent_id, agent, fallback["to"], state, world_turn)
+            return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
-        # No anomaly neighbours at all — move toward highest anomaly activity.
+        # No anomaly locations within 5 hops — move toward the neighbour with highest anomaly activity.
         if connections:
             best = max(connections,
                        key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
@@ -1392,7 +1445,7 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Иду в зону с высокой аномальностью",
-                f"Артефактов нигде нет. Иду в «{best_name}» — там больше аномальная активность.",
+                f"Аномальных зон нет в радиусе 5 переходов. Иду в «{best_name}» — там выше аномальная активность.",
                 {"action_kind": "move_for_anomaly", "destination": best["to"]},
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
