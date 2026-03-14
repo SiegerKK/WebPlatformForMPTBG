@@ -6,7 +6,6 @@ domain knowledge (zone_map, zone_event context types, etc.) that must not
 pollute the generic platform core.
 """
 import uuid
-import copy
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -76,11 +75,12 @@ def create_zone_event(
     event_ctx = create_context(ctx_data, db)
 
     # Register the event in the zone_map's active_events list.
-    # Reassign state_blob entirely so SQLAlchemy tracks the mutation.
-    zone_state = copy.deepcopy(zone_ctx.state_blob or {})
+    # Use load_context_state so we always act on the latest state (Redis > DB).
+    from app.core.state_cache.service import load_context_state, save_context_state
+    zone_state = load_context_state(zone_ctx.id, zone_ctx)
     zone_state.setdefault("active_events", []).append(str(event_ctx.id))
-    zone_ctx.state_blob = zone_state
-    zone_ctx.state_version += 1
+    # force_persist=True: user-initiated creation must be immediately durable.
+    save_context_state(zone_ctx.id, zone_state, zone_ctx, force_persist=True)
     db.commit()
 
     return event_ctx

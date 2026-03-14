@@ -72,13 +72,18 @@ class CommandPipeline:
             # 6. RuleCheck - delegate to game's RuleSet if registered
             ruleset = get_ruleset(match.game_id)
             new_events = []
-            new_state = context.state_blob or {}
+
+            # Load state once from Redis (or DB fallback) so all three passes
+            # (validate, resolve, persist) see the same authoritative state.
+            from app.core.state_cache.service import load_context_state, save_context_state
+            state = load_context_state(context.id, context)
+            new_state = state
 
             if ruleset:
                 result = ruleset.validate_command(
                     envelope.command_type,
                     envelope.payload,
-                    context.state_blob or {},
+                    state,
                     entities_data,
                     str(player.id)
                 )
@@ -92,7 +97,7 @@ class CommandPipeline:
                 new_state, new_events = ruleset.resolve_command(
                     envelope.command_type,
                     envelope.payload,
-                    context.state_blob or {},
+                    state,
                     entities_data,
                     str(player.id)
                 )
@@ -103,9 +108,9 @@ class CommandPipeline:
                 else:
                     new_events = [{"event_type": f"{envelope.command_type}_executed", "payload": envelope.payload}]
 
-            # 8. Optimistic lock + update state
-            context.state_blob = new_state
-            context.state_version += 1
+            # 8. Persist state — user-initiated commands always write to DB
+            # (force_persist=True) so that the change is immediately durable.
+            save_context_state(context.id, new_state, context, force_persist=True)
 
             # 9. Emit events
             emitted = []

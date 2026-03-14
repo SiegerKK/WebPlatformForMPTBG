@@ -82,6 +82,7 @@ class ZoneStalkerRuleSet(RuleSet):
         from app.core.events.models import GameEvent
         from app.core.events.service import allocate_sequence_numbers
         from app.core.matches.models import Match, MatchStatus
+        from app.core.state_cache.service import load_context_state, save_context_state
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         from app.games.zone_stalkers.rules.event_rules import start_event, bot_choose_option
 
@@ -98,12 +99,11 @@ class ZoneStalkerRuleSet(RuleSet):
         if not zone_ctx:
             return {"error": "no active zone_map context found"}
 
-        state = zone_ctx.state_blob or {}
+        # Load state from Redis (or DB fallback on cache miss).
+        state = load_context_state(zone_ctx.id, zone_ctx)
 
         # ── Tick the world map ────────────────────────────────────────
         new_state, map_events = tick_zone_map(state)
-        zone_ctx.state_blob = new_state
-        zone_ctx.state_version += 1
 
         emitted = []
         if map_events:
@@ -127,7 +127,7 @@ class ZoneStalkerRuleSet(RuleSet):
         ).all()
 
         for evt_ctx in event_ctxs:
-            evt_state = evt_ctx.state_blob or {}
+            evt_state = load_context_state(evt_ctx.id, evt_ctx)
 
             if evt_state.get("phase") == "waiting":
                 participants = evt_state.get("participants", {})
@@ -167,13 +167,15 @@ class ZoneStalkerRuleSet(RuleSet):
                 evt_ctx.status = ContextStatus.FINISHED
                 evt_ctx.finished_at = datetime.utcnow()
 
-            evt_ctx.state_blob = evt_state
-            evt_ctx.state_version += 1
+            # Event contexts are small — always persist to DB for reliability.
+            save_context_state(evt_ctx.id, evt_state, evt_ctx, force_persist=True)
 
-        # Save updated zone_map state (includes memory updates from events)
-        zone_ctx.state_blob = new_state
+        # Save zone_map state (includes memory updates from ended events).
+        # force_persist=True on game-over so the final state is always durable.
+        game_over = bool(new_state.get("game_over"))
+        save_context_state(zone_ctx.id, new_state, zone_ctx, force_persist=game_over)
 
-        if new_state.get("game_over"):
+        if game_over:
             match.status = MatchStatus.FINISHED
             match.finished_at = datetime.utcnow()
 

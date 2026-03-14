@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     TICK_INTERVAL_SECONDS: int = 3600  # 1 real-time hour = 1 game hour
     AUTO_TICK_ENABLED: bool = False    # set True in production; off by default for tests
 
+    # State cache (Redis write-through)
+    # How many ticks between DB persistence of state_blob.
+    # - 1  = write to DB every tick (safe, same as before; effective when Redis is down)
+    # - 5  = write to DB every 5 ticks (80 % fewer DB writes; up to 4 ticks lost on crash)
+    # - 10 = write to DB every 10 ticks (90 % fewer DB writes; up to 9 ticks lost on crash)
+    # Ignored when Redis is unavailable — DB is always written in that case.
+    STATE_PERSIST_INTERVAL_TICKS: int = 5
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
