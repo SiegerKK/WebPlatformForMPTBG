@@ -303,7 +303,7 @@ export function LocationDetailPanel({
       {showSpawnModal === 'trader' && (
         <AgentCreateModal
           onClose={() => setShowSpawnModal(null)}
-          onSave={async (name) => {
+          onSave={async (name, _faction, _globalGoal, _isTrader) => {
             await onSpawnTrader(name);
             setShowSpawnModal(null);
           }}

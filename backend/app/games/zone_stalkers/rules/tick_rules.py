@@ -17,6 +17,10 @@ from typing import Any, Dict, List, Tuple
 # 1 game turn = 1 real minute
 MINUTES_PER_TURN = 1
 
+# Derived constants (update MINUTES_PER_TURN above to rescale the whole system)
+_HOUR_IN_TURNS = 60 // MINUTES_PER_TURN       # turns needed to pass 1 in-game hour
+EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exploration
+
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
@@ -334,8 +338,14 @@ def _resolve_exploration(
 
 
 def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int, state: Dict[str, Any]) -> None:
-    """Apply sleep healing effects."""
-    hours = sched.get("hours", sched.get("turns_total", 360) // 60)
+    """Apply sleep healing effects.
+
+    ``sched`` must contain either:
+    * ``hours``       – preferred; the number of in-game hours slept.
+    * ``turns_total`` – fallback; total turns of the sleep action (converted via
+                        ``turns_total // _HOUR_IN_TURNS``).
+    """
+    hours = sched.get("hours", sched.get("turns_total", 6 * _HOUR_IN_TURNS) // _HOUR_IN_TURNS)
     # Heal HP (15 per hour, max 100)
     hp_regen = min(15 * hours, agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
@@ -678,8 +688,8 @@ def _run_bot_action_inner(
         _sleep_hours = 6
         agent["scheduled_action"] = {
             "type": "sleep",
-            "turns_remaining": _sleep_hours * 60,
-            "turns_total": _sleep_hours * 60,
+            "turns_remaining": _sleep_hours * _HOUR_IN_TURNS,
+            "turns_total": _sleep_hours * _HOUR_IN_TURNS,
             "hours": _sleep_hours,
             "target_id": loc_id,
             "started_turn": world_turn,
@@ -766,8 +776,8 @@ def _bot_gather_resources(
     if loc.get("anomalies") and rng.random() < 0.50:
         agent["scheduled_action"] = {
             "type": "explore",
-            "turns_remaining": 30,  # 30 minutes of exploration
-            "turns_total": 30,
+            "turns_remaining": EXPLORE_DURATION_TURNS,
+            "turns_total": EXPLORE_DURATION_TURNS,
             "target_id": loc_id,
             "started_turn": world_turn,
         }
@@ -790,8 +800,8 @@ def _bot_gather_resources(
     if rng.random() < 0.40:
         agent["scheduled_action"] = {
             "type": "explore",
-            "turns_remaining": 30,
-            "turns_total": 30,
+            "turns_remaining": EXPLORE_DURATION_TURNS,
+            "turns_total": EXPLORE_DURATION_TURNS,
             "target_id": loc_id,
             "started_turn": world_turn,
         }
@@ -829,8 +839,8 @@ def _bot_pursue_goal(
         if agent.get("sleepiness", 0) >= 40:
             _sleep_hours = 4
             agent["scheduled_action"] = {
-                "type": "sleep", "turns_remaining": _sleep_hours * 60,
-                "turns_total": _sleep_hours * 60, "hours": _sleep_hours,
+                "type": "sleep", "turns_remaining": _sleep_hours * _HOUR_IN_TURNS,
+                "turns_total": _sleep_hours * _HOUR_IN_TURNS, "hours": _sleep_hours,
                 "target_id": loc_id, "started_turn": world_turn,
             }
             agent["action_used"] = True
@@ -857,7 +867,7 @@ def _bot_pursue_goal(
                      "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
         if loc.get("anomalies") and rng.random() < 0.65:
             agent["scheduled_action"] = {
-                "type": "explore", "turns_remaining": 30, "turns_total": 30,
+                "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
                 "target_id": loc_id, "started_turn": world_turn,
             }
             agent["action_used"] = True
@@ -880,7 +890,7 @@ def _bot_pursue_goal(
         # Explore current location if not recently explored
         if rng.random() < 0.50:
             agent["scheduled_action"] = {
-                "type": "explore", "turns_remaining": 30, "turns_total": 30,
+                "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
                 "target_id": loc_id, "started_turn": world_turn,
             }
             agent["action_used"] = True
@@ -914,7 +924,7 @@ def _bot_pursue_goal(
         return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
     if rng.random() < 0.30:
         agent["scheduled_action"] = {
-            "type": "explore", "turns_remaining": 30, "turns_total": 30,
+            "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
             "target_id": loc_id, "started_turn": world_turn,
         }
         agent["action_used"] = True
