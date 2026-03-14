@@ -1467,7 +1467,8 @@ def _bot_pursue_goal(
             return [{"event_type": "sleep_started", "payload": {"agent_id": agent_id, "hours": _sleep_hours}}]
 
     elif global_goal == "get_rich":
-        # ── Step 3: Explore current location to find artifacts (must go through explore) ──────
+        # ── Explore current location to find artifacts (must go through explore) ──────
+        # Artifacts can only be obtained through the explore action, not picked up directly.
         artifacts = loc.get("artifacts", [])
         if artifacts or loc.get("anomaly_activity", 0) > 0:
             # Build confirmed-empty set to avoid re-exploring fruitless spots
