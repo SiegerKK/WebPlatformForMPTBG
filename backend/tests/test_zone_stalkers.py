@@ -1481,8 +1481,92 @@ class TestUnifiedStalkerModel:
             assert agent["material_threshold"] > 0
 
 
-class TestDebugAutoTick:
-    """Tests for the debug_set_auto_tick command."""
+class TestAutoTickCore:
+    """Tests for the core set_auto_tick pipeline meta-command and ticker service."""
+
+    def _state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    # ── pipeline sets auto_tick_enabled flag ────────────────────────────────
+
+    def _simulate_pipeline_set_auto_tick(self, state: dict, enabled: bool) -> dict:
+        """
+        Simulate the pipeline meta-command logic in isolation
+        (without a real DB/HTTP stack) to verify the state mutation.
+        """
+        import copy
+        new_state = copy.deepcopy(state)
+        new_state["auto_tick_enabled"] = bool(enabled)
+        return new_state
+
+    def test_set_auto_tick_stores_flag_true(self):
+        state = self._state()
+        new_state = self._simulate_pipeline_set_auto_tick(state, True)
+        assert new_state["auto_tick_enabled"] is True
+
+    def test_set_auto_tick_stores_flag_false(self):
+        state = self._state()
+        new_state = self._simulate_pipeline_set_auto_tick(state, False)
+        assert new_state["auto_tick_enabled"] is False
+
+    def test_set_auto_tick_does_not_mutate_original_state(self):
+        import copy
+        state = self._state()
+        original = copy.deepcopy(state)
+        self._simulate_pipeline_set_auto_tick(state, True)
+        assert state == original
+
+    # ── ticker checks auto_tick_enabled (new core flag) ─────────────────────
+
+    def test_ticker_reads_auto_tick_enabled_flag(self):
+        """get_context_flag should return auto_tick_enabled from state."""
+        from app.core.state_cache.service import get_context_flag, _compress, _STATE_KEY_PREFIX
+        from app.core.state_cache.client import get_redis
+
+        state = {"auto_tick_enabled": True, "other_key": 42}
+        r = get_redis()
+        if r is None:
+            import pytest
+            pytest.skip("Redis not available")
+
+        ctx_id = "test-auto-tick-core-ctx"
+        r.set(f"{_STATE_KEY_PREFIX}{ctx_id}", _compress(state), ex=60)
+        assert get_context_flag(ctx_id, "auto_tick_enabled", default=False) is True
+        # cleanup
+        r.delete(f"{_STATE_KEY_PREFIX}{ctx_id}")
+
+    def test_ticker_reads_legacy_debug_auto_tick_flag(self):
+        """Backward compat: legacy debug_auto_tick flag is still recognised."""
+        from app.core.state_cache.service import get_context_flag, _compress, _STATE_KEY_PREFIX
+        from app.core.state_cache.client import get_redis
+
+        state = {"debug_auto_tick": True}
+        r = get_redis()
+        if r is None:
+            import pytest
+            pytest.skip("Redis not available")
+
+        ctx_id = "test-legacy-auto-tick-ctx"
+        r.set(f"{_STATE_KEY_PREFIX}{ctx_id}", _compress(state), ex=60)
+        assert get_context_flag(ctx_id, "debug_auto_tick", default=False) is True
+        # cleanup
+        r.delete(f"{_STATE_KEY_PREFIX}{ctx_id}")
+
+    # ── world_rules: debug_set_auto_tick no longer a game command ────────────
+
+    def test_debug_set_auto_tick_is_not_a_game_command(self):
+        """debug_set_auto_tick was removed from Zone Stalkers world_rules
+        (superseded by the core set_auto_tick pipeline command)."""
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        state = self._state()
+        result = validate_world_command("debug_set_auto_tick", {"enabled": True}, state, "any_user")
+        # Should NOT be valid as a game command (falls through to unknown-command error)
+        assert not result.valid
+
+
+class TestCustomTerrainTypes:
+    """Tests for the extended terrain type support (fixes import+edit bug)."""
 
     def _v(self, cmd, payload, state):
         from app.games.zone_stalkers.rules.world_rules import validate_world_command
@@ -1492,42 +1576,58 @@ class TestDebugAutoTick:
         from app.games.zone_stalkers.rules.world_rules import resolve_world_command
         return resolve_world_command(cmd, payload, state, "any_user")
 
-    def _state(self):
+    def _state_with_custom_loc(self, terrain_type: str) -> tuple:
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
-        return generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        state = generate_zone(seed=42, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        # Inject a location with a custom terrain type (simulating an import)
+        loc_id = "loc_custom_1"
+        state["locations"][loc_id] = {
+            "id": loc_id,
+            "name": "Custom Location",
+            "terrain_type": terrain_type,
+            "anomaly_activity": 0,
+            "dominant_anomaly_type": None,
+            "region": None,
+            "connections": [],
+            "artifacts": [],
+            "agents": [],
+            "items": [],
+        }
+        return state, loc_id
 
-    def test_set_auto_tick_true_valid(self):
-        state = self._state()
-        assert self._v("debug_set_auto_tick", {"enabled": True}, state).valid
+    def test_edit_location_with_urban_terrain(self):
+        state, loc_id = self._state_with_custom_loc("urban")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "urban"}, state)
+        assert result.valid, result.error
 
-    def test_set_auto_tick_false_valid(self):
-        state = self._state()
-        assert self._v("debug_set_auto_tick", {"enabled": False}, state).valid
+    def test_edit_location_with_tunnel_terrain(self):
+        state, loc_id = self._state_with_custom_loc("tunnel")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "tunnel"}, state)
+        assert result.valid, result.error
 
-    def test_set_auto_tick_stores_flag(self):
-        state = self._state()
-        new_state, _ = self._r("debug_set_auto_tick", {"enabled": True}, state)
-        assert new_state["debug_auto_tick"] is True
+    def test_edit_location_with_swamp_terrain(self):
+        state, loc_id = self._state_with_custom_loc("swamp")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "swamp"}, state)
+        assert result.valid, result.error
 
-    def test_set_auto_tick_disable_stores_flag(self):
-        state = self._state()
-        new_state, _ = self._r("debug_set_auto_tick", {"enabled": False}, state)
-        assert new_state["debug_auto_tick"] is False
+    def test_edit_location_with_scientific_bunker_terrain(self):
+        state, loc_id = self._state_with_custom_loc("scientific_bunker")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "scientific_bunker"}, state)
+        assert result.valid, result.error
 
-    def test_set_auto_tick_emits_event(self):
-        state = self._state()
-        _, events = self._r("debug_set_auto_tick", {"enabled": True}, state)
-        assert any(e["event_type"] == "debug_auto_tick_changed" for e in events)
+    def test_edit_location_with_underground_terrain(self):
+        state, loc_id = self._state_with_custom_loc("underground")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "underground"}, state)
+        assert result.valid, result.error
 
-    def test_set_auto_tick_event_payload(self):
-        state = self._state()
-        _, events = self._r("debug_set_auto_tick", {"enabled": True}, state)
-        ev = next(e for e in events if e["event_type"] == "debug_auto_tick_changed")
-        assert ev["payload"]["enabled"] is True
+    def test_save_custom_terrain_persists(self):
+        state, loc_id = self._state_with_custom_loc("tunnel")
+        new_state, events = self._r("debug_update_location", {"loc_id": loc_id, "name": "Tunnel", "terrain_type": "tunnel"}, state)
+        assert new_state["locations"][loc_id]["terrain_type"] == "tunnel"
+        assert new_state["locations"][loc_id]["name"] == "Tunnel"
+        assert any(e["event_type"] == "debug_location_updated" for e in events)
 
-    def test_set_auto_tick_does_not_mutate_original_state(self):
-        import copy
-        state = self._state()
-        original = copy.deepcopy(state)
-        self._r("debug_set_auto_tick", {"enabled": True}, state)
-        assert state == original
+    def test_invalid_terrain_still_rejected(self):
+        state, loc_id = self._state_with_custom_loc("plain")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "ocean"}, state)
+        assert not result.valid

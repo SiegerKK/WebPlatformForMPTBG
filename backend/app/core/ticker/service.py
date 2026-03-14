@@ -108,10 +108,13 @@ def _refresh_debug_context_cache(db: Session) -> Dict[str, str]:
 
 def tick_debug_auto_matches() -> dict:
     """
-    Tick every active zone_map match that has ``debug_auto_tick = True`` in
-    its game state.  Designed to be called from a fast background task
-    (every ~500 ms) via ``asyncio.to_thread`` so that the asyncio event loop
-    is not blocked.
+    Tick every active context that has the auto-tick flag set in its game
+    state.  Checks for ``auto_tick_enabled`` (core generic flag set by the
+    ``set_auto_tick`` platform meta-command) or the legacy
+    ``debug_auto_tick`` flag (Zone Stalkers backward compat).
+
+    Designed to be called from a fast background task (every ~500 ms) via
+    ``asyncio.to_thread`` so that the asyncio event loop is not blocked.
 
     Opens and closes its own database session so that the SQLAlchemy session
     lifecycle is entirely contained within the worker thread.
@@ -131,7 +134,9 @@ def tick_debug_auto_matches() -> dict:
         ticked = 0
         for ctx_id, match_id in ctx_map.items():
             try:
-                if not get_context_flag(ctx_id, "debug_auto_tick", default=False):
+                # Support both the generic core flag and the legacy game flag.
+                if not (get_context_flag(ctx_id, "auto_tick_enabled", default=False)
+                        or get_context_flag(ctx_id, "debug_auto_tick", default=False)):
                     continue
                 result = tick_match(match_id, db)
                 if "error" not in result:

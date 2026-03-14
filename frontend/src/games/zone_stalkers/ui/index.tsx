@@ -190,6 +190,12 @@ const TERRAIN_TYPE_COLOR: Record<string, string> = {
   hamlet: '#9a3412',
   farm: '#14532d',
   field_camp: '#134e4a',
+  // Extended types for custom imported maps
+  urban: '#334155',
+  tunnel: '#1e293b',
+  swamp: '#365314',
+  scientific_bunker: '#075985',
+  underground: '#1e1b4b',
 };
 
 const TERRAIN_TYPE_LABELS: Record<string, string> = {

@@ -9,6 +9,8 @@ import { s } from './styles';
 export const TERRAIN_TYPES = [
   'plain', 'hills', 'slag_heaps', 'industrial', 'buildings', 'military_buildings',
   'hamlet', 'farm', 'field_camp', 'dungeon', 'x_lab',
+  // Additional types for custom imported maps
+  'urban', 'tunnel', 'swamp', 'scientific_bunker', 'underground',
 ] as const;
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
@@ -23,6 +25,11 @@ export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   field_camp: 'Полевой лагерь',
   dungeon: 'Подземелья',
   x_lab: 'Лаборатория Х',
+  urban: 'Городская застройка',
+  tunnel: 'Тоннель',
+  swamp: 'Болота',
+  scientific_bunker: 'Научный бункер',
+  underground: 'Подземный комплекс',
 };
 
 export const DOMINANT_ANOMALY_OPTIONS = [

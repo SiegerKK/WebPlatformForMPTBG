@@ -313,15 +313,15 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   };
 
   // ── Auto-run (течение времени) — server-side, synced across all tabs ────────
-  // The running state lives in zoneState.debug_auto_tick (server-persisted).
-  // Any tab can start or stop ticking; the server broadcasts state_updated to
-  // all connected clients so every tab sees the correct running/paused state.
-  const autoRunning = zoneState.debug_auto_tick ?? false;
+  // The running state lives in zoneState.auto_tick_enabled (core flag, set by
+  // the platform meta-command "set_auto_tick").  Any tab / any game can use
+  // this — no game-specific implementation required.
+  const autoRunning = zoneState.auto_tick_enabled ?? false;
 
   const handleToggleAutoTick = useCallback(async () => {
-    const running = zoneState.debug_auto_tick ?? false;
-    await sendCommand('debug_set_auto_tick', { enabled: !running });
-  }, [sendCommand, zoneState.debug_auto_tick]);
+    const running = zoneState.auto_tick_enabled ?? false;
+    await sendCommand('set_auto_tick', { enabled: !running });
+  }, [sendCommand, zoneState.auto_tick_enabled]);
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(

@@ -79,6 +79,41 @@ class CommandPipeline:
             state = load_context_state(context.id, context)
             new_state = state
 
+            # ── Core platform meta-commands ────────────────────────────────────
+            # Handled directly by the pipeline — no game ruleset involvement.
+            # Any game can use these commands without implementing them itself.
+            if envelope.command_type == "set_auto_tick":
+                import copy as _copy
+                enabled = bool(envelope.payload.get("enabled", False))
+                new_state = _copy.deepcopy(state)
+                new_state["auto_tick_enabled"] = enabled
+                new_events = [{"event_type": "auto_tick_changed", "payload": {"enabled": enabled}}]
+                save_context_state(context.id, new_state, context, force_persist=True)
+
+                seq_range = allocate_sequence_numbers(context.id, len(new_events), db)
+                for ev_data, seq in zip(new_events, seq_range):
+                    event = GameEvent(
+                        match_id=envelope.match_id,
+                        context_id=envelope.context_id,
+                        event_type=ev_data.get("event_type", "unknown"),
+                        payload=ev_data.get("payload", {}),
+                        causation_command_id=command.id,
+                        sequence_no=seq,
+                    )
+                    db.add(event)
+
+                command.status = CommandStatus.RESOLVED
+                command.executed_at = datetime.utcnow()
+                db.commit()
+
+                from app.core.ws.manager import ws_manager
+                ws_manager.notify(str(envelope.match_id), {
+                    "type": "state_updated",
+                    "match_id": str(envelope.match_id),
+                })
+                return CommandResult(command_id=command.id, status=CommandStatus.RESOLVED, events=new_events)
+            # ── End core meta-commands ─────────────────────────────────────────
+
             if ruleset:
                 result = ruleset.validate_command(
                     envelope.command_type,
