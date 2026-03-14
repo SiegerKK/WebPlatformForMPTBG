@@ -1227,6 +1227,134 @@ class TestDebugLocationCommands:
             result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": art_type}, state)
             assert result.valid, f"Expected valid for artifact_type={art_type}"
 
+    # ── debug_delete_agent ───────────────────────────────────────────────────
+
+    def test_delete_agent_valid(self):
+        state = self._state()
+        agent_id = next(iter(state["agents"]))
+        result = self._v("debug_delete_agent", {"agent_id": agent_id}, state)
+        assert result.valid
+
+    def test_delete_agent_removes_from_state(self):
+        state = self._state()
+        agent_id = next(iter(state["agents"]))
+        new_state, events = self._r("debug_delete_agent", {"agent_id": agent_id}, state)
+        assert agent_id not in new_state["agents"]
+        assert any(e["event_type"] == "debug_agent_deleted" for e in events)
+
+    def test_delete_agent_removes_from_location(self):
+        state = self._state()
+        agent_id = next(iter(state["agents"]))
+        loc_id = state["agents"][agent_id]["location_id"]
+        assert agent_id in state["locations"][loc_id]["agents"]
+        new_state, _ = self._r("debug_delete_agent", {"agent_id": agent_id}, state)
+        assert agent_id not in new_state["locations"][loc_id]["agents"]
+
+    def test_delete_agent_invalid_no_id(self):
+        state = self._state()
+        result = self._v("debug_delete_agent", {}, state)
+        assert not result.valid
+
+    def test_delete_agent_invalid_not_found(self):
+        state = self._state()
+        result = self._v("debug_delete_agent", {"agent_id": "nonexistent"}, state)
+        assert not result.valid
+
+    def test_delete_mutant(self):
+        state = self._state()
+        new_state, _ = self._r(
+            "debug_spawn_mutant", {"loc_id": next(iter(state["locations"])), "mutant_type": "zombie"}, state
+        )
+        mutant_id = next(iter(new_state["mutants"]))
+        new_state2, events = self._r("debug_delete_agent", {"agent_id": mutant_id}, new_state)
+        assert mutant_id not in new_state2["mutants"]
+        assert any(e["event_type"] == "debug_agent_deleted" for e in events)
+
+    def test_delete_trader(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        new_state, _ = self._r("debug_spawn_trader", {"loc_id": loc_id}, state)
+        trader_id = next(iter(new_state["traders"]))
+        new_state2, events = self._r("debug_delete_agent", {"agent_id": trader_id}, new_state)
+        assert trader_id not in new_state2["traders"]
+        assert any(e["event_type"] == "debug_agent_deleted" for e in events)
+
+    # ── debug_advance_turns ──────────────────────────────────────────────────
+
+    def test_advance_turns_valid(self):
+        state = self._state()
+        result = self._v("debug_advance_turns", {"max_n": 5}, state)
+        assert result.valid
+
+    def test_advance_turns_advances_world_turn(self):
+        state = self._state()
+        initial_turn = state["world_turn"]
+        new_state, events = self._r("debug_advance_turns", {"max_n": 3, "stop_on_decision": False}, state)
+        assert new_state["world_turn"] == initial_turn + 3
+        assert any(e["event_type"] == "debug_turns_advanced" for e in events)
+        adv_ev = next(e for e in events if e["event_type"] == "debug_turns_advanced")
+        assert adv_ev["payload"]["turns_advanced"] == 3
+
+    def test_advance_turns_no_game_over_when_unlimited(self):
+        """With max_turns=0 (unlimited), advancing many turns should not trigger game_over."""
+        state = self._state()
+        assert state.get("max_turns") == 0  # generator sets 0 = unlimited
+        new_state, events = self._r("debug_advance_turns", {"max_n": 10, "stop_on_decision": False}, state)
+        assert not new_state.get("game_over"), "game_over should not be triggered with unlimited turns"
+
+    # ── debug_preview_bot_decision ───────────────────────────────────────────
+
+    def test_preview_bot_decision_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        bot_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "bot"
+        )
+        result = self._v("debug_preview_bot_decision", {"agent_id": bot_id}, state)
+        assert result.valid
+
+    def test_preview_bot_decision_invalid_human(self):
+        state = self._state()
+        human_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "human"
+        )
+        result = self._v("debug_preview_bot_decision", {"agent_id": human_id}, state)
+        assert not result.valid
+
+    def test_preview_bot_decision_returns_decision(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        bot_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "bot"
+        )
+        new_state, events = self._r("debug_preview_bot_decision", {"agent_id": bot_id}, state)
+        preview_ev = next((e for e in events if e["event_type"] == "debug_bot_decision_preview"), None)
+        assert preview_ev is not None
+        decision = preview_ev["payload"]["decision"]
+        assert "goal" in decision
+        assert "action" in decision
+        assert "reason" in decision
+        # State must NOT be mutated (agent still present)
+        assert bot_id in new_state["agents"]
+
+    def test_preview_bot_decision_does_not_mutate_world_turn(self):
+        """Dry-running the bot decision must not advance the world turn."""
+        state = self._state()
+        initial_turn = state["world_turn"]
+        loc_id = next(iter(state["locations"]))
+        state, _ = self._r("debug_spawn_stalker", {"loc_id": loc_id}, state)
+        bot_id = next(
+            aid for aid, a in state["agents"].items()
+            if a.get("controller", {}).get("kind") == "bot"
+        )
+        new_state, _ = self._r("debug_preview_bot_decision", {"agent_id": bot_id}, state)
+        assert new_state["world_turn"] == initial_turn
+
 
 # ─────────────────────────────────────────────────────────────────
 # Unified stalker model — controller.kind consistency

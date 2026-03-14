@@ -18,6 +18,8 @@ interface AgentRowProps {
   onTakeControl?: () => void;
   /** Location registry used to resolve `agent.location_id` when `locationName` is absent. */
   locations?: Record<string, { name: string }>;
+  /** Optional sendCommand so the profile modal can call debug commands (e.g. bot decision preview). */
+  sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -28,6 +30,7 @@ export default function AgentRow({
   isCurrentPlayer,
   onTakeControl,
   locations,
+  sendCommand,
 }: AgentRowProps) {
   const [showProfile, setShowProfile] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -168,8 +171,10 @@ export default function AgentRow({
           agent={agent}
           locationName={resolvedLocName}
           onClose={() => setShowProfile(false)}
+          sendCommand={sendCommand}
         />
       )}
     </>
   );
 }
+

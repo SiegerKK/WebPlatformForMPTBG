@@ -185,6 +185,13 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     finally { setTicking(false); }
   };
 
+  const [skipping, setSkipping] = useState(false);
+  const handleSkipToDecision = async () => {
+    setSkipping(true);
+    try { await sendCommand('debug_advance_turns', { max_n: 200, stop_on_decision: true }); }
+    finally { setSkipping(false); }
+  };
+
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
     async (
@@ -772,10 +779,18 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             <button
               style={s.toolBtn}
               onClick={handleTick}
-              disabled={ticking}
+              disabled={ticking || skipping}
               title="Advance world by one turn (end_turn command)"
             >
               {ticking ? '…' : '⏭ Ход'}
+            </button>
+            <button
+              style={s.toolBtn}
+              onClick={handleSkipToDecision}
+              disabled={ticking || skipping}
+              title="Пропустить ходы до следующего решения НПЦ (до 200 ходов)"
+            >
+              {skipping ? '…' : '⏩ До решения'}
             </button>
             <button
               style={s.toolBtn}

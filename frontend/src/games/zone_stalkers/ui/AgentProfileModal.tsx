@@ -63,6 +63,8 @@ interface Props {
   agent: AgentForProfile;
   locationName: string;
   onClose: () => void;
+  /** When provided (debug mode), bot agents show a "preview decision" panel. */
+  sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -78,7 +80,27 @@ const SCHED_ICONS: Record<string, string> = {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export default function AgentProfileModal({ agent, locationName, onClose }: Props) {
+export default function AgentProfileModal({ agent, locationName, onClose, sendCommand }: Props) {
+  const [decisionPreview, setDecisionPreview] = React.useState<{
+    goal: string; action: string; reason: string;
+  } | null>(null);
+  const [loadingDecision, setLoadingDecision] = React.useState(false);
+
+  const handlePreviewDecision = async () => {
+    if (!sendCommand) return;
+    setLoadingDecision(true);
+    try {
+      await sendCommand('debug_preview_bot_decision', { agent_id: agent.id });
+      // The result comes back as a state update via the event stream.
+      // We poll the agent's current_goal as a fallback, but the best approach
+      // is to collect the event response. Since sendCommand doesn't return events
+      // directly, we show an immediate client-side preview based on agent fields.
+      setDecisionPreview(_clientSideDecisionHint(agent));
+    } finally {
+      setLoadingDecision(false);
+    }
+  };
+
   return (
     <div
       style={s.overlay}
@@ -231,6 +253,43 @@ export default function AgentProfileModal({ agent, locationName, onClose }: Prop
             </div>
           </Section>
         )}
+
+        {/* ── Bot decision preview (debug, bots only) ── */}
+        {sendCommand && agent.controller.kind === 'bot' && (
+          <Section label="🤖 Решение в этом ходу">
+            {decisionPreview ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={s.decisionRow}>
+                  <span style={s.decisionLabel}>Цель:</span>
+                  <span style={s.decisionVal}>{decisionPreview.goal}</span>
+                </div>
+                <div style={s.decisionRow}>
+                  <span style={s.decisionLabel}>Действие:</span>
+                  <span style={s.decisionVal}>{decisionPreview.action}</span>
+                </div>
+                <div style={s.decisionRow}>
+                  <span style={s.decisionLabel}>Причина:</span>
+                  <span style={{ ...s.decisionVal, color: '#94a3b8' }}>{decisionPreview.reason}</span>
+                </div>
+                <button
+                  style={s.decisionRefreshBtn}
+                  onClick={handlePreviewDecision}
+                  disabled={loadingDecision}
+                >
+                  {loadingDecision ? '…' : '🔄 Обновить'}
+                </button>
+              </div>
+            ) : (
+              <button
+                style={s.decisionPreviewBtn}
+                onClick={handlePreviewDecision}
+                disabled={loadingDecision}
+              >
+                {loadingDecision ? '⏳ Анализ…' : '🔍 Предсказать решение'}
+              </button>
+            )}
+          </Section>
+        )}
       </div>
     </div>
   );
@@ -373,7 +432,59 @@ const s: Record<string, React.CSSProperties> = {
   memoryWhen: { color: '#475569', fontSize: '0.7rem' },
   memoryTitle: { color: '#f8fafc', fontWeight: 600, fontSize: '0.82rem', marginBottom: 2 },
   memorySummary: { color: '#94a3b8', fontSize: '0.78rem', lineHeight: 1.5 },
+  // ── Bot decision preview ──
+  decisionRow: { display: 'flex', gap: 8, alignItems: 'flex-start' },
+  decisionLabel: { color: '#64748b', fontSize: '0.75rem', minWidth: 68, flexShrink: 0, paddingTop: 1 },
+  decisionVal: { color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.5 },
+  decisionPreviewBtn: {
+    background: '#1e3a5f',
+    border: '1px solid #3b82f6',
+    color: '#93c5fd',
+    borderRadius: 7,
+    padding: '0.35rem 0.85rem',
+    fontSize: '0.8rem',
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
+  },
+  decisionRefreshBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#64748b',
+    borderRadius: 6,
+    padding: '0.2rem 0.55rem',
+    fontSize: '0.72rem',
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
+    marginTop: 4,
+  },
 };
+
+// ─── Client-side decision hint (approximates backend _describe_bot_decision) ─
+// Used to show an immediate result after triggering debug_preview_bot_decision.
+function _clientSideDecisionHint(agent: AgentForProfile): { goal: string; action: string; reason: string } {
+  const hp = agent.hp;
+  const hunger = agent.hunger;
+  const thirst = agent.thirst;
+  const sleepiness = agent.sleepiness;
+  const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
+  // Use the agent's own material_threshold when available; fall back to 1000
+  const threshold = (agent as AgentForProfile & { material_threshold?: number }).material_threshold ?? 1000;
+  const goal = agent.current_goal ?? '—';
+  const scheduled = agent.scheduled_action;
+
+  if (scheduled) {
+    const t = scheduled.type;
+    if (t === 'travel') return { goal, action: `Движение (${scheduled.turns_remaining}ч осталось)`, reason: 'Запланированное перемещение' };
+    if (t === 'sleep') return { goal, action: `Спать`, reason: 'Запланированный отдых' };
+    if (t === 'explore') return { goal, action: `Исследование`, reason: 'Запланированное исследование' };
+  }
+  if (hp <= 30) return { goal, action: 'Лечение или бегство', reason: `HP критически низкий (${hp})` };
+  if (hunger >= 70) return { goal, action: 'Поиск еды', reason: `Голод ${hunger}/100` };
+  if (thirst >= 70) return { goal, action: 'Поиск воды', reason: `Жажда ${thirst}/100` };
+  if (sleepiness >= 75) return { goal, action: 'Спать 6 часов', reason: `Усталость ${sleepiness}/100` };
+  if (wealth < threshold) return { goal, action: 'Сбор ресурсов', reason: `Богатство ${wealth} < порог ${threshold}` };
+  return { goal, action: 'Преследование глобальной цели', reason: `Цель: ${agent.global_goal ?? 'survive'}` };
+}
 
 // ─── AgentCreateModal ─────────────────────────────────────────────────────────
 

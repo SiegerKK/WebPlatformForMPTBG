@@ -201,7 +201,7 @@ def generate_zone(
         "world_hour": 6,    # Game starts at 06:00
         "world_minute": 0,  # Minute within current hour (0-59)
         "world_day": 1,
-        "max_turns": 3000,
+        "max_turns": 0,  # 0 = unlimited
         "seed": seed,
         "locations": locations,
         "agents": agents,

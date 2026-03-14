@@ -22,7 +22,10 @@ Supported commands:
 - debug_delete_all_mutants() — remove all mutants (meta)
 - debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
 - debug_delete_all_traders() — remove all traders (meta)
+- debug_delete_agent(agent_id) — remove any single agent/mutant/trader by id (meta)
 - debug_set_time(day?, hour?, minute?) — override current world time (meta)
+- debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
+- debug_preview_bot_decision(agent_id) — dry-run bot decision logic and return decision description without mutating state (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -75,8 +78,14 @@ def validate_world_command(
 
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
-                        "debug_set_time"):
+                        "debug_set_time", "debug_advance_turns"):
         return RuleCheckResult(valid=True)
+
+    if command_type == "debug_delete_agent":
+        return _validate_debug_delete_agent(payload, state)
+
+    if command_type == "debug_preview_bot_decision":
+        return _validate_debug_preview_bot_decision(payload, state)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -405,6 +414,81 @@ def resolve_world_command(
                 "world_day": state["world_day"],
                 "world_hour": state["world_hour"],
                 "world_minute": state.get("world_minute", 0),
+            },
+        })
+        return state, events
+
+    # ── debug_delete_agent ────────────────────────────────────────────────────
+    if command_type == "debug_delete_agent":
+        agent_id_to_del = str(payload["agent_id"])
+        # Remove from agents dict
+        if agent_id_to_del in state.get("agents", {}):
+            for loc in state.get("locations", {}).values():
+                if agent_id_to_del in loc.get("agents", []):
+                    loc["agents"].remove(agent_id_to_del)
+            del state["agents"][agent_id_to_del]
+        # Remove from mutants dict
+        elif agent_id_to_del in state.get("mutants", {}):
+            m = state["mutants"].pop(agent_id_to_del)
+            loc_id = m.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if agent_id_to_del in loc.get("agents", []):
+                    loc["agents"].remove(agent_id_to_del)
+        # Remove from traders dict
+        elif agent_id_to_del in state.get("traders", {}):
+            t = state["traders"].pop(agent_id_to_del)
+            loc_id = t.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if agent_id_to_del in loc.get("agents", []):
+                    loc["agents"].remove(agent_id_to_del)
+        events.append({"event_type": "debug_agent_deleted", "payload": {"agent_id": agent_id_to_del}})
+        return state, events
+
+    # ── debug_advance_turns ───────────────────────────────────────────────────
+    if command_type == "debug_advance_turns":
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        max_n = int(payload.get("max_n", 100))
+        stop_on_decision = bool(payload.get("stop_on_decision", True))
+        turns_advanced = 0
+        decision_event: Dict[str, Any] | None = None
+        for _ in range(max(1, min(max_n, 500))):
+            state, tick_evs = tick_zone_map(state)
+            events.extend(tick_evs)
+            turns_advanced += 1
+            if stop_on_decision:
+                for ev in tick_evs:
+                    if ev.get("event_type") == "bot_decision":
+                        decision_event = ev
+                        break
+                if decision_event:
+                    break
+        events.append({
+            "event_type": "debug_turns_advanced",
+            "payload": {
+                "turns_advanced": turns_advanced,
+                "stopped_on_decision": decision_event is not None,
+                "decision_event": decision_event,
+            },
+        })
+        return state, events
+
+    # ── debug_preview_bot_decision ─────────────────────────────────────────────
+    if command_type == "debug_preview_bot_decision":
+        import copy
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action, _describe_bot_decision
+        agent_id_to_preview = str(payload["agent_id"])
+        state_copy = copy.deepcopy(state)
+        agent_copy = state_copy["agents"][agent_id_to_preview]
+        world_turn = state_copy.get("world_turn", 1)
+        preview_evs = _run_bot_action(agent_id_to_preview, agent_copy, state_copy, world_turn)
+        decision_desc = _describe_bot_decision(agent_copy, preview_evs, state_copy)
+        events.append({
+            "event_type": "debug_bot_decision_preview",
+            "payload": {
+                "agent_id": agent_id_to_preview,
+                "decision": decision_desc,
             },
         })
         return state, events
@@ -893,4 +977,36 @@ def _validate_debug_spawn_artifact(
             valid=False,
             error=f"Invalid artifact_type '{artifact_type}'; must be one of {sorted(ARTIFACT_TYPES.keys())}"
         )
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_delete_agent(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    exists = (
+        agent_id in state.get("agents", {}) or
+        agent_id in state.get("mutants", {}) or
+        agent_id in state.get("traders", {})
+    )
+    if not exists:
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_preview_bot_decision(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    agent = state.get("agents", {}).get(agent_id)
+    if not agent:
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    if agent.get("controller", {}).get("kind") != "bot":
+        return RuleCheckResult(valid=False, error="Agent is not bot-controlled")
     return RuleCheckResult(valid=True)

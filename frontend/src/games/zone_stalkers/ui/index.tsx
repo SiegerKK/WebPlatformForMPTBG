@@ -517,7 +517,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const renderEntryMenu = () => {
     const hasMyAgent = !!myAgentId;
     const worldInfo = zoneState
-      ? `День ${zoneState.world_day} · ${TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Ход ${zoneState.world_turn}/${zoneState.max_turns}`
+      ? `День ${zoneState.world_day} · ${TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Ход ${zoneState.world_turn}${zoneState.max_turns ? `/${zoneState.max_turns}` : ''}`
       : 'Загрузка…';
 
     return (
@@ -1064,7 +1064,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           <div>
             <h3 style={styles.rosterTitle}>☢️ Zone Stalkers — Character Roster</h3>
             <p style={styles.rosterSubtitle}>
-              Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
+              Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}{zoneState.max_turns ? `/${zoneState.max_turns}` : ''}
             </p>
           </div>
           {myAgentId && (
@@ -1270,7 +1270,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 📍 {zoneState.locations[myAgent.location_id]?.name ?? myAgent.location_id}
               </div>
               <div style={styles.turnInfo}>
-                Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
+                Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}{zoneState.max_turns ? `/${zoneState.max_turns}` : ''}
                 {myAgent.action_used && !myAgent.scheduled_action && (
                   <span style={styles.actionUsedBadge}>Acted</span>
                 )}
@@ -1625,13 +1625,34 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           {allAgents.length} сталкеров в Зоне
         </div>
         {allAgents.map((agent) => (
-          <AgentRow
-            key={agent.id}
-            agent={agent as unknown as AgentForProfile}
-            locationName={locName(agent.location_id)}
-            locations={zoneState.locations}
-            isCurrentPlayer={agent.id === myAgentId}
-          />
+          <div key={agent.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <AgentRow
+                agent={agent as unknown as AgentForProfile}
+                locationName={locName(agent.location_id)}
+                locations={zoneState.locations}
+                isCurrentPlayer={agent.id === myAgentId}
+                sendCommand={sendCommand}
+              />
+            </div>
+            <button
+              style={{
+                background: '#2d1515',
+                border: '1px solid #7f1d1d',
+                color: '#ef4444',
+                borderRadius: 6,
+                padding: '0.3rem 0.5rem',
+                fontSize: '0.72rem',
+                cursor: 'pointer',
+                flexShrink: 0,
+                lineHeight: 1,
+              }}
+              onClick={() => sendCommand('debug_delete_agent', { agent_id: agent.id })}
+              title={`Удалить ${agent.name}`}
+            >
+              🗑
+            </button>
+          </div>
         ))}
       </div>
     );

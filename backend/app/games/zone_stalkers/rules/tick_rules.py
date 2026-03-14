@@ -94,8 +94,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         if agent.get("is_alive", True):
             agent["action_used"] = False
 
-    # Check game-over
-    if state["world_turn"] > state.get("max_turns", 50):
+    # Check game-over (max_turns=0 means unlimited)
+    max_turns = state.get("max_turns", 0)
+    if max_turns and state["world_turn"] > max_turns:
         state["game_over"] = True
         events.append({"event_type": "game_over", "payload": {"reason": "max_turns_reached"}})
 
@@ -611,6 +612,30 @@ def _run_bot_action(
       GOAL      – If wealth < material_threshold: gather resources
                   Else: pursue global_goal
     """
+    prev_goal = agent.get("current_goal")
+    events = _run_bot_action_inner(agent_id, agent, state, world_turn)
+    new_goal = agent.get("current_goal")
+    # Emit a bot_decision event whenever the bot's current_goal changes so that
+    # debug_advance_turns can detect when a meaningful decision occurred.
+    if new_goal and new_goal != prev_goal:
+        events.append({
+            "event_type": "bot_decision",
+            "payload": {
+                "agent_id": agent_id,
+                "agent_name": agent.get("name", agent_id),
+                "prev_goal": prev_goal,
+                "new_goal": new_goal,
+            },
+        })
+    return events
+
+
+def _run_bot_action_inner(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     loc_id = agent.get("location_id")
     locations = state.get("locations", {})
@@ -898,3 +923,93 @@ def _bot_pursue_goal(
 
     agent["action_used"] = True
     return []
+
+
+# ─── _describe_bot_decision ───────────────────────────────────────────────────
+
+def _describe_bot_decision(
+    agent: Dict[str, Any],
+    events: List[Dict[str, Any]],
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build a human-readable description of what a bot agent decided to do.
+    Returns a dict: {goal, action, reason}.
+    """
+    goal = agent.get("current_goal", "unknown")
+    sched = agent.get("scheduled_action")
+
+    # Determine action description from scheduled_action or events
+    action = "Бездействие"
+    reason = ""
+
+    if sched:
+        t = sched.get("type", "")
+        if t == "travel":
+            dest_id = sched.get("target_id", "")
+            dest_name = state.get("locations", {}).get(dest_id, {}).get("name", dest_id)
+            action = f"Движение → {dest_name}"
+            turns = sched.get("turns_remaining", 0)
+            reason = f"Идти {turns} ходов"
+        elif t == "sleep":
+            hrs = sched.get("hours", 0)
+            action = f"Спать {hrs}ч"
+            reason = "Восстановление сил"
+        elif t == "explore":
+            loc_id = sched.get("target_id", "")
+            loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+            action = f"Исследование {loc_name}"
+            reason = "Поиск артефактов и ресурсов"
+        else:
+            action = t
+
+    for ev in events:
+        etype = ev.get("event_type", "")
+        p = ev.get("payload", {})
+        if etype == "item_consumed":
+            item_name = p.get("item_type", "предмет")
+            action = f"Использовать: {item_name}"
+            if p.get("item_type") in ("bandage", "medkit"):
+                reason = f"HP критически низкий ({agent.get('hp', 0)})"
+            elif p.get("item_type") in ("bread", "sausage", "canned_food"):
+                reason = f"Голод {agent.get('hunger', 0)}/100"
+            elif p.get("item_type") in ("water", "vodka"):
+                reason = f"Жажда {agent.get('thirst', 0)}/100"
+            break
+        if etype == "artifact_picked_up":
+            art = p.get("artifact_type", "артефакт")
+            action = f"Подобрать артефакт: {art}"
+            reason = "Артефакт лежит на локации"
+            break
+        if etype in ("trade_sell", "artifacts_sold"):
+            action = "Продажа артефактов торговцу"
+            money = p.get("money_gained", 0)
+            reason = f"Выручка: {money} RU"
+            break
+
+    # Build reason from agent state if still empty
+    if not reason:
+        hp = agent.get("hp", 100)
+        hunger = agent.get("hunger", 0)
+        thirst = agent.get("thirst", 0)
+        sleepiness = agent.get("sleepiness", 0)
+        wealth = agent.get("money", 0) + sum(
+            i.get("value", 0) for i in agent.get("inventory", [])
+        )
+        threshold = agent.get("material_threshold", 1000)
+        global_goal = agent.get("global_goal", "survive")
+
+        if hp <= 30:
+            reason = f"Критический HP ({hp})"
+        elif hunger >= 70:
+            reason = f"Голод {hunger}/100"
+        elif thirst >= 70:
+            reason = f"Жажда {thirst}/100"
+        elif sleepiness >= 75:
+            reason = f"Усталость {sleepiness}/100"
+        elif wealth < threshold:
+            reason = f"Богатство {wealth} < порог {threshold}, фаза сбора ресурсов"
+        else:
+            reason = f"Богатство {wealth} ≥ порог {threshold}, преследование цели «{global_goal}»"
+
+    return {"goal": goal, "action": action, "reason": reason}
