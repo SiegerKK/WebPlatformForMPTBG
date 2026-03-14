@@ -37,6 +37,8 @@ export interface AgentForProfile {
     turns_remaining: number;
     turns_total: number;
     target_id: string;
+    /** Ultimate travel destination (may differ from target_id for multi-hop routes). */
+    final_target_id?: string;
   } | null;
   controller: { kind: string; participant_id?: string | null };
   experience?: number;
@@ -66,6 +68,8 @@ interface Props {
   agent: AgentForProfile;
   locationName: string;
   onClose: () => void;
+  /** Location registry used to resolve travel destination names and regions. */
+  locations?: Record<string, { name: string; region?: string }>;
   /** When provided (debug mode), bot agents show a "preview decision" panel. */
   sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
 }
@@ -145,7 +149,7 @@ type DecisionPreview = {
   layers?: Array<{ name: string; skipped: boolean; action: string; reason: string }>;
 };
 
-export default function AgentProfileModal({ agent, locationName, onClose, sendCommand }: Props) {
+export default function AgentProfileModal({ agent, locationName, onClose, locations, sendCommand }: Props) {
   // Initialise immediately with the client-side hint so the panel renders on
   // first paint without needing a button click.
   const [decisionPreview, setDecisionPreview] = React.useState<DecisionPreview | null>(() => {
@@ -206,8 +210,22 @@ export default function AgentProfileModal({ agent, locationName, onClose, sendCo
           <div style={s.sectionVal}>{locationName}</div>
           {agent.scheduled_action && (
             <div style={s.schedLine}>
-              {SCHED_ICONS[agent.scheduled_action.type] ?? '⏳'}{' '}
-              {agent.scheduled_action.type} — {schedRemaining(agent.scheduled_action.type, agent.scheduled_action.turns_remaining)}
+              {(() => {
+                const sa = agent.scheduled_action;
+                const icon = SCHED_ICONS[sa.type] ?? '⏳';
+                const time = schedRemaining(sa.type, sa.turns_remaining);
+                if (sa.type === 'travel' && locations) {
+                  const destId = sa.final_target_id ?? sa.target_id;
+                  const destLoc = locations[destId];
+                  const destLabel = destLoc
+                    ? destLoc.region
+                      ? `${destLoc.name} (${destLoc.region})`
+                      : destLoc.name
+                    : destId;
+                  return `${icon} В пути → ${destLabel} — ${time}`;
+                }
+                return `${icon} ${sa.type} — ${time}`;
+              })()}
             </div>
           )}
         </Section>

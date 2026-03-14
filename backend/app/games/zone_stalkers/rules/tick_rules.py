@@ -1271,8 +1271,10 @@ def _bot_pursue_goal(
             agent["current_goal"] = "goal_get_rich_seek_artifacts"
             return _bot_schedule_travel(agent_id, agent, best_art_loc_id, state, world_turn)
 
-        # No artifacts found anywhere — explore current location hoping to spawn some
-        if loc.get("anomalies") and rng.random() < 0.65:
+        # No artifacts found anywhere.
+        # If the current location already has anomalies, explore it — no random gate so the
+        # agent never bounces between equal-activity neighbours when the roll fails.
+        if loc.get("anomalies"):
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Исследую зону в ожидании артефактов",
@@ -1287,6 +1289,7 @@ def _bot_pursue_goal(
             agent["action_used"] = True
             return [{"event_type": "exploration_started",
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
+        # Current location has no anomalies — travel to the neighbour with the highest activity.
         if connections:
             best = max(connections,
                        key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))

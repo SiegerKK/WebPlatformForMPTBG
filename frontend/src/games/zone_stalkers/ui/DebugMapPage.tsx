@@ -1327,6 +1327,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             zoneState.locations[zoneState.agents[profileAgentId].location_id]?.name ??
             zoneState.agents[profileAgentId].location_id
           }
+          locations={zoneState.locations}
           onClose={() => setProfileAgentId(null)}
           sendCommand={sendCommand}
         />
@@ -1359,6 +1360,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           <AgentProfileModal
             agent={traderAsAgent}
             locationName={zoneState.locations[t.location_id]?.name ?? t.location_id}
+            locations={zoneState.locations}
             onClose={() => setProfileTraderId(null)}
             sendCommand={sendCommand}
           />
