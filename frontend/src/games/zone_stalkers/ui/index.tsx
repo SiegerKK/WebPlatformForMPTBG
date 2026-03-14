@@ -4,6 +4,7 @@ import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../.
 import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';
+import { useMatchWebSocket } from '../../../hooks/useMatchWebSocket';
 
 // ─── DebugTimeControl ────────────────────────────────────────────────────────
 function DebugTimeControl({
@@ -326,6 +327,18 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     } catch { /* ignore */ }
   }, [match.id]);
 
+  // ─── WebSocket push — replaces polling when connected ────────────────────
+  const wsToken = localStorage.getItem('access_token');
+  const { connected: wsConnected } = useMatchWebSocket(
+    match.id,
+    wsToken,
+    useCallback((msg) => {
+      if (msg.type === 'ticked' || msg.type === 'state_updated') {
+        refresh();
+      }
+    }, [refresh]), // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   // ─── ensure zone_map context exists ─────────────────────────────────────
   const ensureContext = useCallback(async () => {
     const ctxRes = await contextsApi.getTree(match.id);
@@ -364,10 +377,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWaiting, match.id, match.status]);
 
-  // ─── active polling ──────────────────────────────────────────────────────
+  // ─── active polling (fallback when WebSocket is not connected) ──────────
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
-    if (isActive && !zoneState?.game_over) {
+    // Only poll when WS is unavailable — WS push handles updates otherwise.
+    if (isActive && !zoneState?.game_over && !wsConnected) {
       pollRef.current = setInterval(async () => {
         try {
           const mRes = await matchesApi.get(match.id);
@@ -383,7 +397,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, zoneState?.game_over, match.id, refresh]);
+  }, [isActive, zoneState?.game_over, match.id, refresh, wsConnected]);
 
   // ─── commands ────────────────────────────────────────────────────────────
   const sendCommand = useCallback(async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {
@@ -1666,7 +1680,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
 
         {debugTab === 'map' && (
-          <DebugMapPage zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
+          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}

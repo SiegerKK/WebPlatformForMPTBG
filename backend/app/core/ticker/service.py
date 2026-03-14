@@ -33,7 +33,18 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     if not ruleset:
         return {"error": f"no ruleset registered for game '{match.game_id}'"}
 
-    return ruleset.tick(match_id_str, db)
+    result = ruleset.tick(match_id_str, db)
+
+    # Notify connected WebSocket clients that the state changed.
+    if "error" not in result:
+        from app.core.ws.manager import ws_manager
+        ws_manager.notify(match_id_str, {
+            "type": "ticked",
+            "match_id": match_id_str,
+            "world_turn": result.get("world_turn"),
+        })
+
+    return result
 
 
 def tick_all_active_matches(db: Session) -> dict:

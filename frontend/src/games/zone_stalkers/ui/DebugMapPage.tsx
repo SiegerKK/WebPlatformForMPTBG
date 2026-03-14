@@ -93,7 +93,7 @@ function botDecisionMade(
   return false;
 }
 
-export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
+export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
 
@@ -106,13 +106,28 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [creatingLoc, setCreatingLoc] = useState(false);
 
+  // ── Viewport persistence (pan + zoom saved per-match in localStorage) ────────
+  const _vpKey = `zs_viewport_${matchId}`;
+  const _loadVp = (): { x: number; y: number; zoom: number } => {
+    try {
+      const raw = localStorage.getItem(_vpKey);
+      if (raw) {
+        const v = JSON.parse(raw) as { x?: number; y?: number; zoom?: number };
+        return { x: v.x ?? 0, y: v.y ?? 0, zoom: v.zoom ?? 1.0 };
+      }
+    } catch { /* ignore */ }
+    return { x: 0, y: 0, zoom: 1.0 };
+  };
+  const _savedVp = _loadVp();
+  const _vpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // ── Canvas pan ────────────────────────────────────────────────────────────
   // panOffset is the translation (in px) of the canvas viewport.
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [panOffset, setPanOffset] = useState({ x: _savedVp.x, y: _savedVp.y });
   const [isPanning, setIsPanning] = useState(false);
 
   // ── Zoom ─────────────────────────────────────────────────────────────────
-  const [zoom, setZoom] = useState(1.0);
+  const [zoom, setZoom] = useState(_savedVp.zoom);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const canvasScrollRef = useRef<HTMLDivElement>(null);
@@ -133,6 +148,18 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
   } | null>(null);
   const panOffsetRef = useRef(panOffset);
   panOffsetRef.current = panOffset;
+
+  // ── Persist pan + zoom to localStorage (debounced 400 ms) ─────────────────
+  useEffect(() => {
+    if (_vpTimerRef.current) clearTimeout(_vpTimerRef.current);
+    _vpTimerRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(_vpKey, JSON.stringify({ x: panOffset.x, y: panOffset.y, zoom }));
+      } catch { /* storage full or unavailable — ignore */ }
+    }, 400);
+    return () => { if (_vpTimerRef.current) clearTimeout(_vpTimerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panOffset.x, panOffset.y, zoom]);
 
   // ── Drag ─────────────────────────────────────────────────────────────────
   // dragOverrides: user-defined card CENTER positions in canvas-space pixels.

@@ -78,6 +78,8 @@ export interface ZoneMapState {
 }
 
 export interface DebugMapPageProps {
+  /** Match ID — used to persist viewport position per-match in localStorage */
+  matchId: string;
   zoneState: ZoneMapState;
   currentLocId: string | null;
   /** Send a command to the backend (uses the zone_map context id automatically) */

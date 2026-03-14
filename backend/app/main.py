@@ -12,6 +12,7 @@ from app.core.turns.router import router as turns_router
 from app.core.events.router import router as events_router
 from app.core.admin.router import router as admin_router
 from app.core.ticker.router import router as ticker_router
+from app.core.ws.router import router as ws_router
 from app.core.commands.pipeline import register_ruleset
 from app.games.tictactoe.rules import TicTacToeRuleSet
 from app.games.zone_stalkers.ruleset import ZoneStalkerRuleSet
@@ -72,6 +73,7 @@ app.include_router(turns_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(ticker_router, prefix="/api")
+app.include_router(ws_router, prefix="/api")
 # Game-specific routers — each game may expose its own endpoints
 app.include_router(zone_stalkers_router, prefix="/api")
 

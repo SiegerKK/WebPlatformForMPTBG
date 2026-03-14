@@ -132,6 +132,13 @@ class CommandPipeline:
             command.executed_at = datetime.utcnow()
             db.commit()
 
+            # Notify connected WebSocket clients about the state change.
+            from app.core.ws.manager import ws_manager
+            ws_manager.notify(str(envelope.match_id), {
+                "type": "state_updated",
+                "match_id": str(envelope.match_id),
+            })
+
             return CommandResult(command_id=command.id, status=CommandStatus.RESOLVED, events=emitted)
 
         except HTTPException:
