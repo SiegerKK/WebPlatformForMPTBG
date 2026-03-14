@@ -82,7 +82,8 @@ def validate_world_command(
 
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
-                        "debug_set_time", "debug_advance_turns"):
+                        "debug_set_time", "debug_advance_turns",
+                        "debug_trigger_emission"):
         return RuleCheckResult(valid=True)
 
     if command_type == "debug_set_agent_money":
@@ -492,6 +493,24 @@ def resolve_world_command(
                 "turns_advanced": turns_advanced,
                 "stopped_on_decision": decision_event is not None,
                 "decision_event": decision_event,
+            },
+        })
+        return state, events
+
+    # ── debug_trigger_emission ────────────────────────────────────────────────
+    if command_type == "debug_trigger_emission":
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        world_turn = state.get("world_turn", 1)
+        # Schedule emission for right now and tick once so the emission logic fires
+        state["emission_scheduled_turn"] = world_turn
+        state["emission_active"] = False
+        state, tick_evs = tick_zone_map(state)
+        events.extend(tick_evs)
+        events.append({
+            "event_type": "debug_emission_triggered",
+            "payload": {
+                "emission_active": state.get("emission_active", False),
+                "emission_ends_turn": state.get("emission_ends_turn", 0),
             },
         })
         return state, events

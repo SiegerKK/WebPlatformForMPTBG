@@ -851,9 +851,28 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             ))}
           </div>
           <div style={s.toolbarRight}>
-            <span style={{ color: '#94a3b8', fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
-              📅 Д{zoneState.world_day} · {String(zoneState.world_hour).padStart(2, '0')}:{String(zoneState.world_minute ?? 0).padStart(2, '0')} · Ход {zoneState.world_turn}
-            </span>
+            {/* ── World clock + emission block ── */}
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+              background: '#0f172a', border: '1px solid #1e3a5f',
+              borderRadius: 6, padding: '0.2rem 0.5rem', gap: 1,
+            }}>
+              <span style={{ color: '#60a5fa', fontSize: '0.72rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                📅 День {zoneState.world_day} · {String(zoneState.world_hour).padStart(2, '0')}:{String(zoneState.world_minute ?? 0).padStart(2, '0')}
+              </span>
+              <span style={{ color: '#475569', fontSize: '0.62rem', whiteSpace: 'nowrap' }}>
+                Ход {zoneState.world_turn}
+              </span>
+              {zoneState.emission_active ? (
+                <span style={{ color: '#ef4444', fontSize: '0.65rem', whiteSpace: 'nowrap', fontWeight: 700 }}>
+                  ⚡ ВЫБРОС! (ещё {(zoneState.emission_ends_turn ?? 0) - zoneState.world_turn} мин)
+                </span>
+              ) : (
+                <span style={{ color: '#f59e0b', fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
+                  ⚡ через {Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn)} мин
+                </span>
+              )}
+            </div>
             <span style={{ color: '#64748b', fontSize: '0.68rem', visibility: saving ? 'visible' : 'hidden' }}>💾 Saving…</span>
             <span style={{ color: '#ef4444', fontSize: '0.68rem', visibility: saveError ? 'visible' : 'hidden' }} title={saveError ?? ''}>
               ⚠ Save failed
@@ -874,6 +893,18 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
               title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
             >
               {skipping ? '⏹ Остановить' : '⏩ До решения'}
+            </button>
+            {/* Trigger emission */}
+            <button
+              style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}
+              onClick={async () => {
+                try { await sendCommand('debug_trigger_emission', {}); }
+                catch { /* ignore */ }
+              }}
+              disabled={zoneState.emission_active}
+              title={zoneState.emission_active ? 'Выброс уже активен' : 'Немедленно запустить выброс (debug)'}
+            >
+              ⚡ Выброс
             </button>
             <button
               style={s.toolBtn}
