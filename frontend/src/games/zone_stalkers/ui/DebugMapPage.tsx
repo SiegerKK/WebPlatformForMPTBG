@@ -86,6 +86,8 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
   // ── Agent profile modal (click stalker in location detail panel) ──────────
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  // ── Trader profile modal (click trader row in location detail panel) ───────
+  const [profileTraderId, setProfileTraderId] = useState<string | null>(null);
 
   // ── Location edit / create modals ─────────────────────────────────────────
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
@@ -1273,6 +1275,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}
             onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
             onAgentClick={(agentId) => setProfileAgentId(agentId)}
+            onTraderClick={(traderId) => setProfileTraderId(traderId)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel
@@ -1328,6 +1331,39 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           sendCommand={sendCommand}
         />
       )}
+
+      {/* ── Trader profile modal (from clicking a trader row in the location panel) ── */}
+      {profileTraderId && zoneState.traders[profileTraderId] && (() => {
+        const t = zoneState.traders[profileTraderId];
+        const traderAsAgent: AgentForProfile = {
+          id: t.id,
+          name: t.name,
+          location_id: t.location_id,
+          hp: 100,
+          max_hp: 100,
+          radiation: 0,
+          hunger: 0,
+          thirst: 0,
+          sleepiness: 0,
+          money: t.money ?? 0,
+          faction: 'trader',
+          inventory: t.inventory ?? [],
+          equipment: {},
+          is_alive: true,
+          action_used: false,
+          scheduled_action: null,
+          controller: { kind: 'npc' },
+          memory: t.memory ?? [],
+        };
+        return (
+          <AgentProfileModal
+            agent={traderAsAgent}
+            locationName={zoneState.locations[t.location_id]?.name ?? t.location_id}
+            onClose={() => setProfileTraderId(null)}
+            sendCommand={sendCommand}
+          />
+        );
+      })()}
     </div>
   );
 }

@@ -46,7 +46,22 @@ export interface ZoneMapState {
   locations: Record<string, ZoneLocation>;
   agents: Record<string, StalkerAgent>;
   mutants: Record<string, { id: string; name: string; location_id: string; hp: number; max_hp: number; is_alive: boolean }>;
-  traders: Record<string, { id: string; name: string; location_id: string }>;
+  traders: Record<string, {
+    id: string;
+    name: string;
+    location_id: string;
+    money?: number;
+    inventory?: Array<{ id: string; type: string; name: string; value?: number }>;
+    memory?: Array<{
+      world_turn: number;
+      world_day: number;
+      world_hour: number;
+      world_minute?: number;
+      type: string;
+      title: string;
+      summary: string;
+    }>;
+  }>;
   player_agents: Record<string, string>;
   active_events: string[];
   game_over: boolean;
