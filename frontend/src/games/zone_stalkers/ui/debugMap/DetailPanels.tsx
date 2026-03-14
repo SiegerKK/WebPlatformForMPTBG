@@ -26,6 +26,7 @@ export function LocationDetailPanel({
   onDeleteConnection,
   onUpdateConnectionWeight,
   onToggleConnectionClosed,
+  onAgentClick,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -45,6 +46,8 @@ export function LocationDetailPanel({
   onDeleteConnection: (toId: string) => void;
   onUpdateConnectionWeight: (toId: string, travelTime: number) => void;
   onToggleConnectionClosed: (toId: string) => void;
+  /** Called when the user clicks a stalker row; opens their profile. */
+  onAgentClick?: (agentId: string) => void;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | null>(null);
 
@@ -185,7 +188,11 @@ export function LocationDetailPanel({
           <EmptyRow />
         ) : (
           stalkers.map((a) => (
-            <DetailRow key={a.id}>
+            <DetailRow
+              key={a.id}
+              style={onAgentClick ? { cursor: 'pointer' } : undefined}
+              onClick={onAgentClick ? () => onAgentClick(a.id) : undefined}
+            >
               <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem', flex: 1 }}>
                 {a.name}
                 {!a.is_alive && (

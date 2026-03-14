@@ -23,6 +23,8 @@ import {
 import { s } from './debugMap/styles';
 import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from './debugMap/DetailPanels';
 import { LocationModal } from './debugMap/Modals';
+import AgentProfileModal from './AgentProfileModal';
+import type { AgentForProfile } from './AgentProfileModal';
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -81,6 +83,9 @@ function botDecisionMade(
 export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+
+  // ── Agent profile modal (click stalker in location detail panel) ──────────
+  const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
 
   // ── Location edit / create modals ─────────────────────────────────────────
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
@@ -244,13 +249,18 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
         // Snapshot scheduled actions before the tick
         const beforeSnap = snapBotScheduledActions(zoneStateRef.current);
 
-        await sendCommand('end_turn', {});
-        // sendCommand triggers a state refresh; wait for React to propagate it
+        // Use debug_advance_turns with max_n=1 — this directly calls tick_zone_map
+        // on the backend (one world tick per call) rather than end_turn which is a
+        // player action and doesn't guarantee a world tick in debug mode.
+        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
+        // sendCommand triggers refresh(); wait for React to commit the new state
+        // into zoneStateRef via the useEffect below.
         await new Promise<void>((r) => setTimeout(r, 200));
 
         if (skipCancelRef.current) break;
 
-        // Check if any bot made a new decision after the tick
+        // Stop the loop if any bot agent gained or changed a scheduled_action
+        // (i.e. it just made a new decision).
         const afterSnap = snapBotScheduledActions(zoneStateRef.current);
         if (botDecisionMade(beforeSnap, afterSnap)) break;
       }
@@ -1262,6 +1272,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
             onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}
             onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
+            onAgentClick={(agentId) => setProfileAgentId(agentId)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel
@@ -1302,6 +1313,19 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           regions={localRegions}
           onClose={() => setCreatingLoc(false)}
           onSave={handleSaveCreate}
+        />
+      )}
+
+      {/* ── Agent profile modal (from clicking a stalker in the location panel) ── */}
+      {profileAgentId && zoneState.agents[profileAgentId] && (
+        <AgentProfileModal
+          agent={zoneState.agents[profileAgentId] as unknown as AgentForProfile}
+          locationName={
+            zoneState.locations[zoneState.agents[profileAgentId].location_id]?.name ??
+            zoneState.agents[profileAgentId].location_id
+          }
+          onClose={() => setProfileAgentId(null)}
+          sendCommand={sendCommand}
         />
       )}
     </div>
