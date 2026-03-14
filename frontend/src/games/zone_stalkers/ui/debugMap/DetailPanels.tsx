@@ -28,6 +28,7 @@ export function LocationDetailPanel({
   onToggleConnectionClosed,
   onAgentClick,
   onTraderClick,
+  onDeleteLoc,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -51,6 +52,8 @@ export function LocationDetailPanel({
   onAgentClick?: (agentId: string) => void;
   /** Called when the user clicks a trader row; opens their profile. */
   onTraderClick?: (traderId: string) => void;
+  /** Called when the user wants to delete this location entirely. */
+  onDeleteLoc?: () => void;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | null>(null);
 
@@ -93,6 +96,15 @@ export function LocationDetailPanel({
           <button onClick={onEdit} style={s.editDetailBtn} title="Редактировать локацию">
             ✏ Редактировать
           </button>
+          {onDeleteLoc && (
+            <button
+              onClick={onDeleteLoc}
+              style={{ ...s.editDetailBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
+              title="Удалить локацию"
+            >
+              🗑 Удалить
+            </button>
+          )}
           <button onClick={onClose} style={s.closeBtn}>✕</button>
         </div>
       </div>

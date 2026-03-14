@@ -966,10 +966,17 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
 
   const handleSaveCreate = useCallback(
     async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
-      // Place the new card just below the current canvas bottom-center so it's visible
+      // Place the new card at the center of the currently visible viewport area.
+      // The canvas transform is: translate(panOffset.x, panOffset.y) scale(zoom)
+      // So the visible center in canvas-space is:
+      //   canvasCX = (-panOffset.x + viewportW/2) / zoom
+      //   canvasCY = (-panOffset.y + viewportH/2) / zoom
+      const vpEl = canvasScrollRef.current;
+      const vpW = vpEl ? vpEl.clientWidth : 800;
+      const vpH = vpEl ? vpEl.clientHeight : 600;
       const pos = {
-        x: Math.max(CARD_W / 2 + CANVAS_PAD, canvasW / 2),
-        y: canvasH + CARD_H / 2 + CANVAS_PAD,
+        x: Math.max(CARD_W / 2 + CANVAS_PAD, (-panOffsetRef.current.x + vpW / 2) / zoomRef.current),
+        y: Math.max(CARD_H / 2 + CANVAS_PAD, (-panOffsetRef.current.y + vpH / 2) / zoomRef.current),
       };
       await sendCommand('debug_create_location', {
         name: data.name,
@@ -980,8 +987,26 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         position: pos,
       });
     },
-    [sendCommand, canvasW, canvasH],
+    [sendCommand],
   );
+
+  const handleDeleteLoc = useCallback(async (locId: string) => {
+    if (!window.confirm(`Удалить локацию "${zoneState.locations[locId]?.name ?? locId}"? Все связи с ней будут разорваны.`)) return;
+    // Clean up local state immediately so UI is responsive before the server round-trip
+    setSelectedLocId(null);
+    setDragOverrides((prev) => {
+      const next = { ...prev };
+      delete next[locId];
+      return next;
+    });
+    const nextConns = { ...localConnsRef.current };
+    delete nextConns[locId];
+    for (const id of Object.keys(nextConns)) {
+      nextConns[id] = nextConns[id].filter((c) => c.to !== locId);
+    }
+    setLocalConns(nextConns);
+    await sendCommand('debug_delete_location', { loc_id: locId });
+  }, [sendCommand, zoneState.locations]);
 
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
   const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
@@ -1496,6 +1521,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
             onAgentClick={(agentId) => setProfileAgentId(agentId)}
             onTraderClick={(traderId) => setProfileTraderId(traderId)}
+            onDeleteLoc={() => handleDeleteLoc(selectedLocId!)}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel
