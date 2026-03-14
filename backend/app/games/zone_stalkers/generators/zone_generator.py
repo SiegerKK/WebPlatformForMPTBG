@@ -194,6 +194,11 @@ def generate_zone(
         "winner": None,
         "scores": {},
         "global_events": [],
+        # Emission (Выброс) mechanic: first emission 1-2 days after start
+        # 1 game day = 1440 turns (1 turn = 1 minute)
+        "emission_active": False,
+        "emission_scheduled_turn": rng.randint(1440, 2880),
+        "emission_ends_turn": 0,
     }
 
 

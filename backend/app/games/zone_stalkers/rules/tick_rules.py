@@ -26,6 +26,16 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 500
 
+# Emission (Выброс) mechanic constants
+# 1 game day = 1440 turns (1 turn = 1 minute)
+_EMISSION_MIN_INTERVAL_TURNS = 1440   # earliest next emission: 1 game day after last
+_EMISSION_MAX_INTERVAL_TURNS = 2880   # latest next emission: 2 game days after last
+_EMISSION_MIN_DURATION_TURNS = 5      # shortest emission: 5 game minutes
+_EMISSION_MAX_DURATION_TURNS = 10     # longest emission: 10 game minutes
+_EMISSION_WARNING_TURNS = 30          # NPC starts fleeing this many turns before emission
+# Terrain types where stalkers are killed by an emission
+_EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
+
 # Anomaly search parameters for the get_rich NPC goal path
 _ANOMALY_SEARCH_MAX_HOPS = 5      # BFS radius (in hops) when looking for anomaly locations
 _ANOMALY_DISTANCE_PENALTY = 5.0   # Score reduction per hop of distance
@@ -74,36 +84,92 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 })
 
 
-    # 2b. Midnight artifact spawn: when the world clock crosses midnight (23:59 → 00:00),
-    # each location with anomalies has a chance to spawn a new artifact.
-    # This runs BEFORE bot AI decisions so bots can react to fresh spawns this turn.
-    _is_midnight_crossing = (_new_minute == 0 and state.get("world_hour", 6) == 23)
-    if _is_midnight_crossing:
-        _midnight_rng = random.Random(
-            state.get("seed", 0) + state.get("world_day", 1) * 1000
+    # 2b. Emission (Выброс) mechanic — replaces the old midnight artifact spawn.
+    # The emission spawns artifacts in anomaly locations, kills stalkers on open
+    # terrain (plains / hills), and notifies all alive stalkers via memory.
+    _emission_rng = random.Random(state.get("seed", 0) + world_turn * 7919)
+
+    # ── Start emission when the scheduled turn is reached ──────────────────────
+    if not state.get("emission_active", False) and state.get("emission_scheduled_turn") == world_turn:
+        _emission_duration = _emission_rng.randint(
+            _EMISSION_MIN_DURATION_TURNS, _EMISSION_MAX_DURATION_TURNS
         )
-        for _mid_loc_id, _mid_loc in state.get("locations", {}).items():
-            if _mid_loc.get("anomaly_activity", 0) <= 0:
+        state["emission_active"] = True
+        state["emission_ends_turn"] = world_turn + _emission_duration
+
+        # Spawn artifacts in all anomaly locations during emission start
+        for _em_loc_id, _em_loc in state.get("locations", {}).items():
+            if _em_loc.get("anomaly_activity", 0) <= 0:
                 continue
-            _spawn_chance = _mid_loc.get("anomaly_activity", 0) / 10.0
-            if _midnight_rng.random() < _spawn_chance:
-                _art_type = _midnight_rng.choice(list(ARTIFACT_TYPES.keys()))
+            _spawn_chance = _em_loc.get("anomaly_activity", 0) / 10.0
+            if _emission_rng.random() < _spawn_chance:
+                _art_type = _emission_rng.choice(list(ARTIFACT_TYPES.keys()))
                 _art_info = ARTIFACT_TYPES[_art_type]
-                _art_id = f"art_midnight_{_mid_loc_id}_{state.get('world_day', 1)}"
-                _new_art = {
+                _art_id = f"art_emission_{_em_loc_id}_{world_turn}"
+                _em_loc.setdefault("artifacts", []).append({
                     "id": _art_id,
                     "type": _art_type,
                     "name": _art_info["name"],
                     "value": _art_info["value"],
-                }
-                _mid_loc.setdefault("artifacts", []).append(_new_art)
+                })
                 events.append({
                     "event_type": "artifact_spawned",
-                    "payload": {
-                        "location_id": _mid_loc_id,
-                        "artifact_type": _art_type,
-                    },
+                    "payload": {"location_id": _em_loc_id, "artifact_type": _art_type},
                 })
+
+        # Kill stalkers caught in the open (dangerous terrain) during emission
+        for _em_agent_id, _em_agent in state.get("agents", {}).items():
+            if not _em_agent.get("is_alive", True):
+                continue
+            _em_agent_loc = state.get("locations", {}).get(_em_agent.get("location_id", ""), {})
+            _em_terrain = _em_agent_loc.get("terrain_type", "")
+            if _em_terrain in _EMISSION_DANGEROUS_TERRAIN:
+                _em_agent["is_alive"] = False
+                events.append({
+                    "event_type": "agent_died",
+                    "payload": {"agent_id": _em_agent_id, "cause": "emission"},
+                })
+
+        # Write observation memory for every still-alive stalker
+        _em_world_day = state.get("world_day", 1)
+        _em_world_hour = state.get("world_hour", 0)
+        _em_world_minute = state.get("world_minute", 0)
+        for _em_agent_id, _em_agent in state.get("agents", {}).items():
+            if not _em_agent.get("is_alive", True):
+                continue
+            _add_memory(
+                _em_agent, world_turn, state, "observation",
+                "⚡ Начался выброс!",
+                "Начался выброс! Нужно укрыться в безопасном месте.",
+                {"action_kind": "emission_started"},
+            )
+
+        events.append({
+            "event_type": "emission_started",
+            "payload": {
+                "world_turn": world_turn,
+                "world_day": state.get("world_day", 1),
+                "world_hour": state.get("world_hour", 0),
+                "world_minute": state.get("world_minute", 0),
+                "ends_turn": state["emission_ends_turn"],
+            },
+        })
+
+    # ── End emission when its duration has passed ──────────────────────────────
+    if state.get("emission_active", False) and world_turn >= state.get("emission_ends_turn", 0):
+        state["emission_active"] = False
+        # Schedule next emission 1–2 in-game days from now
+        _next_emission_delay = _emission_rng.randint(
+            _EMISSION_MIN_INTERVAL_TURNS, _EMISSION_MAX_INTERVAL_TURNS
+        )
+        state["emission_scheduled_turn"] = world_turn + _next_emission_delay
+        events.append({
+            "event_type": "emission_ended",
+            "payload": {
+                "world_turn": world_turn,
+                "next_emission_turn": state["emission_scheduled_turn"],
+            },
+        })
 
     # 3. AI bot agent decisions (bots without a scheduled action)
     for agent_id, agent in state.get("agents", {}).items():
@@ -1016,6 +1082,36 @@ def _run_bot_action_inner(
     loc = locations.get(loc_id, {})
     rng = random.Random(agent_id + str(world_turn))
     inventory = agent.get("inventory", [])
+
+    # ── EMISSION ESCAPE: Flee dangerous terrain before emission ───────────────
+    # If emission is active OR imminent (within warning window), and the agent is
+    # on open terrain (plains / hills), immediately travel to a safer location.
+    _emission_active = state.get("emission_active", False)
+    _emission_scheduled = state.get("emission_scheduled_turn")
+    _on_dangerous_terrain = loc.get("terrain_type", "") in _EMISSION_DANGEROUS_TERRAIN
+    _emission_imminent = (
+        _emission_scheduled is not None
+        and not _emission_active
+        and 0 < (_emission_scheduled - world_turn) <= _EMISSION_WARNING_TURNS
+    )
+    if _on_dangerous_terrain and (_emission_active or _emission_imminent):
+        # Find a connected location that is NOT on dangerous terrain
+        safe_escape_targets = [
+            c["to"] for c in loc.get("connections", [])
+            if not c.get("closed")
+            and locations.get(c["to"], {}).get("terrain_type", "") not in _EMISSION_DANGEROUS_TERRAIN
+        ]
+        if safe_escape_targets:
+            target = rng.choice(safe_escape_targets)
+            agent["current_goal"] = "flee_emission"
+            reason = "активный выброс" if _emission_active else "скорый выброс"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "⚡ Бегу от выброса!",
+                f"Нахожусь на открытой местности во время выброса ({reason}). Бегу в укрытие.",
+                {"action_kind": "flee_emission", "target_id": target},
+            )
+            return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
 
     # ── EMERGENCY: Heal ────────────────────────────────────────────────────────
     if agent.get("hp", 100) <= 30:

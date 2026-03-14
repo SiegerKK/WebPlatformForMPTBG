@@ -144,6 +144,10 @@ interface ZoneMapState {
   world_minute: number;
   world_day: number;
   max_turns: number;
+  /** Emission (Выброс) mechanic */
+  emission_active: boolean;
+  emission_scheduled_turn: number;
+  emission_ends_turn: number;
   locations: Record<string, ZoneLocation>;
   agents: Record<string, StalkerAgent>;
   mutants: Record<string, { id: string; name: string; location_id: string; hp: number; max_hp: number; is_alive: boolean }>;
@@ -1219,8 +1223,38 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     if (!zoneState) return <p style={styles.loadingText}>Generating the Zone…</p>;
     const locations = Object.values(zoneState.locations);
 
+    // Compute turns until next emission for display
+    const turnsUntilEmission = (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn;
+    const emissionHours = Math.floor(turnsUntilEmission / 60);
+    const emissionMins = turnsUntilEmission % 60;
+    const emissionLabel = zoneState.emission_active
+      ? `⚡ ВЫБРОС АКТИВЕН! (ещё ${(zoneState.emission_ends_turn ?? 0) - zoneState.world_turn} мин)`
+      : turnsUntilEmission > 0
+        ? `⚡ Выброс через: ${emissionHours > 0 ? `${emissionHours} ч ` : ''}${emissionMins} мин`
+        : '⚡ Выброс скоро…';
+
     return (
       <div style={styles.mapContainer}>
+        {/* ── World clock block (top-left) ── */}
+        <div style={styles.worldClockBlock}>
+          <div style={styles.worldClockDate}>
+            📅 День {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)}
+          </div>
+          <div style={styles.worldClockTurn}>
+            Ход {zoneState.world_turn}{zoneState.max_turns ? `/${zoneState.max_turns}` : ''}
+          </div>
+          <div style={zoneState.emission_active ? styles.emissionLabelActive : styles.emissionLabel}>
+            {emissionLabel}
+          </div>
+        </div>
+
+        {/* ── Active emission warning banner ── */}
+        {zoneState.emission_active && (
+          <div style={styles.emissionBanner}>
+            ⚡ ВЫБРОС! УКРОЙТЕСЬ! ⚡
+          </div>
+        )}
+
         {/* ── Agent status panel ── */}
         <div style={styles.agentPanel}>
           <div style={styles.panelTitle}>☢️ Your Stalker</div>
@@ -1828,6 +1862,26 @@ const styles: Record<string, React.CSSProperties> = {
 
   // map layout
   mapContainer: { display: 'flex', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' as const },
+
+  // World clock block — shown in top-left above the agent panel
+  worldClockBlock: {
+    width: '100%', flexBasis: '100%',
+    background: '#0f172a', borderRadius: 8, padding: '0.5rem 0.9rem',
+    display: 'flex', alignItems: 'center', gap: '1rem',
+    border: '1px solid #1e3a5f', flexWrap: 'wrap' as const,
+  },
+  worldClockDate: { color: '#60a5fa', fontWeight: 700, fontSize: '1rem' },
+  worldClockTurn: { color: '#475569', fontSize: '0.78rem' },
+  emissionLabel: { color: '#f59e0b', fontSize: '0.82rem', fontWeight: 600 },
+  emissionLabelActive: { color: '#ef4444', fontSize: '0.82rem', fontWeight: 700, animation: 'none' },
+  // Full-width emission warning banner
+  emissionBanner: {
+    width: '100%', flexBasis: '100%',
+    background: '#7f1d1d', border: '2px solid #ef4444', borderRadius: 8,
+    color: '#fca5a5', fontWeight: 700, fontSize: '1.1rem',
+    textAlign: 'center' as const, padding: '0.5rem',
+    letterSpacing: '0.06em',
+  },
 
   agentPanel: {
     width: 200, flexShrink: 0,

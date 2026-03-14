@@ -42,6 +42,11 @@ export interface ZoneMapState {
   world_hour: number;
   world_minute: number;
   world_day: number;
+  max_turns?: number;
+  /** Emission (Выброс) mechanic */
+  emission_active: boolean;
+  emission_scheduled_turn: number;
+  emission_ends_turn: number;
   locations: Record<string, ZoneLocation>;
   agents: Record<string, StalkerAgent>;
   mutants: Record<string, { id: string; name: string; location_id: string; hp: number; max_hp: number; is_alive: boolean }>;
