@@ -253,15 +253,6 @@ def _process_scheduled_action(
     sched["turns_remaining"] = turns_remaining
 
     if turns_remaining > 0:
-        # Still in progress — emit progress event
-        events.append({
-            "event_type": f"{action_type}_in_progress",
-            "payload": {
-                "agent_id": agent_id,
-                "turns_remaining": turns_remaining,
-                "action_type": action_type,
-            },
-        })
         return events
 
     # Action complete — resolve effects

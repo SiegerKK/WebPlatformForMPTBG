@@ -1,5 +1,5 @@
 import uuid
-from typing import List
+from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from .models import GameEvent
@@ -23,8 +23,14 @@ def get_next_sequence_number(context_id: uuid.UUID, db: Session) -> int:
     result = db.query(func.max(GameEvent.sequence_no)).filter(GameEvent.context_id == context_id).scalar()
     return (result or 0) + 1
 
-def get_match_events(match_id: uuid.UUID, db: Session) -> List[GameEvent]:
-    return db.query(GameEvent).filter(GameEvent.match_id == match_id).order_by(GameEvent.sequence_no).all()
+def get_match_events(match_id: uuid.UUID, db: Session, limit: Optional[int] = None) -> List[GameEvent]:
+    q = db.query(GameEvent).filter(GameEvent.match_id == match_id).order_by(GameEvent.created_at.desc(), GameEvent.sequence_no.desc())
+    if limit is not None:
+        q = q.limit(limit)
+    return list(reversed(q.all()))
 
-def get_context_events(context_id: uuid.UUID, db: Session) -> List[GameEvent]:
-    return db.query(GameEvent).filter(GameEvent.context_id == context_id).order_by(GameEvent.sequence_no).all()
+def get_context_events(context_id: uuid.UUID, db: Session, limit: Optional[int] = None) -> List[GameEvent]:
+    q = db.query(GameEvent).filter(GameEvent.context_id == context_id).order_by(GameEvent.created_at.desc(), GameEvent.sequence_no.desc())
+    if limit is not None:
+        q = q.limit(limit)
+    return list(reversed(q.all()))

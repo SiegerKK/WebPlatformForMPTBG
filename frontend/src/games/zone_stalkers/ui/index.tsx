@@ -321,7 +321,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         setActiveEventCtx(null);
       }
 
-      const evRes = await eventsApi.listForMatch(match.id);
+      const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
       setEvents(evRes.data as GameEvent[]);
     } catch { /* ignore */ }
   }, [match.id]);
