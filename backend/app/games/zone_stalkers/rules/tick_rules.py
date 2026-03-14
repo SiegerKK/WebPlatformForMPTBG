@@ -14,6 +14,10 @@ import random
 from typing import Any, Dict, List, Tuple
 
 
+# 1 game turn = 1 real minute
+MINUTES_PER_TURN = 1
+
+
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Advance the world by one turn.
@@ -33,24 +37,27 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
             events.extend(new_evs)
 
-    # 2. Degrade survival needs and apply critical penalties
-    for agent_id, agent in state.get("agents", {}).items():
-        if not agent.get("is_alive", True):
-            continue
-        agent["hunger"] = min(100, agent.get("hunger", 0) + 3)
-        agent["thirst"] = min(100, agent.get("thirst", 0) + 5)
-        agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + 4)
-        # Critical thirst causes HP damage faster than hunger
-        if agent.get("thirst", 0) >= 80:
-            agent["hp"] = max(0, agent["hp"] - 2)
-        if agent.get("hunger", 0) >= 80:
-            agent["hp"] = max(0, agent["hp"] - 1)
-        if agent["hp"] <= 0 and agent.get("is_alive", True):
-            agent["is_alive"] = False
-            events.append({
-                "event_type": "agent_died",
-                "payload": {"agent_id": agent_id, "cause": "starvation_or_thirst"},
-            })
+    # 2. Degrade survival needs and apply critical penalties (once per in-game hour)
+    # Determine current minute after advancing (before committing to state)
+    _new_minute = (state.get("world_minute", 0) + 1) % 60
+    if _new_minute == 0:  # hour boundary reached
+        for agent_id, agent in state.get("agents", {}).items():
+            if not agent.get("is_alive", True):
+                continue
+            agent["hunger"] = min(100, agent.get("hunger", 0) + 3)
+            agent["thirst"] = min(100, agent.get("thirst", 0) + 5)
+            agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + 4)
+            # Critical thirst causes HP damage faster than hunger
+            if agent.get("thirst", 0) >= 80:
+                agent["hp"] = max(0, agent["hp"] - 2)
+            if agent.get("hunger", 0) >= 80:
+                agent["hp"] = max(0, agent["hp"] - 1)
+            if agent["hp"] <= 0 and agent.get("is_alive", True):
+                agent["is_alive"] = False
+                events.append({
+                    "event_type": "agent_died",
+                    "payload": {"agent_id": agent_id, "cause": "starvation_or_thirst"},
+                })
 
     # 3. AI bot agent decisions (bots without a scheduled action)
     for agent_id, agent in state.get("agents", {}).items():
@@ -65,14 +72,19 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         bot_evs = _run_bot_action(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
-    # 4. Advance world time
+    # 4. Advance world time (1 tick = 1 minute)
+    world_minute = state.get("world_minute", 0)
     world_hour = state.get("world_hour", 6)
     world_day = state.get("world_day", 1)
-    world_hour += 1
-    if world_hour >= 24:
-        world_hour = 0
-        world_day += 1
-        events.append({"event_type": "day_changed", "payload": {"world_day": world_day}})
+    world_minute += 1
+    if world_minute >= 60:
+        world_minute = 0
+        world_hour += 1
+        if world_hour >= 24:
+            world_hour = 0
+            world_day += 1
+            events.append({"event_type": "day_changed", "payload": {"world_day": world_day}})
+    state["world_minute"] = world_minute
     state["world_hour"] = world_hour
     state["world_day"] = world_day
     state["world_turn"] = world_turn + 1
@@ -91,6 +103,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         "event_type": "world_turn_advanced",
         "payload": {
             "world_turn": state["world_turn"],
+            "world_minute": world_minute,
             "world_hour": world_hour,
             "world_day": world_day,
         },
@@ -321,7 +334,7 @@ def _resolve_exploration(
 
 def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int, state: Dict[str, Any]) -> None:
     """Apply sleep healing effects."""
-    hours = sched.get("turns_total", 6)
+    hours = sched.get("hours", sched.get("turns_total", 360) // 60)
     # Heal HP (15 per hour, max 100)
     hp_regen = min(15 * hours, agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
@@ -349,6 +362,7 @@ def _add_memory(
         "world_turn": world_turn,
         "world_day": state.get("world_day", 1),
         "world_hour": state.get("world_hour", 0),
+        "world_minute": state.get("world_minute", 0),
         "type": memory_type,
         "title": title,
         "summary": summary,
@@ -366,6 +380,55 @@ def _add_memory(
 
 # Import centralised item-type sets from balance data (single source of truth)
 from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+
+
+# ─────────────────────────────────────────────────────────────────
+# NPC planning helpers
+# ─────────────────────────────────────────────────────────────────
+
+def _agent_wealth(agent: Dict[str, Any]) -> int:
+    """Sum of money + total inventory item values."""
+    inv_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
+    return agent.get("money", 0) + inv_value
+
+
+def _visited_locs(agent: Dict[str, Any]) -> set:
+    """Set of location IDs the agent has been to (from memory)."""
+    visited = set()
+    visited.add(agent.get("location_id", ""))
+    for mem in agent.get("memory", []):
+        if mem.get("type") in ("travel", "explore"):
+            # memory title contains location name; extract location from payload
+            pass
+    return visited
+
+
+def _bot_schedule_travel(
+    agent_id: str,
+    agent: Dict[str, Any],
+    target_loc_id: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Schedule a travel action for a bot toward target_loc_id. Returns events."""
+    from app.games.zone_stalkers.rules.world_rules import _bfs_route, _route_travel_turns
+    route = _bfs_route(state["locations"], agent["location_id"], target_loc_id)
+    if not route:
+        return []
+    turns = _route_travel_turns(route, state["locations"], agent["location_id"])
+    agent["scheduled_action"] = {
+        "type": "travel",
+        "turns_remaining": turns,
+        "turns_total": turns,
+        "target_id": target_loc_id,
+        "route": route,
+        "started_turn": world_turn,
+    }
+    agent["action_used"] = True
+    return [{
+        "event_type": "agent_travel_started",
+        "payload": {"agent_id": agent_id, "destination": target_loc_id, "turns": turns, "bot": True},
+    }]
 
 
 def _bot_consume(
@@ -394,14 +457,13 @@ def _run_bot_action(
     world_turn: int,
 ) -> List[Dict[str, Any]]:
     """
-    Make a prioritised decision for a bot-controlled stalker agent and apply it.
+    Make a goal-directed decision for a bot-controlled stalker agent.
 
-    Priority order (GDD §11):
-      P1 – Heal if HP critical
-      P2 – Eat/drink if hunger/thirst critical
-      P3 – Sleep if sleepy and in safe location
-      P4 – Pick up artifacts at current location
-      P5 – Schedule exploration or move to adjacent location
+    Decision layers:
+      EMERGENCY – Heal / eat / drink (always overrides goal logic)
+      SURVIVAL  – Sleep when exhausted
+      GOAL      – If wealth < material_threshold: gather resources
+                  Else: pursue global_goal
     """
     events: List[Dict[str, Any]] = []
     loc_id = agent.get("location_id")
@@ -410,89 +472,248 @@ def _run_bot_action(
     rng = random.Random(agent_id + str(world_turn))
     inventory = agent.get("inventory", [])
 
-    # P1 — Heal if HP ≤ 30
+    # ── EMERGENCY: Heal ────────────────────────────────────────────────────────
     if agent.get("hp", 100) <= 30:
         heal_item = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
         if heal_item:
             return _bot_consume(agent_id, agent, heal_item)
-        # No healing item: stay put
+        # No healing: move toward a safe location (low anomaly_activity)
+        safe_neighbors = [
+            c["to"] for c in loc.get("connections", [])
+            if not c.get("closed") and
+               locations.get(c["to"], {}).get("anomaly_activity", 5) <= 3
+        ]
+        if safe_neighbors:
+            target = rng.choice(safe_neighbors)
+            agent["current_goal"] = "flee_to_safety"
+            return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
         agent["action_used"] = True
         return events
 
-    # P2 — Eat if hunger ≥ 70
+    # ── EMERGENCY: Eat ────────────────────────────────────────────────────────
     if agent.get("hunger", 0) >= 70:
         food = next((i for i in inventory if i["type"] in FOOD_ITEM_TYPES), None)
         if food:
             return _bot_consume(agent_id, agent, food)
 
-    # P2b — Drink if thirst ≥ 70
+    # ── EMERGENCY: Drink ──────────────────────────────────────────────────────
     if agent.get("thirst", 0) >= 70:
-        nourishment = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
-        if nourishment:
-            return _bot_consume(agent_id, agent, nourishment)
+        drink = next((i for i in inventory if i["type"] in DRINK_ITEM_TYPES), None)
+        if drink:
+            return _bot_consume(agent_id, agent, drink)
 
-    # P3 — Sleep if sleepiness ≥ 75
+    # ── SURVIVAL: Sleep ───────────────────────────────────────────────────────
     if agent.get("sleepiness", 0) >= 75:
+        _sleep_hours = 6
         agent["scheduled_action"] = {
             "type": "sleep",
-            "turns_remaining": 6,
-            "turns_total": 6,
+            "turns_remaining": _sleep_hours * 60,
+            "turns_total": _sleep_hours * 60,
+            "hours": _sleep_hours,
             "target_id": loc_id,
             "started_turn": world_turn,
         }
         agent["action_used"] = True
-        events.append({
-            "event_type": "sleep_started",
-            "payload": {"agent_id": agent_id, "hours": 6},
-        })
+        events.append({"event_type": "sleep_started", "payload": {"agent_id": agent_id, "hours": _sleep_hours}})
         return events
 
-    # P4 — Pick up artifact if available
+    # ── GOAL SELECTION ─────────────────────────────────────────────────────────
+    wealth = _agent_wealth(agent)
+    threshold = agent.get("material_threshold", 1000)
+    global_goal = agent.get("global_goal", "survive")
+
+    if wealth < threshold:
+        # Phase 1: Accumulate resources before pursuing global goal
+        agent["current_goal"] = "gather_resources"
+        return _bot_gather_resources(agent_id, agent, loc_id, loc, state, world_turn, rng)
+    else:
+        # Phase 2: Pursue global goal
+        agent["current_goal"] = f"goal_{global_goal}"
+        return _bot_pursue_goal(agent_id, agent, global_goal, loc_id, loc, state, world_turn, rng)
+
+
+def _bot_gather_resources(
+    agent_id: str,
+    agent: Dict[str, Any],
+    loc_id: str,
+    loc: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+    rng: random.Random,
+) -> List[Dict[str, Any]]:
+    """
+    Resource-gathering mode: pick up artifacts, explore high-anomaly areas, move to loot-rich locations.
+    """
+    locations = state.get("locations", {})
+
+    # G1 — Pick up artifact at current location
     artifacts = loc.get("artifacts", [])
     if artifacts:
         art = artifacts[0]
         loc["artifacts"] = artifacts[1:]
         agent.setdefault("inventory", []).append(art)
         agent["action_used"] = True
-        events.append({
-            "event_type": "artifact_picked_up",
-            "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]},
-        })
-        return events
+        return [{"event_type": "artifact_picked_up",
+                 "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
-    # P5a — Schedule exploration with 30% probability
-    if rng.random() < 0.30:
+    # G2 — Explore if anomalies are present (good chance of finding artifacts)
+    if loc.get("anomalies") and rng.random() < 0.50:
         agent["scheduled_action"] = {
             "type": "explore",
-            "turns_remaining": 1,
-            "turns_total": 1,
+            "turns_remaining": 30,  # 30 minutes of exploration
+            "turns_total": 30,
             "target_id": loc_id,
             "started_turn": world_turn,
         }
         agent["action_used"] = True
-        events.append({
-            "event_type": "exploration_started",
-            "payload": {"agent_id": agent_id, "location_id": loc_id},
-        })
-        return events
+        return [{"event_type": "exploration_started",
+                 "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-    # P5b — Move to adjacent location
-    connections = loc.get("connections", [])
-    if connections and rng.random() < 0.70:
-        conn = rng.choice(connections)
-        target_loc_id = conn["to"]
-        if agent_id in loc.get("agents", []):
-            loc["agents"].remove(agent_id)
-        agent["location_id"] = target_loc_id
-        new_loc = locations.get(target_loc_id, {})
-        if agent_id not in new_loc.get("agents", []):
-            new_loc.setdefault("agents", []).append(agent_id)
+    # G3 — Move toward a more loot-rich adjacent location (higher anomaly_activity)
+    connections = [c for c in loc.get("connections", []) if not c.get("closed")]
+    if connections:
+        # Prefer neighbors with higher anomaly_activity and artifacts present
+        def loc_score(conn):
+            nb = locations.get(conn["to"], {})
+            return nb.get("anomaly_activity", 0) * 2 + len(nb.get("artifacts", [])) * 3
+        best = max(connections, key=loc_score)
+        if rng.random() < 0.70:
+            return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+
+    # G4 — Fallback: explore current location anyway
+    if rng.random() < 0.40:
+        agent["scheduled_action"] = {
+            "type": "explore",
+            "turns_remaining": 30,
+            "turns_total": 30,
+            "target_id": loc_id,
+            "started_turn": world_turn,
+        }
         agent["action_used"] = True
-        events.append({
-            "event_type": "agent_moved",
-            "payload": {"agent_id": agent_id, "from": loc_id, "to": target_loc_id, "bot": True},
-        })
-        return events
+        return [{"event_type": "exploration_started",
+                 "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
     agent["action_used"] = True
-    return events
+    return []
+
+
+def _bot_pursue_goal(
+    agent_id: str,
+    agent: Dict[str, Any],
+    global_goal: str,
+    loc_id: str,
+    loc: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+    rng: random.Random,
+) -> List[Dict[str, Any]]:
+    """
+    Goal-directed mode: behave according to the NPC's global_goal.
+    """
+    locations = state.get("locations", {})
+    connections = [c for c in loc.get("connections", []) if not c.get("closed")]
+
+    if global_goal == "survive":
+        # Stay in safe locations; sleep more; top up supplies
+        if loc.get("anomaly_activity", 0) > 5 and connections:
+            safe_conn = [c for c in connections
+                         if locations.get(c["to"], {}).get("anomaly_activity", 5) <= 3]
+            if safe_conn:
+                return _bot_schedule_travel(agent_id, agent, rng.choice(safe_conn)["to"], state, world_turn)
+        if agent.get("sleepiness", 0) >= 40:
+            _sleep_hours = 4
+            agent["scheduled_action"] = {
+                "type": "sleep", "turns_remaining": _sleep_hours * 60,
+                "turns_total": _sleep_hours * 60, "hours": _sleep_hours,
+                "target_id": loc_id, "started_turn": world_turn,
+            }
+            agent["action_used"] = True
+            return [{"event_type": "sleep_started", "payload": {"agent_id": agent_id, "hours": _sleep_hours}}]
+        # Pick up any nearby artifacts opportunistically
+        artifacts = loc.get("artifacts", [])
+        if artifacts:
+            art = artifacts[0]
+            loc["artifacts"] = artifacts[1:]
+            agent.setdefault("inventory", []).append(art)
+            agent["action_used"] = True
+            return [{"event_type": "artifact_picked_up",
+                     "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
+
+    elif global_goal == "get_rich":
+        # Aggressively collect artifacts; move to high-anomaly zones
+        artifacts = loc.get("artifacts", [])
+        if artifacts:
+            art = artifacts[0]
+            loc["artifacts"] = artifacts[1:]
+            agent.setdefault("inventory", []).append(art)
+            agent["action_used"] = True
+            return [{"event_type": "artifact_picked_up",
+                     "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
+        if loc.get("anomalies") and rng.random() < 0.65:
+            agent["scheduled_action"] = {
+                "type": "explore", "turns_remaining": 30, "turns_total": 30,
+                "target_id": loc_id, "started_turn": world_turn,
+            }
+            agent["action_used"] = True
+            return [{"event_type": "exploration_started",
+                     "payload": {"agent_id": agent_id, "location_id": loc_id}}]
+        if connections:
+            best = max(connections,
+                       key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
+            return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+
+    elif global_goal == "explore":
+        # Visit as many unique locations as possible
+        visited = {mem.get("effects", {}).get("to_loc") for mem in agent.get("memory", [])
+                   if mem.get("type") == "travel"}
+        visited.add(loc_id)
+        unvisited = [c for c in connections if c["to"] not in visited]
+        if unvisited:
+            target = rng.choice(unvisited)
+            return _bot_schedule_travel(agent_id, agent, target["to"], state, world_turn)
+        # Explore current location if not recently explored
+        if rng.random() < 0.50:
+            agent["scheduled_action"] = {
+                "type": "explore", "turns_remaining": 30, "turns_total": 30,
+                "target_id": loc_id, "started_turn": world_turn,
+            }
+            agent["action_used"] = True
+            return [{"event_type": "exploration_started",
+                     "payload": {"agent_id": agent_id, "location_id": loc_id}}]
+        if connections:
+            return _bot_schedule_travel(agent_id, agent, rng.choice(connections)["to"], state, world_turn)
+
+    elif global_goal == "serve_faction":
+        # Patrol: move toward locations where faction members are present
+        faction = agent.get("faction", "loner")
+        faction_locs = []
+        for cid, c_loc in locations.items():
+            for aid in c_loc.get("agents", []):
+                other = state.get("agents", {}).get(aid, {})
+                if other.get("faction") == faction and aid != agent_id:
+                    faction_locs.append(cid)
+                    break
+        # Move toward closest faction location
+        if faction_locs and connections:
+            target_conn = next(
+                (c for c in connections if c["to"] in faction_locs),
+                rng.choice(connections) if connections else None
+            )
+            if target_conn:
+                return _bot_schedule_travel(agent_id, agent, target_conn["to"], state, world_turn)
+
+    # Fallback: wander
+    if connections and rng.random() < 0.60:
+        conn = rng.choice(connections)
+        return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
+    if rng.random() < 0.30:
+        agent["scheduled_action"] = {
+            "type": "explore", "turns_remaining": 30, "turns_total": 30,
+            "target_id": loc_id, "started_turn": world_turn,
+        }
+        agent["action_used"] = True
+        return [{"event_type": "exploration_started",
+                 "payload": {"agent_id": agent_id, "location_id": loc_id}}]
+
+    agent["action_used"] = True
+    return []

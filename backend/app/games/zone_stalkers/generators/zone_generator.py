@@ -198,8 +198,9 @@ def generate_zone(
         "context_type": "zone_map",
         "world_turn": 1,
         "world_hour": 6,    # Game starts at 06:00
+        "world_minute": 0,  # Minute within current hour (0-59)
         "world_day": 1,
-        "max_turns": 50,
+        "max_turns": 3000,
         "seed": seed,
         "locations": locations,
         "agents": agents,
@@ -281,9 +282,11 @@ def _make_stalker_agent(
         "skill_medicine": 1,
         "skill_social": 1,
         # ─── Goals & Psychology ───
-        "global_goal": "survive",   # "survive" | "get_rich" | "explore" | "serve_faction"
+        "global_goal": rng.choice(["survive", "get_rich", "explore", "serve_faction"]) if controller_kind == "bot" else "survive",
         "current_goal": None,
-        "risk_tolerance": 0.5,      # 0.0–1.0
+        "risk_tolerance": round(rng.uniform(0.2, 0.9), 2) if controller_kind == "bot" else 0.5,
+        # Minimum wealth (money + inventory value) before pursuing global_goal
+        "material_threshold": rng.randint(500, 3000) if controller_kind == "bot" else 1000,
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one

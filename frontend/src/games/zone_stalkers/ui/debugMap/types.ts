@@ -36,6 +36,7 @@ export interface ZoneMapState {
   context_type: string;
   world_turn: number;
   world_hour: number;
+  world_minute: number;
   world_day: number;
   locations: Record<string, ZoneLocation>;
   agents: Record<string, StalkerAgent>;

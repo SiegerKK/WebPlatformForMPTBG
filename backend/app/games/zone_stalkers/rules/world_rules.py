@@ -16,6 +16,11 @@ Supported commands:
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
+- debug_delete_all_npcs() — remove all bot-controlled stalker NPCs (meta)
+- debug_delete_all_mutants() — remove all mutants (meta)
+- debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
+- debug_delete_all_traders() — remove all traders (meta)
+- debug_set_time(day?, hour?, minute?) — override current world time (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -59,6 +64,11 @@ def validate_world_command(
 
     if command_type == "debug_spawn_mutant":
         return _validate_debug_spawn_mutant(payload, state)
+
+    if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
+                        "debug_delete_all_artifacts", "debug_delete_all_traders",
+                        "debug_set_time"):
+        return RuleCheckResult(valid=True)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -271,6 +281,75 @@ def resolve_world_command(
         events.append({"event_type": "debug_mutant_spawned", "payload": {"mutant_id": new_mutant_id, "loc_id": loc_id}})
         return state, events
 
+    # ── debug_delete_all_npcs ─────────────────────────────────────────────────
+    if command_type == "debug_delete_all_npcs":
+        removed = []
+        for aid in list(state.get("agents", {}).keys()):
+            a = state["agents"][aid]
+            if a.get("archetype") == "stalker_agent" and a.get("controller", {}).get("kind") != "human":
+                for loc in state.get("locations", {}).values():
+                    if aid in loc.get("agents", []):
+                        loc["agents"].remove(aid)
+                del state["agents"][aid]
+                removed.append(aid)
+        events.append({"event_type": "debug_npcs_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_delete_all_mutants ──────────────────────────────────────────────
+    if command_type == "debug_delete_all_mutants":
+        removed = list(state.get("mutants", {}).keys())
+        for mid in removed:
+            m = state["mutants"][mid]
+            loc_id = m.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if mid in loc.get("agents", []):
+                    loc["agents"].remove(mid)
+        state["mutants"] = {}
+        events.append({"event_type": "debug_mutants_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_delete_all_artifacts ────────────────────────────────────────────
+    if command_type == "debug_delete_all_artifacts":
+        total = 0
+        for loc in state.get("locations", {}).values():
+            total += len(loc.get("artifacts", []))
+            loc["artifacts"] = []
+        events.append({"event_type": "debug_artifacts_deleted", "payload": {"count": total}})
+        return state, events
+
+    # ── debug_delete_all_traders ──────────────────────────────────────────────
+    if command_type == "debug_delete_all_traders":
+        removed = list(state.get("traders", {}).keys())
+        for tid in removed:
+            t = state["traders"][tid]
+            loc_id = t.get("location_id")
+            if loc_id and loc_id in state.get("locations", {}):
+                loc = state["locations"][loc_id]
+                if tid in loc.get("agents", []):
+                    loc["agents"].remove(tid)
+        state["traders"] = {}
+        events.append({"event_type": "debug_traders_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_set_time ────────────────────────────────────────────────────────
+    if command_type == "debug_set_time":
+        if "day" in payload:
+            state["world_day"] = max(1, int(payload["day"]))
+        if "hour" in payload:
+            state["world_hour"] = max(0, min(23, int(payload["hour"])))
+        if "minute" in payload:
+            state["world_minute"] = max(0, min(59, int(payload["minute"])))
+        events.append({
+            "event_type": "debug_time_set",
+            "payload": {
+                "world_day": state["world_day"],
+                "world_hour": state["world_hour"],
+                "world_minute": state.get("world_minute", 0),
+            },
+        })
+        return state, events
+
     if command_type == "end_turn":
         # Mark this player's agent as having acted
         if agent_id and agent_id in state.get("agents", {}):
@@ -385,10 +464,12 @@ def resolve_world_command(
 
     elif command_type == "sleep":
         hours = max(_MIN_SLEEP_HOURS, min(_MAX_SLEEP_HOURS, int(payload.get("hours", _DEFAULT_SLEEP_HOURS))))
+        turns = hours * 60  # 1 turn = 1 minute
         agent["scheduled_action"] = {
             "type": "sleep",
-            "turns_remaining": hours,
-            "turns_total": hours,
+            "turns_remaining": turns,
+            "turns_total": turns,
+            "hours": hours,
             "target_id": agent["location_id"],
             "started_turn": state.get("world_turn", 1),
         }
@@ -593,7 +674,7 @@ def _route_travel_turns(
     locations: Dict[str, Any],
     start_loc_id: str = None,
 ) -> int:
-    """Sum travel_time (minutes) across all hops and convert to turns (1 turn = 60 min).
+    """Sum travel_time (minutes) across all hops. 1 turn = 1 minute.
 
     *route* is an ordered list of location IDs [waypoint1, ..., destination],
     NOT including the starting location.  *start_loc_id* is the agent's current
@@ -601,11 +682,10 @@ def _route_travel_turns(
     Falls back to 12 min/hop if *start_loc_id* is unknown or a connection weight
     is missing.
     """
-    import math
     if not route:
         return 1
     if start_loc_id is None:
-        return max(1, math.ceil(len(route) * 12 / 60))
+        return max(1, len(route) * 12)
     total_minutes = 0
     current = start_loc_id
     for next_loc in route:
@@ -616,7 +696,7 @@ def _route_travel_turns(
         )
         total_minutes += travel_time
         current = next_loc
-    return max(1, math.ceil(total_minutes / 60))
+    return max(1, total_minutes)
 
 
 def _validate_take_control(

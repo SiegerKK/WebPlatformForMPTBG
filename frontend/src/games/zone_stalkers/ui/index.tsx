@@ -5,6 +5,52 @@ import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';
 
+// ─── DebugTimeControl ────────────────────────────────────────────────────────
+function DebugTimeControl({
+  worldDay, worldHour, worldMinute, onSetTime, disabled,
+}: {
+  worldDay: number; worldHour: number; worldMinute: number;
+  onSetTime: (day: number, hour: number, minute: number) => void;
+  disabled?: boolean;
+}) {
+  const [day, setDay] = React.useState(String(worldDay));
+  const [hour, setHour] = React.useState(String(worldHour));
+  const [minute, setMinute] = React.useState(String(worldMinute));
+
+  React.useEffect(() => {
+    setDay(String(worldDay));
+    setHour(String(worldHour));
+    setMinute(String(worldMinute));
+  }, [worldDay, worldHour, worldMinute]);
+
+  const inputStyle: React.CSSProperties = {
+    width: 52, padding: '0.3rem 0.4rem', background: '#1e293b', color: '#f8fafc',
+    border: '1px solid #334155', borderRadius: 6, fontSize: '0.85rem', textAlign: 'center',
+  };
+  const labelStyle: React.CSSProperties = { color: '#94a3b8', fontSize: '0.78rem', marginRight: 4 };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+      <label style={labelStyle}>День</label>
+      <input type="number" min="1" style={inputStyle} value={day}
+        onChange={e => setDay(e.target.value)} />
+      <label style={labelStyle}>Час (0–23)</label>
+      <input type="number" min="0" max="23" style={inputStyle} value={hour}
+        onChange={e => setHour(e.target.value)} />
+      <label style={labelStyle}>Мин (0–59)</label>
+      <input type="number" min="0" max="59" style={inputStyle} value={minute}
+        onChange={e => setMinute(e.target.value)} />
+      <button
+        style={{ padding: '0.3rem 0.8rem', background: '#1e40af', color: '#bfdbfe', border: '1px solid #3b82f6', borderRadius: 6, cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}
+        disabled={disabled}
+        onClick={() => onSetTime(parseInt(day) || 1, parseInt(hour) || 0, parseInt(minute) || 0)}
+      >
+        ⏱ Установить время
+      </button>
+    </div>
+  );
+}
+
 interface Props {
   match: Match;
   user: User;
@@ -53,6 +99,7 @@ interface MemoryEntry {
   world_turn: number;
   world_day: number;
   world_hour: number;
+  world_minute: number;
   type: string;
   title: string;
   summary: string;
@@ -95,6 +142,7 @@ interface ZoneMapState {
   context_type: string;
   world_turn: number;
   world_hour: number;
+  world_minute: number;
   world_day: number;
   max_turns: number;
   locations: Record<string, ZoneLocation>;
@@ -152,7 +200,7 @@ const TERRAIN_TYPE_LABELS: Record<string, string> = {
   field_camp: 'Пол. лагерь',
 };
 
-const HOUR_LABEL = (h: number) => `${String(h).padStart(2, '0')}:00`;
+const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 
 const SCHED_ICONS: Record<string, string> = {
   travel: '🚶',
@@ -184,7 +232,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // When true, the full-screen Debug panel is shown (with its own sub-tabs)
   const [showDebug, setShowDebug] = useState(false);
   // Sub-tab within the debug panel
-  const [debugTab, setDebugTab] = useState<'map' | 'characters'>('map');
+  const [debugTab, setDebugTab] = useState<'map' | 'characters' | 'global'>('map');
 
   // Enter game as your own assigned character
   const enterGame = () => {
@@ -469,7 +517,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const renderEntryMenu = () => {
     const hasMyAgent = !!myAgentId;
     const worldInfo = zoneState
-      ? `День ${zoneState.world_day} · ${HOUR_LABEL(zoneState.world_hour)} · Ход ${zoneState.world_turn}/${zoneState.max_turns}`
+      ? `День ${zoneState.world_day} · ${TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Ход ${zoneState.world_turn}/${zoneState.max_turns}`
       : 'Загрузка…';
 
     return (
@@ -928,7 +976,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                       <div key={i} style={styles.memoryEntry}>
                         <div style={styles.memoryHeader}>
                           <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
-                          <span style={styles.memoryWhen}>Day {m.world_day} · {HOUR_LABEL(m.world_hour)}</span>
+                          <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                         </div>
                         <div style={styles.memoryTitle}>{m.title}</div>
                         <div style={styles.memorySummary}>{m.summary}</div>
@@ -1016,7 +1064,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           <div>
             <h3 style={styles.rosterTitle}>☢️ Zone Stalkers — Character Roster</h3>
             <p style={styles.rosterSubtitle}>
-              Day {zoneState.world_day} · {HOUR_LABEL(zoneState.world_hour)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
+              Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
             </p>
           </div>
           {myAgentId && (
@@ -1222,7 +1270,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 📍 {zoneState.locations[myAgent.location_id]?.name ?? myAgent.location_id}
               </div>
               <div style={styles.turnInfo}>
-                Day {zoneState.world_day} · {HOUR_LABEL(zoneState.world_hour)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
+                Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}/{zoneState.max_turns}
                 {myAgent.action_used && !myAgent.scheduled_action && (
                   <span style={styles.actionUsedBadge}>Acted</span>
                 )}
@@ -1485,7 +1533,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                     <div key={i} style={styles.memoryEntry}>
                       <div style={styles.memoryHeader}>
                         <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
-                        <span style={styles.memoryWhen}>Day {m.world_day} · {HOUR_LABEL(m.world_hour)}</span>
+                        <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                       </div>
                       <div style={styles.memoryTitle}>{m.title}</div>
                       <div style={styles.memorySummary}>{m.summary}</div>
@@ -1545,6 +1593,12 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             >
               👥 Персонажи
             </button>
+            <button
+              style={{ ...styles.tabBtn, ...(debugTab === 'global' ? styles.tabBtnActive : {}) }}
+              onClick={() => setDebugTab('global')}
+            >
+              🌐 Глобальные
+            </button>
           </div>
         </div>
 
@@ -1553,6 +1607,8 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
+
+        {debugTab === 'global' && renderGlobalDebug()}
       </div>
     );
   };
@@ -1577,6 +1633,74 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             isCurrentPlayer={agent.id === myAgentId}
           />
         ))}
+      </div>
+    );
+  };
+
+  // ─── render: global debug tab ───────────────────────────────────────────
+  const renderGlobalDebug = () => {
+    if (!zoneState) return null;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 0' }}>
+        {/* Time display */}
+        <div style={{ color: '#94a3b8', fontSize: '0.82rem' }}>
+          Время: День {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Ход {zoneState.world_turn}
+        </div>
+
+        {/* Global management actions */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 2 }}>
+            Управление агентами
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <button
+              style={styles.btnWarning}
+              onClick={() => sendCommand('debug_delete_all_npcs', {})}
+              disabled={actionLoading}
+              title="Удалить всех НПЦ-сталкеров (ботов) с карты"
+            >
+              🗑 Удалить всех НПЦ
+            </button>
+            <button
+              style={styles.btnWarning}
+              onClick={() => sendCommand('debug_delete_all_mutants', {})}
+              disabled={actionLoading}
+              title="Удалить всех мутантов с карты"
+            >
+              🗑 Удалить мутантов
+            </button>
+            <button
+              style={styles.btnWarning}
+              onClick={() => sendCommand('debug_delete_all_traders', {})}
+              disabled={actionLoading}
+              title="Удалить всех торговцев с карты"
+            >
+              🗑 Удалить торговцев
+            </button>
+            <button
+              style={styles.btnWarning}
+              onClick={() => sendCommand('debug_delete_all_artifacts', {})}
+              disabled={actionLoading}
+              title="Удалить все артефакты со всех локаций"
+            >
+              🗑 Удалить артефакты
+            </button>
+          </div>
+        </div>
+
+        {/* Time control */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 2 }}>
+            Управление временем
+          </div>
+          <DebugTimeControl
+            worldDay={zoneState.world_day}
+            worldHour={zoneState.world_hour}
+            worldMinute={zoneState.world_minute ?? 0}
+            onSetTime={(day, hour, minute) => sendCommand('debug_set_time', { day, hour, minute })}
+            disabled={actionLoading}
+          />
+        </div>
       </div>
     );
   };
@@ -1660,6 +1784,7 @@ const styles: Record<string, React.CSSProperties> = {
   btnDisabled: { background: '#334155', color: '#64748b', cursor: 'not-allowed' as const },
   btnDanger: { padding: '0.5rem 1.2rem', background: '#7f1d1d', color: '#fca5a5', border: '1px solid #ef4444', borderRadius: 8, cursor: 'pointer', fontWeight: 600 },
   btnDangerSmall: { padding: '0.25rem 0.7rem', background: '#7f1d1d', color: '#fca5a5', border: '1px solid #ef4444', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem' },
+  btnWarning: { padding: '0.35rem 0.9rem', background: '#451a03', color: '#fbbf24', border: '1px solid #b45309', borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' },
   cancelBtn: { padding: '0.25rem 0.6rem', background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: '0.8rem', marginTop: 4 },
 
   // map layout

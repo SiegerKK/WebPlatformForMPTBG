@@ -144,7 +144,7 @@ class TestWorldRulesNewCommands:
         new_state, events = self._r("sleep", {"hours": 6}, state)
         scheduled = new_state["agents"]["agent_p0"]["scheduled_action"]
         assert scheduled["type"] == "sleep"
-        assert scheduled["turns_remaining"] == 6
+        assert scheduled["turns_remaining"] == 6 * 60  # 1 turn = 1 minute
         assert any(e["event_type"] == "sleep_started" for e in events)
 
     # join_event ─────────────────────────────────────────────────
@@ -187,12 +187,15 @@ class TestTickRules:
     def test_tick_advances_world_hour(self):
         state = _make_world()
         initial_hour = state.get("world_hour", 0)
-        new_state, _ = self._tick(state)
-        assert new_state["world_hour"] == initial_hour + 1
+        # 1 tick = 1 minute; need 60 ticks to advance 1 hour
+        for _ in range(60):
+            state, _ = self._tick(state)
+        assert state["world_hour"] == initial_hour + 1
 
     def test_tick_day_rollover(self):
         state = _make_world()
         state["world_hour"] = 23
+        state["world_minute"] = 59
         state["world_day"] = 1
         new_state, events = self._tick(state)
         assert new_state["world_hour"] == 0
@@ -285,7 +288,8 @@ class TestTickRules:
             pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 4}, state, "player1")
-        for _ in range(4):
+        # 1 turn = 1 minute; sleep(4 hours) = 240 ticks
+        for _ in range(4 * 60):
             state, _ = self._tick(state)
         assert state["agents"]["agent_p0"]["hp"] > 50
 
@@ -299,7 +303,8 @@ class TestTickRules:
             pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 4}, state, "player1")
-        for _ in range(4):
+        # 1 turn = 1 minute; sleep(4 hours) = 240 ticks
+        for _ in range(4 * 60):
             state, _ = self._tick(state)
         assert state["agents"]["agent_p0"]["radiation"] < 50
 
@@ -312,7 +317,8 @@ class TestTickRules:
             pytest.skip("No low-anomaly location in generated world")
         agent["location_id"] = safe_locs[0]
         state, _ = resolve_world_command("sleep", {"hours": 2}, state, "player1")
-        for _ in range(2):
+        # 1 turn = 1 minute; sleep(2 hours) = 120 ticks
+        for _ in range(2 * 60):
             state, _ = self._tick(state)
         assert any(m["type"] == "sleep" for m in state["agents"]["agent_p0"]["memory"])
 
@@ -532,7 +538,9 @@ class TestNeedsDegradation:
         return tick_zone_map(state)
 
     def test_hunger_increases_each_tick(self):
+        # Survival needs degrade once per in-game hour (every 60 ticks)
         state = _make_world()
+        state["world_minute"] = 59  # next tick crosses hour boundary
         agent = state["agents"]["agent_p0"]
         initial_hunger = agent.get("hunger", 0)
         new_state, _ = self._tick(state)
@@ -540,12 +548,14 @@ class TestNeedsDegradation:
 
     def test_thirst_increases_each_tick(self):
         state = _make_world()
+        state["world_minute"] = 59
         initial_thirst = state["agents"]["agent_p0"].get("thirst", 0)
         new_state, _ = self._tick(state)
         assert new_state["agents"]["agent_p0"]["thirst"] > initial_thirst
 
     def test_sleepiness_increases_each_tick(self):
         state = _make_world()
+        state["world_minute"] = 59
         initial_sleep = state["agents"]["agent_p0"].get("sleepiness", 0)
         new_state, _ = self._tick(state)
         assert new_state["agents"]["agent_p0"]["sleepiness"] > initial_sleep
@@ -560,6 +570,7 @@ class TestNeedsDegradation:
 
     def test_thirst_critical_damages_hp(self):
         state = _make_world()
+        state["world_minute"] = 59  # next tick crosses hour boundary → degradation applied
         state["agents"]["agent_p0"]["thirst"] = 80
         state["agents"]["agent_p0"]["hunger"] = 0
         initial_hp = state["agents"]["agent_p0"]["hp"]
@@ -568,6 +579,7 @@ class TestNeedsDegradation:
 
     def test_hunger_critical_damages_hp(self):
         state = _make_world()
+        state["world_minute"] = 59  # next tick crosses hour boundary → degradation applied
         state["agents"]["agent_p0"]["hunger"] = 80
         state["agents"]["agent_p0"]["thirst"] = 0
         initial_hp = state["agents"]["agent_p0"]["hp"]
@@ -577,7 +589,7 @@ class TestNeedsDegradation:
     def test_sleep_resets_sleepiness(self):
         from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
         agent = {"hp": 60, "max_hp": 100, "radiation": 10, "sleepiness": 90}
-        sched = {"turns_total": 6}
+        sched = {"hours": 6}  # hours field used by _resolve_sleep
         _resolve_sleep(agent, sched, 5, {})
         assert agent["sleepiness"] == 0
 
