@@ -191,6 +191,7 @@ def generate_zone(
             "location_id": spawn_loc,
             "inventory": trader_inventory,
             "money": rng.randint(3000, 8000),
+            "memory": [],   # list of {world_turn, world_day, world_hour, type, title, summary, effects}
         }
         locations[spawn_loc]["agents"].append(trader_id)
 

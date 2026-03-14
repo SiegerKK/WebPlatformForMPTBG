@@ -654,3 +654,264 @@ class TestActionQueue:
 
         new_state, _ = self._tick(state)
         assert new_state["agents"]["agent_p0"]["scheduled_action"] is None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Artifact → Sell → Trader scenario (ALIVe behaviour)
+# ─────────────────────────────────────────────────────────────────
+
+def _make_trader_scenario():
+    """
+    Build a minimal world state for the trader scenario:
+
+    - One NPC stalker (global_goal="get_rich", wealth < threshold so
+      it will try to gather resources / sell artifacts)
+    - One trader in a DIFFERENT location (so the stalker has to travel)
+    - ONLY our test artifact placed at the stalker's starting location
+
+    Location layout (two connected locations):
+        stalker_loc ──► trader_loc
+    """
+    from app.games.zone_stalkers.generators.zone_generator import generate_zone
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+
+    # Generate a world with no bots/traders (we'll add them manually)
+    state = generate_zone(seed=99, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    # Pick two connected locations
+    locs = list(state["locations"].keys())
+    stalker_loc = locs[0]
+    # Find a connected neighbor for the trader
+    conns = state["locations"][stalker_loc].get("connections", [])
+    trader_loc = conns[0]["to"] if conns else locs[1]
+
+    # Spawn the stalker
+    from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
+    import random
+    rng = random.Random(1)
+    stalker = _make_stalker_agent(
+        agent_id="bot_stalker",
+        name="Test Stalker",
+        location_id=stalker_loc,
+        controller_kind="bot",
+        participant_id=None,
+        rng=rng,
+    )
+    stalker["global_goal"] = "get_rich"
+    stalker["material_threshold"] = 999999  # always in "gather" phase initially
+    stalker["inventory"] = []  # clear inventory so wealth is just money
+    stalker["money"] = 100
+    state["agents"]["bot_stalker"] = stalker
+    state["locations"][stalker_loc]["agents"].append("bot_stalker")
+
+    # Place ONLY our test artifact at the stalker's location (clear any generator artifacts)
+    art_type = "soul"
+    art_info = ARTIFACT_TYPES[art_type]
+    artifact = {
+        "id": "art_test_001",
+        "type": art_type,
+        "name": art_info["name"],
+        "value": art_info["value"],
+    }
+    state["locations"][stalker_loc]["artifacts"] = [artifact]  # replace, not append
+
+    # Spawn a trader at trader_loc
+    trader = {
+        "id": "trader_test",
+        "archetype": "trader_npc",
+        "name": "Sidorovich",
+        "location_id": trader_loc,
+        "inventory": [],
+        "money": 10000,
+        "memory": [],
+    }
+    state.setdefault("traders", {})["trader_test"] = trader
+    state["locations"][trader_loc]["agents"].append("trader_test")
+
+    return state, "bot_stalker", "trader_test", stalker_loc, trader_loc, artifact
+
+
+class TestArtifactToTraderScenario:
+    """
+    Verify that a bot stalker with global_goal='get_rich':
+      1. Picks up the artifact and records it in memory
+      2. Decides to travel to the trader's location (records decision in memory)
+      3. After arriving, sells the artifact to the trader (both sides record it in memory)
+
+    Note: the sell action fires in the SAME tick as travel completion (bot AI
+    decision step runs in the same tick immediately after the scheduled action
+    clears), so we use _run_until_sold() to advance through the whole cycle.
+    """
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _run_until_sold(self, state, sid):
+        """Tick until the stalker has a trade_sell entry in memory or 200 ticks."""
+        for _ in range(200):
+            agent = state["agents"][sid]
+            if any(m["type"] == "trade_sell" for m in agent.get("memory", [])):
+                return state
+            state, _ = self._tick(state)
+        return state
+
+    # ── Phase 1: Artifact pickup ──────────────────────────────────────────────
+
+    def test_tick1_picks_up_artifact(self):
+        state, sid, *_ = _make_trader_scenario()
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        assert any(i["id"] == "art_test_001" for i in agent["inventory"])
+        assert any(e["event_type"] == "artifact_picked_up" for e in events)
+
+    def test_tick1_pickup_recorded_in_memory(self):
+        state, sid, *_ = _make_trader_scenario()
+        new_state, _ = self._tick(state)
+        agent = new_state["agents"][sid]
+        pickup_mems = [m for m in agent["memory"] if m["type"] == "pickup"]
+        assert len(pickup_mems) >= 1
+        mem = pickup_mems[0]
+        assert mem["effects"]["artifact_type"] == "soul"
+        assert mem["effects"]["artifact_value"] > 0
+
+    # ── Phase 2: Travel decision toward trader ────────────────────────────────
+
+    def test_tick2_decides_to_travel_to_trader(self):
+        state, sid, _, stalker_loc, trader_loc, _ = _make_trader_scenario()
+        state, _ = self._tick(state)  # tick 1: pick up artifact
+        new_state, events = self._tick(state)  # tick 2: travel decision
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have a scheduled travel action"
+        assert sched["type"] == "travel"
+        assert sched["target_id"] == trader_loc
+
+    def test_tick2_travel_decision_recorded_in_memory(self):
+        state, sid, *_ = _make_trader_scenario()
+        state, _ = self._tick(state)  # tick 1: pickup
+        new_state, _ = self._tick(state)  # tick 2: travel decision
+        agent = new_state["agents"][sid]
+        decision_mems = [m for m in agent["memory"] if m["type"] == "decision"]
+        assert len(decision_mems) >= 1
+        mem = decision_mems[0]
+        assert mem["effects"]["artifacts_count"] >= 1
+
+    # ── Phase 3: Sell to trader ───────────────────────────────────────────────
+
+    def test_sell_completes_full_cycle(self):
+        """Full scenario: pickup → travel → sell."""
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        initial_stalker_money = state["agents"][sid]["money"]
+        initial_trader_money = state["traders"][tid]["money"]
+
+        state = self._run_until_sold(state, sid)
+
+        agent = state["agents"][sid]
+        # Stalker reached trader location
+        assert agent["location_id"] == trader_loc
+        # Artifact gone from inventory
+        assert not any(i["id"] == artifact["id"] for i in agent["inventory"])
+        # Stalker earned money
+        assert agent["money"] > initial_stalker_money
+        # bot_sold_artifact event was emitted somewhere in the run
+        # (checked via memory instead since events are per-tick)
+        sell_mems = [m for m in agent["memory"] if m["type"] == "trade_sell"]
+        assert len(sell_mems) >= 1
+
+    def test_sell_recorded_in_stalker_memory(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        agent = state["agents"][sid]
+        sell_mems = [m for m in agent["memory"] if m["type"] == "trade_sell"]
+        assert len(sell_mems) >= 1
+        mem = sell_mems[0]
+        assert "soul" in mem["effects"]["items_sold"]
+        assert mem["effects"]["money_gained"] > 0
+        assert mem["effects"]["trader_id"] == tid
+
+    def test_sell_recorded_in_trader_memory(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        trader = state["traders"][tid]
+        buy_mems = [m for m in trader.get("memory", []) if m["type"] == "trade_buy"]
+        assert len(buy_mems) >= 1
+        mem = buy_mems[0]
+        assert "soul" in mem["effects"]["items_bought"]
+        assert mem["effects"]["money_spent"] > 0
+        assert mem["effects"]["stalker_id"] == sid
+
+    def test_trader_receives_artifact(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        trader = state["traders"][tid]
+        assert any(i.get("type") == "soul" for i in trader["inventory"]), \
+            "Trader should have the soul artifact after purchase"
+
+    def test_trader_money_decreased(self):
+        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        initial_trader_money = state["traders"][tid]["money"]
+        state = self._run_until_sold(state, sid)
+
+        trader = state["traders"][tid]
+        assert trader["money"] < initial_trader_money
+
+    def test_stalker_memory_has_full_chain(self):
+        """Stalker memory must contain pickup → decision → travel → trade_sell."""
+        state, sid, *_ = _make_trader_scenario()
+        state = self._run_until_sold(state, sid)
+
+        agent = state["agents"][sid]
+        mem_types = [m["type"] for m in agent["memory"]]
+        assert "pickup" in mem_types
+        assert "decision" in mem_types
+        assert "travel" in mem_types
+        assert "trade_sell" in mem_types
+        # Check ordering: pickup before travel before trade_sell
+        p = mem_types.index("pickup")
+        t = mem_types.index("travel")
+        s = mem_types.index("trade_sell")
+        assert p < t < s, f"Expected pickup({p}) < travel({t}) < trade_sell({s}) in memory"
+
+    # ── Debug spawn trader command ───────────────────────────────────────────
+
+    def test_debug_spawn_trader_valid(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        loc_id = next(iter(state["locations"]))
+        result = validate_world_command("debug_spawn_trader", {"loc_id": loc_id}, state, "any")
+        assert result.valid
+
+    def test_debug_spawn_trader_invalid_no_loc(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        result = validate_world_command("debug_spawn_trader", {}, state, "any")
+        assert not result.valid
+
+    def test_debug_spawn_trader_creates_trader_with_memory(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command, resolve_world_command
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        loc_id = next(iter(state["locations"]))
+        new_state, events = resolve_world_command(
+            "debug_spawn_trader", {"loc_id": loc_id, "name": "TestTrader"}, state, "any"
+        )
+        new_tid = (set(new_state["traders"]) - set(state["traders"])).pop()
+        trader = new_state["traders"][new_tid]
+        assert trader["name"] == "TestTrader"
+        assert trader["location_id"] == loc_id
+        assert "memory" in trader
+        assert isinstance(trader["memory"], list)
+        assert any(e["event_type"] == "debug_trader_spawned" for e in events)
+
+    def test_trader_has_memory_field_from_generator(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=2)
+        for tid, trader in state["traders"].items():
+            assert "memory" in trader, f"Trader {tid} missing memory field"
+            assert isinstance(trader["memory"], list)

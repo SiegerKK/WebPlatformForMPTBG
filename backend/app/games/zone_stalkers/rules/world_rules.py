@@ -16,6 +16,7 @@ Supported commands:
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
+- debug_spawn_trader(loc_id, name?) — spawn a trader NPC at a location in debug mode (meta)
 - debug_delete_all_npcs() — remove all bot-controlled stalker NPCs (meta)
 - debug_delete_all_mutants() — remove all mutants (meta)
 - debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
@@ -64,6 +65,9 @@ def validate_world_command(
 
     if command_type == "debug_spawn_mutant":
         return _validate_debug_spawn_mutant(payload, state)
+
+    if command_type == "debug_spawn_trader":
+        return _validate_debug_spawn_trader(payload, state)
 
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
@@ -279,6 +283,35 @@ def resolve_world_command(
         state.setdefault("mutants", {})[new_mutant_id] = mutant
         state["locations"][loc_id]["agents"].append(new_mutant_id)
         events.append({"event_type": "debug_mutant_spawned", "payload": {"mutant_id": new_mutant_id, "loc_id": loc_id}})
+        return state, events
+
+    # ── debug_spawn_trader: meta-command, spawn a trader NPC ─────────────────
+    if command_type == "debug_spawn_trader":
+        loc_id = payload["loc_id"]
+        existing_traders = state.get("traders", {})
+        n = len(existing_traders)
+        new_trader_id = f"trader_debug_{n}"
+        while new_trader_id in existing_traders:
+            n += 1
+            new_trader_id = f"trader_debug_{n}"
+        trader_names = ["Sidorovich", "Barkeep", "Nimble", "Sakharov", "Wolf", "Petrenko"]
+        name = str(payload.get("name", "")).strip() or trader_names[n % len(trader_names)]
+        import random as _random
+        from app.games.zone_stalkers.generators.zone_generator import _generate_trader_inventory
+        rng = _random.Random(new_trader_id)
+        trader_inv = _generate_trader_inventory(rng)
+        trader = {
+            "id": new_trader_id,
+            "archetype": "trader_npc",
+            "name": name,
+            "location_id": loc_id,
+            "inventory": trader_inv,
+            "money": rng.randint(3000, 8000),
+            "memory": [],
+        }
+        state.setdefault("traders", {})[new_trader_id] = trader
+        state["locations"][loc_id]["agents"].append(new_trader_id)
+        events.append({"event_type": "debug_trader_spawned", "payload": {"trader_id": new_trader_id, "loc_id": loc_id}})
         return state, events
 
     # ── debug_delete_all_npcs ─────────────────────────────────────────────────
@@ -803,4 +836,16 @@ def _validate_debug_spawn_mutant(
     mutant_type = payload.get("mutant_type")
     if not mutant_type or mutant_type not in MUTANT_TYPES:
         return RuleCheckResult(valid=False, error=f"Invalid mutant_type '{mutant_type}'; must be one of {sorted(MUTANT_TYPES.keys())}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_trader(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
     return RuleCheckResult(valid=True)

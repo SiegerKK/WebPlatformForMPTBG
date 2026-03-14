@@ -380,6 +380,10 @@ def _add_memory(
 
 # Import centralised item-type sets from balance data (single source of truth)
 from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+
+# Set of artifact type keys (used to identify artifacts in inventory)
+_ARTIFACT_ITEM_TYPES: frozenset = frozenset(ARTIFACT_TYPES.keys())
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -392,15 +396,157 @@ def _agent_wealth(agent: Dict[str, Any]) -> int:
     return agent.get("money", 0) + inv_value
 
 
-def _visited_locs(agent: Dict[str, Any]) -> set:
-    """Set of location IDs the agent has been to (from memory)."""
-    visited = set()
-    visited.add(agent.get("location_id", ""))
-    for mem in agent.get("memory", []):
-        if mem.get("type") in ("travel", "explore"):
-            # memory title contains location name; extract location from payload
-            pass
-    return visited
+def _agent_artifacts_in_inventory(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return list of artifact items currently in the agent's inventory."""
+    return [i for i in agent.get("inventory", []) if i.get("type") in _ARTIFACT_ITEM_TYPES]
+
+
+def _find_trader_at_location(loc_id: str, state: Dict[str, Any]) -> Any:
+    """Return the first alive trader at *loc_id*, or None."""
+    loc_agents = state.get("locations", {}).get(loc_id, {}).get("agents", [])
+    traders = state.get("traders", {})
+    for tid in loc_agents:
+        t = traders.get(tid)
+        if t is not None:
+            return t
+    return None
+
+
+def _find_nearest_trader_location(from_loc_id: str, state: Dict[str, Any]) -> Any:
+    """
+    BFS over the location graph to find the id of the closest location
+    that contains a trader.  Returns None if no trader exists in the world.
+    """
+    trader_locs = set()
+    for trader in state.get("traders", {}).values():
+        tl = trader.get("location_id")
+        if tl:
+            trader_locs.add(tl)
+    if not trader_locs:
+        return None
+    if from_loc_id in trader_locs:
+        return from_loc_id
+
+    locations = state.get("locations", {})
+    visited = {from_loc_id}
+    queue = [from_loc_id]
+    while queue:
+        current = queue.pop(0)
+        for conn in locations.get(current, {}).get("connections", []):
+            nxt = conn.get("to")
+            if not nxt or conn.get("closed") or nxt in visited:
+                continue
+            if nxt in trader_locs:
+                return nxt
+            visited.add(nxt)
+            queue.append(nxt)
+    return None
+
+
+def _add_trader_memory(
+    trader: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    memory_type: str,
+    title: str,
+    summary: str,
+    effects: Dict[str, Any],
+) -> None:
+    """Append a memory entry to a trader NPC (same structure as agent memory)."""
+    entry = {
+        "world_turn": world_turn,
+        "world_day": state.get("world_day", 1),
+        "world_hour": state.get("world_hour", 0),
+        "world_minute": state.get("world_minute", 0),
+        "type": memory_type,
+        "title": title,
+        "summary": summary,
+        "effects": effects,
+    }
+    trader.setdefault("memory", []).append(entry)
+    if len(trader["memory"]) > 50:
+        trader["memory"] = trader["memory"][-50:]
+
+
+def _bot_sell_to_trader(
+    agent_id: str,
+    agent: Dict[str, Any],
+    trader: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """
+    Perform a direct (inline) sale of all artifacts from *agent* to *trader*.
+
+    Updates money on both sides, removes artifacts from agent inventory,
+    appends them to trader inventory, and writes memory entries for
+    both the stalker and the trader.
+    """
+    events: List[Dict[str, Any]] = []
+    artifacts = _agent_artifacts_in_inventory(agent)
+    if not artifacts:
+        return events
+
+    sell_price_total = 0
+    sold_items = []
+    for art in artifacts:
+        sell_price = int(art.get("value", 0) * 0.6)  # 60% of base value
+        trader_money = trader.get("money", 0)
+        if trader_money < sell_price:
+            continue  # trader too poor; skip this item
+        # Transfer money
+        agent["money"] = agent.get("money", 0) + sell_price
+        trader["money"] = trader_money - sell_price
+        sell_price_total += sell_price
+        # Transfer item
+        sold_item = dict(art)
+        sold_item["stock"] = 1
+        trader.setdefault("inventory", []).append(sold_item)
+        sold_items.append(art)
+        events.append({
+            "event_type": "bot_sold_artifact",
+            "payload": {
+                "agent_id": agent_id,
+                "trader_id": trader["id"],
+                "item_id": art["id"],
+                "item_type": art["type"],
+                "price": sell_price,
+            },
+        })
+
+    if not sold_items:
+        return events
+
+    # Remove sold items from inventory
+    sold_ids = {i["id"] for i in sold_items}
+    agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] not in sold_ids]
+    agent["action_used"] = True
+
+    # ── Stalker memory ────────────────────────────────────────────
+    item_names = ", ".join(i.get("name", i.get("type", "?")) for i in sold_items)
+    trader_name = trader.get("name", trader["id"])
+    loc_name = state.get("locations", {}).get(agent.get("location_id", ""), {}).get("name", "?")
+    _add_memory(
+        agent, world_turn, state, "trade_sell",
+        f"Продал {item_names} торговцу {trader_name}",
+        f"Заработал {sell_price_total} RU, продав {len(sold_items)} артефакт(ов) торговцу "
+        f"{trader_name} в локации {loc_name}.",
+        {"money_gained": sell_price_total, "items_sold": [i["type"] for i in sold_items],
+         "trader_id": trader["id"]},
+    )
+
+    # ── Trader memory ─────────────────────────────────────────────
+    stalker_name = agent.get("name", agent_id)
+    _add_trader_memory(
+        trader, world_turn, state, "trade_buy",
+        f"Купил {item_names} у сталкера {stalker_name}",
+        f"Потратил {sell_price_total} RU, купив {len(sold_items)} артефакт(ов) у {stalker_name} "
+        f"в локации {loc_name}.",
+        {"money_spent": sell_price_total, "items_bought": [i["type"] for i in sold_items],
+         "stalker_id": agent_id},
+    )
+
+    return events
 
 
 def _bot_schedule_travel(
@@ -517,6 +663,31 @@ def _run_bot_action(
         events.append({"event_type": "sleep_started", "payload": {"agent_id": agent_id, "hours": _sleep_hours}})
         return events
 
+    # ── TRADING OPPORTUNITY ────────────────────────────────────────────────────
+    # If the agent is carrying artifacts, try to sell them:
+    #   a) Trader is at current location → sell immediately
+    #   b) No local trader but goal is get_rich → travel to nearest trader
+    artifacts_held = _agent_artifacts_in_inventory(agent)
+    if artifacts_held:
+        trader_here = _find_trader_at_location(loc_id, state)
+        if trader_here:
+            sell_evs = _bot_sell_to_trader(agent_id, agent, trader_here, state, world_turn)
+            if sell_evs:
+                return sell_evs
+        elif agent.get("global_goal") == "get_rich":
+            trader_loc = _find_nearest_trader_location(loc_id, state)
+            if trader_loc and trader_loc != loc_id:
+                agent["current_goal"] = "sell_artifacts"
+                items_desc = ", ".join(a.get("name", a.get("type", "?")) for a in artifacts_held)
+                trader_loc_name = state.get("locations", {}).get(trader_loc, {}).get("name", trader_loc)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"Решил продать добычу",
+                    f"В инвентаре: {items_desc}. Иду к торговцу в {trader_loc_name}.",
+                    {"destination": trader_loc, "artifacts_count": len(artifacts_held)},
+                )
+                return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+
     # ── GOAL SELECTION ─────────────────────────────────────────────────────────
     wealth = _agent_wealth(agent)
     threshold = agent.get("material_threshold", 1000)
@@ -553,6 +724,16 @@ def _bot_gather_resources(
         loc["artifacts"] = artifacts[1:]
         agent.setdefault("inventory", []).append(art)
         agent["action_used"] = True
+        art_name = art.get("name", art.get("type", "артефакт"))
+        loc_name = loc.get("name", loc_id)
+        _add_memory(
+            agent, world_turn, state, "pickup",
+            f"Подобрал {art_name}",
+            f"Нашёл и поднял артефакт «{art_name}» в {loc_name}. "
+            f"Ценность: {art.get('value', 0)} RU.",
+            {"artifact_id": art["id"], "artifact_type": art["type"],
+             "artifact_value": art.get("value", 0), "location_id": loc_id},
+        )
         return [{"event_type": "artifact_picked_up",
                  "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
