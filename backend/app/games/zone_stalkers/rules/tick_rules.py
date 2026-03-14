@@ -1358,28 +1358,9 @@ def _bot_gather_resources(
     """
     locations = state.get("locations", {})
 
-    # G1 — Pick up artifact at current location
+    # G2 — Explore if anomalies are present or artifacts are visible (must explore to obtain them)
     artifacts = loc.get("artifacts", [])
-    if artifacts:
-        art = artifacts[0]
-        loc["artifacts"] = artifacts[1:]
-        agent.setdefault("inventory", []).append(art)
-        agent["action_used"] = True
-        art_name = art.get("name", art.get("type", "артефакт"))
-        loc_name = loc.get("name", loc_id)
-        _add_memory(
-            agent, world_turn, state, "action",
-            f"Подобрал {art_name}",
-            f"Нашёл и поднял артефакт «{art_name}» в {loc_name}. "
-            f"Ценность: {art.get('value', 0)} RU.",
-            {"action_kind": "pickup", "artifact_id": art["id"], "artifact_type": art["type"],
-             "artifact_value": art.get("value", 0), "location_id": loc_id},
-        )
-        return [{"event_type": "artifact_picked_up",
-                 "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
-
-    # G2 — Explore if anomalies are present AND activity > 0 (otherwise no artifacts ever spawn)
-    if loc.get("anomaly_activity", 0) > 0 and rng.random() < 0.50:
+    if loc.get("anomaly_activity", 0) > 0 or artifacts:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую аномальную зону",
@@ -1484,49 +1465,34 @@ def _bot_pursue_goal(
             }
             agent["action_used"] = True
             return [{"event_type": "sleep_started", "payload": {"agent_id": agent_id, "hours": _sleep_hours}}]
-        # Pick up any nearby artifacts opportunistically
-        artifacts = loc.get("artifacts", [])
-        if artifacts:
-            art = artifacts[0]
-            loc["artifacts"] = artifacts[1:]
-            agent.setdefault("inventory", []).append(art)
-            agent["action_used"] = True
-            art_name = art.get("name", art.get("type", "артефакт"))
-            _add_memory(
-                agent, world_turn, state, "action",
-                f"Подобрал {art_name}",
-                f"Подобрал артефакт «{art_name}» в «{loc.get('name', loc_id)}». "
-                f"Ценность: {art.get('value', 0)} RU.",
-                {"action_kind": "pickup", "artifact_id": art["id"], "artifact_type": art["type"],
-                 "artifact_value": art.get("value", 0), "location_id": loc_id},
-            )
-            return [{"event_type": "artifact_picked_up",
-                     "payload": {"agent_id": agent_id, "artifact_id": art["id"], "artifact_type": art["type"]}}]
 
     elif global_goal == "get_rich":
-        # ── Step 3: Pick up the most-valuable artifact at current location ──────
+        # ── Step 3: Explore current location to find artifacts (must go through explore) ──────
         artifacts = loc.get("artifacts", [])
-        if artifacts:
-            best_art = max(artifacts, key=lambda a: a.get("value", 0))
-            loc["artifacts"] = [a for a in artifacts if a["id"] != best_art["id"]]
-            agent.setdefault("inventory", []).append(best_art)
-            agent["action_used"] = True
-            art_name = best_art.get("name", best_art.get("type", "артефакт"))
-            _add_memory(
-                agent, world_turn, state, "action",
-                f"Подобрал {art_name}",
-                f"Подобрал артефакт «{art_name}». Ценность: {best_art.get('value', 0)} RU.",
-                {
-                    "action_kind": "pickup",
-                    "artifact_id": best_art["id"],
-                    "artifact_type": best_art["type"],
-                    "artifact_value": best_art.get("value", 0),
-                    "location_id": loc_id,
-                },
+        if artifacts or loc.get("anomaly_activity", 0) > 0:
+            # Build confirmed-empty set to avoid re-exploring fruitless spots
+            confirmed_empty_here: frozenset = frozenset(
+                mem.get("effects", {}).get("location_id")
+                for mem in agent.get("memory", [])
+                if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
+                and mem.get("effects", {}).get("location_id")
             )
-            return [{"event_type": "artifact_picked_up",
-                     "payload": {"agent_id": agent_id, "artifact_id": best_art["id"],
-                                 "artifact_type": best_art["type"]}}]
+            if loc_id not in confirmed_empty_here:
+                loc_name = loc.get("name", loc_id)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"Исследую «{loc_name}»",
+                    f"На локации «{loc_name}» есть артефакты — нужно провести разведку чтобы их найти.",
+                    {"action_kind": "explore_decision", "location_id": loc_id},
+                )
+                agent["scheduled_action"] = {
+                    "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS,
+                    "turns_total": EXPLORE_DURATION_TURNS,
+                    "target_id": loc_id, "started_turn": world_turn,
+                }
+                agent["action_used"] = True
+                return [{"event_type": "exploration_started",
+                         "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
         # ── Steps 1-2: Survey ALL locations; travel to the richest artifact spot ─
         best_art_loc_id, best_art_value = _find_richest_artifact_location(

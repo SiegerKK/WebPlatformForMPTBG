@@ -755,9 +755,10 @@ def _make_trader_scenario():
 class TestArtifactToTraderScenario:
     """
     Verify that a bot stalker with global_goal='get_rich':
-      1. Picks up the artifact and records it in memory
-      2. Decides to travel to the trader's location (records decision in memory)
-      3. After arriving, sells the artifact to the trader (both sides record it in memory)
+      1. Starts exploration (artifacts must be found via explore, not picked up directly)
+      2. After exploration completes, artifact may be found and is recorded in memory
+      3. Decides to travel to the trader's location once artifact is in inventory
+      4. After arriving, sells the artifact to the trader (both sides record it in memory)
 
     Note: the sell action fires in the SAME tick as travel completion (bot AI
     decision step runs in the same tick immediately after the scheduled action
@@ -768,9 +769,18 @@ class TestArtifactToTraderScenario:
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         return tick_zone_map(state)
 
-    def _run_until_sold(self, state, sid):
-        """Tick until the stalker has a trade_sell (action) entry in memory or 200 ticks."""
-        for _ in range(200):
+    def _run_until_artifact_acquired(self, state, sid, artifact_id, max_ticks=300):
+        """Tick until the stalker has the artifact in inventory or max_ticks reached."""
+        for _ in range(max_ticks):
+            agent = state["agents"][sid]
+            if any(i["id"] == artifact_id for i in agent.get("inventory", [])):
+                return state
+            state, _ = self._tick(state)
+        return state
+
+    def _run_until_sold(self, state, sid, max_ticks=400):
+        """Tick until the stalker has a trade_sell (action) entry in memory or max_ticks."""
+        for _ in range(max_ticks):
             agent = state["agents"][sid]
             if any(m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"
                    for m in agent.get("memory", [])):
@@ -778,48 +788,74 @@ class TestArtifactToTraderScenario:
             state, _ = self._tick(state)
         return state
 
-    # ── Phase 1: Artifact pickup ──────────────────────────────────────────────
+    # ── Phase 1: Exploration start ────────────────────────────────────────────
 
-    def test_tick1_picks_up_artifact(self):
+    def test_tick1_starts_exploration(self):
+        """Artifacts must be found via explore — NPC starts exploration on tick 1."""
         state, sid, *_ = _make_trader_scenario()
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
-        assert any(i["id"] == "art_test_001" for i in agent["inventory"])
-        assert any(e["event_type"] == "artifact_picked_up" for e in events)
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have a scheduled action"
+        assert sched["type"] == "explore", (
+            f"Agent should start exploring, not '{sched['type']}' "
+            "(artifacts must be obtained through explore, not direct pickup)"
+        )
+        assert any(e["event_type"] == "exploration_started" for e in events)
 
-    def test_tick1_pickup_recorded_in_memory(self):
+    def test_tick1_explore_decision_recorded_in_memory(self):
+        """Decision to explore should be recorded on tick 1."""
         state, sid, *_ = _make_trader_scenario()
         new_state, _ = self._tick(state)
         agent = new_state["agents"][sid]
+        explore_mems = [m for m in agent["memory"]
+                        if m["type"] == "decision"
+                        and m["effects"].get("action_kind") == "explore_decision"]
+        assert len(explore_mems) >= 1
+
+    def test_artifact_found_via_explore(self):
+        """After explore completes, artifact must appear in inventory (via explore, not direct pickup)."""
+        state, sid, _, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_artifact_acquired(state, sid, artifact["id"])
+        agent = state["agents"][sid]
+        assert any(i["id"] == artifact["id"] for i in agent.get("inventory", [])), \
+            "Artifact should eventually be found via exploration"
+        # Verify it was found through explore action, not direct pickup
         pickup_mems = [m for m in agent["memory"]
-                       if m["type"] == "action" and m["effects"].get("action_kind") == "pickup"]
+                       if m["type"] == "action" and m["effects"].get("action_kind") == "pickup"
+                       and m["effects"].get("artifact_type") == "soul"]
         assert len(pickup_mems) >= 1
         mem = pickup_mems[0]
-        assert mem["effects"]["artifact_type"] == "soul"
         assert mem["effects"]["artifact_value"] > 0
 
     # ── Phase 2: Travel decision toward trader ────────────────────────────────
 
-    def test_tick2_decides_to_travel_to_trader(self):
-        state, sid, _, stalker_loc, trader_loc, _ = _make_trader_scenario()
-        state, _ = self._tick(state)  # tick 1: pick up artifact
-        new_state, events = self._tick(state)  # tick 2: travel decision
+    def test_decides_to_travel_to_trader_after_explore(self):
+        """After explore finds the artifact, agent should plan to travel to trader."""
+        state, sid, _, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        # Run until artifact is acquired via explore
+        state = self._run_until_artifact_acquired(state, sid, artifact["id"])
+        # One more tick for the travel decision
+        new_state, _ = self._tick(state)
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
-        assert sched is not None, "Agent should have a scheduled travel action"
+        assert sched is not None, "Agent should have a scheduled travel action after acquiring artifact"
         assert sched["type"] == "travel"
-        # With hop-by-hop travel, target_id is the first hop, final_target_id is the destination
         assert sched.get("final_target_id") == trader_loc
 
-    def test_tick2_travel_decision_recorded_in_memory(self):
-        state, sid, *_ = _make_trader_scenario()
-        state, _ = self._tick(state)  # tick 1: pickup
-        new_state, _ = self._tick(state)  # tick 2: travel decision
+    def test_travel_decision_recorded_in_memory(self):
+        """Travel-to-trader decision must be recorded in memory after artifact is found."""
+        state, sid, _, stalker_loc, trader_loc, artifact = _make_trader_scenario()
+        state = self._run_until_artifact_acquired(state, sid, artifact["id"])
+        # Run one more tick for travel decision
+        new_state, _ = self._tick(state)
         agent = new_state["agents"][sid]
         decision_mems = [m for m in agent["memory"] if m["type"] == "decision"]
         assert len(decision_mems) >= 1
-        mem = decision_mems[0]
-        assert mem["effects"]["artifacts_count"] >= 1
+        # The artifacts_count memory is written in the trading opportunity check
+        trader_decision_mems = [m for m in decision_mems
+                                 if m["effects"].get("artifacts_count", 0) >= 1]
+        assert len(trader_decision_mems) >= 1
 
     # ── Phase 3: Sell to trader ───────────────────────────────────────────────
 
