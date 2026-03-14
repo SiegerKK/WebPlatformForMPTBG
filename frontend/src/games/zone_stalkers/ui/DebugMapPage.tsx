@@ -658,13 +658,14 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     }
   }, []);
 
-  // ── Export layout ─────────────────────────────────────────────────────────
+  // ── Export full map ───────────────────────────────────────────────────────
   const handleExport = useCallback(() => {
     const exportData = {
-      version: 2,
+      version: 3,
+      // Canvas layout
       positions: effectivePosRef.current,
-      connections: localConnsRef.current,
       regions: localRegionsRef.current,
+      // Full location data (IDs, connections, terrain, anomalies, region)
       locations: Object.fromEntries(
         Object.entries(zoneState.locations).map(([id, loc]) => [
           id,
@@ -674,21 +675,38 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             anomaly_activity: loc.anomaly_activity,
             dominant_anomaly_type: loc.dominant_anomaly_type ?? null,
             region: loc.region ?? null,
+            // Use the live canvas connections (may differ from zoneState if unsaved)
+            connections: (localConnsRef.current[id] ?? loc.connections ?? []).map((c) => ({
+              to: c.to,
+              travel_time: c.travel_time,
+              type: c.type ?? 'normal',
+              closed: c.closed ?? false,
+            })),
+            artifacts: loc.artifacts ?? [],
           },
         ]),
       ),
+      // World time
+      world_turn: zoneState.world_turn,
+      world_day: zoneState.world_day,
+      world_hour: zoneState.world_hour,
+      world_minute: zoneState.world_minute ?? 0,
+      // Emission state
+      emission_active: zoneState.emission_active,
+      emission_scheduled_turn: zoneState.emission_scheduled_turn ?? null,
+      emission_ends_turn: zoneState.emission_ends_turn ?? null,
     };
     const json = JSON.stringify(exportData, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'zone_layout.json';
+    a.download = `zone_map_day${zoneState.world_day}_turn${zoneState.world_turn}.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [zoneState.locations]);
+  }, [zoneState]);
 
-  // ── Import layout ─────────────────────────────────────────────────────────
+  // ── Import full map ────────────────────────────────────────────────────────
   const handleImportFile = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -699,10 +717,64 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           parsed = JSON.parse(text) as Record<string, unknown>;
         } catch {
           setSaveError('Import failed: invalid JSON');
+          e.target.value = '';
           return;
         }
+
+        // Full-map import (v3)
+        if (
+          parsed.version === 3 &&
+          parsed.locations &&
+          typeof parsed.locations === 'object' &&
+          !Array.isArray(parsed.locations)
+        ) {
+          const locCount = Object.keys(parsed.locations as object).length;
+          const confirmed = window.confirm(
+            `⚠️ Полный импорт карты!\n\n` +
+            `Это заменит ВСЕ локации (${locCount}), переходы, регионы, ` +
+            `время и состояние выброса.\n\n` +
+            `Персонажи и предметы в совпадающих локациях будут сохранены, ` +
+            `остальные могут стать недоступны.\n\n` +
+            `Продолжить?`
+          );
+          if (!confirmed) { e.target.value = ''; return; }
+
+          // Send the whole thing to the backend in a single atomic command
+          await sendCommand('debug_import_full_map', {
+            locations: parsed.locations,
+            positions: parsed.positions ?? {},
+            regions: parsed.regions ?? {},
+            world_turn: parsed.world_turn,
+            world_day: parsed.world_day,
+            world_hour: parsed.world_hour,
+            world_minute: parsed.world_minute,
+            emission_active: parsed.emission_active,
+            emission_scheduled_turn: parsed.emission_scheduled_turn,
+            emission_ends_turn: parsed.emission_ends_turn,
+          });
+
+          // Sync local canvas state
+          const newPositions = (parsed.positions ?? {}) as Record<string, { x: number; y: number }>;
+          const newConns = {} as Record<string, LocationConn[]>;
+          for (const [id, locData] of Object.entries(parsed.locations as Record<string, Record<string, unknown>>)) {
+            if (Array.isArray(locData.connections)) {
+              newConns[id] = locData.connections as LocationConn[];
+            }
+          }
+          const newRegions = (typeof parsed.regions === 'object' && !Array.isArray(parsed.regions) && parsed.regions !== null)
+            ? parsed.regions as Record<string, { name: string; colorIndex: number }>
+            : {};
+          setDragOverrides(newPositions);
+          setLocalConns(newConns);
+          setLocalRegions(newRegions);
+          e.target.value = '';
+          return;
+        }
+
+        // Legacy v1/v2 import — positions + connections + per-location metadata only
         if (!parsed.positions || typeof parsed.positions !== 'object' || Array.isArray(parsed.positions)) {
           setSaveError('Import failed: JSON must have a "positions" object');
+          e.target.value = '';
           return;
         }
         const newPositions = parsed.positions as Record<string, { x: number; y: number }>;
@@ -714,7 +786,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
           setLocalConns(newConns);
         }
 
-        // Restore regions if present (v2+)
         let newRegions: Record<string, { name: string; colorIndex: number }> | undefined;
         if (parsed.regions && typeof parsed.regions === 'object' && !Array.isArray(parsed.regions)) {
           newRegions = parsed.regions as Record<string, { name: string; colorIndex: number }>;
@@ -723,7 +794,6 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
 
         await persistMap(newPositions, newConns, newRegions);
 
-        // Restore per-location metadata (name, terrain_type, etc.) via backend (v2+)
         if (parsed.locations && typeof parsed.locations === 'object' && !Array.isArray(parsed.locations)) {
           const locsData = parsed.locations as Record<string, {
             name?: string;
@@ -753,7 +823,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
     [persistMap, sendCommand, zoneState.locations],
   );
 
-  // ── Location CRUD ─────────────────────────────────────────────────────────
+
   const handleSaveEdit = useCallback(
     async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
       if (!editingLocId) return;
@@ -988,7 +1058,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             <button
               style={s.toolBtn}
               onClick={handleExport}
-              title="Export current layout as zone_layout.json"
+              title="Экспортировать ВСЮ карту: локации, переходы, регионы, время и выброс в JSON"
             >
               📤 Export
             </button>
@@ -996,7 +1066,7 @@ export default function DebugMapPage({ zoneState, currentLocId, sendCommand }: D
             <button
               style={s.toolBtn}
               onClick={() => importInputRef.current?.click()}
-              title="Import a previously-exported zone_layout.json"
+              title="Импортировать карту из JSON (v3 — полная замена карты; v1/v2 — только позиции/связи)"
             >
               📥 Import
             </button>

@@ -83,7 +83,7 @@ def validate_world_command(
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
                         "debug_set_time", "debug_advance_turns",
-                        "debug_trigger_emission"):
+                        "debug_trigger_emission", "debug_import_full_map"):
         return RuleCheckResult(valid=True)
 
     if command_type == "debug_set_agent_money":
@@ -512,6 +512,80 @@ def resolve_world_command(
                 "emission_active": state.get("emission_active", False),
                 "emission_ends_turn": state.get("emission_ends_turn", 0),
             },
+        })
+        return state, events
+
+    # ── debug_import_full_map ─────────────────────────────────────────────────
+    if command_type == "debug_import_full_map":
+        """
+        Replaces the entire map state from a previously exported full-map JSON.
+        Expected payload keys:
+          locations: {id: {name, terrain_type, anomaly_activity, dominant_anomaly_type, region, connections, artifacts}}
+          positions: {id: {x, y}}
+          regions: {id: {name, colorIndex}}
+          world_turn, world_day, world_hour, world_minute
+          emission_active, emission_scheduled_turn, emission_ends_turn
+        Agents, mutants, traders and player state are preserved as-is.
+        """
+        new_locs_data = payload.get("locations", {})
+        new_positions = payload.get("positions", {})
+        new_regions = payload.get("regions", {})
+
+        # Build fresh locations dict, preserving agent/mutant lists from any
+        # existing location with the same id (so live NPCs don't become orphans).
+        old_locations = state.get("locations", {})
+        new_locations: Dict[str, Any] = {}
+        for loc_id, loc_data in new_locs_data.items():
+            old = old_locations.get(loc_id, {})
+            new_locations[loc_id] = {
+                "id": loc_id,
+                "name": str(loc_data.get("name", loc_id)).strip(),
+                "terrain_type": loc_data.get("terrain_type", "plain"),
+                "anomaly_activity": int(loc_data.get("anomaly_activity", 0)),
+                "dominant_anomaly_type": loc_data.get("dominant_anomaly_type") or None,
+                "region": loc_data.get("region") or None,
+                "connections": [
+                    {
+                        "to": c["to"],
+                        "travel_time": int(c.get("travel_time", 15)),
+                        "type": c.get("type", "normal"),
+                        "closed": bool(c.get("closed", False)),
+                    }
+                    for c in loc_data.get("connections", [])
+                    if "to" in c and c["to"] in new_locs_data
+                ],
+                "artifacts": list(loc_data.get("artifacts", [])),
+                "agents": list(old.get("agents", [])),
+                "items": list(old.get("items", [])),
+            }
+        state["locations"] = new_locations
+
+        # Canvas layout
+        debug_layout = state.setdefault("debug_layout", {})
+        debug_layout["positions"] = new_positions
+        debug_layout["regions"] = new_regions
+
+        # World time
+        if "world_turn" in payload:
+            state["world_turn"] = int(payload["world_turn"])
+        if "world_day" in payload:
+            state["world_day"] = max(1, int(payload["world_day"]))
+        if "world_hour" in payload:
+            state["world_hour"] = max(0, min(23, int(payload["world_hour"])))
+        if "world_minute" in payload:
+            state["world_minute"] = max(0, min(59, int(payload["world_minute"])))
+
+        # Emission state
+        if "emission_active" in payload:
+            state["emission_active"] = bool(payload["emission_active"])
+        if "emission_scheduled_turn" in payload and payload["emission_scheduled_turn"] is not None:
+            state["emission_scheduled_turn"] = int(payload["emission_scheduled_turn"])
+        if "emission_ends_turn" in payload and payload["emission_ends_turn"] is not None:
+            state["emission_ends_turn"] = int(payload["emission_ends_turn"])
+
+        events.append({
+            "event_type": "debug_full_map_imported",
+            "payload": {"location_count": len(new_locations)},
         })
         return state, events
 
