@@ -4,12 +4,13 @@ import { authApi, matchesApi } from './api/client';
 import Login from './components/Login/Login';
 import Layout from './components/Layout/Layout';
 import MatchList from './components/MatchList/MatchList';
-import TicTacToeGame from './components/TicTacToeGame';
+import GameLobby from './components/GameLobby';
 import AdminPanel from './components/AdminPanel/AdminPanel';
 import UserProfile from './components/UserProfile/UserProfile';
+import { gameUIRegistry } from './games/uiRegistry';
 import type { User, Match } from './types';
 
-type View = 'matches' | 'match' | 'admin' | 'profile';
+type View = 'games' | 'matches' | 'match' | 'admin' | 'profile';
 
 /** Extract a match UUID from a URL hash like `#/match/uuid`. */
 function parseHashMatchId(): string | null {
@@ -28,7 +29,8 @@ function viewFromHash(): View {
   if (parseHashMatchId()) return 'match';
   if (parseHashProfileId()) return 'profile';
   if (window.location.hash === '#/admin') return 'admin';
-  return 'matches';
+  if (window.location.hash === '#/matches') return 'matches';
+  return 'games';
 }
 
 export default function App() {
@@ -107,11 +109,13 @@ export default function App() {
         setView('profile');
       } else if (isAdmin) {
         setView('admin');
+      } else if (window.location.hash === '#/matches') {
+        setView('matches');
       } else {
         if (currentMatchIdRef.current !== null) {
           dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
         }
-        setView('matches');
+        setView('games');
       }
     };
     window.addEventListener('hashchange', handleHashChange);
@@ -120,7 +124,7 @@ export default function App() {
 
   if (!state.token) return <Login />;
 
-  const isTicTacToe = state.currentMatch?.game_id === 'tictactoe';
+  const GameUI = state.currentMatch ? gameUIRegistry[state.currentMatch.game_id] : null;
   const isAdmin = state.user?.is_superuser ?? false;
 
   const handleMatchDeleted = (deletedId: string) => {
@@ -132,9 +136,12 @@ export default function App() {
   };
 
   const handleNavSelect = (v: string) => {
-    if (v === 'matches') {
-      dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+    if (v === 'games') {
       window.location.hash = '';
+      setView('games');
+    } else if (v === 'matches') {
+      dispatch({ type: 'SET_CURRENT_MATCH', payload: null });
+      window.location.hash = '#/matches';
       setView('matches');
     } else if (v === 'admin') {
       window.location.hash = '#/admin';
@@ -156,14 +163,16 @@ export default function App() {
 
   return (
     <Layout onNavSelect={handleNavSelect} activeView={view}>
+      {view === 'games' && <GameLobby />}
+
       {view === 'matches' && <MatchList />}
 
       {view === 'match' && (
         <div>
           {!state.currentMatch ? (
             <p style={styles.hint}>Select a match from the Matches list.</p>
-          ) : isTicTacToe && state.user ? (
-            <TicTacToeGame
+          ) : GameUI && state.user ? (
+            <GameUI
               match={state.currentMatch}
               user={state.user}
               onMatchUpdated={(updated: Match) =>

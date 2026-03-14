@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from sdk.rule_set import RuleSet, RuleCheckResult
 
 WINNING_LINES = [
@@ -31,6 +31,46 @@ def _init_state() -> dict:
 
 class TicTacToeRuleSet(RuleSet):
     """RuleSet for the Tic-Tac-Toe game (Крестики-нолики)."""
+
+    # ── Context initialisation ────────────────────────────────────────────────
+
+    def create_initial_context_state(
+        self,
+        context_type: str,
+        match_id: Any,
+        db: Any,
+    ):
+        """
+        Auto-initialise a Tic-Tac-Toe context so that turn order is set from
+        the very first render — avoids both players seeing "waiting for
+        opponent".
+        """
+        if context_type != "tictactoe":
+            return None
+
+        from app.core.matches.models import Participant
+        parts = (
+            db.query(Participant)
+            .filter(Participant.match_id == match_id)
+            .order_by(Participant.joined_at, Participant.id)
+            .all()
+        )
+        user_parts = [p for p in parts if p.user_id is not None]
+        if len(user_parts) < 2:
+            return None
+        p1 = str(user_parts[0].user_id)
+        p2 = str(user_parts[1].user_id)
+        return {
+            "board": [None] * 9,
+            "player_marks": {p1: "X", p2: "O"},
+            "current_player_id": p1,
+            "winner": None,
+            "winner_mark": None,
+            "game_over": False,
+            "turn_count": 0,
+        }
+
+    # ── Command validation / resolution ──────────────────────────────────────
 
     def validate_command(
         self,

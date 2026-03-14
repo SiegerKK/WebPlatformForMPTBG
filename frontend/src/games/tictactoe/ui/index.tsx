@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../api/client';
+import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../../api/client';
 import type {
   GameContext,
   GameEvent,
@@ -7,7 +7,7 @@ import type {
   MatchParticipant,
   TicTacToeState,
   User,
-} from '../../types';
+} from '../../../types';
 
 interface Props {
   match: Match;
