@@ -485,13 +485,6 @@ def _resolve_exploration(
                 "location_id": loc_id,
             },
         )
-        # Observation memory
-        _add_memory(
-            agent, world_turn, state, "observation",
-            f"Поднял артефакт {art_name} с аномалии",
-            f"Во время обыска нашёл и поднял «{art_name}» на локации «{loc_name}».",
-            {"action_kind": "pickup", "artifact_type": art["type"], "location_id": loc_id},
-        )
         # ── Survival skill XP gain ────────────────────────────────────────────
         art_value = art.get("value", 0)
         xp_gain = art_value / 100.0
@@ -747,15 +740,9 @@ def _write_location_observations(
             {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
         )
 
-    # ── Artifacts on the ground ───────────────────────────────────────────────
-    artifact_types = sorted(a.get("type", "?") for a in loc.get("artifacts", []))
-    if artifact_types and artifact_types != _last_obs_content(agent, "artifacts", loc_id):
-        _add_memory(
-            agent, world_turn, state, "observation",
-            f"Вижу артефакты в «{loc_name}»",
-            f"На земле: {', '.join(artifact_types)} (всего {len(artifact_types)} шт.).",
-            {"observed": "artifacts", "location_id": loc_id, "artifact_types": artifact_types},
-        )
+    # NOTE: Artifacts are NOT recorded as a location observation on arrival.
+    # They can only be discovered and recorded through the explore action.
+    # See _resolve_exploration() for the artifact pickup observation.
 
     # ── Loose items on the ground ─────────────────────────────────────────────
     item_types = sorted(it.get("type", "?") for it in loc.get("items", []))

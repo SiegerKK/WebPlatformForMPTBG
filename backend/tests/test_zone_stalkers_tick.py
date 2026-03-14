@@ -1012,8 +1012,9 @@ class TestPerTurnObservations:
         assert len(obs) >= 1
         assert state["agents"][a1]["name"] in obs[0]["effects"]["names"]
 
-    def test_observation_written_when_artifact_present(self):
-        """An agent whose location has an artifact writes an artifacts observation each tick."""
+    def test_no_artifact_observation_on_tick_arrival(self):
+        """Artifacts at a location do NOT generate an 'artifacts' observation on arrival/tick.
+        Artifact observations are only written when an artifact is found via explore."""
         state = _make_world()
         agent = state["agents"]["agent_p0"]
         loc_id = agent["location_id"]
@@ -1023,32 +1024,33 @@ class TestPerTurnObservations:
         new_state, _ = self._tick(state)
         obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
                if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
-        assert len(obs) >= 1
-        assert "fire" in obs[0]["effects"]["artifact_types"]
+        assert len(obs) == 0, "Artifacts should NOT be observed passively; only via explore."
 
     def test_observation_deduplicated_on_second_tick(self):
-        """Identical observations are NOT re-written on the next tick — deduplication works."""
+        """Identical observations are NOT re-written on the next tick — deduplication works.
+        Test uses loose items since artifacts are no longer passively observed on tick."""
         state = _make_world()
         agent = state["agents"]["agent_p0"]
         loc_id = agent["location_id"]
-        state["locations"][loc_id].setdefault("artifacts", []).append(
-            {"id": "art_dedup_001", "type": "fire", "value": 100}
+        state["locations"][loc_id].setdefault("items", []).append(
+            {"id": "item_dedup_001", "type": "medkit", "value": 50}
         )
         state1, _ = self._tick(state)
         count_after_tick1 = sum(
             1 for m in state1["agents"]["agent_p0"]["memory"]
-            if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"
+            if m["type"] == "observation" and m["effects"].get("observed") == "items"
         )
         state2, _ = self._tick(state1)
         count_after_tick2 = sum(
             1 for m in state2["agents"]["agent_p0"]["memory"]
-            if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"
+            if m["type"] == "observation" and m["effects"].get("observed") == "items"
         )
         # Should NOT have added a duplicate entry on the second tick
         assert count_after_tick2 == count_after_tick1
 
-    def test_new_observation_written_when_content_changes(self):
-        """A new observation IS written when a second artifact appears (content changed)."""
+    def test_no_artifact_observation_on_content_change(self):
+        """Adding more artifacts to a location still does NOT generate artifact observations
+        on tick. Only explore can produce artifact observations."""
         state = _make_world()
         agent = state["agents"]["agent_p0"]
         loc_id = agent["location_id"]
@@ -1063,11 +1065,8 @@ class TestPerTurnObservations:
         state2, _ = self._tick(state1)
         obs = [m for m in state2["agents"]["agent_p0"]["memory"]
                if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
-        # Two distinct observation entries (different content each tick)
-        assert len(obs) >= 2
-        # The latest observation should contain both artifact types
-        latest = obs[-1]
-        assert "soul" in latest["effects"]["artifact_types"]
+        # No artifact observations should exist — not written on tick
+        assert len(obs) == 0
 
     def test_trader_visible_in_stalker_observations(self):
         """Traders at the same location appear in the 'stalkers' observation entry."""
