@@ -735,6 +735,8 @@ def _make_trader_scenario():
         "value": art_info["value"],
     }
     state["locations"][stalker_loc]["artifacts"] = [artifact]  # replace, not append
+    # Artifacts only spawn in anomaly zones; ensure the location has activity so exploration triggers
+    state["locations"][stalker_loc].setdefault("anomaly_activity", 5)
 
     # Spawn a trader at trader_loc
     trader = {

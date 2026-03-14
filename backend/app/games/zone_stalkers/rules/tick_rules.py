@@ -36,8 +36,8 @@ _EMISSION_WARNING_TURNS = 30          # NPC starts fleeing this many turns befor
 # Terrain types where stalkers are killed by an emission
 _EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
 
-# Anomaly search parameters for the get_rich NPC goal path
-_ANOMALY_SEARCH_MAX_HOPS = 5      # BFS radius (in hops) when looking for anomaly locations
+# Anomaly search parameters for the get_rich NPC goal path.
+# Search radius is skill-based: 1 + agent["skill_survival"] hops (e.g. 2 for level-1 survival).
 _ANOMALY_DISTANCE_PENALTY = 5.0   # Score reduction per hop of distance
 _ANOMALY_SCORE_NOISE = 0.5        # Small random jitter to break ties between equal-scoring locations
 
@@ -637,7 +637,7 @@ def _score_location(loc: Dict[str, Any], goal_kind: str) -> float:
     highest-scoring option across goal kinds.
     """
     if goal_kind == "artifacts":
-        return loc.get("anomaly_activity", 0) * 10.0 + len(loc.get("artifacts", [])) * 50.0
+        return loc.get("anomaly_activity", 0) * 10.0
     if goal_kind == "loot":
         # TODO: expand when item loot collection is implemented
         return sum(item.get("value", 0) for item in loc.get("items", []))
@@ -839,6 +839,10 @@ def _find_richest_artifact_location(
     The caller's current location can be excluded via *exclude_loc_id*.
     When *from_loc_id* is provided, only locations reachable (via non-closed
     connections) from that location are considered.
+
+    NOTE: This function is retained for unit-test use only.  Bot decision logic
+    does NOT call it — NPCs must not have omniscient knowledge of where artifacts
+    are located; they discover them by exploring anomaly zones.
     """
     # Build reachability set when a starting location is given
     reachable: set | None = None
@@ -1345,9 +1349,8 @@ def _bot_gather_resources(
     """
     locations = state.get("locations", {})
 
-    # G2 — Explore if anomalies are present or artifacts are visible (must explore to obtain them)
-    artifacts = loc.get("artifacts", [])
-    if loc.get("anomaly_activity", 0) > 0 or artifacts:
+    # G2 — Explore if anomalies are present (must explore to obtain artifacts)
+    if loc.get("anomaly_activity", 0) > 0:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую аномальную зону",
@@ -1368,10 +1371,10 @@ def _bot_gather_resources(
     # G3 — Move toward a more loot-rich adjacent location (higher anomaly_activity)
     connections = [c for c in loc.get("connections", []) if not c.get("closed")]
     if connections:
-        # Prefer neighbors with higher anomaly_activity and artifacts present
+        # Prefer neighbors with higher anomaly_activity
         def loc_score(conn):
             nb = locations.get(conn["to"], {})
-            return nb.get("anomaly_activity", 0) * 2 + len(nb.get("artifacts", [])) * 3
+            return nb.get("anomaly_activity", 0) * 2
         best = max(connections, key=loc_score)
         if rng.random() < 0.70:
             best_nb_name = locations.get(best["to"], {}).get("name", best["to"])
@@ -1456,8 +1459,9 @@ def _bot_pursue_goal(
     elif global_goal == "get_rich":
         # ── Explore current location to find artifacts (must go through explore) ──────
         # Artifacts can only be obtained through the explore action, not picked up directly.
-        artifacts = loc.get("artifacts", [])
-        if artifacts or loc.get("anomaly_activity", 0) > 0:
+        # Stalkers do NOT have omniscient knowledge of which locations have artifacts —
+        # they can only explore anomaly zones and learn from memory.
+        if loc.get("anomaly_activity", 0) > 0:
             # Build confirmed-empty set to avoid re-exploring fruitless spots
             confirmed_empty_here: frozenset = frozenset(
                 mem.get("effects", {}).get("location_id")
@@ -1470,7 +1474,7 @@ def _bot_pursue_goal(
                 _add_memory(
                     agent, world_turn, state, "decision",
                     f"Исследую «{loc_name}»",
-                    f"На локации «{loc_name}» есть артефакты — нужно провести разведку чтобы их найти.",
+                    f"На локации «{loc_name}» есть аномальная активность — нужно провести разведку чтобы найти артефакты.",
                     {"action_kind": "explore_decision", "location_id": loc_id},
                 )
                 agent["scheduled_action"] = {
@@ -1482,30 +1486,7 @@ def _bot_pursue_goal(
                 return [{"event_type": "exploration_started",
                          "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-        # ── Steps 1-2: Survey ALL locations; travel to the richest artifact spot ─
-        best_art_loc_id, best_art_value = _find_richest_artifact_location(
-            state, exclude_loc_id=loc_id, from_loc_id=loc_id
-        )
-        if best_art_loc_id:
-            best_loc_name = locations.get(best_art_loc_id, {}).get("name", best_art_loc_id)
-            # Step 1 — record the global survey finding
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Ищу ценные предметы",
-                f"Ищу ценные предметы. Лучшая локация: {best_loc_name}.",
-                {"target_location": best_art_loc_id, "estimated_value": best_art_value},
-            )
-            # Step 2 — commit to travelling there
-            _add_memory(
-                agent, world_turn, state, "decision",
-                f"Иду на {best_loc_name}",
-                f"Иду на {best_loc_name} за артефактами.",
-                {"destination": best_art_loc_id},
-            )
-            agent["current_goal"] = "goal_get_rich_seek_artifacts"
-            return _bot_schedule_travel(agent_id, agent, best_art_loc_id, state, world_turn)
-
-        # No artifacts found anywhere on the map.
+        # Current location has no anomaly activity or already confirmed empty.
         # Build the set of locations the agent has confirmed as empty through exploration.
         confirmed_empty: frozenset = frozenset(
             mem.get("effects", {}).get("location_id")
@@ -1532,7 +1513,7 @@ def _bot_pursue_goal(
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
         # Current location confirmed empty or no anomaly activity here.
-        # BFS up to _ANOMALY_SEARCH_MAX_HOPS hops to find the best anomaly location not yet confirmed empty.
+        # BFS radius is skill-based: 1 + skill_survival hops (e.g. 2 for level-1 survival).
         _max_anomaly_search_hops = 1 + int(agent.get("skill_survival", 1))
         reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_anomaly_search_hops)
 
@@ -1550,12 +1531,12 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"Иду в непроверенную аномальную зону «{best_name}»",
-                f"Ищу аномальные зоны. Лучший вариант в радиусе 5 переходов: «{best_name}» (активность {locations.get(best_lid, {}).get('anomaly_activity', 0)}, расстояние {best_dist}).",
+                f"Ищу аномальные зоны. Лучший вариант в радиусе {_max_anomaly_search_hops} переходов: «{best_name}» (активность {locations.get(best_lid, {}).get('anomaly_activity', 0)}, расстояние {best_dist}).",
                 {"action_kind": "move_for_anomaly", "destination": best_lid},
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
-        # All anomaly locations within 5 hops are confirmed empty — go to the best one to wait for midnight spawns.
+        # All anomaly locations within the search radius are confirmed empty — go to the best one to wait for midnight spawns.
         all_anomaly_candidates = [
             (lid, dist) for lid, dist in reachable.items()
             if locations.get(lid, {}).get("anomaly_activity", 0) > 0
@@ -1566,12 +1547,12 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"Все аномальные зоны изучены — иду в «{best_name}» ждать",
-                f"Все известные аномальные локации в радиусе 5 переходов пусты. Иду в «{best_name}» в ожидании новых артефактов.",
+                f"Все известные аномальные локации в радиусе {_max_anomaly_search_hops} переходов пусты. Иду в «{best_name}» в ожидании новых артефактов.",
                 {"action_kind": "move_for_anomaly", "destination": best_lid},
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
-        # No anomaly locations within 5 hops — move toward the neighbour with highest anomaly activity.
+        # No anomaly locations within search radius — move toward the neighbour with highest anomaly activity.
         if connections:
             best = max(connections,
                        key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
@@ -1579,7 +1560,7 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Иду в зону с высокой аномальностью",
-                f"Аномальных зон нет в радиусе 5 переходов. Иду в «{best_name}» — там выше аномальная активность.",
+                f"Аномальных зон нет в радиусе {_max_anomaly_search_hops} переходов. Иду в «{best_name}» — там выше аномальная активность.",
                 {"action_kind": "move_for_anomaly", "destination": best["to"]},
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
