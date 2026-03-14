@@ -1391,7 +1391,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                         {agentHere > 0 && <span style={styles.locBadge}>👥 {agentHere}</span>}
                         {tradersHere > 0 && <span style={styles.locBadge}>🏪 Trader</span>}
                         {loc.artifacts.length > 0 && <span style={styles.locBadgeArt}>💎 {loc.artifacts.length}</span>}
-                        {loc.anomaly_activity > 0 && <span style={styles.locBadgeAnom}>☢ {loc.anomaly_activity}</span>}
+                        {(loc.anomaly_activity ?? 0) > 0 && <span style={styles.locBadgeAnom}>☢ {loc.anomaly_activity}</span>}
                       </div>
                       {isSelected && isConnected && <div style={styles.moveHint}>Click again to move →</div>}
                     </div>
@@ -1434,7 +1434,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                       ))}
                     </div>
                   )}
-                  {currentLoc.anomaly_activity > 0 && (
+                  {(currentLoc.anomaly_activity ?? 0) > 0 && (
                     <div style={styles.locDetailSection}>
                       <div style={styles.locDetailLabel}>☢ Аномальная активность</div>
                       <div style={{ ...styles.locDetailItem, color: '#a855f7' }}>
