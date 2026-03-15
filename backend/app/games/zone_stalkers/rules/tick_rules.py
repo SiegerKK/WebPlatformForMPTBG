@@ -87,6 +87,18 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 agent["hp"] = max(0, agent["hp"] - 1)
             if agent["hp"] <= 0 and agent.get("is_alive", True):
                 agent["is_alive"] = False
+                _hunger = agent.get("hunger", 0)
+                _thirst = agent.get("thirst", 0)
+                _death_cause_str = (
+                    "обезвоживание" if _thirst >= _hunger else "голод"
+                )
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    "💀 Смерть",
+                    f"Погиб от {_death_cause_str}. Голод: {_hunger}%, жажда: {_thirst}%.",
+                    {"action_kind": "death", "cause": "starvation_or_thirst",
+                     "hunger": _hunger, "thirst": _thirst},
+                )
                 events.append({
                     "event_type": "agent_died",
                     "payload": {"agent_id": agent_id, "cause": "starvation_or_thirst"},
@@ -134,6 +146,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _em_terrain = _em_agent_loc.get("terrain_type", "")
             if _em_terrain in _EMISSION_DANGEROUS_TERRAIN:
                 _em_agent["is_alive"] = False
+                _em_loc_name = _em_agent_loc.get("name", _em_agent.get("location_id", "?"))
+                _add_memory(
+                    _em_agent, world_turn, state, "observation",
+                    "💀 Смерть",
+                    f"Погиб от выброса на открытой местности в «{_em_loc_name}».",
+                    {"action_kind": "death", "cause": "emission",
+                     "location_id": _em_agent.get("location_id"), "terrain": _em_terrain},
+                )
                 events.append({
                     "event_type": "agent_died",
                     "payload": {"agent_id": _em_agent_id, "cause": "emission"},
@@ -414,6 +434,13 @@ def _process_scheduled_action(
                 _write_location_observations(agent_id, agent, destination, state, world_turn)
             if agent["hp"] <= 0:
                 agent["is_alive"] = False
+                _travel_loc_name = state.get("locations", {}).get(destination, {}).get("name", destination)
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    "💀 Смерть",
+                    f"Погиб от воздействия аномалии во время перехода в «{_travel_loc_name}».",
+                    {"action_kind": "death", "cause": "travel_anomaly", "location_id": destination},
+                )
                 events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "travel_anomaly"}})
 
     elif action_type == "explore_anomaly_location":
@@ -574,6 +601,13 @@ def _resolve_exploration(
         })
         if agent["hp"] <= 0:
             agent["is_alive"] = False
+            _add_memory(
+                agent, world_turn, state, "observation",
+                "💀 Смерть",
+                f"Погиб от аномалии во время разведки в «{loc_name}». Тип аномалии: {anomaly_type}.",
+                {"action_kind": "death", "cause": "anomaly_exploration",
+                 "location_id": loc_id, "anomaly_type": anomaly_type},
+            )
             events.append({
                 "event_type": "agent_died",
                 "payload": {"agent_id": agent_id, "cause": "anomaly_exploration"},
