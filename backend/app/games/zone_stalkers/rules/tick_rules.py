@@ -997,6 +997,7 @@ def _write_location_observations(
 from app.games.zone_stalkers.balance.items import (
     HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES,
     WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_ITEM_TYPES, AMMO_FOR_WEAPON,
+    SECRET_DOCUMENT_ITEM_TYPES,
 )
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 
@@ -1875,6 +1876,96 @@ def _find_item_memory_location(
         if not _bfs_route(locations, agent_loc, loc_id):
             continue
         return loc_id
+    return None
+
+
+def _bot_ask_colocated_stalkers_about_item(
+    agent_id: str,
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+    item_category_name: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> Optional[str]:
+    """Ask co-located stalker agents about the location of items of the given types.
+
+    For each alive stalker sharing the agent's location, scan their memory for the
+    most recent ``observed: items`` entry that mentions one of *item_types*.
+    When intel is found, write an ``intel_from_stalker`` observation to *agent*'s
+    memory so that a subsequent call to ``_find_item_memory_location`` can use it.
+
+    Returns the ``loc_id`` of the first piece of intel successfully shared, or
+    ``None`` when no useful information could be obtained from any co-located stalker.
+
+    Deduplication: if the asking agent already holds a ``intel_from_stalker``
+    observation for the same (source_agent_id, location_id) pair recorded within
+    the current turn, the entry is skipped to avoid redundant writes.
+    """
+    loc_id = agent.get("location_id", "")
+    agents = state.get("agents", {})
+
+    # Build a set of (source_agent_id, loc_id) pairs the asking agent already knows
+    # this turn so we don't write duplicate entries.
+    already_known: set = set()
+    for mem in agent.get("memory", []):
+        if mem.get("world_turn") != world_turn:
+            continue
+        fx = mem.get("effects", {})
+        if fx.get("action_kind") == "intel_from_stalker":
+            already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+
+    for other_id, other in agents.items():
+        if other_id == agent_id:
+            continue
+        if not other.get("is_alive", True):
+            continue
+        if other.get("location_id") != loc_id:
+            continue
+        if other.get("archetype") != "stalker_agent":
+            continue
+
+        other_name = other.get("name", other_id)
+
+        # Scan the other agent's memory (newest first) for an items observation
+        # that includes one of the requested types and isn't already known.
+        for mem in reversed(other.get("memory", [])):
+            if mem.get("type") != "observation":
+                continue
+            fx = mem.get("effects", {})
+            if fx.get("observed") != "items":
+                continue
+            obs_loc = fx.get("location_id")
+            if not obs_loc:
+                continue
+            obs_types = frozenset(fx.get("item_types", []))
+            if not obs_types.intersection(item_types):
+                continue
+
+            # Found relevant intel — check deduplication
+            if (other_id, obs_loc) in already_known:
+                break  # already recorded intel from this stalker about this location
+
+            obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
+            current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+            matched_types = sorted(obs_types.intersection(item_types))
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"💬 Разведданные от {other_name}",
+                (
+                    f"{other_name} рассказал, что видел {item_category_name} "
+                    f"в «{obs_loc_name}» (в {current_loc_name})."
+                ),
+                {
+                    "action_kind": "intel_from_stalker",
+                    "observed": "items",
+                    "location_id": obs_loc,
+                    "item_types": matched_types,
+                    "source_agent_id": other_id,
+                    "source_agent_name": other_name,
+                },
+            )
+            return obs_loc
+
     return None
 
 
@@ -2788,6 +2879,95 @@ def _bot_pursue_goal(
                 reason="аномальных зон в радиусе нет — иду к ближайшей по активности",
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+
+    if global_goal == "unravel_zone_mystery":
+        # ── Разгадать тайну Зоны: найти секретные документы ──────────────────
+        # Step 1: Already carrying a secret document — goal effectively complete;
+        # hold it and continue wandering until further mechanics are added.
+        docs_in_inv = [i for i in agent.get("inventory", []) if i.get("type") in SECRET_DOCUMENT_ITEM_TYPES]
+        if docs_in_inv:
+            doc_names = ", ".join(d.get("name", d.get("type", "?")) for d in docs_in_inv)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "🔍 Документы найдены — продолжаю изучение",
+                f"В инвентаре есть секретные документы: {doc_names}. Продолжаю разгадывать тайну Зоны.",
+                {"action_kind": "goal_unravel_has_docs",
+                 "doc_types": [d.get("type") for d in docs_in_inv]},
+                reason="несу секретные документы — цель выполнена",
+            )
+            agent["action_used"] = True
+            return []
+
+        # Step 2: Pick up secret documents if they're on the ground right here.
+        pickup_evs = _bot_pickup_item_from_ground(agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES, state, world_turn)
+        if pickup_evs:
+            return pickup_evs
+
+        # Step 3: Check memory for a known location of secret documents.
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, SECRET_DOCUMENT_ITEM_TYPES, "secret_document")
+        mem_loc = _find_item_memory_location(agent, SECRET_DOCUMENT_ITEM_TYPES, state)
+        if mem_loc:
+            mem_loc_name = locations.get(mem_loc, {}).get("name", mem_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🗺️ Иду за секретными документами в «{mem_loc_name}»",
+                f"Помню, что видел секретные документы в «{mem_loc_name}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": mem_loc},
+                reason="помню где видел секретные документы — иду туда",
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+
+        # Step 4: Ask co-located stalkers about secret documents.
+        intel_loc = _bot_ask_colocated_stalkers_about_item(
+            agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, world_turn
+        )
+        if intel_loc:
+            intel_loc_name = locations.get(intel_loc, {}).get("name", intel_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🗺️ Иду за секретными документами (по наводке) в «{intel_loc_name}»",
+                f"Узнал от сталкера, что секретные документы есть в «{intel_loc_name}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": intel_loc},
+                reason="получил разведданные о секретных документах от другого сталкера",
+            )
+            return _bot_schedule_travel(agent_id, agent, intel_loc, state, world_turn)
+
+        # Step 5: Wander and ask — no leads, explore to find documents.
+        # Prefer locations with dungeon/x_lab/scientific_bunker terrain where
+        # documents are most likely to be found.
+        _SECRET_DOC_TERRAIN = frozenset({"dungeon", "x_lab", "scientific_bunker", "military_buildings"})
+        interesting_connections = [
+            c for c in connections
+            if locations.get(c["to"], {}).get("terrain_type", "") in _SECRET_DOC_TERRAIN
+        ]
+        if interesting_connections:
+            conn = rng.choice(interesting_connections)
+            conn_name = locations.get(conn["to"], {}).get("name", conn["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🔍 Ищу секретные документы в «{conn_name}»",
+                f"Не знаю где искать секретные документы. Иду в «{conn_name}» — это подходящее место.",
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": conn["to"]},
+                reason="нет сведений о секретных документах — иду в подходящую зону",
+            )
+            return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
+
+        # No leads, no interesting locations nearby — wander randomly and hope to
+        # meet a stalker who knows something.
+        if connections:
+            conn = rng.choice(connections)
+            conn_name = locations.get(conn["to"], {}).get("name", conn["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "❓ Брожу в поисках секретных документов",
+                f"Не знаю где искать секретные документы и не у кого спросить. Иду в «{conn_name}» наугад.",
+                {"action_kind": "wander", "destination": conn["to"]},
+                reason="нет сведений о секретных документах — брожу в поисках",
+            )
+            return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
+
+        agent["action_used"] = True
+        return []
 
     # Fallback: wander
     if connections and rng.random() < 0.60:

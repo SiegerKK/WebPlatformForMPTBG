@@ -51,6 +51,7 @@ _VALID_TERRAIN_TYPES = frozenset([
 
 _VALID_GLOBAL_GOALS = frozenset([
     "get_rich",
+    "unravel_zone_mystery",
 ])
 
 

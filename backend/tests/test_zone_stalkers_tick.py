@@ -2037,16 +2037,18 @@ class TestConfirmedEmptyBlocking:
         )
 
     def test_generator_always_uses_get_rich(self):
-        """zone_generator should always generate 'get_rich' as the only global goal."""
+        """zone_generator should generate valid global goals for all agents."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         goals_found = set()
         for seed in range(50):
             state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
             for ag in state["agents"].values():
                 goals_found.add(ag.get("global_goal"))
-        assert goals_found == {"get_rich"}, (
-            f"Generator should only create agents with goal 'get_rich'; found goals: {goals_found}"
+        assert goals_found.issubset(_VALID_GLOBAL_GOALS), (
+            f"Generator created agents with invalid global goals: {goals_found - _VALID_GLOBAL_GOALS}"
         )
+        assert "get_rich" in goals_found, "Generator should still produce some 'get_rich' agents"
 
     def test_confirmed_empty_cleared_by_emission_memory(self):
         """An explore_confirmed_empty entry older than the agent's emission_ended memory
@@ -3947,3 +3949,265 @@ class TestFleeEmissionSelfInterrupt:
         assert interrupted or (sched is None), (
             "Normal travel without emergency_flee should be interrupted by emission warning"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New mechanic: secret documents + unravel_zone_mystery goal
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSecretDocumentItems:
+    """Verify new secret_document item category is correctly defined."""
+
+    def test_secret_document_types_in_item_catalogue(self):
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        assert len(SECRET_DOCUMENT_ITEM_TYPES) >= 3, "At least 3 secret document types expected"
+        for key in SECRET_DOCUMENT_ITEM_TYPES:
+            assert key in ITEM_TYPES
+            assert ITEM_TYPES[key]["type"] == "secret_document"
+
+    def test_secret_document_fields(self):
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        for key in SECRET_DOCUMENT_ITEM_TYPES:
+            info = ITEM_TYPES[key]
+            assert "name" in info
+            assert "weight" in info
+            assert "value" in info
+            assert info["value"] > 0
+
+    def test_generator_places_secret_documents(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        found = [
+            item
+            for loc in state["locations"].values()
+            for item in loc.get("items", [])
+            if item.get("type") in SECRET_DOCUMENT_ITEM_TYPES
+        ]
+        assert len(found) >= 1, "Generator should place at least one secret document in the zone"
+
+
+class TestUnravelZoneMysteryGoal:
+    """Tests for the unravel_zone_mystery global goal bot behaviour."""
+
+    def _make_mystery_agent(self, loc_id: str, state: dict, rng_seed: int = 0) -> dict:
+        """Return a bot agent that is ready to pursue unravel_zone_mystery."""
+        import random
+        rng = random.Random(rng_seed)
+        return {
+            "id": "agent_ai_m",
+            "archetype": "stalker_agent",
+            "name": "Агент-Исследователь",
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 5000,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot", "participant_id": None},
+            "is_alive": True,
+            "action_used": False,
+            "reputation": 0,
+            "experience": 0,
+            "skill_combat": 1, "skill_stalker": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "skill_survival_xp": 0.0,
+            "global_goal": "unravel_zone_mystery",
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 1,  # already over threshold → goal pursuit phase
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+        }
+
+    def _minimal_state(self, loc_id: str = "A") -> dict:
+        """Minimal two-location state for testing."""
+        return {
+            "locations": {
+                "A": {
+                    "name": "Лаборатория X-18",
+                    "terrain_type": "x_lab",
+                    "anomaly_activity": 0,
+                    "items": [],
+                    "artifacts": [],
+                    "agents": ["agent_ai_m"],
+                    "connections": [{"to": "B", "type": "normal"}],
+                },
+                "B": {
+                    "name": "Равнина",
+                    "terrain_type": "plain",
+                    "anomaly_activity": 0,
+                    "items": [],
+                    "artifacts": [],
+                    "agents": [],
+                    "connections": [{"to": "A", "type": "normal"}],
+                },
+            },
+            "agents": {},
+            "traders": {},
+            "mutants": {},
+            "world_turn": 1,
+            "emission_active": False,
+        }
+
+    def test_unravel_zone_mystery_is_valid_global_goal(self):
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
+        assert "unravel_zone_mystery" in _VALID_GLOBAL_GOALS
+
+    def test_bot_with_no_memory_wanders(self):
+        """Bot with unravel_zone_mystery and no doc intel should wander."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+        ]
+        assert decisions, "Bot should record a decision"
+        # Should wander or seek item
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert action_kinds.intersection(
+            {"wander", "seek_item"}
+        ), f"Expected wander or seek_item, got: {action_kinds}"
+
+    def test_bot_goes_to_known_doc_location(self):
+        """Bot should travel to a remembered secret document location."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        # Give agent a memory of seeing a secret document in location B
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        _add_memory(
+            agent, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        # Agent should decide to seek_item for destination B
+        seek_decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m["effects"].get("action_kind") == "seek_item"
+            and m["effects"].get("destination") == "B"
+            and m["effects"].get("item_category") == "secret_document"
+        ]
+        assert seek_decisions, "Bot with doc memory should seek_item to known location"
+
+    def test_bot_picks_up_doc_from_ground(self):
+        """Bot at a location with a secret document on the ground should pick it up."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        doc_info = ITEM_TYPES[doc_type]
+        state = self._minimal_state("A")
+        state["locations"]["A"]["items"].append({
+            "id": "doc_test_001",
+            "type": doc_type,
+            "name": doc_info["name"],
+            "weight": doc_info["weight"],
+            "value": doc_info["value"],
+        })
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        inv_types = {i["type"] for i in agent.get("inventory", [])}
+        assert doc_type in inv_types, "Bot should pick up secret document from ground"
+
+    def test_bot_gets_intel_from_colocated_stalker(self):
+        """Bot should receive intel from a co-located stalker who saw secret documents."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        # Create a co-located stalker who has memory of a secret document in B
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 1
+        )
+        assert result_loc == "B", "Should receive intel about location B from co-located stalker"
+        # Asking agent should have an intel_from_stalker observation in memory
+        intel_mems = [
+            m for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        ]
+        assert intel_mems, "Agent should have intel_from_stalker memory entry"
+        assert intel_mems[0]["effects"]["location_id"] == "B"
+        assert intel_mems[0]["effects"]["source_agent_name"] == "Информатор"
+
+    def test_intel_deduplication_same_turn(self):
+        """Asking twice in the same turn from the same stalker should not write duplicate entries."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 1
+        )
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 1
+        )
+        intel_mems = [
+            m for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        ]
+        assert len(intel_mems) == 1, "Should not write duplicate intel from same stalker in same turn"
+
+    def test_set_goal_via_world_command(self):
+        """debug_spawn_stalker should accept 'unravel_zone_mystery' as global_goal."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command, resolve_world_command
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        loc_id = next(iter(state["locations"]))
+        payload = {"loc_id": loc_id, "global_goal": "unravel_zone_mystery", "name": "Тест"}
+        result = validate_world_command("debug_spawn_stalker", payload, state, "any_user")
+        assert result.valid, f"Validation failed: {result.error}"
+        new_state, _ = resolve_world_command("debug_spawn_stalker", payload, state, "any_user")
+        new_agent_ids = set(new_state["agents"]) - set(state["agents"])
+        assert new_agent_ids, "Should have spawned a new agent"
+        new_agent = new_state["agents"][next(iter(new_agent_ids))]
+        assert new_agent["global_goal"] == "unravel_zone_mystery"

@@ -661,8 +661,9 @@ class TestNewAgentFields:
 
     def test_global_goal_present(self):
         agent = self._agent()
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         assert "global_goal" in agent
-        assert agent["global_goal"] == "get_rich"
+        assert agent["global_goal"] in _VALID_GLOBAL_GOALS
 
     def test_risk_tolerance_present(self):
         agent = self._agent()
@@ -1255,8 +1256,8 @@ class TestEquipmentUpgrade:
         new_state, _ = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "medkit"}, state)
         item_id = new_state["agents"]["agent_p0"]["inventory"][-1]["id"]
         final_state, events = self._r("debug_remove_item", {"agent_id": "agent_p0", "item_id": item_id}, new_state)
-        inv_types = {i["type"] for i in final_state["agents"]["agent_p0"]["inventory"]}
-        assert "medkit" not in inv_types
+        inv_ids = {i["id"] for i in final_state["agents"]["agent_p0"]["inventory"]}
+        assert item_id not in inv_ids
         ev = next(e for e in events if e["event_type"] == "debug_item_removed")
         assert ev["payload"]["removed"] is True
 
@@ -2111,14 +2112,16 @@ class TestUnifiedStalkerModel:
     # ── global_goal present for all agents ────────────────────────────────────
 
     def test_player_agent_has_global_goal(self):
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         state = self._state()
         agent = state["agents"]["agent_p0"]
-        assert agent["global_goal"] == "get_rich"
+        assert agent["global_goal"] in _VALID_GLOBAL_GOALS
 
     def test_npc_agent_has_global_goal(self):
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         state = self._state()
         agent = state["agents"]["agent_ai_0"]
-        assert agent["global_goal"] == "get_rich"
+        assert agent["global_goal"] in _VALID_GLOBAL_GOALS
 
     def test_all_agents_have_material_threshold(self):
         state = self._state()

@@ -4,12 +4,15 @@ Full item catalogue — all items with their parameters (type, weight, value, ef
 Each item entry is a pure-data dict; no game logic lives here.
 
 Categories:
-  medical    — healing and radiation treatment consumables
-  weapon     — ranged weapons with damage/range/ammo_type stats
-  armor      — protective suits with defense rating
-  ammo       — ammunition packs linked to a weapon via ammo_type
-  consumable — food, drink and stimulants
-  detector   — anomaly detection devices
+  medical         — healing and radiation treatment consumables
+  weapon          — ranged weapons with damage/range/ammo_type stats
+  armor           — protective suits with defense rating
+  ammo            — ammunition packs linked to a weapon via ammo_type
+  consumable      — food, drink and stimulants
+  detector        — anomaly detection devices
+  secret_document — classified files, encrypted media, and research notes about
+                    the Zone's origin; sought by stalkers pursuing the
+                    ``unravel_zone_mystery`` global goal
 
 ``risk_tolerance`` (float 0.0–1.0) encodes the aggressiveness/risk profile that
 suits an agent wanting this item.  Low values (≈0.0) mean a cautious stalker
@@ -193,6 +196,24 @@ ITEM_TYPES: dict = {
         "effects": {"hp": 15, "hunger": -30},
         "description": "Питательный раствор. Немного лечит и снижает голод на 30 единиц.",
     },
+    # ── Secret Documents ──────────────────────────────────────────────────────
+    # Rare classified materials scattered across restricted Zone locations.
+    # Sought by stalkers pursuing the ``unravel_zone_mystery`` global goal.
+    "classified_report": {
+        "name": "Секретный отчёт", "type": "secret_document",
+        "weight": 0.05, "value": 2000, "risk_tolerance": 0.6,
+        "description": "Засекреченный доклад неизвестного ведомства. Содержит данные об аномальной активности в Зоне.",
+    },
+    "encrypted_disk": {
+        "name": "Зашифрованный диск", "type": "secret_document",
+        "weight": 0.02, "value": 3500, "risk_tolerance": 0.7,
+        "description": "Жёсткий диск с зашифрованными данными о происхождении Зоны. Представляет большую научную ценность.",
+    },
+    "zone_research_notes": {
+        "name": "Исследовательские записки", "type": "secret_document",
+        "weight": 0.08, "value": 1200, "risk_tolerance": 0.4,
+        "description": "Рукописные заметки учёного, работавшего в Зоне. Содержат наблюдения за аномалиями и мутантами.",
+    },
     # ── Detectors ─────────────────────────────────────────────────────────────
     "echo_detector": {
         "name": "Детектор «Эхо»", "type": "detector",
@@ -257,6 +278,11 @@ AMMO_ITEM_TYPES: frozenset = frozenset(
 # Detector item types
 DETECTOR_ITEM_TYPES: frozenset = frozenset(
     k for k, v in ITEM_TYPES.items() if v["type"] == "detector"
+)
+
+# Secret document item types (sought by stalkers with the unravel_zone_mystery goal)
+SECRET_DOCUMENT_ITEM_TYPES: frozenset = frozenset(
+    k for k, v in ITEM_TYPES.items() if v["type"] == "secret_document"
 )
 
 # Mapping: weapon item key → ammo item key required for that weapon
