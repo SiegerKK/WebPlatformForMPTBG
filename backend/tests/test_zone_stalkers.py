@@ -1223,6 +1223,139 @@ class TestEquipmentUpgrade:
         assert ev["payload"]["removed"] is False
 
 
+class TestMaterialThreshold:
+    """Tests for material_threshold separation from global_goal and the debug command."""
+
+    def _base_state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=7, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "any_user")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "any_user")
+
+    # ── Generator: all agents get threshold in [3000, 10000] ───────────────
+
+    def test_all_generated_agents_have_threshold_in_range(self):
+        """Generator must set material_threshold in [3000, 10000] for all stalkers."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        for seed in range(20):
+            state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
+            for agent_id, agent in state.get("agents", {}).items():
+                t = agent.get("material_threshold", 0)
+                assert 3000 <= t <= 10000, (
+                    f"seed={seed} agent={agent_id}: material_threshold={t} out of [3000,10000]"
+                )
+
+    def test_get_rich_agent_has_same_threshold_range(self):
+        """get_rich agents must also have threshold in [3000, 10000], not 50k-1M."""
+        from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
+        import random
+        found_get_rich = False
+        for seed in range(100):
+            rng = random.Random(seed)
+            agent = _make_stalker_agent(
+                agent_id=f"a{seed}", name=f"S{seed}", location_id="loc0",
+                controller_kind="bot", participant_id=None, rng=rng,
+                global_goal="get_rich",
+            )
+            assert 3000 <= agent["material_threshold"] <= 10000, (
+                f"get_rich agent seed={seed}: threshold={agent['material_threshold']}"
+            )
+            found_get_rich = True
+        assert found_get_rich
+
+    # ── Bot decision: ALL agents go through threshold gate ─────────────────
+
+    def test_get_rich_agent_below_threshold_gathers_resources(self):
+        """A get_rich agent below material_threshold must gather resources, not pursue goal directly."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=8, num_players=0, num_ai_stalkers=1, num_mutants=0, num_traders=0)
+        agent_id = list(state["agents"].keys())[0]
+        agent = state["agents"][agent_id]
+        agent["global_goal"] = "get_rich"
+        agent["material_threshold"] = 5000
+        agent["money"] = 100  # far below threshold
+        agent["inventory"] = []
+        agent["equipment"] = {"weapon": None, "armor": None, "detector": None}
+        # We just need to verify current_goal gets set to gather_resources
+        _run_bot_action_inner(agent_id, agent, state, world_turn=1)
+        assert agent.get("current_goal") in ("gather_resources", "get_weapon", "get_armor"), (
+            f"Expected resource gathering for underfunded get_rich agent, got {agent.get('current_goal')}"
+        )
+
+    def test_survive_agent_above_threshold_pursues_goal(self):
+        """A survive agent above material_threshold must pursue its global goal."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=9, num_players=0, num_ai_stalkers=1, num_mutants=0, num_traders=0)
+        agent_id = list(state["agents"].keys())[0]
+        agent = state["agents"][agent_id]
+        agent["global_goal"] = "survive"
+        agent["material_threshold"] = 3000
+        agent["money"] = 10000  # above threshold
+        agent["equipment"] = {
+            "weapon": {"id": "w1", "type": "pistol", "name": "PM", "value": 500},
+            "armor":  {"id": "a1", "type": "leather_jacket", "name": "Куртка", "value": 300},
+            "detector": None,
+        }
+        _run_bot_action_inner(agent_id, agent, state, world_turn=1)
+        goal = agent.get("current_goal", "")
+        assert goal.startswith("goal_") or goal == "upgrade_equipment", (
+            f"Expected goal pursuit for wealthy survive agent, got {goal!r}"
+        )
+
+    # ── debug_set_agent_threshold: validate ────────────────────────────────
+
+    def test_validate_set_threshold_valid(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 5000}, state)
+        assert result.valid
+
+    def test_validate_set_threshold_below_min(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 2999}, state)
+        assert not result.valid
+
+    def test_validate_set_threshold_above_max(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 10001}, state)
+        assert not result.valid
+
+    def test_validate_set_threshold_missing_agent(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "ghost_agent", "amount": 5000}, state)
+        assert not result.valid
+
+    def test_validate_set_threshold_missing_amount(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0"}, state)
+        assert not result.valid
+
+    # ── debug_set_agent_threshold: resolve ─────────────────────────────────
+
+    def test_resolve_set_threshold_updates_agent(self):
+        state = self._base_state()
+        new_state, events = self._r("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 7500}, state)
+        assert new_state["agents"]["agent_p0"]["material_threshold"] == 7500
+        assert any(e["event_type"] == "debug_agent_threshold_set" for e in events)
+
+    def test_resolve_set_threshold_at_boundary_3000(self):
+        state = self._base_state()
+        new_state, _ = self._r("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 3000}, state)
+        assert new_state["agents"]["agent_p0"]["material_threshold"] == 3000
+
+    def test_resolve_set_threshold_at_boundary_10000(self):
+        state = self._base_state()
+        new_state, _ = self._r("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 10000}, state)
+        assert new_state["agents"]["agent_p0"]["material_threshold"] == 10000
+
+
 class TestDebugUpdateMap:
     """Tests for the debug_update_map meta-command (no player agent required)."""
 

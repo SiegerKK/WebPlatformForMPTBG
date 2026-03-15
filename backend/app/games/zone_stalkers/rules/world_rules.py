@@ -30,6 +30,7 @@ Supported commands:
 - debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
 - debug_add_item(agent_id, item_type) — add an item to an agent's inventory in debug mode (meta)
 - debug_remove_item(agent_id, item_id) — remove an item from an agent's inventory or equipment slot in debug mode (meta)
+- debug_set_agent_threshold(agent_id, amount) — set agent's material_threshold (3000–10000) in debug mode (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -97,6 +98,9 @@ def validate_world_command(
 
     if command_type == "debug_set_agent_money":
         return _validate_debug_set_agent_money(payload, state)
+
+    if command_type == "debug_set_agent_threshold":
+        return _validate_debug_set_agent_threshold(payload, state)
 
     if command_type == "debug_delete_agent":
         return _validate_debug_delete_agent(payload, state)
@@ -499,6 +503,19 @@ def resolve_world_command(
             state["traders"][target_id]["money"] = amount
         events.append({
             "event_type": "debug_agent_money_set",
+            "payload": {"agent_id": target_id, "amount": amount},
+        })
+        return state, events
+
+    # ── debug_set_agent_threshold: meta-command, set material_threshold ──────
+    if command_type == "debug_set_agent_threshold":
+        target_id = str(payload["agent_id"])
+        from app.games.zone_stalkers.rules.tick_rules import MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX
+        amount = max(MATERIAL_THRESHOLD_MIN, min(MATERIAL_THRESHOLD_MAX, int(payload["amount"])))
+        if target_id in state.get("agents", {}):
+            state["agents"][target_id]["material_threshold"] = amount
+        events.append({
+            "event_type": "debug_agent_threshold_set",
             "payload": {"agent_id": target_id, "amount": amount},
         })
         return state, events
@@ -1337,4 +1354,29 @@ def _validate_debug_remove_item(
     item_id = payload.get("item_id")
     if not item_id:
         return RuleCheckResult(valid=False, error="item_id is required")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_set_agent_threshold(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    if agent_id not in state.get("agents", {}):
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    amount = payload.get("amount")
+    if amount is None:
+        return RuleCheckResult(valid=False, error="amount is required")
+    try:
+        val = int(amount)
+    except (TypeError, ValueError):
+        return RuleCheckResult(valid=False, error="amount must be an integer")
+    from app.games.zone_stalkers.rules.tick_rules import MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX
+    if not (MATERIAL_THRESHOLD_MIN <= val <= MATERIAL_THRESHOLD_MAX):
+        return RuleCheckResult(
+            valid=False,
+            error=f"amount must be between {MATERIAL_THRESHOLD_MIN} and {MATERIAL_THRESHOLD_MAX}"
+        )
     return RuleCheckResult(valid=True)

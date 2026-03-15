@@ -215,6 +215,9 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   // first paint without needing a button click.
   const [moneyEdit, setMoneyEdit] = React.useState<string | null>(null);
   const [moneySaving, setMoneySaving] = React.useState(false);
+  // Threshold editor state
+  const [thresholdEdit, setThresholdEdit] = React.useState<string | null>(null);
+  const [thresholdSaving, setThresholdSaving] = React.useState(false);
   // Inventory management state
   const [addItemType, setAddItemType] = React.useState<string>('bandage');
   const [addItemSaving, setAddItemSaving] = React.useState(false);
@@ -250,6 +253,20 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     } finally {
       setMoneySaving(false);
       setMoneyEdit(null);
+    }
+  };
+
+  const handleThresholdSave = async () => {
+    if (!sendCommand || thresholdEdit === null) return;
+    const raw = parseInt(thresholdEdit, 10);
+    if (isNaN(raw)) { setThresholdEdit(null); return; }
+    const parsed = Math.max(3000, Math.min(10000, raw));
+    setThresholdSaving(true);
+    try {
+      await sendCommand('debug_set_agent_threshold', { agent_id: agent.id, amount: parsed });
+    } finally {
+      setThresholdSaving(false);
+      setThresholdEdit(null);
     }
   };
 
@@ -416,6 +433,43 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 🎯 Цель: <strong>{agent.global_goal}</strong>
                 {agent.current_goal && (
                    <span style={s.subgoal}> → {currentGoalLabel(agent.current_goal)}</span>
+                )}
+              </div>
+            )}
+            {/* ── Material threshold editor ── */}
+            {agent.material_threshold != null && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>💼 Порог богатства:</span>
+                {sendCommand && thresholdEdit !== null ? (
+                  <>
+                    <input
+                      type="number"
+                      min={3000}
+                      max={10000}
+                      value={thresholdEdit}
+                      onChange={(e) => setThresholdEdit(e.target.value)}
+                      onBlur={handleThresholdSave}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleThresholdSave(); if (e.key === 'Escape') setThresholdEdit(null); }}
+                      style={s.moneyInput}
+                      autoFocus
+                      disabled={thresholdSaving}
+                    />
+                    <span style={s.moneyRu}>RU</span>
+                    <button style={s.moneySaveBtn} onClick={handleThresholdSave} disabled={thresholdSaving} title="Сохранить">
+                      {thresholdSaving ? '…' : '💾'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span
+                      style={sendCommand ? s.moneyLineEditable : { color: '#e2e8f0', fontSize: '0.82rem' }}
+                      onClick={() => sendCommand && setThresholdEdit(String(agent.material_threshold))}
+                      title={sendCommand ? 'Нажмите для редактирования (3000–10000)' : undefined}
+                    >
+                      {agent.material_threshold} RU
+                    </span>
+                    {sendCommand && <span style={s.moneyEditHint}>✏️</span>}
+                  </>
                 )}
               </div>
             )}
@@ -880,11 +934,9 @@ function _worstStatus(criteria: PriorityCriterion[]): StatusColor {
 function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
   const { hp, max_hp, hunger, thirst, sleepiness, radiation } = agent;
   const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
-  const threshold = agent.material_threshold ?? 1000;
+  const threshold = agent.material_threshold ?? 3000;
   const eq = agent.equipment;
   const inv = agent.inventory;
-
-  // ── Group 1: Vital signs ─────────────────────────────────────────────────
   const hpPct = max_hp > 0 ? hp / max_hp : 1;
   const vitalCriteria: PriorityCriterion[] = [
     {
@@ -1128,7 +1180,7 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const thirst = agent.thirst;
   const sleepiness = agent.sleepiness;
   const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
-  const threshold = agent.material_threshold ?? 1000;
+  const threshold = agent.material_threshold ?? 3000;
   const goal = agent.current_goal ?? '—';
   const scheduled = agent.scheduled_action;
   const globalGoal = agent.global_goal ?? 'survive';

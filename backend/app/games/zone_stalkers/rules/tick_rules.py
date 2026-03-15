@@ -29,6 +29,12 @@ MAX_AGENT_MEMORY = 500
 # Default risk_tolerance used when an agent or item does not specify one.
 DEFAULT_RISK_TOLERANCE = 0.5
 
+# Wealth buffer all stalkers must accumulate before pursuing their global goal.
+# Valid range for material_threshold is [3000, 10000].
+DEFAULT_MATERIAL_THRESHOLD = 3000
+MATERIAL_THRESHOLD_MIN = 3000
+MATERIAL_THRESHOLD_MAX = 10000
+
 # Emission (Выброс) mechanic constants
 # 1 game day = 1440 turns (1 turn = 1 minute)
 _EMISSION_MIN_INTERVAL_TURNS = 1440   # earliest next emission: 1 game day after last
@@ -1758,7 +1764,7 @@ def _run_bot_action_inner(
     # ── TRADING OPPORTUNITY ────────────────────────────────────────────────────
     # If the agent is carrying artifacts, try to sell them:
     #   a) Trader is at current location → sell immediately
-    #   b) No local trader but goal is get_rich → travel to nearest trader
+    #   b) No local trader → travel to nearest one (all agents, not just get_rich)
     artifacts_held = _agent_artifacts_in_inventory(agent)
     if artifacts_held:
         trader_here = _find_trader_at_location(loc_id, state)
@@ -1766,7 +1772,7 @@ def _run_bot_action_inner(
             sell_evs = _bot_sell_to_trader(agent_id, agent, trader_here, state, world_turn)
             if sell_evs:
                 return sell_evs
-        elif agent.get("global_goal") == "get_rich":
+        else:
             trader_loc = _find_nearest_trader_location(loc_id, state)
             if trader_loc and trader_loc != loc_id:
                 agent["current_goal"] = "sell_artifacts"
@@ -1806,23 +1812,21 @@ def _run_bot_action_inner(
 
     # ── GOAL SELECTION ─────────────────────────────────────────────────────────
     wealth = _agent_wealth(agent)
-    threshold = agent.get("material_threshold", 1000)
+    threshold = agent.get("material_threshold", DEFAULT_MATERIAL_THRESHOLD)
     global_goal = agent.get("global_goal", "survive")
 
-    # get_rich agents always follow the goal-directed pursuit path — the goal
-    # itself handles both artifact gathering and selling, so the generic
-    # resource-accumulation phase would only slow them down.
-    if global_goal == "get_rich" or wealth >= threshold:
-        # Phase 2a: Equipment upgrade (only when wealth >= threshold)
+    # All agents accumulate resources until they reach material_threshold first,
+    # then switch to equipment upgrade → global goal pursuit.
+    if wealth >= threshold:
+        # Phase 2a: Equipment upgrade (wealth is sufficient)
         # Before pursuing the global goal, check whether better-matching equipment
         # is available.  Upgrade attempts only fire when the agent already has
         # basic equipment (no point upgrading an empty slot — handled by Phase 1).
-        if wealth >= threshold:
-            upgrade_evs = _bot_try_upgrade_equipment(
-                agent_id, agent, loc_id, state, world_turn
-            )
-            if upgrade_evs:
-                return upgrade_evs
+        upgrade_evs = _bot_try_upgrade_equipment(
+            agent_id, agent, loc_id, state, world_turn
+        )
+        if upgrade_evs:
+            return upgrade_evs
         # Phase 2b: Pursue global goal
         agent["current_goal"] = f"goal_{global_goal}"
         return _bot_pursue_goal(agent_id, agent, global_goal, loc_id, loc, state, world_turn, rng)
@@ -2185,7 +2189,7 @@ def _describe_bot_decision_tree(
     sleepiness = agent.get("sleepiness", 0)
     loc_id = agent.get("location_id", "")
     wealth = _agent_wealth(agent)
-    threshold = agent.get("material_threshold", 1000)
+    threshold = agent.get("material_threshold", DEFAULT_MATERIAL_THRESHOLD)
     global_goal = agent.get("global_goal", "survive")
     artifacts = _agent_artifacts_in_inventory(agent)
     trader_here = _find_trader_at_location(loc_id, state)
