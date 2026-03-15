@@ -1889,23 +1889,21 @@ def _bot_ask_colocated_stalkers_about_item(
 ) -> Optional[str]:
     """Ask co-located stalker agents about the location of items of the given types.
 
-    For each alive stalker sharing the agent's location, scan their memory for the
-    most recent ``observed: items`` entry that mentions one of *item_types*.
-    When intel is found, write an ``intel_from_stalker`` observation to *agent*'s
-    memory so that a subsequent call to ``_find_item_memory_location`` can use it.
+    Scans ALL memories of EVERY co-located alive stalker.  For each unique
+    (source_agent, location) pair not already known, writes one
+    ``intel_from_stalker`` observation to *agent*'s memory so that a subsequent
+    call to ``_find_item_memory_location`` can use it.
 
-    Returns the ``loc_id`` of the first piece of intel successfully shared, or
-    ``None`` when no useful information could be obtained from any co-located stalker.
+    Returns the ``loc_id`` of the first new piece of intel written (oldest
+    co-located stalker processed first), or ``None`` if nothing new was found.
 
-    Deduplication: if the asking agent already holds a ``intel_from_stalker``
-    observation for the same (source_agent_id, location_id) pair recorded within
-    the current turn, the entry is skipped to avoid redundant writes.
+    Deduplication: pairs already recorded during the current turn are skipped.
     """
     loc_id = agent.get("location_id", "")
     agents = state.get("agents", {})
 
-    # Build a set of (source_agent_id, loc_id) pairs the asking agent already knows
-    # this turn so we don't write duplicate entries.
+    # Build a set of (source_agent_id, loc_id) pairs the asking agent already
+    # knows this turn so we don't write duplicate entries.
     already_known: set = set()
     for mem in agent.get("memory", []):
         if mem.get("world_turn") != world_turn:
@@ -1913,6 +1911,8 @@ def _bot_ask_colocated_stalkers_about_item(
         fx = mem.get("effects", {})
         if fx.get("action_kind") == "intel_from_stalker":
             already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+
+    first_loc: Optional[str] = None
 
     for other_id, other in agents.items():
         if other_id == agent_id:
@@ -1926,8 +1926,12 @@ def _bot_ask_colocated_stalkers_about_item(
 
         other_name = other.get("name", other_id)
 
-        # Scan the other agent's memory (newest first) for an items observation
-        # that includes one of the requested types and isn't already known.
+        # Track which locations we've already recorded for *this stalker* in
+        # this call to avoid writing multiple entries for the same location from
+        # one stalker (keep only the newest observation per location).
+        seen_locs_this_stalker: set = set()
+
+        # Scan the other agent's memory (newest first) for items observations.
         for mem in reversed(other.get("memory", [])):
             if mem.get("type") != "observation":
                 continue
@@ -1941,9 +1945,17 @@ def _bot_ask_colocated_stalkers_about_item(
             if not obs_types.intersection(item_types):
                 continue
 
-            # Found relevant intel — check deduplication
+            # Skip if already known from this turn (don't re-write).
             if (other_id, obs_loc) in already_known:
-                break  # already recorded intel from this stalker about this location
+                continue  # keep scanning — other locations may still be new
+
+            # Skip if we already wrote an entry for this (stalker, location)
+            # in this call.  Because the loop iterates newest-first, the first
+            # observation we encounter for a given location is always the most
+            # recent one — older observations for the same location are redundant
+            # and will be skipped by the `seen_locs_this_stalker` guard below.
+            if obs_loc in seen_locs_this_stalker:
+                continue
 
             obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
             current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
@@ -1964,9 +1976,12 @@ def _bot_ask_colocated_stalkers_about_item(
                     "source_agent_name": other_name,
                 },
             )
-            return obs_loc
+            seen_locs_this_stalker.add(obs_loc)
+            already_known.add((other_id, obs_loc))  # prevent cross-stalker duplicates
+            if first_loc is None:
+                first_loc = obs_loc
 
-    return None
+    return first_loc
 
 
 def _find_upgrade_target(
@@ -2882,35 +2897,16 @@ def _bot_pursue_goal(
 
     if global_goal == "unravel_zone_mystery":
         # ── Разгадать тайну Зоны: найти секретные документы ──────────────────
-        # Step 1: Already carrying a secret document — goal effectively complete;
-        # hold it and continue wandering until further mechanics are added.
-        docs_in_inv = [i for i in agent.get("inventory", []) if i.get("type") in SECRET_DOCUMENT_ITEM_TYPES]
-        if docs_in_inv:
-            # Anti-spam: only write the decision once while the state doesn't change.
-            _last_unravel_kind = None
-            for _sm in reversed(agent.get("memory", [])):
-                if _sm.get("type") == "decision":
-                    _last_unravel_kind = _sm.get("effects", {}).get("action_kind")
-                    break
-            if _last_unravel_kind != "goal_unravel_has_docs":
-                doc_names = ", ".join(d.get("name", d.get("type", "?")) for d in docs_in_inv)
-                _add_memory(
-                    agent, world_turn, state, "decision",
-                    "🔍 Документы найдены — продолжаю изучение",
-                    f"В инвентаре есть секретные документы: {doc_names}. Продолжаю разгадывать тайну Зоны.",
-                    {"action_kind": "goal_unravel_has_docs",
-                     "doc_types": [d.get("type") for d in docs_in_inv]},
-                    reason="несу секретные документы — цель выполнена",
-                )
-            agent["action_used"] = True
-            return []
+        # Even if the agent already carries some documents it keeps searching for
+        # more — there is no "done" state.  The fact that it has docs is visible
+        # in inventory; no separate idle decision is needed.
 
-        # Step 2: Pick up secret documents if they're on the ground right here.
+        # Step 1: Pick up secret documents if they're on the ground right here.
         pickup_evs = _bot_pickup_item_from_ground(agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES, state, world_turn)
         if pickup_evs:
             return pickup_evs
 
-        # Step 3: Check memory for a known location of secret documents.
+        # Step 2: Check memory for a known location of secret documents.
         _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, SECRET_DOCUMENT_ITEM_TYPES, "secret_document")
         mem_loc = _find_item_memory_location(agent, SECRET_DOCUMENT_ITEM_TYPES, state)
         if mem_loc:
@@ -2924,7 +2920,7 @@ def _bot_pursue_goal(
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
 
-        # Step 4: Ask co-located stalkers about secret documents.
+        # Step 3: Ask co-located stalkers about secret documents.
         intel_loc = _bot_ask_colocated_stalkers_about_item(
             agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, world_turn
         )
@@ -2939,7 +2935,7 @@ def _bot_pursue_goal(
             )
             return _bot_schedule_travel(agent_id, agent, intel_loc, state, world_turn)
 
-        # Step 5: No leads, no co-located stalkers to ask.
+        # Step 4: No leads, no co-located stalkers to ask.
         # Strategy: go to the nearest trader and wait there for a non-trader
         # stalker to appear; when one shows up, Step 4 will handle asking them.
         # This avoids spamming the decision log with meaningless wander entries.

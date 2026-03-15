@@ -4215,6 +4215,112 @@ class TestUnravelZoneMysteryGoal:
         ]
         assert len(intel_mems) == 1, "Should not write duplicate intel from same stalker in same turn"
 
+    def test_ask_stalker_returns_all_intel(self):
+        """When a stalker has observations about multiple locations, all should be written."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        # Add a third location C
+        state["locations"]["C"] = {
+            "name": "Лаборатория X-18 Сектор 2",
+            "terrain_type": "x_lab",
+            "anomaly_activity": 0,
+            "items": [], "artifacts": [],
+            "agents": [],
+            "connections": [{"to": "A", "type": "normal"}],
+        }
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        # Informant has seen docs in BOTH B and C
+        _add_memory(
+            informant, 1, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        _add_memory(
+            informant, 2, state, "observation",
+            "Вижу предметы в «Лаборатория»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "C", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 3
+        )
+        # Should receive intel from BOTH locations
+        intel_mems = [
+            m for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        ]
+        intel_locs = {m["effects"]["location_id"] for m in intel_mems}
+        assert intel_locs == {"B", "C"}, (
+            f"Should receive intel about both B and C, got: {intel_locs}"
+        )
+        # Return value should be the first loc found
+        assert result_loc in {"B", "C"}, f"Return value should be B or C, got: {result_loc}"
+
+    def test_ask_stalker_all_locations_from_multiple_stalkers(self):
+        """Intel from multiple co-located stalkers should all be collected."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        state["locations"]["C"] = {
+            "name": "Бункер",
+            "terrain_type": "scientific_bunker",
+            "anomaly_activity": 0,
+            "items": [], "artifacts": [],
+            "agents": [],
+            "connections": [{"to": "A", "type": "normal"}],
+        }
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+
+        # Stalker 1 knows about location B
+        stalker1 = {
+            "id": "stalker_1", "archetype": "stalker_agent", "name": "Сталкер Один",
+            "location_id": "A", "is_alive": True, "memory": [],
+        }
+        _add_memory(stalker1, 1, state, "observation", "Вижу предметы",
+                    f"На земле: {doc_type}.",
+                    {"observed": "items", "location_id": "B", "item_types": [doc_type]})
+        state["agents"]["stalker_1"] = stalker1
+
+        # Stalker 2 knows about location C
+        stalker2 = {
+            "id": "stalker_2", "archetype": "stalker_agent", "name": "Сталкер Два",
+            "location_id": "A", "is_alive": True, "memory": [],
+        }
+        _add_memory(stalker2, 1, state, "observation", "Вижу предметы",
+                    f"На земле: {doc_type}.",
+                    {"observed": "items", "location_id": "C", "item_types": [doc_type]})
+        state["agents"]["stalker_2"] = stalker2
+
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 2
+        )
+        intel_locs = {
+            m["effects"]["location_id"] for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        }
+        assert intel_locs == {"B", "C"}, (
+            f"Should receive intel from both stalkers about B and C, got: {intel_locs}"
+        )
+
     def test_set_goal_via_world_command(self):
         """debug_spawn_stalker should accept 'unravel_zone_mystery' as global_goal."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
@@ -4364,9 +4470,10 @@ class TestUnravelZoneMysteryGoal:
         )
         assert seek_decision["effects"].get("destination") == "B"
 
-    def test_bot_has_docs_no_spam(self):
-        """goal_unravel_has_docs decision should not be written on every tick."""
-        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+    def test_bot_continues_seeking_with_docs(self):
+        """Agent that already has docs should continue searching for more, not idle."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
         from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
         doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
         doc_info = ITEM_TYPES[doc_type]
@@ -4375,15 +4482,17 @@ class TestUnravelZoneMysteryGoal:
         agent["inventory"] = [{"id": "doc_001", "type": doc_type, "name": doc_info["name"],
                                 "weight": doc_info["weight"], "value": doc_info["value"]}]
         state["agents"]["agent_ai_m"] = agent
-        # Simulate two ticks
-        _run_bot_action_inner("agent_ai_m", agent, state, 1)
-        agent["action_used"] = False
-        _run_bot_action_inner("agent_ai_m", agent, state, 2)
-        has_docs_decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
-            and m["effects"].get("action_kind") == "goal_unravel_has_docs"
-        ]
-        assert len(has_docs_decisions) == 1, (
-            f"goal_unravel_has_docs should only be written once, got: {len(has_docs_decisions)}"
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        # Agent with docs should still write a decision (seek_item, wander, wait_at_trader)
+        assert decisions, "Agent with docs should still take an action and write a decision"
+        # Must NOT idle with goal_unravel_has_docs any more
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "goal_unravel_has_docs" not in action_kinds, (
+            f"Agent should not idle with goal_unravel_has_docs, got: {action_kinds}"
+        )
+        # Should be doing something active (seek, wander, wait at trader)
+        assert action_kinds.intersection({"seek_item", "wander", "wait_at_trader"}), (
+            f"Agent with docs should actively search for more, got: {action_kinds}"
         )
