@@ -2314,7 +2314,11 @@ class TestItemNotFoundLoop:
         )
 
     def test_no_observation_when_item_found(self):
-        """If the weapon IS on the ground when the agent arrives, no not_found entry is written."""
+        """When the weapon IS on the ground and is picked up as the last item,
+        a pickup-induced item_not_found_here observation IS written (prevents re-visit).
+        The arrival-based observation from _maybe_record_item_not_found is NOT written
+        because _bot_pickup_item_from_ground returns early on success, never reaching
+        the _maybe_record_item_not_found call."""
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state = self._agent_with_seek_weapon_memory("A")
         info = ITEM_TYPES["pistol"]
@@ -2328,8 +2332,14 @@ class TestItemNotFoundLoop:
             m for m in agent["memory"]
             if m.get("effects", {}).get("action_kind") == "item_not_found_here"
         ]
-        assert len(not_found) == 0, (
-            f"Should not write not_found when weapon was actually found; got {not_found}"
+        # The new behavior: pickup of the last item writes item_not_found_here so
+        # the agent won't plan another trip here for the same category.
+        assert len(not_found) == 1, (
+            f"Expected 1 item_not_found_here written by pickup; got {len(not_found)}"
+        )
+        # Verify it is the pickup-kind, not the arrival-kind.
+        assert not_found[0]["effects"].get("source") == "pickup", (
+            f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
         )
 
     def test_no_observation_without_seek_intent(self):
@@ -2437,3 +2447,130 @@ class TestItemMemoryUnreachable:
         ]
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result == "C", f"Should return reachable C, not unreachable B; got {result}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Successful pickup blocks repeated item search at same location
+# ─────────────────────────────────────────────────────────────────
+
+class TestPickupBlocksResearch:
+    """Verify that after picking up the last item of a needed type from a location,
+    an item_not_found_here observation is written so that _find_item_memory_location
+    won't send the agent back to the same spot."""
+
+    def _call_pickup(self, agent, item_types, state, world_turn=1):
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_item_from_ground
+        return _bot_pickup_item_from_ground("agent1", agent, item_types, state, world_turn)
+
+    def _make_agent_at(self, loc_id: str, state: dict) -> dict:
+        agent = next(iter(state["agents"].values()))
+        agent["location_id"] = loc_id
+        return agent
+
+    def test_pickup_last_item_writes_not_found_observation(self):
+        """After picking up the last weapon on the ground, item_not_found_here is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        evs = self._call_pickup(agent, WEAPON_ITEM_TYPES, state)
+        assert evs, "Should have returned pickup event"
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(not_found) == 1, (
+            f"Expected 1 item_not_found_here after last-item pickup, got {len(not_found)}"
+        )
+        assert not_found[0]["effects"].get("source") == "pickup", (
+            f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
+        )
+
+    def test_pickup_with_remaining_items_no_observation(self):
+        """When another weapon remains after pickup, no item_not_found_here is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+            {"id": "wpn2", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+        ]
+        evs = self._call_pickup(agent, WEAPON_ITEM_TYPES, state)
+        assert evs, "Should have returned pickup event"
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            f"Should NOT write not_found when another weapon remains; got {not_found}"
+        )
+
+    def test_not_found_observation_blocks_find_item_memory_location(self):
+        """After picking up the last weapon, _find_item_memory_location no longer
+        returns that location."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = self._make_agent_at("A", state)
+        # Agent remembers having seen a weapon at B
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        # Simulate: agent travelled to B, picked up last weapon there
+        agent["location_id"] = "B"
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["B"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        self._call_pickup(agent, WEAPON_ITEM_TYPES, state)  # picks up + writes not_found for B
+
+        # Back at A: now search again
+        agent["location_id"] = "A"
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, (
+            f"_find_item_memory_location should return None after pickup-block on B; got {result}"
+        )
+
+    def test_newer_item_obs_lifts_pickup_block(self):
+        """A newer observed:items entry for the same location lifts the pickup-induced block."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = self._make_agent_at("A", state)
+        # Simulate: old observation + pickup (writes not_found) + newer observation
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # the block written by pickup on turn 1
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # a new item spawned and agent observed it on turn 2
+            {"world_turn": 2, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "B", (
+            f"Newer observed:items should lift the pickup block on B; got {result}"
+        )

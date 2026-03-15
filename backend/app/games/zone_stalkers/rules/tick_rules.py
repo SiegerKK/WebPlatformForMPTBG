@@ -1374,6 +1374,11 @@ def _bot_pickup_item_from_ground(
 
     Removes the item from ``location["items"]`` and adds it to the agent's
     inventory.  Returns a non-empty event list on success.
+
+    After a successful pickup, if no items of ``item_types`` remain on the ground
+    at this location, an ``item_not_found_here`` observation is written so that
+    the agent does not return looking for more of those items until a fresh
+    ``observed:items`` entry supersedes the block.
     """
     loc_id = agent.get("location_id")
     loc = state.get("locations", {}).get(loc_id, {})
@@ -1392,6 +1397,21 @@ def _bot_pickup_item_from_ground(
         f"Нашёл «{item_name}» на земле в «{loc_name}» и подобрал.",
         {"action_kind": "pickup_ground", "item_type": item["type"], "location_id": loc_id},
     )
+    # If no more items of the requested types remain, record that so the agent
+    # won't plan another trip here for the same item category.
+    remaining = loc.get("items", [])
+    if not any(i.get("type") in item_types for i in remaining):
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"📭 Предметы закончились в «{loc_name}»",
+            f"Подобрал последний предмет нужного типа в «{loc_name}». Здесь больше нет.",
+            {
+                "action_kind": "item_not_found_here",
+                "source": "pickup",
+                "location_id": loc_id,
+                "item_types": sorted(item_types),
+            },
+        )
     return [{"event_type": "item_picked_up",
              "payload": {"agent_id": agent_id, "item_type": item["type"],
                          "item_id": item["id"], "location_id": loc_id}}]
@@ -1492,6 +1512,7 @@ def _maybe_record_item_not_found(
         f"Пришёл в «{loc_name}» за {item_category}, но предмет уже забрали.",
         {
             "action_kind": "item_not_found_here",
+            "source": "arrival",
             "location_id": loc_id,
             "item_types": sorted(item_types),
         },
