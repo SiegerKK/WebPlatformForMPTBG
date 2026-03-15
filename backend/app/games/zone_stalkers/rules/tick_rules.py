@@ -2082,30 +2082,31 @@ def _bot_gather_resources(
         return [{"event_type": "exploration_started",
                  "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-    # G3 — Move toward a fresh (not confirmed-empty) anomaly location
-    connections = [c for c in loc.get("connections", []) if not c.get("closed")]
-    if connections:
-        # Only consider neighbors that have anomaly activity AND are not confirmed empty.
-        # Ignoring confirmed-empty neighbors prevents the bot from oscillating between
-        # two barren anomaly spots (arrive at A → go to B → go back to A → …).
-        fresh_neighbors = [
-            c for c in connections
-            if locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
-            and c["to"] not in confirmed_empty
-        ]
-        if fresh_neighbors:
-            best = max(fresh_neighbors,
-                       key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
-            if rng.random() < 0.70:
-                best_nb_name = locations.get(best["to"], {}).get("name", best["to"])
-                _add_memory(
-                    agent, world_turn, state, "decision",
-                    "Двигаюсь к непроверенной аномальной зоне",
-                    f"Иду в «{best_nb_name}» — там есть аномальная активность и я ещё не исследовал это место.",
-                    {"action_kind": "move_for_resources", "destination": best["to"]},
-                    reason="у соседней локации есть аномальная активность и она не исследована",
-                )
-                return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+    # G3 — BFS search for the best fresh (not confirmed-empty) anomaly location within
+    # skill-based radius.  Uses the same formula as _bot_pursue_goal (Phase 2b) so that
+    # Phase-1 stalkers are not limited to just their immediate neighbors.
+    _max_gather_search_hops = 4 + int(agent.get("skill_stalker", 1))  # mirrors Phase-2b radius
+    reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_gather_search_hops)
+
+    def _gather_candidate_score(lid: str, dist: int) -> float:
+        return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY + rng.random() * _ANOMALY_SCORE_NOISE
+
+    fresh_gather_candidates = [
+        (lid, dist) for lid, dist in reachable.items()
+        if locations.get(lid, {}).get("anomaly_activity", 0) > 0
+        and lid not in confirmed_empty
+    ]
+    if fresh_gather_candidates:
+        best_lid, best_dist = max(fresh_gather_candidates, key=lambda t: _gather_candidate_score(*t))
+        best_nb_name = locations.get(best_lid, {}).get("name", best_lid)
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "Двигаюсь к непроверенной аномальной зоне",
+            f"Ищу аномальные зоны для сбора ресурсов. Лучший вариант в радиусе {_max_gather_search_hops} переходов: «{best_nb_name}» (активность {locations.get(best_lid, {}).get('anomaly_activity', 0)}, расстояние {best_dist}).",
+            {"action_kind": "move_for_resources", "destination": best_lid},
+            reason="ближайшая непроверенная аномальная зона в радиусе поиска",
+        )
+        return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
     # G4 — Fallback: explore current location only if not confirmed empty
     if loc_id not in confirmed_empty and rng.random() < 0.40:
