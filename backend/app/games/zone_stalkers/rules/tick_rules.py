@@ -1055,6 +1055,23 @@ def _select_item_by_risk_tolerance(
     return best_key, best_value
 
 
+def _can_afford_cheapest(agent: Dict[str, Any], item_types: "frozenset[str]") -> bool:
+    """Return True if the agent can afford at least the cheapest item in
+    *item_types* at the standard trader markup (base_value × 1.5).
+
+    Used to guard "travel to trader" decisions: if the agent cannot afford
+    anything the trip would be pointless and would cause an infinite loop
+    (seek trader → can't buy → fall through to goal → seek trader again).
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+    money = agent.get("money", 0)
+    return any(
+        money >= int(ITEM_TYPES[k].get("value", 0) * 1.5)
+        for k in item_types
+        if k in ITEM_TYPES
+    )
+
+
 def _bot_buy_from_trader(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1549,9 +1566,9 @@ def _run_bot_action_inner(
             bought = _bot_buy_from_trader(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
             if bought:
                 return bought
-        elif trader_loc is not None:
+        elif trader_loc is not None and _can_afford_cheapest(agent, HEAL_ITEM_TYPES):
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
-        # No trader reachable — flee to low-anomaly neighbor
+        # No trader reachable (or can't afford) — flee to low-anomaly neighbor
         safe_neighbors = [
             c["to"] for c in loc.get("connections", [])
             if not c.get("closed")
@@ -1573,7 +1590,7 @@ def _run_bot_action_inner(
             bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
             if bought:
                 return bought
-        elif trader_loc is not None:
+        elif trader_loc is not None and _can_afford_cheapest(agent, FOOD_ITEM_TYPES):
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── EMERGENCY: Drink ──────────────────────────────────────────────────────
@@ -1587,7 +1604,7 @@ def _run_bot_action_inner(
             bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
             if bought:
                 return bought
-        elif trader_loc is not None:
+        elif trader_loc is not None and _can_afford_cheapest(agent, DRINK_ITEM_TYPES):
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── EQUIPMENT MAINTENANCE ─────────────────────────────────────────────────
@@ -1626,7 +1643,7 @@ def _run_bot_action_inner(
             bought = _bot_buy_from_trader(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
             if bought:
                 return bought
-        elif trader_loc is not None:
+        elif trader_loc is not None and _can_afford_cheapest(agent, WEAPON_ITEM_TYPES):
             agent["current_goal"] = "get_weapon"
             _add_memory(
                 agent, world_turn, state, "decision",
@@ -1659,7 +1676,7 @@ def _run_bot_action_inner(
             bought = _bot_buy_from_trader(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
             if bought:
                 return bought
-        elif trader_loc is not None:
+        elif trader_loc is not None and _can_afford_cheapest(agent, ARMOR_ITEM_TYPES):
             agent["current_goal"] = "get_armor"
             _add_memory(
                 agent, world_turn, state, "decision",
@@ -1697,7 +1714,7 @@ def _run_bot_action_inner(
                     bought = _bot_buy_from_trader(agent_id, agent, _required_ammo_set, state, world_turn)
                     if bought:
                         return bought
-                elif trader_loc is not None:
+                elif trader_loc is not None and _can_afford_cheapest(agent, _required_ammo_set):
                     agent["current_goal"] = "get_ammo"
                     _add_memory(
                         agent, world_turn, state, "decision",
@@ -1708,12 +1725,22 @@ def _run_bot_action_inner(
                     )
                     return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
-    # Need 4 — Medicine reserve (proactive; only acts if local trader or ground item available) ──
+    # Need 4 — Medicine reserve (pick up from ground, travel to observed location, or buy locally) ──
     _has_heal = any(i["type"] in HEAL_ITEM_TYPES for i in agent.get("inventory", []))
     if not _has_heal:
         evs = _bot_pickup_item_from_ground(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
         if evs:
             return evs
+        # Travel to a location where healing items were observed (observation memory)
+        mem_loc = _find_item_memory_location(agent, HEAL_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду за аптечкой по памяти",
+                f"Нет лечебных предметов. Помню, что видел их в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "medical", "destination": mem_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         # Only buy locally — don't travel just for medicine stockpile
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
@@ -1721,24 +1748,44 @@ def _run_bot_action_inner(
             if bought:
                 return bought
 
-    # Need 5 — Food reserve (proactive; only when hunger > 30) ────────────────
+    # Need 5 — Food reserve (pick up from ground, travel to observed location, or buy locally) ──
     _has_food = any(i["type"] in FOOD_ITEM_TYPES for i in agent.get("inventory", []))
     if not _has_food and agent.get("hunger", 0) > 30:
         evs = _bot_pickup_item_from_ground(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
         if evs:
             return evs
+        # Travel to a location where food was observed (observation memory)
+        mem_loc = _find_item_memory_location(agent, FOOD_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду за едой по памяти",
+                f"Нет еды. Помню, что видел её в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "food", "destination": mem_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
             bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
             if bought:
                 return bought
 
-    # Need 6 — Water/drink reserve (proactive; only when thirst > 30) ─────────
+    # Need 6 — Water/drink reserve (pick up from ground, travel to observed location, or buy locally) ──
     _has_drink = any(i["type"] in DRINK_ITEM_TYPES for i in agent.get("inventory", []))
     if not _has_drink and agent.get("thirst", 0) > 30:
         evs = _bot_pickup_item_from_ground(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
         if evs:
             return evs
+        # Travel to a location where drinks were observed (observation memory)
+        mem_loc = _find_item_memory_location(agent, DRINK_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду за водой по памяти",
+                f"Нет воды. Помню, что видел её в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "drink", "destination": mem_loc},
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
             bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
