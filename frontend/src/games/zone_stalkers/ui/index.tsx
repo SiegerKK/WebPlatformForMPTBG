@@ -341,6 +341,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lobbyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ─── refresh rate-limiting ────────────────────────────────────────────────
+  // Prevent concurrent refresh() calls from stacking up (e.g. when the
+  // debug auto-ticker fires at 500 ms and each WS `ticked` message
+  // immediately triggers a full API round-trip for the context tree + events).
+  // At most one HTTP refresh is in-flight at a time.  If a second call arrives
+  // while one is already running, we remember to run exactly one more after
+  // the current one finishes instead of stacking unlimited parallel requests.
+  const refreshInFlightRef = useRef(false);
+  const pendingRefreshRef = useRef(false);
 
   const zoneState: ZoneMapState | null = context
     ? (context.state_blob as unknown as ZoneMapState)
@@ -378,6 +387,13 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // ─── refresh context + events ────────────────────────────────────────────
   const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) {
+      // A refresh is already running — schedule one more pass after it finishes
+      // instead of launching a parallel request.
+      pendingRefreshRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
     try {
       const ctxRes = await contextsApi.getTree(match.id);
       const ctxList = ctxRes.data as GameContext[];
@@ -398,7 +414,16 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
       const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
       setEvents(evRes.data as GameEvent[]);
     } catch { /* ignore */ }
-  }, [match.id]);
+    finally {
+      refreshInFlightRef.current = false;
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        // One pending request was queued while we were in-flight — run it now.
+        // setTimeout(0) avoids deep synchronous recursion.
+        setTimeout(() => refresh(), 0);
+      }
+    }
+  }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── WebSocket push — replaces polling when connected ────────────────────
   const wsToken = localStorage.getItem('access_token');

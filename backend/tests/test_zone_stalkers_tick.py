@@ -3388,3 +3388,152 @@ class TestDebugTriggerEmission:
         assert len(warnings) == 1, (
             f"Expected 1 emission_imminent memory after ticks, got {len(warnings)}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission interrupt during anomaly exploration
+# ─────────────────────────────────────────────────────────────────
+
+class TestExplorationEmissionInterrupt:
+    """Verify that a bot mid-exploration cancels the exploration and flees/shelters
+    when it has an active emission warning in memory."""
+
+    def _make_explore_state(self, terrain="plain"):
+        """Two locations: A (anomaly, configured terrain) and B (building=safe).
+        Agent at A with an in-progress explore_anomaly_location scheduled action."""
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1}]},
+                "B": {"connections": [{"to": "A", "travel_time": 1}]},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = terrain
+        state["locations"]["A"]["anomaly_activity"] = 5
+        state["locations"]["B"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+        state["seed"] = 0
+        # Put agent mid-exploration (5 turns remaining out of 30)
+        agent = next(iter(state["agents"].values()))
+        agent["scheduled_action"] = {
+            "type": "explore_anomaly_location",
+            "turns_remaining": 5,
+            "turns_total": 30,
+            "target_id": "A",
+            "started_turn": 1,
+        }
+        return state
+
+    def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": world_turn,
+            "title": "⚠️ Скоро выброс!",
+            "summary": "...",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": 12,
+                "emission_scheduled_turn": scheduled_turn,
+            },
+        })
+
+    def test_exploration_interrupted_by_emission_warning(self):
+        """Mid-exploration with emission_imminent memory: exploration action cancelled.
+        On dangerous terrain the bot immediately schedules a flee travel, so we
+        only verify that the original explore_anomaly_location is no longer active."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_explore_state(terrain="plain")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, events = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        # The exploration action must no longer be the scheduled action
+        sched = new_agent.get("scheduled_action")
+        assert sched is None or sched.get("type") != "explore_anomaly_location", (
+            "Exploration action should have been cancelled when emission_imminent is in memory"
+        )
+
+    def test_interruption_memory_written(self):
+        """After interrupting exploration, an exploration_interrupted memory entry is written."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_explore_state(terrain="plain")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        interrupted = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "exploration_interrupted"
+        ]
+        assert interrupted, "exploration_interrupted memory entry should be written"
+
+    def test_bot_flees_after_interrupt_on_dangerous_terrain(self):
+        """After interrupting exploration on dangerous terrain, bot schedules flee travel."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_explore_state(terrain="plain")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        # Bot should have scheduled a flee travel to safe terrain
+        sched = new_agent.get("scheduled_action")
+        assert sched is not None, "Bot should schedule travel to flee after interruption"
+        assert sched["type"] == "travel", f"Expected travel action, got {sched.get('type')}"
+        # Target must be safe terrain (B = building)
+        assert sched.get("final_target_id") == "B" or sched.get("target_id") == "B", (
+            "Bot should flee toward safe terrain (building B)"
+        )
+
+    def test_bot_shelters_after_interrupt_on_safe_terrain(self):
+        """After interrupting exploration on safe terrain, bot writes wait_in_shelter."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_explore_state(terrain="building")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        shelter = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        assert shelter, "Bot should write wait_in_shelter after interruption on safe terrain"
+        # No travel should be scheduled (already safe)
+        sched = new_agent.get("scheduled_action")
+        assert sched is None, "Bot should NOT schedule travel when already on safe terrain"
+
+    def test_exploration_not_interrupted_without_warning(self):
+        """Without emission warning, exploration continues normally."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_explore_state(terrain="plain")
+        # No emission_imminent in memory
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        assert sched is not None, "Exploration should continue without emission warning"
+        assert sched["type"] == "explore_anomaly_location"
+        assert sched["turns_remaining"] == 4, "turns_remaining should have decremented"
+
+    def test_exploration_interrupted_by_active_emission(self):
+        """Mid-exploration with emission_active=True: scheduled_action cleared."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_explore_state(terrain="building")
+        state["emission_active"] = True
+        state["emission_ends_turn"] = 300
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        assert new_agent.get("scheduled_action") is None, (
+            "Exploration should be interrupted when emission_active=True"
+        )

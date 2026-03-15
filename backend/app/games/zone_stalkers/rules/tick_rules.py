@@ -344,6 +344,47 @@ def _process_scheduled_action(
     sched["turns_remaining"] = turns_remaining
 
     if turns_remaining > 0:
+        # ── Emergency interrupt: emission warning during anomaly exploration ──
+        # Anomaly exploration is a long-running action (30 turns).  If an
+        # emission becomes active or the agent received an ``emission_imminent``
+        # observation while exploring, cancel the action immediately so that
+        # the bot decision loop runs on this same tick and can choose to flee.
+        # Checking the agent's own memory (written in step 2b of the previous
+        # tick) means the interrupt fires from the very next tick after the
+        # warning is broadcast.
+        if action_type == "explore_anomaly_location":
+            _emit_active = state.get("emission_active", False)
+            _emit_warned = False
+            if not _emit_active:
+                _last_ended_turn: int = 0
+                _last_imminent_turn: int = 0
+                for _mem in agent.get("memory", []):
+                    if _mem.get("type") != "observation":
+                        continue
+                    _kind = _mem.get("effects", {}).get("action_kind")
+                    _mem_turn = _mem.get("world_turn", 0)
+                    if _kind == "emission_ended" and _mem_turn > _last_ended_turn:
+                        _last_ended_turn = _mem_turn
+                    elif _kind == "emission_imminent" and _mem_turn > _last_imminent_turn:
+                        _last_imminent_turn = _mem_turn
+                _emit_warned = _last_imminent_turn > _last_ended_turn
+            if _emit_active or _emit_warned:
+                agent["scheduled_action"] = None
+                _int_loc_name = state.get("locations", {}).get(
+                    agent.get("location_id", ""), {}
+                ).get("name", "аномалии")
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "⚡ Прерываю исследование из-за выброса",
+                    f"Получено предупреждение о выбросе во время исследования «{_int_loc_name}». "
+                    "Прерываю разведку аномалии — нужно найти укрытие.",
+                    {"action_kind": "exploration_interrupted", "reason": "emission_warning",
+                     "location_id": agent.get("location_id")},
+                    reason="выброс во время исследования аномалии",
+                )
+                # Return without events; the bot decision loop will run this tick
+                # (since scheduled_action is now None) and will order a flee/shelter.
+                return events
         return events
 
     # Action complete — resolve effects
