@@ -3537,3 +3537,252 @@ class TestExplorationEmissionInterrupt:
         assert new_agent.get("scheduled_action") is None, (
             "Exploration should be interrupted when emission_active=True"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission interrupt during travel
+# ─────────────────────────────────────────────────────────────────
+
+class TestTravelEmissionInterrupt:
+    """Verify that a bot mid-travel cancels the trip and flees/shelters when
+    an emission warning is active in memory.  Two cases are covered:
+
+    1. Mid-hop (turns_remaining > 0): hop has not yet completed.
+    2. Post-hop (turns_remaining == 0, remaining_route non-empty): bot arrives
+       at an intermediate hop and would normally schedule the next hop but must
+       not do so when emission is imminent.
+    """
+
+    def _make_travel_state(self, terrain_at_current="plain", hop_turns=5):
+        """Three locations:
+          A (origin, configured terrain) -- hop_turns --> B (intermediate, hills)
+          B (intermediate) -- 1 --> C (destination, building)
+        Agent is mid-trip A→B→C, currently at A with travel scheduled to B.
+        """
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": hop_turns}]},
+                "B": {"connections": [{"to": "A", "travel_time": hop_turns},
+                                       {"to": "C", "travel_time": 1}]},
+                "C": {"connections": [{"to": "B", "travel_time": 1}]},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = terrain_at_current
+        state["locations"]["B"]["terrain_type"] = "hills"
+        state["locations"]["C"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+        state["seed"] = 0
+        agent = next(iter(state["agents"].values()))
+        # Agent is mid-hop toward B (hop_turns - 1 turns remaining)
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": hop_turns - 1,  # > 0 → mid-hop case
+            "turns_total": hop_turns,
+            "target_id": "B",
+            "final_target_id": "C",
+            "remaining_route": ["C"],
+            "started_turn": 1,
+        }
+        return state
+
+    def _make_post_hop_state(self, terrain_at_B="hills"):
+        """Agent has just arrived at B (turns_remaining will hit 0) with one
+        more hop to C remaining.  B is on the given terrain."""
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1}]},
+                "B": {"connections": [{"to": "A", "travel_time": 1},
+                                       {"to": "C", "travel_time": 1}]},
+                "C": {"connections": [{"to": "B", "travel_time": 1}]},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "plain"
+        state["locations"]["B"]["terrain_type"] = terrain_at_B
+        state["locations"]["C"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+        state["seed"] = 0
+        agent = next(iter(state["agents"].values()))
+        # turns_remaining=1 → will become 0 on next tick → hop completes, moves to B
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 1,
+            "turns_total": 1,
+            "target_id": "B",
+            "final_target_id": "C",
+            "remaining_route": ["C"],
+            "started_turn": 1,
+        }
+        return state
+
+    def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": world_turn,
+            "title": "⚠️ Скоро выброс!",
+            "summary": "...",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": 12,
+                "emission_scheduled_turn": scheduled_turn,
+            },
+        })
+
+    # ── Mid-hop cases ────────────────────────────────────────────────────────
+
+    def test_mid_hop_travel_interrupted_by_emission_warning(self):
+        """Mid-hop travel is cancelled when emission_imminent is in memory."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_travel_state(hop_turns=5)
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        assert sched is None or sched.get("type") != "travel", (
+            "Mid-hop travel should be cancelled when emission_imminent is in memory"
+        )
+
+    def test_mid_hop_travel_interrupted_memory_written(self):
+        """travel_interrupted memory entry is written on mid-hop cancellation."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_travel_state(hop_turns=5)
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        interrupted = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+        ]
+        assert interrupted, "travel_interrupted memory entry should be written"
+        assert interrupted[0]["effects"].get("reason") == "emission_warning"
+
+    def test_mid_hop_travel_not_interrupted_without_warning(self):
+        """Without emission warning, mid-hop travel continues normally."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_travel_state(hop_turns=5)
+        # No emission_imminent in memory
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        assert sched is not None, "Travel should continue without emission warning"
+        assert sched["type"] == "travel"
+        assert sched["turns_remaining"] == 3, "turns_remaining should decrement"
+
+    def test_mid_hop_travel_interrupted_by_active_emission(self):
+        """Mid-hop travel is cancelled when emission_active=True."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_travel_state(hop_turns=5)
+        state["emission_active"] = True
+        state["emission_ends_turn"] = 300
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        assert sched is None or sched.get("type") != "travel", (
+            "Mid-hop travel should be cancelled when emission is active"
+        )
+
+    # ── Post-hop cases (hop completes, remaining_route non-empty) ────────────
+
+    def test_post_hop_next_hop_not_scheduled_when_emission_warned(self):
+        """After completing a hop with more hops remaining, the original multi-hop
+        route is interrupted and no continuation is scheduled when on safe terrain.
+        (On dangerous terrain the bot would instead schedule a flee action — see
+        test_post_hop_bot_flees_dangerous_terrain_after_interrupt.)"""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        # Use safe terrain at B so the bot waits instead of scheduling a flee travel
+        state = self._make_post_hop_state(terrain_at_B="building")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        # travel_interrupted must be in memory (route was cancelled)
+        interrupted = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+        ]
+        assert interrupted, "travel_interrupted memory should confirm route was cancelled"
+        # On safe terrain the bot waits in shelter — no new travel should be scheduled
+        sched = new_agent.get("scheduled_action")
+        assert sched is None, (
+            "Bot on safe terrain should NOT schedule travel after post-hop interrupt"
+        )
+
+    def test_post_hop_travel_interrupted_memory_written(self):
+        """travel_interrupted memory entry written when post-hop next hop is suppressed."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_post_hop_state(terrain_at_B="hills")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        interrupted = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+        ]
+        assert interrupted, "travel_interrupted memory should be written after post-hop interrupt"
+
+    def test_post_hop_agent_moved_before_interrupt(self):
+        """Even when emission interrupts the next hop, the agent still moved to
+        the intermediate location (the completed hop is not reversed)."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_post_hop_state(terrain_at_B="hills")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        assert new_agent["location_id"] == "B", (
+            "Agent should have moved to intermediate hop location B"
+        )
+
+    def test_post_hop_next_hop_scheduled_without_emission(self):
+        """Without emission warning, the next hop IS scheduled after completing a hop."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_post_hop_state(terrain_at_B="hills")
+        # No emission_imminent in memory
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        assert sched is not None, "Next hop should be scheduled when no emission"
+        assert sched["type"] == "travel"
+        assert sched.get("target_id") == "C", "Next hop target should be C"
+
+    def test_post_hop_bot_flees_dangerous_terrain_after_interrupt(self):
+        """After post-hop interrupt on dangerous terrain, bot schedules flee travel."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_post_hop_state(terrain_at_B="hills")
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        # After interrupt bot runs its decision logic and should flee from hills
+        sched = new_agent.get("scheduled_action")
+        flee_mems = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert flee_mems or (sched is not None and sched.get("type") == "travel"), (
+            "Bot should flee from dangerous terrain after travel interrupt"
+        )

@@ -350,6 +350,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // the current one finishes instead of stacking unlimited parallel requests.
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef(false);
+  // When set, the next refresh() call will skip fetching events from the API
+  // because they already arrived inline via the WS `ticked` message payload.
+  const skipNextEventsRef = useRef(false);
 
   const zoneState: ZoneMapState | null = context
     ? (context.state_blob as unknown as ZoneMapState)
@@ -394,6 +397,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
       return;
     }
     refreshInFlightRef.current = true;
+    // Consume the skip-events flag atomically so the pending-refresh path below
+    // always fetches events (only the immediate call initiated by a WS message
+    // can skip them).
+    const fetchEvents = !skipNextEventsRef.current;
+    skipNextEventsRef.current = false;
     try {
       const ctxRes = await contextsApi.getTree(match.id);
       const ctxList = ctxRes.data as GameContext[];
@@ -411,8 +419,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         setActiveEventCtx(null);
       }
 
-      const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
-      setEvents(evRes.data as GameEvent[]);
+      if (fetchEvents) {
+        const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
+        setEvents(evRes.data as GameEvent[]);
+      }
     } catch { /* ignore */ }
     finally {
       refreshInFlightRef.current = false;
@@ -455,6 +465,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               },
             };
           });
+        }
+        // Append new events that arrived inline with the WS notification.
+        // This avoids a separate listForMatch() API call on every tick.
+        const wsNewEvents = msg.new_events as GameEvent[] | undefined;
+        if (Array.isArray(wsNewEvents) && wsNewEvents.length > 0) {
+          setEvents((prev) => {
+            const existingIds = new Set(prev.map((e) => e.id));
+            const added = wsNewEvents.filter((e) => !existingIds.has(e.id));
+            if (added.length === 0) return prev;
+            const combined = [...prev, ...added];
+            // Keep the last 100 events (same cap as the listForMatch call)
+            return combined.length > 100 ? combined.slice(-100) : combined;
+          });
+          // Signal refresh() to skip the events API call — we already have them.
+          skipNextEventsRef.current = true;
         }
         refresh();
       } else if (msg.type === 'state_updated') {

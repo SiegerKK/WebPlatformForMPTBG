@@ -331,6 +331,25 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 # Scheduled action processing
 # ─────────────────────────────────────────────────────────────────
 
+def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """Return True if an active emission or a live emission_imminent warning
+    (not yet superseded by emission_ended) is present in the agent's memory."""
+    if state.get("emission_active", False):
+        return True
+    _last_ended: int = 0
+    _last_imminent: int = 0
+    for _mem in agent.get("memory", []):
+        if _mem.get("type") != "observation":
+            continue
+        _mk = _mem.get("effects", {}).get("action_kind")
+        _mt = _mem.get("world_turn", 0)
+        if _mk == "emission_ended" and _mt > _last_ended:
+            _last_ended = _mt
+        elif _mk == "emission_imminent" and _mt > _last_imminent:
+            _last_imminent = _mt
+    return _last_imminent > _last_ended
+
+
 def _process_scheduled_action(
     agent_id: str,
     agent: Dict[str, Any],
@@ -344,44 +363,39 @@ def _process_scheduled_action(
     sched["turns_remaining"] = turns_remaining
 
     if turns_remaining > 0:
-        # ── Emergency interrupt: emission warning during anomaly exploration ──
-        # Anomaly exploration is a long-running action (30 turns).  If an
-        # emission becomes active or the agent received an ``emission_imminent``
-        # observation while exploring, cancel the action immediately so that
-        # the bot decision loop runs on this same tick and can choose to flee.
-        # Checking the agent's own memory (written in step 2b of the previous
-        # tick) means the interrupt fires from the very next tick after the
-        # warning is broadcast.
-        if action_type == "explore_anomaly_location":
-            _emit_active = state.get("emission_active", False)
-            _emit_warned = False
-            if not _emit_active:
-                _last_ended_turn: int = 0
-                _last_imminent_turn: int = 0
-                for _mem in agent.get("memory", []):
-                    if _mem.get("type") != "observation":
-                        continue
-                    _kind = _mem.get("effects", {}).get("action_kind")
-                    _mem_turn = _mem.get("world_turn", 0)
-                    if _kind == "emission_ended" and _mem_turn > _last_ended_turn:
-                        _last_ended_turn = _mem_turn
-                    elif _kind == "emission_imminent" and _mem_turn > _last_imminent_turn:
-                        _last_imminent_turn = _mem_turn
-                _emit_warned = _last_imminent_turn > _last_ended_turn
-            if _emit_active or _emit_warned:
+        # ── Emergency interrupt: emission warning during any long-running action ──
+        # If an emission becomes active or the agent received an ``emission_imminent``
+        # observation, cancel the current action immediately so that the bot decision
+        # loop runs on this same tick and can choose to flee or shelter.
+        # This fires for both exploration (30-turn) and multi-hop travel actions.
+        if action_type in ("explore_anomaly_location", "travel"):
+            if _is_emission_threat(agent, state):
                 agent["scheduled_action"] = None
                 _int_loc_name = state.get("locations", {}).get(
                     agent.get("location_id", ""), {}
-                ).get("name", "аномалии")
-                _add_memory(
-                    agent, world_turn, state, "decision",
-                    "⚡ Прерываю исследование из-за выброса",
-                    f"Получено предупреждение о выбросе во время исследования «{_int_loc_name}». "
-                    "Прерываю разведку аномалии — нужно найти укрытие.",
-                    {"action_kind": "exploration_interrupted", "reason": "emission_warning",
-                     "location_id": agent.get("location_id")},
-                    reason="выброс во время исследования аномалии",
-                )
+                ).get("name", "текущей позиции")
+                if action_type == "explore_anomaly_location":
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "⚡ Прерываю исследование из-за выброса",
+                        f"Получено предупреждение о выбросе во время исследования «{_int_loc_name}». "
+                        "Прерываю разведку аномалии — нужно найти укрытие.",
+                        {"action_kind": "exploration_interrupted", "reason": "emission_warning",
+                         "location_id": agent.get("location_id")},
+                        reason="выброс во время исследования аномалии",
+                    )
+                else:  # travel
+                    _cancelled = sched.get("final_target_id", sched.get("target_id"))
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "⚡ Прерываю движение из-за выброса",
+                        f"Получено предупреждение о выбросе во время движения. "
+                        f"Нахожусь в «{_int_loc_name}» — прерываю маршрут, нужно найти укрытие.",
+                        {"action_kind": "travel_interrupted", "reason": "emission_warning",
+                         "location_id": agent.get("location_id"),
+                         "cancelled_target": _cancelled},
+                        reason="выброс во время движения",
+                    )
                 # Return without events; the bot decision loop will run this tick
                 # (since scheduled_action is now None) and will order a flee/shelter.
                 return events
@@ -416,6 +430,25 @@ def _process_scheduled_action(
                     total_dmg = 5 + hop_anomaly_activity
                     agent["hp"] = max(0, agent["hp"] - total_dmg)
             if remaining_route:
+                # ── Emergency interrupt: don't continue travel when emission is active/warned ──
+                # Even if the route is still open, staying put on dangerous terrain is a
+                # better choice than continuing to move.  The bot decision loop runs on
+                # the same tick (scheduled_action is None already) and will order a flee
+                # or shelter action.
+                if _is_emission_threat(agent, state):
+                    _dest_name_em = state.get("locations", {}).get(destination, {}).get("name", destination)
+                    _final_name_em = state.get("locations", {}).get(final_target, {}).get("name", final_target)
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "⚡ Прерываю движение из-за выброса",
+                        f"Получено предупреждение о выбросе. Остановился в «{_dest_name_em}» "
+                        f"вместо продолжения к «{_final_name_em}».",
+                        {"action_kind": "travel_interrupted", "reason": "emission_warning",
+                         "stopped_at": destination, "cancelled_target": final_target},
+                        reason="выброс — остановка на промежуточной точке маршрута",
+                    )
+                    _write_location_observations(agent_id, agent, destination, state, world_turn)
+                    return events
                 # More hops to go — verify the pre-computed next hop is still accessible.
                 next_hop = remaining_route[0]
                 conns = state["locations"].get(destination, {}).get("connections", [])
