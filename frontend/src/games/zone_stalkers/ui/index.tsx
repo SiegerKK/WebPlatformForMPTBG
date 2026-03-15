@@ -352,6 +352,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   }, [context]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lobbyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Refs so the WS callback (memoised on `refresh`) can read the latest values
+  // without causing the callback to be recreated on every render.
+  const profileAgentIdRef = useRef<string | null>(null);
+  const activeTabRef = useRef<'map' | 'event' | 'memory'>('map');
+  const myAgentIdRef = useRef<string | null>(null);
   // ─── refresh rate-limiting ────────────────────────────────────────────────
   // Prevent concurrent refresh() calls from stacking up (e.g. when the
   // debug auto-ticker fires at 500 ms and each WS `ticked` message
@@ -373,6 +378,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const myAgent: StalkerAgent | null = myAgentId ? (zoneState?.agents?.[myAgentId] ?? null) : null;
   const currentLocId = myAgent?.location_id ?? null;
   const currentLoc = currentLocId ? zoneState?.locations?.[currentLocId] : null;
+  // Keep refs in sync so the memoised WS callback can access the latest values.
+  useEffect(() => { profileAgentIdRef.current = profileAgentId; }, [profileAgentId]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { myAgentIdRef.current = myAgentId; }, [myAgentId]);
 
   const isCreator = match.created_by_user_id === user.id;
   const isWaiting = match.status === 'waiting_for_players' || match.status === 'draft';
@@ -493,10 +502,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           skipNextEventsRef.current = true;
         }
         refresh();
+        // Re-fetch memory for whichever agent is currently visible so the
+        // profile / memory tab shows entries written during this tick.
+        const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+        if (visibleAgent) loadAgentMemory(visibleAgent);
       } else if (msg.type === 'state_updated') {
         refresh();
       }
-    }, [refresh]), // eslint-disable-line react-hooks/exhaustive-deps
+    }, [refresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // ─── ensure zone_map context exists ─────────────────────────────────────
@@ -572,11 +585,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             onMatchDeleted(match.id);
         }
         await refresh();
+        // Same live-memory refresh as the WS path.
+        const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+        if (visibleAgent) loadAgentMemory(visibleAgent);
       }, interval);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, zoneState?.game_over, zoneState?.auto_tick_enabled, match.id, refresh, wsConnected]);
+  }, [isActive, zoneState?.game_over, zoneState?.auto_tick_enabled, match.id, refresh, wsConnected, loadAgentMemory]);
 
   // ─── commands ────────────────────────────────────────────────────────────
   const sendCommand = useCallback(async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {

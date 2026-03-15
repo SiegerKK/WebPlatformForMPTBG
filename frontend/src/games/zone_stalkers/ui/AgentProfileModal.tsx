@@ -231,15 +231,24 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   // (state_blob no longer carries memory to save bandwidth).
   type MemEntry = NonNullable<AgentForProfile['memory']>[number];
   const [fetchedMemory, setFetchedMemory] = useState<MemEntry[] | null>(null);
-  useEffect(() => {
+  const fetchMemory = React.useCallback(() => {
     if (!contextId) return;
-    setFetchedMemory(null); // reset when agent changes so we never show stale data
     contextsApi.getAgentMemory(contextId, agent.id)
       .then((res) => setFetchedMemory(res.data as MemEntry[]))
       .catch(() => { /* non-fatal */ });
-  // Re-fetch whenever the target agent changes (modal can be reused for different agents).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.id, contextId]);
+  useEffect(() => {
+    setFetchedMemory(null); // reset when agent changes so we never show stale data
+    fetchMemory();
+  }, [fetchMemory]);
+  // While the modal is open, poll for new memory entries on a 3-second interval
+  // so live games update without requiring the user to close and reopen the profile.
+  useEffect(() => {
+    if (!contextId) return;
+    const id = setInterval(fetchMemory, 3000);
+    return () => clearInterval(id);
+  }, [fetchMemory, contextId]);
   // Prefer freshly-fetched memory, fall back to whatever was passed in agent.memory.
   const displayMemory: MemEntry[] = fetchedMemory ?? (agent.memory ?? []);
 
