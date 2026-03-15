@@ -42,7 +42,7 @@ ITEM_TYPES: dict = {
         "name": "Стимпак", "type": "medical",
         "weight": 0.3, "value": 350, "risk_tolerance": 0.7,
         "effects": {"hp": 50, "hunger": 10},
-        "description": "Боевой стимулятор. Восстанавливает 30 HP, немного повышает голод.",
+        "description": "Боевой стимулятор. Восстанавливает 50 HP, немного повышает голод.",
     },
     "morphine": {
         "name": "Морфин", "type": "medical",
@@ -191,7 +191,7 @@ ITEM_TYPES: dict = {
         "name": "Раствор глюкозы", "type": "consumable",
         "weight": 0.15, "value": 120, "risk_tolerance": 0.7,
         "effects": {"hp": 15, "hunger": -30},
-        "description": "Питательный раствор. Немного лечит и утоляет голод.",
+        "description": "Питательный раствор. Немного лечит и снижает голод на 30 единиц.",
     },
     # ── Detectors ─────────────────────────────────────────────────────────────
     "echo_detector": {

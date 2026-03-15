@@ -53,6 +53,12 @@ _ANOMALY_DISTANCE_PENALTY = 5.0        # Score reduction per hop of distance
 _ANOMALY_SCORE_NOISE = 0.5             # Small random jitter to break ties between equal-scoring locations
 _ANOMALY_RISK_MISMATCH_PENALTY = 150.0  # Penalty for full risk-tolerance mismatch; exceeds max base score (10*10=100) so agents strongly prefer zones that match their risk profile
 
+# Item purchase scoring — weights must sum to 1.0.
+# Three factors are balanced: risk-tolerance fit (dominant), value/quality, and inverse weight.
+_ITEM_SCORE_WEIGHT_RISK = 0.7        # Risk-tolerance match is the primary factor
+_ITEM_SCORE_WEIGHT_VALUE = 0.2       # Higher base value (better quality item) is preferred
+_ITEM_SCORE_WEIGHT_INV_WEIGHT = 0.1  # Lighter items are preferred
+
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
@@ -1258,36 +1264,63 @@ def _bot_schedule_travel(
     }]
 
 
+def _score_item_for_purchase(
+    info: Dict[str, Any],
+    agent_risk: float,
+    max_value: float,
+    max_weight: float,
+) -> float:
+    """Return a composite purchase score for *info* relative to *agent_risk*.
+
+    Higher score = better fit.  Three factors contribute:
+
+    * **Risk-tolerance match** (weight ``_ITEM_SCORE_WEIGHT_RISK``): the closer
+      the item's ``risk_tolerance`` is to the agent's own, the better.
+    * **Value / quality** (weight ``_ITEM_SCORE_WEIGHT_VALUE``): a more
+      expensive item is considered higher quality and preferred.
+    * **Inverse weight** (weight ``_ITEM_SCORE_WEIGHT_INV_WEIGHT``): lighter
+      items are preferred (lower carry burden).
+
+    All three sub-scores are normalised to [0, 1] using the per-candidate-set
+    maximums supplied by the caller.
+    """
+    rt_score = 1.0 - abs(info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE) - agent_risk)
+    val_score = (info.get("value", 0) / max_value) if max_value > 0 else 0.0
+    weight_score = (1.0 - info.get("weight", 0.0) / max_weight) if max_weight > 0 else 1.0
+    return (
+        _ITEM_SCORE_WEIGHT_RISK * rt_score
+        + _ITEM_SCORE_WEIGHT_VALUE * val_score
+        + _ITEM_SCORE_WEIGHT_INV_WEIGHT * weight_score
+    )
+
+
 def _select_item_by_risk_tolerance(
     item_types: "frozenset[str]",
     agent_risk: float,
 ) -> "tuple[str, float] | None":
-    """Return the (item_key, buy_price) whose ``risk_tolerance`` is closest to
-    *agent_risk* among all items in *item_types* that exist in the catalogue.
+    """Return the ``(item_key, buy_price)`` with the highest composite purchase
+    score among all items in *item_types* that exist in the catalogue.
 
-    Ties are broken by preferring a lower base value (cheaper item wins).
+    Scoring is multi-factor (see :func:`_score_item_for_purchase`):
+    risk-tolerance match dominates, with higher item value and lower item
+    weight as secondary/tertiary factors.
+
     Returns ``None`` when *item_types* is empty or no matching entries exist.
     """
     from app.games.zone_stalkers.balance.items import ITEM_TYPES
 
-    best_key: "str | None" = None
-    best_dist = float("inf")
-    best_value = float("inf")
-
-    for k in item_types:
-        info = ITEM_TYPES.get(k)
-        if info is None:
-            continue
-        dist = abs(info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE) - agent_risk)
-        value = info.get("value", 0)
-        if dist < best_dist or (dist == best_dist and value < best_value):
-            best_key = k
-            best_dist = dist
-            best_value = value
-
-    if best_key is None:
+    candidates = [(k, ITEM_TYPES[k]) for k in item_types if k in ITEM_TYPES]
+    if not candidates:
         return None
-    return best_key, best_value
+
+    max_value = max(info.get("value", 0) for _, info in candidates) or 1
+    max_weight = max(info.get("weight", 0.0) for _, info in candidates) or 1
+
+    best_key = max(
+        candidates,
+        key=lambda kv: _score_item_for_purchase(kv[1], agent_risk, max_value, max_weight),
+    )[0]
+    return best_key, ITEM_TYPES[best_key].get("value", 0)
 
 
 def _can_afford_cheapest(agent: Dict[str, Any], item_types: "frozenset[str]") -> bool:
@@ -1353,17 +1386,27 @@ def _bot_buy_from_trader(
 
     agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
 
-    # Build candidate list sorted by closeness of risk_tolerance to agent's own,
-    # with ties broken by lower value (cheaper preferred).
+    # Build scored candidate list: each entry is (item_key, base_value, item_risk, score).
+    # Normalise value and weight within this candidate set so scores are comparable.
+    raw = [
+        (k, ITEM_TYPES[k].get("value", 0), ITEM_TYPES[k].get("risk_tolerance", DEFAULT_RISK_TOLERANCE),
+         ITEM_TYPES[k].get("weight", 0.0))
+        for k in item_types if k in ITEM_TYPES
+    ]
+    if not raw:
+        return []
+    max_value = max(v for _, v, _, _ in raw) or 1
+    max_weight = max(w for _, _, _, w in raw) or 1
     candidates = sorted(
-        (
-            (k, ITEM_TYPES[k].get("value", 0), ITEM_TYPES[k].get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
-            for k in item_types if k in ITEM_TYPES
-        ),
-        key=lambda x: (abs(x[2] - agent_risk), x[1]),
+        [
+            (k, base_value, item_risk, _score_item_for_purchase(ITEM_TYPES[k], agent_risk, max_value, max_weight))
+            for k, base_value, item_risk, _ in raw
+        ],
+        key=lambda x: x[3],
+        reverse=True,
     )
 
-    for item_type, base_value, item_risk in candidates:
+    for idx, (item_type, base_value, item_risk, score) in enumerate(candidates):
         buy_price = int(base_value * 1.5)
         if agent.get("money", 0) < buy_price:
             continue
@@ -1381,22 +1424,41 @@ def _bot_buy_from_trader(
         agent["action_used"] = True
         item_name = ITEM_TYPES[item_type].get("name", item_type)
         trader_name = trader.get("name", trader["id"])
-        # Decision memory: explain the risk-tolerance match and the reason for purchase
+        # Collect up to 2 runner-ups (next candidates in the scored list, regardless of affordability)
+        runners_up = [
+            {
+                "item_type": rk,
+                "item_name": ITEM_TYPES[rk].get("name", rk),
+                "score": round(rs, 3),
+                "price": int(ITEM_TYPES[rk].get("value", 0) * 1.5),
+            }
+            for rk, _, _, rs in candidates[idx + 1: idx + 3]
+        ]
+        runners_up_text = ""
+        if runners_up:
+            parts = [
+                f"«{r['item_name']}» (счёт {r['score']:.3f}, {r['price']} монет)"
+                for r in runners_up
+            ]
+            runners_up_text = " Ближайшие конкуренты: " + ", ".join(parts) + "."
+        # Decision memory: explain the composite score and the reason for purchase
         _add_memory(
             agent, world_turn, state, "decision",
             f"Решил купить «{item_name}»",
             (
-                f"Выбор основан на склонности к риску: моя толерантность к риску "
-                f"{agent_risk:.2f}, предмет «{item_name}» имеет {item_risk:.2f}. "
-                f"Расхождение {abs(item_risk - agent_risk):.2f} — ближайшее среди доступных. "
-                f"Куплю у торговца {trader_name} за {buy_price} монет."
+                f"Итоговый счёт предмета «{item_name}»: {score:.3f} "
+                f"(риск {item_risk:.2f} vs мой {agent_risk:.2f}, "
+                f"ценность {base_value}, вес {ITEM_TYPES[item_type].get('weight', 0):.1f} кг). "
+                f"Куплю у торговца {trader_name} за {buy_price} монет.{runners_up_text}"
             ),
             {
                 "action_kind": "trade_decision",
                 "item_type": item_type,
                 "agent_risk_tolerance": agent_risk,
                 "item_risk_tolerance": item_risk,
+                "score": round(score, 3),
                 "price": buy_price,
+                "runners_up": runners_up,
             },
             reason=purchase_reason,
         )
@@ -1426,6 +1488,7 @@ def _bot_buy_from_trader(
                 "agent_id": agent_id, "trader_id": trader["id"],
                 "item_type": item_type, "price": buy_price,
                 "agent_risk_tolerance": agent_risk, "item_risk_tolerance": item_risk,
+                "score": round(score, 3),
             },
         }]
     return []
