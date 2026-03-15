@@ -631,6 +631,14 @@ def _add_memory(
     effects: Dict[str, Any],
     reason: str = "",
 ) -> None:
+    """Append a memory entry to an agent.
+
+    *reason* is only meaningful for ``memory_type == "decision"`` entries.
+    When provided it is:
+    - prepended to *summary* as ``"Причина: {reason}. "``
+    - stored in *effects* under the key ``"reason"``
+    For all other memory types *reason* is silently ignored.
+    """
     if reason and memory_type == "decision":
         effects = {**effects, "reason": reason}
         summary = f"Причина: {reason}. " + summary
@@ -1230,6 +1238,19 @@ def _bot_buy_from_trader(
             f"Купил «{item_name}» у торговца",
             f"Купил «{item_name}» у {trader_name} за {buy_price} монет.",
             {"action_kind": "trade_buy", "item_type": item_type, "price": buy_price},
+        )
+        # Trader memory: record the sale from the trader's perspective
+        agent_name = agent.get("name", agent_id)
+        loc_name = state.get("locations", {}).get(agent.get("location_id", ""), {}).get("name", "?")
+        _add_trader_memory(
+            trader, world_turn, state, "trade_sale",
+            f"Продал «{item_name}» сталкеру {agent_name}",
+            f"Продал «{item_name}» сталкеру {agent_name} в «{loc_name}» за {buy_price} монет.",
+            {
+                "item_type": item_type,
+                "price": buy_price,
+                "buyer_id": agent_id,
+            },
         )
         return [{
             "event_type": "bot_bought_item",

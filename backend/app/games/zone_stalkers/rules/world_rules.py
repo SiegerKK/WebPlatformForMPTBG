@@ -934,6 +934,21 @@ def resolve_world_command(
                     "price": buy_price,
                 },
             })
+            # Trader memory: record the sale from the trader's perspective
+            from app.games.zone_stalkers.rules.tick_rules import _add_trader_memory
+            _wt = state.get("world_turn", 1)
+            buyer_name = agent.get("name", agent_id)
+            loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+            _add_trader_memory(
+                trader, _wt, state, "trade_sale",
+                f"Продал «{item_info['name']}» сталкеру {buyer_name}",
+                f"Продал «{item_info['name']}» сталкеру {buyer_name} в «{loc_name}» за {buy_price} монет.",
+                {
+                    "item_type": item_type,
+                    "price": buy_price,
+                    "buyer_id": agent_id,
+                },
+            )
 
     return state, events
 
