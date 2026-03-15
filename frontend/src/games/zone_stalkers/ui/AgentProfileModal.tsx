@@ -678,6 +678,8 @@ const _AMMO_FOR_WEAPON: Record<string, string> = {
   ak74:    'ammo_545',
   pistol:  'ammo_9mm',
   shotgun: 'ammo_12gauge',
+  pkm:     'ammo_762',
+  svu_svd: 'ammo_762',
 };
 
 type StatusColor = 'green' | 'yellow' | 'red';
@@ -768,9 +770,9 @@ function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
   const reqAmmo    = weaponItem ? (_AMMO_FOR_WEAPON[weaponItem.type] ?? null) : null;
   const hasAmmo    = reqAmmo ? inv.some(i => i.type === reqAmmo) : null;
 
-  const hasHeal  = inv.some(i => ['medkit', 'bandage', 'stimpack'].includes(i.type));
-  const hasFood  = inv.some(i => ['bread', 'canned_food', 'energy_drink'].includes(i.type));
-  const hasDrink = inv.some(i => ['water', 'vodka', 'energy_drink'].includes(i.type));
+  const hasHeal  = inv.some(i => ['bandage', 'medkit', 'army_medkit', 'stimpack', 'morphine'].includes(i.type));
+  const hasFood  = inv.some(i => ['bread', 'canned_food', 'military_ration', 'energy_drink', 'glucose'].includes(i.type));
+  const hasDrink = inv.some(i => ['water', 'purified_water', 'vodka', 'energy_drink'].includes(i.type));
 
   const equipCriteria: PriorityCriterion[] = [
     {

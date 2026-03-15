@@ -233,6 +233,67 @@ const SCHED_ICONS: Record<string, string> = {
   event: '📖',
 };
 
+// ── Item catalogue — mirrors backend balance/items.py ITEM_TYPES ─────────────
+// Grouped by category for the trader shop UI.  Keep in sync with items.py.
+interface ShopItem {
+  type: string;
+  name: string;
+  category: string;
+  value: number;
+  weight: number;
+  description: string;
+  // extra stats shown in the shop
+  extra?: string;
+}
+
+const ITEM_CATALOGUE: ShopItem[] = [
+  // ── Medical ────────────────────────────────────────────────────────────────
+  { type: 'bandage',    name: 'Бинт',               category: 'Медицина',  value: 50,   weight: 0.1, description: 'Перевязочный материал. Восстанавливает 15 HP.', extra: '+15 HP' },
+  { type: 'medkit',     name: 'Аптечка',             category: 'Медицина',  value: 200,  weight: 0.5, description: 'Стандартная полевая аптечка. Восстанавливает 50 HP.', extra: '+50 HP' },
+  { type: 'army_medkit',name: 'Военная аптечка',     category: 'Медицина',  value: 450,  weight: 0.6, description: 'Военная аптечка высшего класса. Восстанавливает 80 HP.', extra: '+80 HP' },
+  { type: 'stimpack',   name: 'Стимпак',             category: 'Медицина',  value: 350,  weight: 0.3, description: 'Боевой стимулятор. Восстанавливает 30 HP, немного повышает голод.', extra: '+30 HP' },
+  { type: 'morphine',   name: 'Морфин',              category: 'Медицина',  value: 300,  weight: 0.15,description: 'Обезболивающее. Восстанавливает 25 HP, снижает усталость на 20.', extra: '+25 HP, −20 сон' },
+  { type: 'antirad',    name: 'Антирад',             category: 'Медицина',  value: 150,  weight: 0.2, description: 'Препарат от радиационного отравления. Снижает радиацию на 30.', extra: '−30 рад.' },
+  { type: 'rad_cure',   name: 'Рад-Пурге',           category: 'Медицина',  value: 380,  weight: 0.2, description: 'Мощный антирадиационный препарат. Снижает радиацию на 60.', extra: '−60 рад.' },
+  // ── Weapons ────────────────────────────────────────────────────────────────
+  { type: 'pistol',     name: 'Пистолет ПМ',         category: 'Оружие',    value: 500,  weight: 0.7, description: 'Пистолет Макарова. Компактное личное оружие.', extra: 'Урон 15, дал. 2, патрон 9x18' },
+  { type: 'shotgun',    name: 'Обрез ТОЗ-34',        category: 'Оружие',    value: 800,  weight: 3.0, description: 'Двустволка ближнего боя. Высокий урон, малая дальность.', extra: 'Урон 40, дал. 1, патрон 12gauge' },
+  { type: 'ak74',       name: 'АК-74',               category: 'Оружие',    value: 1500, weight: 3.5, description: 'Автомат Калашникова. Надёжное оружие среднего боя.', extra: 'Урон 25, дал. 3, патрон 5.45x39' },
+  { type: 'pkm',        name: 'ПКМ (пулемёт)',        category: 'Оружие',    value: 3500, weight: 7.5, description: 'Ручной пулемёт Калашникова. Высокий DPS, тяжёлый.', extra: 'Урон 35, дал. 3, патрон 7.62x54R' },
+  { type: 'svu_svd',    name: 'СВД (снайперская)',    category: 'Оружие',    value: 4500, weight: 4.2, description: 'Снайперская винтовка. Максимальная дальность и урон.', extra: 'Урон 50, дал. 5, патрон 7.62x54R' },
+  // ── Armor ──────────────────────────────────────────────────────────────────
+  { type: 'leather_jacket', name: 'Кожаная куртка',  category: 'Броня',     value: 300,  weight: 2.0, description: 'Простейшая защита. Дешёвая, но лучше чем ничего.', extra: 'Защита 5' },
+  { type: 'stalker_suit',   name: 'Комбинезон сталкера', category: 'Броня', value: 1500, weight: 5.0, description: 'Стандартный комбинезон с лёгкой бронёй и радиозащитой.', extra: 'Защита 15' },
+  { type: 'combat_armor',   name: 'Боевой бронежилет',   category: 'Броня', value: 3000, weight: 6.5, description: 'Военный бронежилет. Хорошая защита от пуль и аномалий.', extra: 'Защита 22' },
+  { type: 'seva_suit',      name: 'Костюм СЕВА',         category: 'Броня', value: 3500, weight: 6.0, description: 'Научный комбинезон СЕВА с усиленной радиозащитой.', extra: 'Защита 18' },
+  { type: 'exoskeleton',    name: 'Экзоскелет',          category: 'Броня', value: 6000, weight: 8.0, description: 'Тяжёлый боевой экзоскелет. Максимальная защита в Зоне.', extra: 'Защита 30' },
+  // ── Ammo ───────────────────────────────────────────────────────────────────
+  { type: 'ammo_9mm',     name: 'Патроны 9х18 (20 шт.)',      category: 'Патроны', value: 60,  weight: 0.2, description: 'Пистолетные патроны для ПМ.',            extra: 'для ПМ × 20' },
+  { type: 'ammo_12gauge', name: 'Дробь 12 кал. (10 шт.)',     category: 'Патроны', value: 80,  weight: 0.3, description: 'Дробовые патроны для обреза ТОЗ-34.',    extra: 'для ТОЗ × 10' },
+  { type: 'ammo_545',     name: 'Патроны 5.45х39 (30 шт.)',   category: 'Патроны', value: 100, weight: 0.3, description: 'Стандартные патроны для АК-74.',          extra: 'для АК × 30' },
+  { type: 'ammo_762',     name: 'Патроны 7.62х54R (20 шт.)',  category: 'Патроны', value: 180, weight: 0.4, description: 'Винтовочные патроны для ПКМ и СВД.',    extra: 'для ПКМ/СВД × 20' },
+  // ── Consumables ────────────────────────────────────────────────────────────
+  { type: 'bread',          name: 'Буханка хлеба',     category: 'Расходники', value: 20,  weight: 0.3, description: 'Простая еда. Утоляет голод на 35 единиц.',                  extra: 'Голод −35' },
+  { type: 'canned_food',    name: 'Тушёнка',            category: 'Расходники', value: 40,  weight: 0.4, description: 'Консервы. Хорошо утоляет голод, немного усиливает жажду.',  extra: 'Голод −50, жажда +5' },
+  { type: 'military_ration',name: 'Сухой паёк',         category: 'Расходники', value: 65,  weight: 0.35,description: 'Военный сухой паёк. Максимально утоляет голод.',            extra: 'Голод −70' },
+  { type: 'water',          name: 'Вода (0.5л)',         category: 'Расходники', value: 30,  weight: 0.5, description: 'Чистая вода. Утоляет жажду на 50 единиц.',                 extra: 'Жажда −50' },
+  { type: 'purified_water', name: 'Очищенная вода (1л)', category: 'Расходники', value: 70,  weight: 1.0, description: 'Очищенная вода 1л. Полностью утоляет жажду.',              extra: 'Жажда −80' },
+  { type: 'energy_drink',   name: 'Энергетик',           category: 'Расходники', value: 80,  weight: 0.3, description: 'Энергетический напиток. Снижает усталость на 30, утоляет жажду.', extra: 'Сон −30, жажда −40' },
+  { type: 'vodka',          name: 'Водка',               category: 'Расходники', value: 50,  weight: 0.5, description: 'Народное средство от радиации. Снижает радиацию, немного портит здоровье.', extra: 'Рад. −10, HP −5' },
+  { type: 'glucose',        name: 'Раствор глюкозы',     category: 'Расходники', value: 120, weight: 0.15,description: 'Питательный раствор. Немного лечит и утоляет голод.',       extra: '+15 HP, голод −20' },
+  // ── Detectors ──────────────────────────────────────────────────────────────
+  { type: 'echo_detector',  name: 'Детектор «Эхо»',     category: 'Детекторы',  value: 500,  weight: 0.5, description: 'Простой детектор аномалий. Радиус обнаружения 2.', extra: 'Радиус 2' },
+  { type: 'bear_detector',  name: 'Детектор «Медведь»', category: 'Детекторы',  value: 1500, weight: 0.7, description: 'Средний детектор. Радиус обнаружения 3.', extra: 'Радиус 3' },
+  { type: 'veles_detector', name: 'Детектор «Велес»',   category: 'Детекторы',  value: 3000, weight: 0.8, description: 'Продвинутый детектор. Радиус обнаружения 4.', extra: 'Радиус 4' },
+];
+
+// Set of consumable item types (medical + consumable categories)
+const CONSUMABLE_ITEM_TYPES = new Set<string>([
+  'bandage', 'medkit', 'army_medkit', 'stimpack', 'morphine', 'antirad', 'rad_cure',
+  'vodka', 'bread', 'canned_food', 'military_ration', 'water', 'purified_water',
+  'energy_drink', 'glucose',
+]);
+
 export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDeleted }: Props) {
   const [context, setContext] = useState<GameContext | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
@@ -485,6 +546,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   const handleConsumeItem = async (itemId: string) =>
     sendCommand('consume_item', { item_id: itemId });
+
+  const handleBuyFromTrader = async (itemType: string) =>
+    sendCommand('buy_from_trader', { item_type: itemType });
 
   const handleEndTurn = async () => sendCommand('end_turn', {});
 
@@ -1382,7 +1446,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 {myAgent.inventory.length === 0
                   ? <span style={styles.emptyText}>Empty</span>
                   : myAgent.inventory.map((item) => {
-                    const isConsumable = ['medkit', 'bandage', 'antirad', 'bread', 'energy_drink', 'vodka'].includes(item.type);
+                    const isConsumable = CONSUMABLE_ITEM_TYPES.has(item.type);
                     return (
                       <div key={item.id} style={styles.inventoryItem}>
                         <span style={styles.itemName}>{item.name}</span>
@@ -1556,6 +1620,65 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                         ))}
                       </div>
                     ) : null;
+                  })()}
+                  {/* ── Trader shop at this location ── */}
+                  {(() => {
+                    const tradersHere = Object.values(zoneState?.traders ?? {})
+                      .filter((t) => t.location_id === currentLocId);
+                    if (tradersHere.length === 0 || !canAct) return null;
+                    const trader = tradersHere[0];
+                    const myMoney = myAgent?.money ?? 0;
+                    // Group catalogue by category
+                    const categories = Array.from(new Set(ITEM_CATALOGUE.map(i => i.category)));
+                    return (
+                      <div style={styles.locDetailSection}>
+                        <div style={styles.locDetailLabel}>🏪 Магазин — {(trader as { name: string }).name}</div>
+                        <div style={{ color: '#94a3b8', fontSize: '0.72rem', marginBottom: 6 }}>
+                          Цена = базовая × 1.5 | У вас: {myMoney} RU
+                        </div>
+                        {categories.map((cat) => (
+                          <details key={cat} style={{ marginBottom: 4 }}>
+                            <summary style={{ cursor: 'pointer', color: '#cbd5e1', fontSize: '0.78rem', fontWeight: 600, padding: '0.2rem 0' }}>
+                              {cat}
+                            </summary>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, paddingTop: 4 }}>
+                              {ITEM_CATALOGUE.filter(i => i.category === cat).map((item) => {
+                                const buyPrice = Math.floor(item.value * 1.5);
+                                const canBuy = myMoney >= buyPrice;
+                                return (
+                                  <div key={item.type} style={{ ...styles.locDetailItem, flexWrap: 'wrap', gap: 4 }}>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <span style={{ color: '#e2e8f0', fontWeight: 600, fontSize: '0.8rem' }}>{item.name}</span>
+                                      {item.extra && <span style={{ color: '#64748b', fontSize: '0.72rem', marginLeft: 6 }}>{item.extra}</span>}
+                                      <div style={{ color: '#94a3b8', fontSize: '0.7rem' }}>{item.description}</div>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                                      <span style={{ color: canBuy ? '#fbbf24' : '#64748b', fontSize: '0.78rem', fontWeight: 600 }}>
+                                        {buyPrice} RU
+                                      </span>
+                                      <button
+                                        style={{
+                                          ...styles.pickUpBtn,
+                                          opacity: canBuy ? 1 : 0.4,
+                                          cursor: canBuy ? 'pointer' : 'not-allowed',
+                                          background: canBuy ? '#166534' : '#1e293b',
+                                          borderColor: canBuy ? '#16a34a' : '#334155',
+                                        }}
+                                        disabled={!canBuy || actionLoading}
+                                        onClick={() => handleBuyFromTrader(item.type)}
+                                        title={canBuy ? `Купить «${item.name}» за ${buyPrice} RU` : `Недостаточно денег (нужно ${buyPrice} RU)`}
+                                      >
+                                        Купить
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    );
                   })()}
                 </div>
               )}

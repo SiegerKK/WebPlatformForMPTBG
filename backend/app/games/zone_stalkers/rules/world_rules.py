@@ -9,6 +9,8 @@ Supported commands:
 - join_event(event_context_id)        — join an active zone_event
 - pick_up_artifact(artifact_id)
 - pick_up_item(item_id)
+- consume_item(item_id)
+- buy_from_trader(item_type)          — buy any item from catalogue at a trader (1 action)
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 - debug_update_map(positions, connections, regions?) — persist debug canvas layout (meta, no action cost)
@@ -145,6 +147,9 @@ def validate_world_command(
 
     if command_type == "consume_item":
         return _validate_consume_item(payload, state, agent)
+
+    if command_type == "buy_from_trader":
+        return _validate_buy_from_trader(payload, state, agent)
 
     return RuleCheckResult(valid=False, error=f"Unknown command for zone_map: {command_type}")
 
@@ -824,6 +829,42 @@ def resolve_world_command(
                 },
             })
 
+    elif command_type == "buy_from_trader":
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        item_type = payload["item_type"]
+        item_info = ITEM_TYPES[item_type]
+        buy_price = int(item_info.get("value", 0) * 1.5)
+        loc_id = agent["location_id"]
+        trader = next(
+            (t for t in state.get("traders", {}).values()
+             if t.get("location_id") == loc_id and t.get("is_alive", True)),
+            None,
+        )
+        if trader:
+            import uuid as _uuid
+            agent["money"] = agent.get("money", 0) - buy_price
+            trader["money"] = trader.get("money", 0) + buy_price
+            new_item: Dict[str, Any] = {
+                "id": str(_uuid.uuid4()),
+                "type": item_type,
+                "name": item_info["name"],
+                "weight": item_info.get("weight", 0),
+                "value": item_info.get("value", 0),
+            }
+            agent.setdefault("inventory", []).append(new_item)
+            agent["action_used"] = True
+            events.append({
+                "event_type": "item_bought",
+                "payload": {
+                    "agent_id": agent_id,
+                    "player_id": player_id,
+                    "trader_id": trader["id"],
+                    "item_id": new_item["id"],
+                    "item_type": item_type,
+                    "price": buy_price,
+                },
+            })
+
     return state, events
 
 
@@ -916,8 +957,30 @@ def _validate_consume_item(payload: Dict[str, Any], state: Dict[str, Any], agent
     return RuleCheckResult(valid=True)
 
 
+def _validate_buy_from_trader(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
+    item_type = payload.get("item_type")
+    if not item_type:
+        return RuleCheckResult(valid=False, error="item_type is required")
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+    if item_type not in ITEM_TYPES:
+        return RuleCheckResult(valid=False, error=f"Unknown item type: '{item_type}'")
+    loc_id = agent.get("location_id")
+    traders = state.get("traders", {})
+    trader = next(
+        (t for t in traders.values()
+         if t.get("location_id") == loc_id and t.get("is_alive", True)),
+        None,
+    )
+    if not trader:
+        return RuleCheckResult(valid=False, error="No trader at your current location")
+    buy_price = int(ITEM_TYPES[item_type].get("value", 0) * 1.5)
+    if agent.get("money", 0) < buy_price:
+        return RuleCheckResult(valid=False, error=f"Not enough money (need {buy_price} RU)")
+    return RuleCheckResult(valid=True)
+
+
 def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
-    """Apply item effect dict to agent stats (hp, radiation, hunger, thirst)."""
+    """Apply item effect dict to agent stats (hp, radiation, hunger, thirst, sleepiness)."""
     if "hp" in effects:
         agent["hp"] = max(0, min(agent.get("max_hp", 100), agent.get("hp", 100) + effects["hp"]))
     if "radiation" in effects:
@@ -926,6 +989,8 @@ def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
         agent["hunger"] = max(0, agent.get("hunger", 0) + effects["hunger"])
     if "thirst" in effects:
         agent["thirst"] = max(0, agent.get("thirst", 0) + effects["thirst"])
+    if "sleepiness" in effects:
+        agent["sleepiness"] = max(0, agent.get("sleepiness", 0) + effects["sleepiness"])
 
 
 def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:

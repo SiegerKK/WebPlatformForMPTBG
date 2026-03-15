@@ -316,10 +316,22 @@ def _make_item_instance(item_type: str, rng: random.Random) -> Dict[str, Any]:
 def _generate_trader_inventory(rng: random.Random) -> List[Dict[str, Any]]:
     """Generate a trader's starting inventory."""
     stock: List[Dict[str, Any]] = []
-    sell_types = ["medkit", "bandage", "antirad", "ak74", "pistol",
-                  "ammo_545", "ammo_9mm", "stalker_suit", "leather_jacket",
-                  "energy_drink", "vodka", "echo_detector"]
-    for item_type in rng.sample(sell_types, rng.randint(5, len(sell_types))):
+    sell_types = [
+        # Medical
+        "bandage", "medkit", "army_medkit", "antirad", "rad_cure", "stimpack", "morphine",
+        # Weapons
+        "pistol", "shotgun", "ak74", "pkm", "svu_svd",
+        # Armor
+        "leather_jacket", "stalker_suit", "combat_armor", "seva_suit",
+        # Ammo
+        "ammo_9mm", "ammo_12gauge", "ammo_545", "ammo_762",
+        # Consumables
+        "bread", "canned_food", "military_ration", "water", "purified_water",
+        "energy_drink", "vodka", "glucose",
+        # Detectors
+        "echo_detector", "bear_detector",
+    ]
+    for item_type in rng.sample(sell_types, rng.randint(8, min(14, len(sell_types)))):
         info = ITEM_TYPES[item_type]
         stock.append({
             "id": _make_id("trader_item", rng),

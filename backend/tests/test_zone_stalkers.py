@@ -752,6 +752,117 @@ class TestConsumeItem:
         state = self._state_with_item()
         assert not self._v("consume_item", {}, state).valid
 
+    def test_consume_morphine_reduces_sleepiness(self):
+        state = self._state_with_item("morphine")
+        state["agents"]["agent_p0"]["sleepiness"] = 60
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["sleepiness"] < 60
+
+    def test_consume_energy_drink_reduces_sleepiness(self):
+        state = self._state_with_item("energy_drink")
+        state["agents"]["agent_p0"]["sleepiness"] = 50
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["sleepiness"] < 50
+
+
+class TestBuyFromTrader:
+    """Unit tests for the buy_from_trader zone_map command."""
+
+    def _make_state(self, agent_money: int = 5000):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=7, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        state["agents"]["agent_p0"]["money"] = agent_money
+        # Place a trader at the same location as the player's agent
+        loc_id = state["agents"]["agent_p0"]["location_id"]
+        state["traders"]["trader_test"] = {
+            "id": "trader_test",
+            "name": "Sidorovich",
+            "location_id": loc_id,
+            "inventory": [],
+            "money": 5000,
+            "is_alive": True,
+        }
+        state["locations"][loc_id].setdefault("agents", []).append("trader_test")
+        return state
+
+    def _v(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command("buy_from_trader", payload, state, "player1")
+
+    def _r(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("buy_from_trader", payload, state, "player1")
+
+    def test_buy_valid(self):
+        state = self._make_state()
+        result = self._v({"item_type": "medkit"}, state)
+        assert result.valid
+
+    def test_buy_unknown_item_type_invalid(self):
+        state = self._make_state()
+        result = self._v({"item_type": "nonexistent_item"}, state)
+        assert not result.valid
+        assert "unknown" in result.error.lower()
+
+    def test_buy_missing_item_type_invalid(self):
+        state = self._make_state()
+        result = self._v({}, state)
+        assert not result.valid
+        assert "item_type" in result.error.lower()
+
+    def test_buy_no_trader_at_location_invalid(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=7, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        result = self._v({"item_type": "medkit"}, state)
+        assert not result.valid
+        assert "trader" in result.error.lower()
+
+    def test_buy_not_enough_money_invalid(self):
+        state = self._make_state(agent_money=10)
+        result = self._v({"item_type": "medkit"}, state)
+        assert not result.valid
+        assert "money" in result.error.lower()
+
+    def test_buy_transfers_item_to_inventory(self):
+        state = self._make_state(agent_money=5000)
+        new_state, events = self._r({"item_type": "bandage"}, state)
+        agent = new_state["agents"]["agent_p0"]
+        assert any(i["type"] == "bandage" for i in agent["inventory"])
+        assert any(e["event_type"] == "item_bought" for e in events)
+
+    def test_buy_deducts_money_at_150_pct(self):
+        state = self._make_state(agent_money=5000)
+        new_state, _ = self._r({"item_type": "bandage"}, state)
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        expected_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+        assert new_state["agents"]["agent_p0"]["money"] == 5000 - expected_price
+
+    def test_buy_credits_trader_money(self):
+        state = self._make_state(agent_money=5000)
+        new_state, _ = self._r({"item_type": "bandage"}, state)
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        expected_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+        assert new_state["traders"]["trader_test"]["money"] == 5000 + expected_price
+
+    def test_buy_all_new_items_valid(self):
+        """All new item types should be purchasable from a trader."""
+        new_items = [
+            "army_medkit", "morphine", "rad_cure",
+            "pkm", "svu_svd",
+            "combat_armor", "seva_suit",
+            "ammo_762",
+            "military_ration", "purified_water", "glucose",
+            "bear_detector",
+        ]
+        for item_type in new_items:
+            state = self._make_state(agent_money=50000)
+            result = self._v({"item_type": item_type}, state)
+            assert result.valid, f"buy_from_trader should be valid for new item '{item_type}': {result.error}"
+
 
 class TestDebugUpdateMap:
     """Tests for the debug_update_map meta-command (no player agent required)."""
