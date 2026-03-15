@@ -233,12 +233,13 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   const [fetchedMemory, setFetchedMemory] = useState<MemEntry[] | null>(null);
   useEffect(() => {
     if (!contextId) return;
+    setFetchedMemory(null); // reset when agent changes so we never show stale data
     contextsApi.getAgentMemory(contextId, agent.id)
       .then((res) => setFetchedMemory(res.data as MemEntry[]))
       .catch(() => { /* non-fatal */ });
-  // Intentionally omit agent.id / contextId from deps — load once on mount.
+  // Re-fetch whenever the target agent changes (modal can be reused for different agents).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [agent.id, contextId]);
   // Prefer freshly-fetched memory, fall back to whatever was passed in agent.memory.
   const displayMemory: MemEntry[] = fetchedMemory ?? (agent.memory ?? []);
 

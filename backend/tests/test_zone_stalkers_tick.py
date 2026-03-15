@@ -3786,3 +3786,147 @@ class TestTravelEmissionInterrupt:
         assert flee_mems or (sched is not None and sched.get("type") == "travel"), (
             "Bot should flee from dangerous terrain after travel interrupt"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission flee-self-interrupt regression
+# ─────────────────────────────────────────────────────────────────
+
+class TestFleeEmissionSelfInterrupt:
+    """Regression test: a bot fleeing from an emission must NOT have its own
+    flee travel interrupted by the emission interrupt on the next tick.
+
+    The bug (before the fix) was:
+      tick N:   travel interrupted → flee travel scheduled (type="travel")
+      tick N+1: flee travel also interrupted because _is_emission_threat is True
+      tick N+2: repeated until the emission fires and the agent dies.
+    """
+
+    def _make_flee_state(self):
+        """Two locations: A (plain, dangerous) → B (building, safe).
+        Agent is at A with an in-progress flee travel to B."""
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 5}]},
+                "B": {"connections": [{"to": "A", "travel_time": 5}]},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "plain"
+        state["locations"]["B"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+        state["seed"] = 0
+        agent = next(iter(state["agents"].values()))
+        # Simulate the state after the flee decision was made:
+        # - Agent has an emission_imminent in memory
+        # - scheduled_action is a flee travel (emergency_flee=True) to B
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": 1,
+            "title": "⚠️ Скоро выброс!",
+            "summary": "...",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": 10,
+                "emission_scheduled_turn": 200,
+            },
+        })
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 4,  # still 4 ticks away
+            "turns_total": 5,
+            "target_id": "B",
+            "final_target_id": "B",
+            "remaining_route": [],
+            "started_turn": 1,
+            "emergency_flee": True,
+        }
+        return state
+
+    def test_flee_travel_not_interrupted(self):
+        """Flee travel (emergency_flee=True) is NOT cancelled on the next tick
+        even though emission_imminent is still in memory."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_flee_state()
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        assert sched is not None, "Flee travel must not be cancelled by emission interrupt"
+        assert sched["type"] == "travel", "Flee travel must remain active"
+        assert sched.get("emergency_flee") is True, "emergency_flee flag must be preserved"
+
+    def test_flee_travel_continues_across_multiple_ticks(self):
+        """Flee travel persists for several ticks despite ongoing emission threat."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_flee_state()
+
+        for tick in range(3):
+            state, _ = tick_zone_map(state)
+            agent = next(iter(state["agents"].values()))
+            sched = agent.get("scheduled_action")
+            # Agent may have completed travel (sched=None) but must NOT have
+            # been interrupted (which would cause travel_interrupted in memory).
+            interrupted = [
+                m for m in agent["memory"]
+                if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+                and m.get("world_turn", 0) > 1  # only entries written by these ticks
+            ]
+            assert not interrupted, (
+                f"Flee travel was interrupted at tick {tick + 2} — "
+                "emergency_flee flag must suppress the interrupt"
+            )
+
+    def test_normal_travel_still_interrupted(self):
+        """Regular (non-flee) travel is still interrupted when emission is warned."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 5}]},
+                "B": {"connections": [{"to": "A", "travel_time": 5}]},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "plain"
+        state["locations"]["B"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["seed"] = 0
+        agent = next(iter(state["agents"].values()))
+        # Normal travel (no emergency_flee flag) while emission is warned
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": 1,
+            "title": "⚠️ Скоро выброс!",
+            "summary": "...",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": 10,
+                "emission_scheduled_turn": 200,
+            },
+        })
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": 4,
+            "turns_total": 5,
+            "target_id": "B",
+            "final_target_id": "B",
+            "remaining_route": [],
+            "started_turn": 1,
+            # No emergency_flee flag → should be interrupted
+        }
+
+        new_state, _ = tick_zone_map(state)
+        new_agent = next(iter(new_state["agents"].values()))
+
+        sched = new_agent.get("scheduled_action")
+        # After interrupt, bot may reschedule a flee OR stay sheltered (B is safe anyway)
+        interrupted = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+        ]
+        # The travel should have been interrupted (unless it completed, which it can't at 4 ticks)
+        assert interrupted or (sched is None), (
+            "Normal travel without emergency_flee should be interrupted by emission warning"
+        )

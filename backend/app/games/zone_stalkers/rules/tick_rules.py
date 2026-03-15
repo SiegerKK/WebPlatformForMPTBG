@@ -368,8 +368,11 @@ def _process_scheduled_action(
         # observation, cancel the current action immediately so that the bot decision
         # loop runs on this same tick and can choose to flee or shelter.
         # This fires for both exploration (30-turn) and multi-hop travel actions.
+        # EXCEPTION: travel that was itself scheduled as an emergency flee-to-shelter
+        # must NEVER be interrupted — doing so creates an infinite cancel/reschedule
+        # loop that prevents the agent from reaching safety.
         if action_type in ("explore_anomaly_location", "travel"):
-            if _is_emission_threat(agent, state):
+            if not sched.get("emergency_flee") and _is_emission_threat(agent, state):
                 agent["scheduled_action"] = None
                 _int_loc_name = state.get("locations", {}).get(
                     agent.get("location_id", ""), {}
@@ -435,7 +438,8 @@ def _process_scheduled_action(
                 # better choice than continuing to move.  The bot decision loop runs on
                 # the same tick (scheduled_action is None already) and will order a flee
                 # or shelter action.
-                if _is_emission_threat(agent, state):
+                # EXCEPTION: emergency flee travel is never interrupted (same reason as above).
+                if not sched.get("emergency_flee") and _is_emission_threat(agent, state):
                     _dest_name_em = state.get("locations", {}).get(destination, {}).get("name", destination)
                     _final_name_em = state.get("locations", {}).get(final_target, {}).get("name", final_target)
                     _add_memory(
@@ -1216,8 +1220,15 @@ def _bot_schedule_travel(
     target_loc_id: str,
     state: Dict[str, Any],
     world_turn: int,
+    emergency_flee: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Schedule hop-by-hop travel for a bot toward target_loc_id. Returns events."""
+    """Schedule hop-by-hop travel for a bot toward target_loc_id. Returns events.
+
+    Set *emergency_flee=True* when the travel is a direct response to an
+    emission warning.  This flag is stored on the ``scheduled_action`` and
+    prevents the emission-interrupt logic from cancelling the very flee that
+    was just scheduled.
+    """
     from app.games.zone_stalkers.rules.world_rules import _bfs_route
     route = _bfs_route(state["locations"], agent["location_id"], target_loc_id)
     if not route:
@@ -1228,7 +1239,7 @@ def _bot_schedule_travel(
         (c.get("travel_time", 12) for c in conns if c["to"] == first_hop),
         12,
     )
-    agent["scheduled_action"] = {
+    sched: Dict[str, Any] = {
         "type": "travel",
         "turns_remaining": hop_time,
         "turns_total": hop_time,
@@ -1237,6 +1248,9 @@ def _bot_schedule_travel(
         "remaining_route": route[1:],
         "started_turn": world_turn,
     }
+    if emergency_flee:
+        sched["emergency_flee"] = True
+    agent["scheduled_action"] = sched
     agent["action_used"] = True
     return [{
         "event_type": "agent_travel_started",
@@ -2050,7 +2064,7 @@ def _run_bot_action_inner(
                 {"action_kind": "flee_emission", "target_id": target},
                 reason=reason,
             )
-            return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
+            return _bot_schedule_travel(agent_id, agent, target, state, world_turn, emergency_flee=True)
 
     # ── EMISSION SHELTER: Stay put when emission is active or imminent ────────
     # Second-highest priority (after fleeing dangerous terrain, before any pending

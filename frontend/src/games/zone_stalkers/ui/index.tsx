@@ -833,6 +833,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 key={agent.id}
                 agent={agent as unknown as AgentForProfile}
                 locations={zoneState.locations}
+                contextId={context?.id}
                 onTakeControl={() => handleTakeControl(agent.id)}
               />
             ))}
@@ -1700,6 +1701,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                             key={a.id}
                             agent={a as unknown as AgentForProfile}
                             locations={zoneState?.locations}
+                            contextId={context?.id}
                             sendCommand={sendCommand}
                           />
                         ))}
@@ -1972,7 +1974,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
 
         {debugTab === 'map' && (
-          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
+          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} contextId={context?.id} />
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
@@ -2001,6 +2003,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 locationName={locName(agent.location_id)}
                 locations={zoneState.locations}
                 isCurrentPlayer={agent.id === myAgentId}
+                contextId={context?.id}
                 sendCommand={sendCommand}
               />
             </div>

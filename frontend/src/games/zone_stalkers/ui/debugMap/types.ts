@@ -86,4 +86,6 @@ export interface DebugMapPageProps {
   currentLocId: string | null;
   /** Send a command to the backend (uses the zone_map context id automatically) */
   sendCommand: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
+  /** Zone-map context ID — forwarded to AgentProfileModal for on-demand memory loading. */
+  contextId?: string;
 }

@@ -20,6 +20,8 @@ interface AgentRowProps {
   locations?: Record<string, { name: string; region?: string }>;
   /** Optional sendCommand so the profile modal can call debug commands (e.g. bot decision preview). */
   sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
+  /** Zone-map context ID — forwarded to AgentProfileModal so it can fetch memory on demand. */
+  contextId?: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -31,6 +33,7 @@ export default function AgentRow({
   onTakeControl,
   locations,
   sendCommand,
+  contextId,
 }: AgentRowProps) {
   const [showProfile, setShowProfile] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -173,6 +176,7 @@ export default function AgentRow({
           onClose={() => setShowProfile(false)}
           locations={locations}
           sendCommand={sendCommand}
+          contextId={contextId}
         />
       )}
     </>

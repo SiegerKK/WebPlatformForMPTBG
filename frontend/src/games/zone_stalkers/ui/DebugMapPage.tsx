@@ -93,7 +93,7 @@ function botDecisionMade(
   return false;
 }
 
-export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
+export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
 
@@ -1565,6 +1565,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           locations={zoneState.locations}
           onClose={() => setProfileAgentId(null)}
           sendCommand={sendCommand}
+          contextId={contextId}
         />
       )}
 
@@ -1589,7 +1590,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           action_used: false,
           scheduled_action: null,
           controller: { kind: 'npc' },
-          memory: t.memory ?? [],
+          memory: [],
         };
         return (
           <AgentProfileModal
@@ -1598,6 +1599,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             locations={zoneState.locations}
             onClose={() => setProfileTraderId(null)}
             sendCommand={sendCommand}
+            contextId={contextId}
           />
         );
       })()}
