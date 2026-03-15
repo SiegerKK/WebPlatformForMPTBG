@@ -11,6 +11,7 @@ export default defineConfig({
         // Inside Docker the nginx conf handles the /api proxy to the backend container.
         target: 'http://localhost:8000',
         changeOrigin: true,
+        ws: true,
       }
     }
   }

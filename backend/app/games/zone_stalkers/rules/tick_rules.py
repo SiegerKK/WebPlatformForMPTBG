@@ -1463,6 +1463,38 @@ def _bot_pickup_on_arrival(
     return []
 
 
+def _bot_sell_on_arrival(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """If the most recent decision was a ``sell_at_trader`` whose destination
+    matches the agent's current location, sell artifacts to the trader now.
+
+    Called after emergency checks but before equipment-maintenance so that
+    the agent completes the purpose of its trip (selling artifacts) before
+    being redirected to satisfy secondary needs like buying new gear.
+
+    Returns sell events on success, or an empty list if not applicable.
+    """
+    loc_id = agent.get("location_id")
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "decision":
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") != "sell_at_trader":
+            return []  # Latest decision was something else — no pending sell.
+        if effects.get("destination") != loc_id:
+            return []  # Still en-route to a different location.
+        # Arrived at the target trader location — attempt the sale.
+        trader = _find_trader_at_location(loc_id, state)
+        if trader is None:
+            return []  # Trader not present (edge case).
+        return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn)
+    return []
+
+
 def _bot_pickup_item_from_ground(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1927,22 +1959,13 @@ def _run_bot_action_inner(
             )
             return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
 
-    # ── ARRIVAL COMMITMENT: pick up the item we travelled here for ────────────
-    # When the most recent decision was a seek_item whose destination is the
-    # current location, immediately attempt to pick up the sought item before
-    # re-evaluating priorities.  This prevents a higher-priority Need from
-    # redirecting the agent on the very tick it arrives, without ever collecting
-    # what it came for.
-    _arrival_events = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
-    if _arrival_events:
-        return _arrival_events
-
     # ── EMISSION SHELTER: Stay put when emission is active or imminent ────────
-    # Highest-priority check (after fleeing dangerous terrain).  If the agent is
-    # already on safe terrain but knows an emission is coming (or is ongoing),
-    # it must NOT schedule any new travel or work — doing so risks arriving on
-    # dangerous terrain when the emission fires.  The agent simply waits until
-    # it sees an ``emission_ended`` observation (which resets _emission_warned).
+    # Second-highest priority (after fleeing dangerous terrain, before any pending
+    # tasks or new decisions).  If the agent is already on safe terrain but knows
+    # an emission is coming (or is ongoing), it must NOT do anything — doing so
+    # risks arriving on dangerous terrain when the emission fires.  The agent
+    # simply waits until it sees an ``emission_ended`` observation.
+    # Emission is an "urgent trigger" that overrides all pending arrival tasks.
     if _emission_active or _emission_warned:
         # Only write the decision memory once; avoid flooding the log.
         _last_decision_kind = None
@@ -1959,6 +1982,16 @@ def _run_bot_action_inner(
                 reason="скоро выброс, нахожусь в безопасном месте",
             )
         return []
+
+    # ── ARRIVAL COMMITMENT: pick up the item we travelled here for ────────────
+    # When the most recent decision was a seek_item whose destination is the
+    # current location, immediately attempt to pick up the sought item before
+    # re-evaluating priorities.  This prevents a higher-priority Need from
+    # redirecting the agent on the very tick it arrives, without ever collecting
+    # what it came for.
+    _arrival_events = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
+    if _arrival_events:
+        return _arrival_events
 
     # ── EMERGENCY: Heal ────────────────────────────────────────────────────────
     if agent.get("hp", 100) <= 30:
@@ -2047,6 +2080,16 @@ def _run_bot_action_inner(
             )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
+    # ── ARRIVAL COMMITMENT: sell artifacts at the trader we travelled to ──────
+    # If the agent's most recent decision was to travel to a trader specifically
+    # to sell artifacts (action_kind == "sell_at_trader"), complete that task
+    # now before evaluating other needs.  This ensures the agent finishes what
+    # it came for instead of being side-tracked by e.g. equipment purchases.
+    # Life-threatening emergencies above still override this (they run first).
+    _sell_arrival_evs = _bot_sell_on_arrival(agent_id, agent, state, world_turn)
+    if _sell_arrival_evs:
+        return _sell_arrival_evs
+
     # ── EQUIPMENT MAINTENANCE ─────────────────────────────────────────────────
     # High-priority: ensure the agent is always armed, armored and has basic
     # supplies.  For each need the cascade is:
@@ -2099,7 +2142,7 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     "Иду к торговцу за оружием",
                     f"Нет оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                    {"action_kind": "seek_item", "item_category": "weapon", "destination": trader_loc},
+                    {"action_kind": "buy_item", "item_category": "weapon", "destination": trader_loc},
                     reason="нет оружия в снаряжении, иду к торговцу",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
@@ -2138,7 +2181,7 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     "Иду к торговцу за бронёй",
                     f"Нет брони. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                    {"action_kind": "seek_item", "item_category": "armor", "destination": trader_loc},
+                    {"action_kind": "buy_item", "item_category": "armor", "destination": trader_loc},
                     reason="нет брони в снаряжении, иду к торговцу",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
@@ -2182,7 +2225,7 @@ def _run_bot_action_inner(
                             agent, world_turn, state, "decision",
                             "Иду к торговцу за патронами",
                             f"Нет патронов для оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                            {"action_kind": "seek_item", "item_category": "ammo",
+                            {"action_kind": "buy_item", "item_category": "ammo",
                              "ammo_type": _required_ammo, "destination": trader_loc},
                             reason="нет патронов для оружия, иду к торговцу",
                         )
@@ -2332,7 +2375,7 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     f"Иду к торговцу {trader_name}",
                     f"Иду к торговцу {trader_name}.",
-                    {"destination": trader_loc},
+                    {"action_kind": "sell_at_trader", "destination": trader_loc},
                     reason="есть артефакты для продажи, торговец не здесь",
                 )
 

@@ -55,6 +55,9 @@ export function useMatchWebSocket(
   // Ref to the active WebSocket instance so the cleanup function can close it.
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Persistent retry delay across reconnect attempts so back-off actually grows.
+  const retryDelayRef = useRef(INITIAL_RETRY_MS);
+
   const connect = useCallback(() => {
     if (!token || cancelledRef.current) return;
 
@@ -69,7 +72,6 @@ export function useMatchWebSocket(
 
     wsRef.current = ws;
 
-    let retryDelay = INITIAL_RETRY_MS;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
 
     const cleanup = () => {
@@ -79,7 +81,7 @@ export function useMatchWebSocket(
     ws.onopen = () => {
       if (cancelledRef.current) { ws.close(); return; }
       setConnected(true);
-      retryDelay = INITIAL_RETRY_MS; // reset back-off on successful connect
+      retryDelayRef.current = INITIAL_RETRY_MS; // reset back-off on successful connect
       // Start ping/pong keep-alive
       pingTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -100,15 +102,18 @@ export function useMatchWebSocket(
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       cleanup();
       setConnected(false);
       if (cancelledRef.current) return;
+      // Auth failure — token is invalid or expired; retrying won't help.
+      if (event.code === 4401) return;
       // Exponential back-off reconnect
+      const delay = retryDelayRef.current;
+      retryDelayRef.current = Math.min(delay * 2, MAX_RETRY_MS);
       setTimeout(() => {
         if (!cancelledRef.current) connect();
-      }, retryDelay);
-      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_MS);
+      }, delay);
     };
 
     ws.onerror = () => {
@@ -119,6 +124,7 @@ export function useMatchWebSocket(
   useEffect(() => {
     if (!token) return;
     cancelledRef.current = false;
+    retryDelayRef.current = INITIAL_RETRY_MS; // reset back-off when match/token changes
     connect();
     return () => {
       cancelledRef.current = true;
