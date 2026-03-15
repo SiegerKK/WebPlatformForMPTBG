@@ -17,7 +17,7 @@ def _strip_agent_memory(state_blob: Dict[str, Any]) -> Dict[str, Any]:
     """Return a shallow-copy of *state_blob* with ``memory`` removed from every
     agent and trader dict.
 
-    Agent memory can hold up to 50 entries per entity.  Including it in every
+    Agent memory can hold up to 2000 entries per entity.  Including it in every
     ``getTree`` / ``get`` response wastes bandwidth because the frontend only
     needs it on demand (memory tab, profile modal).  The full array is still
     preserved in Redis / the database and served by the dedicated

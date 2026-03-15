@@ -242,11 +242,12 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     setFetchedMemory(null); // reset when agent changes so we never show stale data
     fetchMemory();
   }, [fetchMemory]);
-  // While the modal is open, poll for new memory entries on a 3-second interval
+  // While the modal is open, poll for new memory entries every 5 seconds
   // so live games update without requiring the user to close and reopen the profile.
+  // (5 s is a good balance: fast enough for active ticking, low overhead when paused.)
   useEffect(() => {
     if (!contextId) return;
-    const id = setInterval(fetchMemory, 3000);
+    const id = setInterval(fetchMemory, 5000);
     return () => clearInterval(id);
   }, [fetchMemory, contextId]);
   // Prefer freshly-fetched memory, fall back to whatever was passed in agent.memory.

@@ -24,7 +24,7 @@ EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exp
 DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
 
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
-MAX_AGENT_MEMORY = 500
+MAX_AGENT_MEMORY = 2000
 
 # Default risk_tolerance used when an agent or item does not specify one.
 DEFAULT_RISK_TOLERANCE = 0.5
@@ -1122,8 +1122,8 @@ def _add_trader_memory(
         "effects": effects,
     }
     trader.setdefault("memory", []).append(entry)
-    if len(trader["memory"]) > 50:
-        trader["memory"] = trader["memory"][-50:]
+    if len(trader["memory"]) > MAX_AGENT_MEMORY:
+        trader["memory"] = trader["memory"][-MAX_AGENT_MEMORY:]
 
 
 def _bot_sell_to_trader(
@@ -1722,13 +1722,17 @@ def _maybe_record_item_not_found(
         if mem.get("type") != "decision":
             continue
         effects = mem.get("effects", {})
-        if (
-            effects.get("action_kind") == "seek_item"
-            and effects.get("destination") == loc_id
-            and effects.get("item_category") == item_category
-        ):
+        if effects.get("destination") != loc_id or effects.get("item_category") != item_category:
+            continue
+        ak = effects.get("action_kind")
+        if ak == "seek_item":
             found_seek = True
             break
+        elif ak == "buy_item":
+            # The most recent relevant decision was to travel here for purchasing,
+            # not for picking up from the ground.  "No ground items" is expected
+            # at a trader location, so do not record a dead-end observation.
+            return
     if not found_seek:
         return
 
