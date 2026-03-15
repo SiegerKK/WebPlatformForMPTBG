@@ -928,8 +928,8 @@ function _worstStatus(criteria: PriorityCriterion[]): StatusColor {
  * Groups:
  *   1. Жизненные   — HP / hunger / thirst / sleep / radiation
  *   2. Экипировка  — weapon / armor / ammo / medicine / food / water
- *   3. Материальное — wealth vs threshold / artifacts to sell
- *   4. Глобальная цель — current global goal
+ *   3. Материальное — wealth vs threshold / upgrade-available / artifacts to sell
+ *   4. Глобальная цель — threshold gate (locked/unlocked) + current global goal
  */
 function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
   const { hp, max_hp, hunger, thirst, sleepiness, radiation } = agent;
@@ -1026,9 +1026,12 @@ function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
       detail: `${wealth} / ${threshold} RU`,
     },
     {
+      // Upgrade check only activates once the wealth threshold is reached.
       label:  'Апгрейд снаряжения',
       status: wealthFrac >= 1 ? 'yellow' : 'green',
-      detail: wealthFrac >= 1 ? 'Достаточно средств — возможен апгрейд' : 'Ещё накапливаю ресурсы',
+      detail: wealthFrac >= 1
+        ? 'Порог достигнут — проверяю апгрейд'
+        : `Накапливаю ресурсы (${Math.round(wealthFrac * 100)}% от порога)`,
     },
     {
       label:  'Артефакты',
@@ -1038,10 +1041,18 @@ function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
   ];
 
   // ── Group 4: Global goal ──────────────────────────────────────────────────
+  const goalUnlocked = wealthFrac >= 1;
   const goalCriteria: PriorityCriterion[] = [
     {
+      label:  'Порог богатства',
+      status: goalUnlocked ? 'green' : 'yellow',
+      detail: goalUnlocked
+        ? `Открыто (${wealth} ≥ ${threshold} RU)`
+        : `Заблокировано — нужно ещё ${threshold - wealth} RU`,
+    },
+    {
       label:  'Цель',
-      status: 'green',
+      status: goalUnlocked ? 'green' : 'yellow',
       detail: agent.global_goal
         ? agent.global_goal + (agent.current_goal ? ` → ${currentGoalLabel(agent.current_goal)}` : '')
         : '—',
@@ -1164,10 +1175,21 @@ function PriorityGroupsPanel({ agent }: { agent: AgentForProfile }) {
 /**
  * Client-side approximation of the backend `_describe_bot_decision_tree` logic.
  *
- * Evaluates the same 8-layer priority tree using agent fields available in the
+ * Evaluates the same 9-layer priority tree using agent fields available in the
  * frontend state, returning an immediate result that is displayed before (or
  * instead of) a backend round-trip.  The backend version is authoritative;
  * this function is used only for instantaneous UI feedback.
+ *
+ * Layers:
+ *  1. EMERGENCY: HP критический
+ *  2. EMERGENCY: Голод
+ *  3. EMERGENCY: Жажда
+ *  4. СНАРЯЖЕНИЕ: Оружие / броня / патроны
+ *  5. ВЫЖИВАНИЕ: Сон
+ *  6. ТОРГОВЛЯ: Продать артефакты (all agents)
+ *  7. ЦЕЛЬ: Накопить богатство   (wealth < threshold)
+ *  8. АПГРЕЙД: Улучшение снаряжения  (wealth >= threshold, before global goal)
+ *  9. ЦЕЛЬ: Глобальная цель      (wealth >= threshold)
  *
  * @param agent - The bot agent whose decision should be previewed.
  * @returns A `DecisionPreview` with `goal`, `action`, `reason`, and the full
@@ -1248,14 +1270,16 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   });
 
   // Layer 6: ТОРГОВЛЯ: Продать артефакты
-  // Note: client-side can't check for a trader at the location, so we only check inventory.
+  // All agents travel to sell artifacts (not just get_rich since the previous fix).
+  // Client-side can't check for a trader at the current location, so we show
+  // only whether artifacts are in inventory; the backend will handle routing.
   const cond6 = artifactCount > 0;
   layers.push({
     name: 'ТОРГОВЛЯ: Продать артефакты',
     skipped: !cond6,
-    action: 'Продать артефакты',
+    action: 'Продать артефакты торговцу',
     reason: cond6
-      ? `${artifactCount} артефактов (наличие торговца неизвестно)`
+      ? `${artifactCount} арт. в инвентаре — идти к торговцу`
       : 'Нет артефактов в инвентаре',
   });
 
@@ -1270,13 +1294,26 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
       : `Богатство ${wealth} ≥ порог ${threshold}`,
   });
 
-  // Layer 8: ЦЕЛЬ: Глобальная цель
+  // Layer 8: АПГРЕЙД: Улучшение снаряжения
+  // Fires when wealth >= threshold. The bot checks for a better-matching item
+  // at a trader before pursuing the global goal.
   const cond8 = wealth >= threshold;
   layers.push({
-    name: 'ЦЕЛЬ: Глобальная цель',
+    name: 'АПГРЕЙД: Улучшение снаряжения',
     skipped: !cond8,
-    action: `Преследование цели «${globalGoal}»`,
+    action: 'Купить улучшенное снаряжение',
     reason: cond8
+      ? `Порог ${threshold} достигнут — проверяю возможность апгрейда`
+      : `Богатство ${wealth} < порог ${threshold}, апгрейд недоступен`,
+  });
+
+  // Layer 9: ЦЕЛЬ: Глобальная цель
+  const cond9 = wealth >= threshold;
+  layers.push({
+    name: 'ЦЕЛЬ: Глобальная цель',
+    skipped: !cond9,
+    action: `Преследование цели «${globalGoal}»`,
+    reason: cond9
       ? `Богатство ${wealth} ≥ порог ${threshold}, цель: ${globalGoal}`
       : `Богатство ${wealth} < порог ${threshold}`,
   });
@@ -1318,6 +1355,9 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   } else if (cond7) {
     action = 'Сбор ресурсов';
     reason = `Богатство ${wealth} < порог ${threshold}`;
+  } else if (goal === 'upgrade_equipment') {
+    action = 'Улучшение снаряжения';
+    reason = `Порог ${threshold} достигнут — апгрейд снаряжения`;
   } else {
     action = 'Преследование глобальной цели';
     reason = `Цель: ${globalGoal}`;

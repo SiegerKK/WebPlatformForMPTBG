@@ -2281,15 +2281,32 @@ def _describe_bot_decision_tree(
         "reason": f"Богатство {wealth} < порог {threshold}" if cond7 else f"Богатство {wealth} ≥ порог {threshold}",
     })
 
-    # Layer 8: ЦЕЛЬ: Глобальная цель
+    # Layer 8: АПГРЕЙД: Улучшение снаряжения
+    # Fires when wealth >= threshold: before pursuing the global goal the bot
+    # checks whether a better-matching weapon or armor is affordable.
+    # The description tree cannot run the full upgrade search here, so we simply
+    # mark this layer as active whenever the wealth gate is open.
     cond8 = wealth >= threshold
     layers.append({
-        "name": "ЦЕЛЬ: Глобальная цель",
+        "name": "АПГРЕЙД: Улучшение снаряжения",
         "skipped": not cond8,
+        "action": "Купить улучшенное снаряжение",
+        "reason": (
+            f"Порог {threshold} достигнут — проверяю возможность апгрейда"
+            if cond8
+            else f"Богатство {wealth} < порог {threshold}, апгрейд недоступен"
+        ),
+    })
+
+    # Layer 9: ЦЕЛЬ: Глобальная цель
+    cond9 = wealth >= threshold
+    layers.append({
+        "name": "ЦЕЛЬ: Глобальная цель",
+        "skipped": not cond9,
         "action": f"Преследование цели «{global_goal}»",
         "reason": (
             f"Богатство {wealth} ≥ порог {threshold}, цель: {global_goal}"
-            if cond8
+            if cond9
             else f"Богатство {wealth} < порог {threshold}"
         ),
     })
@@ -2370,6 +2387,8 @@ def _describe_bot_decision_tree(
             reason = f"Усталость {sleepiness}/100"
         elif wealth < threshold:
             reason = f"Богатство {wealth} < порог {threshold}, фаза сбора ресурсов"
+        elif goal == "upgrade_equipment":
+            reason = f"Порог {threshold} достигнут — улучшаю снаряжение"
         else:
             reason = f"Богатство {wealth} ≥ порог {threshold}, преследование цели «{global_goal}»"
 
