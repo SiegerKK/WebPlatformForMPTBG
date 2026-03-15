@@ -881,10 +881,12 @@ class TestRiskToleranceItemSelection:
         return state, agent
 
     def test_select_item_prefers_closest_risk_tolerance(self):
-        """_select_item_by_risk_tolerance should pick the item with risk_tolerance closest to agent's."""
+        """_select_item_by_risk_tolerance should pick the item with risk_tolerance closest to agent's
+        when there is a unique closest match (multi-factor scoring with risk as dominant factor)."""
         from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
-        # Find the weapon whose risk_tolerance is exactly 0.5, if one exists; otherwise closest.
+        # ak74 has rt=0.5 — exact match for agent_risk=0.5, unique minimum distance.
+        # Even with multi-factor scoring the unique best risk-match should still win.
         agent_risk = 0.5
         result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
         assert result is not None
@@ -898,30 +900,37 @@ class TestRiskToleranceItemSelection:
 
     def test_select_item_for_cautious_agent(self):
         """A cautious agent (low risk_tolerance) should prefer the lowest-risk weapon."""
-        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance, _score_item_for_purchase
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
         agent_risk = 0.0  # absolute minimum — will pick the weapon with lowest risk_tolerance
         result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
         assert result is not None
         item_key, _ = result
-        expected_key = min(
-            (k for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES),
-            key=lambda k: (abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk), ITEM_TYPES[k].get("value", 0)),
-        )
+        # Multi-factor: compute expected winner with the composite score
+        candidates = [(k, ITEM_TYPES[k]) for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES]
+        max_value = max(info.get("value", 0) for _, info in candidates) or 1
+        max_weight = max(info.get("weight", 0.0) for _, info in candidates) or 1
+        expected_key = max(
+            candidates,
+            key=lambda kv: _score_item_for_purchase(kv[1], agent_risk, max_value, max_weight),
+        )[0]
         assert item_key == expected_key
 
     def test_select_item_for_aggressive_agent(self):
         """An aggressive agent (high risk_tolerance) should prefer the highest-risk weapon."""
-        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance, _score_item_for_purchase
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
         agent_risk = 1.0  # absolute maximum — will pick the weapon with highest risk_tolerance
         result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
         assert result is not None
         item_key, _ = result
-        expected_key = min(
-            (k for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES),
-            key=lambda k: (abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk), ITEM_TYPES[k].get("value", 0)),
-        )
+        candidates = [(k, ITEM_TYPES[k]) for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES]
+        max_value = max(info.get("value", 0) for _, info in candidates) or 1
+        max_weight = max(info.get("weight", 0.0) for _, info in candidates) or 1
+        expected_key = max(
+            candidates,
+            key=lambda kv: _score_item_for_purchase(kv[1], agent_risk, max_value, max_weight),
+        )[0]
         assert item_key == expected_key
 
     def test_select_item_empty_set_returns_none(self):
@@ -929,20 +938,20 @@ class TestRiskToleranceItemSelection:
         assert _select_item_by_risk_tolerance(frozenset(), 0.5) is None
 
     def test_bot_buys_risk_matched_weapon(self):
-        """Bot should choose the weapon whose risk_tolerance is closest to its own."""
+        """Bot should choose the weapon with the best composite score (risk+value+weight)."""
         from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader, _select_item_by_risk_tolerance
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
         agent_risk = 0.5
         state, agent = self._make_bot_state(agent_risk=agent_risk)
         events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
         assert len(events) == 1
-        # Verify the purchased item is the expected best-risk-match (ignoring affordability order)
+        # Verify the purchased item matches the reference selector (both use the same formula)
         expected = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
         assert expected is not None
         assert events[0]["payload"]["item_type"] == expected[0]
 
     def test_bot_buys_risk_matched_armor(self):
-        """Bot should choose the armor whose risk_tolerance is closest to its own."""
+        """Bot should choose the armor with the best composite score (risk+value+weight)."""
         from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader, _select_item_by_risk_tolerance
         from app.games.zone_stalkers.balance.items import ARMOR_ITEM_TYPES
         agent_risk = 0.4
@@ -954,20 +963,75 @@ class TestRiskToleranceItemSelection:
         assert events[0]["payload"]["item_type"] == expected[0]
 
     def test_bot_buy_writes_decision_memory(self):
-        """A 'decision' memory entry must be written with risk_tolerance info."""
+        """A 'decision' memory entry must be written with risk_tolerance and score info."""
         from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
         state, agent = self._make_bot_state(agent_risk=0.5)
         _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
         decision_entries = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
         assert len(decision_entries) >= 1
-        # The decision memory must contain risk_tolerance info
         last_decision = decision_entries[-1]
-        assert "trade_decision" in last_decision.get("effects", {}).get("action_kind", "")
-        assert "agent_risk_tolerance" in last_decision.get("effects", {})
+        effects = last_decision.get("effects", {})
+        assert effects.get("action_kind") == "trade_decision"
+        assert "agent_risk_tolerance" in effects
+        assert "score" in effects, "decision memory must contain composite score"
 
-    def test_bot_buy_event_carries_risk_tolerance_info(self):
-        """bot_bought_item event payload must include both risk_tolerance values."""
+    def test_bot_buy_decision_memory_includes_runners_up(self):
+        """When multiple candidates exist, the decision memory must list up to 2 runner-ups."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        # WEAPON_ITEM_TYPES has 5 items — there will be runner-ups
+        state, agent = self._make_bot_state(agent_risk=0.5)
+        _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        decision_entries = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
+        last_decision = decision_entries[-1]
+        effects = last_decision.get("effects", {})
+        runners_up = effects.get("runners_up", [])
+        assert isinstance(runners_up, list), "runners_up must be a list"
+        assert 1 <= len(runners_up) <= 2, f"expected 1-2 runner-ups, got {len(runners_up)}"
+        for r in runners_up:
+            assert "item_type" in r
+            assert "score" in r
+            assert "price" in r
+        # Each runner-up score should be ≤ the winner's score
+        winner_score = effects.get("score", 0.0)
+        for r in runners_up:
+            assert r["score"] <= winner_score + 1e-9, (
+                f"runner-up score {r['score']} exceeds winner score {winner_score}"
+            )
+
+    def test_scoring_prefers_higher_value_when_risk_is_tied(self):
+        """When risk_tolerance distances are equal, higher-value item scores better."""
+        from app.games.zone_stalkers.rules.tick_rules import _score_item_for_purchase
+        # Two synthetic items with identical risk_tolerance — but different values and weights
+        # (same weight to isolate the value factor).
+        agent_risk = 0.5
+        item_cheap = {"risk_tolerance": 0.5, "value": 100, "weight": 1.0}
+        item_expensive = {"risk_tolerance": 0.5, "value": 1000, "weight": 1.0}
+        max_value = 1000
+        max_weight = 1.0
+        score_cheap = _score_item_for_purchase(item_cheap, agent_risk, max_value, max_weight)
+        score_expensive = _score_item_for_purchase(item_expensive, agent_risk, max_value, max_weight)
+        assert score_expensive > score_cheap, (
+            "higher-value item should score better when risk_tolerance is equal"
+        )
+
+    def test_scoring_prefers_lighter_item_when_risk_and_value_are_equal(self):
+        """When risk_tolerance and value are equal, the lighter item scores better."""
+        from app.games.zone_stalkers.rules.tick_rules import _score_item_for_purchase
+        agent_risk = 0.5
+        item_heavy = {"risk_tolerance": 0.5, "value": 500, "weight": 5.0}
+        item_light = {"risk_tolerance": 0.5, "value": 500, "weight": 1.0}
+        max_value = 500
+        max_weight = 5.0
+        score_heavy = _score_item_for_purchase(item_heavy, agent_risk, max_value, max_weight)
+        score_light = _score_item_for_purchase(item_light, agent_risk, max_value, max_weight)
+        assert score_light > score_heavy, (
+            "lighter item should score better when risk_tolerance and value are equal"
+        )
+
+    def test_bot_buy_event_carries_score_and_risk_tolerance(self):
+        """bot_bought_item event payload must include score, risk_tolerance values."""
         from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
         state, agent = self._make_bot_state(agent_risk=0.6)
@@ -976,6 +1040,8 @@ class TestRiskToleranceItemSelection:
         payload = events[0]["payload"]
         assert "agent_risk_tolerance" in payload
         assert "item_risk_tolerance" in payload
+        assert "score" in payload
+        assert 0.0 <= payload["score"] <= 1.0
 
     def test_bot_falls_back_when_preferred_item_too_expensive(self):
         """If the best-matching item is unaffordable, the next-closest is chosen."""
@@ -1051,8 +1117,9 @@ class TestEquipmentUpgrade:
         """No upgrade when current item is the best risk-tolerance match."""
         from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
-        # Current: shotgun (rt=0.5), agent_risk=0.5 → already best match
-        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "shotgun", 0.5, 50000)
+        # ak74 has rt=0.5 — exact match for agent_risk=0.5.
+        # No other weapon has a closer risk_tolerance AND higher value, so no upgrade exists.
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "ak74", 0.5, 50000)
         assert result is None
 
     def test_find_upgrade_target_no_upgrade_when_cant_afford(self):
@@ -1592,7 +1659,7 @@ class TestDebugLocationCommands:
         state = self._state()
         for loc in state["locations"].values():
             assert "terrain_type" in loc
-            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings", "hamlet", "farm", "field_camp"}
+            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings", "hamlet", "farm", "field_camp", "swamp"}
             assert "anomaly_activity" in loc
             assert isinstance(loc["anomaly_activity"], int)
             assert 0 <= loc["anomaly_activity"] <= 10
@@ -2199,9 +2266,15 @@ class TestCustomTerrainTypes:
         }
         return state, loc_id
 
-    def test_edit_location_with_urban_terrain(self):
-        state, loc_id = self._state_with_custom_loc("urban")
+    def test_edit_location_with_urban_terrain_now_invalid(self):
+        """urban was removed as a duplicate of buildings; it must now be rejected."""
+        state, loc_id = self._state_with_custom_loc("plain")
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "urban"}, state)
+        assert not result.valid
+
+    def test_edit_location_with_bridge_terrain(self):
+        state, loc_id = self._state_with_custom_loc("bridge")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "bridge"}, state)
         assert result.valid, result.error
 
     def test_edit_location_with_tunnel_terrain(self):
@@ -2219,10 +2292,11 @@ class TestCustomTerrainTypes:
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "scientific_bunker"}, state)
         assert result.valid, result.error
 
-    def test_edit_location_with_underground_terrain(self):
-        state, loc_id = self._state_with_custom_loc("underground")
+    def test_edit_location_with_underground_terrain_now_invalid(self):
+        """underground was removed as a duplicate of dungeon; it must now be rejected."""
+        state, loc_id = self._state_with_custom_loc("plain")
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "underground"}, state)
-        assert result.valid, result.error
+        assert not result.valid
 
     def test_save_custom_terrain_persists(self):
         state, loc_id = self._state_with_custom_loc("tunnel")
@@ -2235,3 +2309,63 @@ class TestCustomTerrainTypes:
         state, loc_id = self._state_with_custom_loc("plain")
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "ocean"}, state)
         assert not result.valid
+
+
+class TestEmissionDangerousTerrain:
+    """Unit tests for the _EMISSION_DANGEROUS_TERRAIN constant."""
+
+    def test_dangerous_terrain_contains_required_types(self):
+        """All five user-specified dangerous terrain types must be present."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        required = {"plain", "hills", "swamp", "field_camp", "slag_heaps"}
+        assert required <= _EMISSION_DANGEROUS_TERRAIN, (
+            f"Missing from dangerous terrain: {required - _EMISSION_DANGEROUS_TERRAIN}"
+        )
+
+    def test_swamp_terrain_locations_exist_in_fixed_map(self):
+        """Fixed zone map should contain at least one location with terrain_type='swamp'."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        swamp_locs = [
+            loc for loc in state["locations"].values()
+            if loc.get("terrain_type") == "swamp"
+        ]
+        assert len(swamp_locs) >= 1, "Expected at least one swamp-terrain location in the fixed map"
+
+    def test_swamp_location_is_dangerous(self):
+        """A location with terrain_type='swamp' must be classified as dangerous for emission."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "swamp" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_field_camp_terrain_is_dangerous(self):
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "field_camp" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_slag_heaps_terrain_is_dangerous(self):
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "slag_heaps" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_bridge_terrain_is_dangerous(self):
+        """Мост (bridge) is open terrain — must be dangerous during emission."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "bridge" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_industrial_and_buildings_remain_safe(self):
+        """Industrial structures and buildings must remain safe (not in dangerous set)."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "industrial" not in _EMISSION_DANGEROUS_TERRAIN
+        assert "buildings" not in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_terrain_migration_normalizes_unknown_types(self):
+        """Unknown terrain types (e.g. old 'urban'/'underground') are normalized to 'plain' on first tick."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        # Inject invalid/removed terrain types into two locations
+        locs = list(state["locations"].values())
+        locs[0]["terrain_type"] = "urban"
+        locs[1]["terrain_type"] = "underground"
+        new_state, _ = tick_zone_map(state)
+        assert new_state["locations"][locs[0]["id"]]["terrain_type"] == "plain"
+        assert new_state["locations"][locs[1]["id"]]["terrain_type"] == "plain"
+        assert new_state.get("_terrain_migrated_v3") is True

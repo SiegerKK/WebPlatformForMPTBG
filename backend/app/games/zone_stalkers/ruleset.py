@@ -106,18 +106,34 @@ class ZoneStalkerRuleSet(RuleSet):
         new_state, map_events = tick_zone_map(state)
 
         emitted = []
+        new_events_for_ws = []  # serializable copies for WebSocket broadcast
         if map_events:
+            import uuid as _uuid_mod
+            from datetime import datetime as _dt_cls
             seq_range = allocate_sequence_numbers(zone_ctx.id, len(map_events), db)
             for ev_data, seq in zip(map_events, seq_range):
+                _ev_id = _uuid_mod.uuid4()
+                _ev_created = _dt_cls.utcnow()
                 ev = GameEvent(
+                    id=_ev_id,
                     match_id=match.id,
                     context_id=zone_ctx.id,
                     event_type=ev_data.get("event_type", "tick"),
                     payload=ev_data.get("payload", {}),
                     sequence_no=seq,
+                    created_at=_ev_created,
                 )
                 db.add(ev)
                 emitted.append(ev_data)
+                new_events_for_ws.append({
+                    "id": str(_ev_id),
+                    "match_id": str(match.id),
+                    "context_id": str(zone_ctx.id),
+                    "event_type": ev_data.get("event_type", "tick"),
+                    "payload": ev_data.get("payload", {}),
+                    "sequence_no": seq,
+                    "created_at": _ev_created.isoformat(),
+                })
 
         # ── Process active zone_event child contexts ──────────────────
         event_ctxs = db.query(GameContext).filter(
@@ -187,6 +203,7 @@ class ZoneStalkerRuleSet(RuleSet):
             "world_day": new_state.get("world_day"),
             "world_minute": new_state.get("world_minute"),
             "events_emitted": len(emitted),
+            "new_events": new_events_for_ws,
         }
 
     # ── Command validation / resolution ──────────────────────────────────────

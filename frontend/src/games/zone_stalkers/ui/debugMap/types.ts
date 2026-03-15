@@ -77,6 +77,8 @@ export interface ZoneMapState {
   };
   /** True while the server-side auto-ticker is advancing this match (core flag) */
   auto_tick_enabled?: boolean;
+  /** True when auto-tick is running in slow mode (3 s per turn) */
+  auto_tick_slow_mode?: boolean;
 }
 
 export interface DebugMapPageProps {
@@ -86,4 +88,6 @@ export interface DebugMapPageProps {
   currentLocId: string | null;
   /** Send a command to the backend (uses the zone_map context id automatically) */
   sendCommand: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
+  /** Zone-map context ID — forwarded to AgentProfileModal for on-demand memory loading. */
+  contextId?: string;
 }

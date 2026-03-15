@@ -182,33 +182,39 @@ interface ZoneEventState {
 // ─── Location type colour ────────────────────────────────────────────────────
 
 const TERRAIN_TYPE_COLOR: Record<string, string> = {
-  plain: '#166534',
-  hills: '#4c1d95',
-  slag_heaps: '#334155',
-  industrial: '#854d0e',
-  buildings: '#3730a3',
-  military_buildings: '#991b1b',
-  hamlet: '#9a3412',
-  farm: '#14532d',
-  field_camp: '#134e4a',
-  // Extended types for custom imported maps
-  urban: '#334155',
-  tunnel: '#1e293b',
-  swamp: '#365314',
-  scientific_bunker: '#075985',
-  underground: '#1e1b4b',
+  plain: '#4CAF50',
+  hills: '#9ACD32',
+  swamp: '#5E8C31',
+  field_camp: '#20B2AA',
+  slag_heaps: '#6B8E23',
+  bridge: '#66BB6A',
+  industrial: '#FF9800',
+  buildings: '#FFC107',
+  military_buildings: '#F44336',
+  hamlet: '#FF7043',
+  farm: '#FFB74D',
+  dungeon: '#7E57C2',
+  tunnel: '#3949AB',
+  x_lab: '#1E88E5',
+  scientific_bunker: '#42A5F5',
 };
 
 const TERRAIN_TYPE_LABELS: Record<string, string> = {
   plain: 'Равнина',
   hills: 'Холмы',
-  slag_heaps: 'Террикони',
+  swamp: 'Болото',
+  field_camp: 'Пол. лагерь',
+  slag_heaps: 'Терриконы',
+  bridge: 'Мост',
   industrial: 'Промзона',
   buildings: 'Здания',
   military_buildings: 'Воен. здания',
   hamlet: 'Хутор',
   farm: 'Ферма',
-  field_camp: 'Пол. лагерь',
+  dungeon: 'Подземелья',
+  tunnel: 'Туннель',
+  x_lab: 'Лаборатория X',
+  scientific_bunker: 'Науч. бункер',
 };
 
 const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
@@ -339,8 +345,36 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // Agent whose profile modal is open (null = list view)
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  // On-demand memory cache: agentId → MemoryEntry[].
+  // Memory is no longer included in the getTree() state_blob to save bandwidth.
+  // It is fetched lazily when the memory tab is opened or an agent profile is viewed.
+  const [agentMemoryCache, setAgentMemoryCache] = useState<Record<string, MemoryEntry[]>>({});
+  const loadAgentMemory = useCallback(async (agentId: string) => {
+    if (!context) return;
+    try {
+      const res = await contextsApi.getAgentMemory(context.id, agentId);
+      setAgentMemoryCache((prev) => ({ ...prev, [agentId]: res.data as MemoryEntry[] }));
+    } catch { /* non-fatal */ }
+  }, [context]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lobbyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Refs so the WS callback (memoised on `refresh`) can read the latest values
+  // without causing the callback to be recreated on every render.
+  const profileAgentIdRef = useRef<string | null>(null);
+  const activeTabRef = useRef<'map' | 'event' | 'memory'>('map');
+  const myAgentIdRef = useRef<string | null>(null);
+  // ─── refresh rate-limiting ────────────────────────────────────────────────
+  // Prevent concurrent refresh() calls from stacking up (e.g. when the
+  // debug auto-ticker fires at 500 ms and each WS `ticked` message
+  // immediately triggers a full API round-trip for the context tree + events).
+  // At most one HTTP refresh is in-flight at a time.  If a second call arrives
+  // while one is already running, we remember to run exactly one more after
+  // the current one finishes instead of stacking unlimited parallel requests.
+  const refreshInFlightRef = useRef(false);
+  const pendingRefreshRef = useRef(false);
+  // When set, the next refresh() call will skip fetching events from the API
+  // because they already arrived inline via the WS `ticked` message payload.
+  const skipNextEventsRef = useRef(false);
 
   const zoneState: ZoneMapState | null = context
     ? (context.state_blob as unknown as ZoneMapState)
@@ -350,6 +384,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const myAgent: StalkerAgent | null = myAgentId ? (zoneState?.agents?.[myAgentId] ?? null) : null;
   const currentLocId = myAgent?.location_id ?? null;
   const currentLoc = currentLocId ? zoneState?.locations?.[currentLocId] : null;
+  // Keep refs in sync so the memoised WS callback can access the latest values.
+  useEffect(() => { profileAgentIdRef.current = profileAgentId; }, [profileAgentId]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { myAgentIdRef.current = myAgentId; }, [myAgentId]);
 
   const isCreator = match.created_by_user_id === user.id;
   const isWaiting = match.status === 'waiting_for_players' || match.status === 'draft';
@@ -378,6 +416,18 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // ─── refresh context + events ────────────────────────────────────────────
   const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) {
+      // A refresh is already running — schedule one more pass after it finishes
+      // instead of launching a parallel request.
+      pendingRefreshRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
+    // Consume the skip-events flag atomically so the pending-refresh path below
+    // always fetches events (only the immediate call initiated by a WS message
+    // can skip them).
+    const fetchEvents = !skipNextEventsRef.current;
+    skipNextEventsRef.current = false;
     try {
       const ctxRes = await contextsApi.getTree(match.id);
       const ctxList = ctxRes.data as GameContext[];
@@ -395,10 +445,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         setActiveEventCtx(null);
       }
 
-      const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
-      setEvents(evRes.data as GameEvent[]);
+      if (fetchEvents) {
+        const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
+        setEvents(evRes.data as GameEvent[]);
+      }
     } catch { /* ignore */ }
-  }, [match.id]);
+    finally {
+      refreshInFlightRef.current = false;
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        // One pending request was queued while we were in-flight — run it now.
+        // setTimeout(0) avoids deep synchronous recursion.
+        setTimeout(() => refresh(), 0);
+      }
+    }
+  }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── WebSocket push — replaces polling when connected ────────────────────
   const wsToken = localStorage.getItem('access_token');
@@ -431,11 +492,30 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             };
           });
         }
+        // Append new events that arrived inline with the WS notification.
+        // This avoids a separate listForMatch() API call on every tick.
+        const wsNewEvents = msg.new_events as GameEvent[] | undefined;
+        if (Array.isArray(wsNewEvents) && wsNewEvents.length > 0) {
+          setEvents((prev) => {
+            const existingIds = new Set(prev.map((e) => e.id));
+            const added = wsNewEvents.filter((e) => !existingIds.has(e.id));
+            if (added.length === 0) return prev;
+            const combined = [...prev, ...added];
+            // Keep the last 100 events (same cap as the listForMatch call)
+            return combined.length > 100 ? combined.slice(-100) : combined;
+          });
+          // Signal refresh() to skip the events API call — we already have them.
+          skipNextEventsRef.current = true;
+        }
         refresh();
+        // Re-fetch memory for whichever agent is currently visible so the
+        // profile / memory tab shows entries written during this tick.
+        const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+        if (visibleAgent) loadAgentMemory(visibleAgent);
       } else if (msg.type === 'state_updated') {
         refresh();
       }
-    }, [refresh]), // eslint-disable-line react-hooks/exhaustive-deps
+    }, [refresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // ─── ensure zone_map context exists ─────────────────────────────────────
@@ -476,6 +556,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWaiting, match.id, match.status]);
 
+  // ─── lazy-load agent memory when memory tab or profile opens ────────────
+  useEffect(() => {
+    if (activeTab === 'memory' && myAgentId) {
+      loadAgentMemory(myAgentId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, myAgentId]);
+
+  useEffect(() => {
+    if (profileAgentId) {
+      loadAgentMemory(profileAgentId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileAgentId]);
+
   // ─── active polling (fallback when WebSocket is not connected) ──────────
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -496,11 +591,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             onMatchDeleted(match.id);
         }
         await refresh();
+        // Same live-memory refresh as the WS path.
+        const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+        if (visibleAgent) loadAgentMemory(visibleAgent);
       }, interval);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, zoneState?.game_over, zoneState?.auto_tick_enabled, match.id, refresh, wsConnected]);
+  }, [isActive, zoneState?.game_over, zoneState?.auto_tick_enabled, match.id, refresh, wsConnected, loadAgentMemory]);
 
   // ─── commands ────────────────────────────────────────────────────────────
   const sendCommand = useCallback(async (commandType: string, payload: Record<string, unknown>, contextId?: string) => {
@@ -757,6 +855,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 key={agent.id}
                 agent={agent as unknown as AgentForProfile}
                 locations={zoneState.locations}
+                contextId={context?.id}
                 onTakeControl={() => handleTakeControl(agent.id)}
               />
             ))}
@@ -1104,23 +1203,27 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               </div>
 
               {/* ── Memory ── */}
-              {stalker.memory.length > 0 && (
-                <div style={styles.profileSection}>
-                  <div style={styles.profileSectionLabel}>🧠 Memory ({stalker.memory.length} entries)</div>
-                  <div style={styles.profileMemoryList}>
-                    {[...stalker.memory].reverse().slice(0, 10).map((m, i) => (
-                      <div key={i} style={styles.memoryEntry}>
-                        <div style={styles.memoryHeader}>
-                          <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
-                          <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
+              {(() => {
+                const mem = agentMemoryCache[agentId] ?? [];
+                if (mem.length === 0) return null;
+                return (
+                  <div style={styles.profileSection}>
+                    <div style={styles.profileSectionLabel}>🧠 Memory ({mem.length} entries)</div>
+                    <div style={styles.profileMemoryList}>
+                      {[...mem].reverse().slice(0, 10).map((m, i) => (
+                        <div key={i} style={styles.memoryEntry}>
+                          <div style={styles.memoryHeader}>
+                            <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
+                            <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
+                          </div>
+                          <div style={styles.memoryTitle}>{m.title}</div>
+                          <div style={styles.memorySummary}>{m.summary}</div>
                         </div>
-                        <div style={styles.memoryTitle}>{m.title}</div>
-                        <div style={styles.memorySummary}>{m.summary}</div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </>
           )}
 
@@ -1620,6 +1723,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                             key={a.id}
                             agent={a as unknown as AgentForProfile}
                             locations={zoneState?.locations}
+                            contextId={context?.id}
                             sendCommand={sendCommand}
                           />
                         ))}
@@ -1810,31 +1914,35 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           {activeTab === 'memory' && (
             <div style={styles.memoryPanel}>
               <div style={styles.panelTitle}>🧠 Stalker Memory</div>
-              {(!myAgent || myAgent.memory.length === 0) ? (
-                <p style={styles.emptyText}>No memories yet. Go explore the Zone!</p>
-              ) : (
-                <div style={styles.memoryList}>
-                  {[...myAgent.memory].reverse().map((m, i) => (
-                    <div key={i} style={styles.memoryEntry}>
-                      <div style={styles.memoryHeader}>
-                        <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
-                        <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
-                      </div>
-                      <div style={styles.memoryTitle}>{m.title}</div>
-                      <div style={styles.memorySummary}>{m.summary}</div>
-                      {Object.keys(m.effects).filter(k => m.effects[k] !== 0).length > 0 && (
-                        <div style={styles.memoryEffects}>
-                          {Object.entries(m.effects).filter(([, v]) => v !== 0).map(([k, v]) => (
-                            <span key={k} style={{ ...styles.effectChip, color: v > 0 ? '#86efac' : '#fca5a5' }}>
-                              {k}: {v > 0 ? '+' : ''}{v}
-                            </span>
-                          ))}
+              {(() => {
+                const myMemory = myAgentId ? (agentMemoryCache[myAgentId] ?? []) : [];
+                if (!myAgent || myMemory.length === 0) {
+                  return <p style={styles.emptyText}>No memories yet. Go explore the Zone!</p>;
+                }
+                return (
+                  <div style={styles.memoryList}>
+                    {[...myMemory].reverse().map((m, i) => (
+                      <div key={i} style={styles.memoryEntry}>
+                        <div style={styles.memoryHeader}>
+                          <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
+                          <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                         </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
+                        <div style={styles.memoryTitle}>{m.title}</div>
+                        <div style={styles.memorySummary}>{m.summary}</div>
+                        {Object.keys(m.effects).filter(k => m.effects[k] !== 0).length > 0 && (
+                          <div style={styles.memoryEffects}>
+                            {Object.entries(m.effects).filter(([, v]) => v !== 0).map(([k, v]) => (
+                              <span key={k} style={{ ...styles.effectChip, color: v > 0 ? '#86efac' : '#fca5a5' }}>
+                                {k}: {v > 0 ? '+' : ''}{v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -1888,7 +1996,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
 
         {debugTab === 'map' && (
-          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} />
+          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} contextId={context?.id} />
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
@@ -1917,6 +2025,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 locationName={locName(agent.location_id)}
                 locations={zoneState.locations}
                 isCurrentPlayer={agent.id === myAgentId}
+                contextId={context?.id}
                 sendCommand={sendCommand}
               />
             </div>

@@ -226,7 +226,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_A5",
         "name": "Болото Агропрома",
         "region": "agroprom",
-        "terrain_type": "plain",
+        "terrain_type": "swamp",
         "anomaly_activity": 5,
         "connections": [
             {"to": "loc_A2", "travel_time": 14},
@@ -332,7 +332,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_S1",
         "name": "База Чистого Неба",
         "region": "swamps",
-        "terrain_type": "plain",
+        "terrain_type": "swamp",
         "anomaly_activity": 1,
         "connections": [
             {"to": "loc_S2", "travel_time": 12},
@@ -368,7 +368,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_S4",
         "name": "Южный хутор",
         "region": "swamps",
-        "terrain_type": "plain",
+        "terrain_type": "swamp",
         "anomaly_activity": 3,
         "connections": [
             {"to": "loc_S3", "travel_time": 11},
@@ -381,7 +381,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_S5",
         "name": "Северный хутор",
         "region": "swamps",
-        "terrain_type": "plain",
+        "terrain_type": "swamp",
         "anomaly_activity": 3,
         "connections": [
             {"to": "loc_S2", "travel_time": 10},
@@ -407,7 +407,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_S7",
         "name": "Рыбацкий хутор",
         "region": "swamps",
-        "terrain_type": "plain",
+        "terrain_type": "swamp",
         "anomaly_activity": 4,
         "connections": [
             {"to": "loc_S4", "travel_time": 12},
@@ -420,7 +420,7 @@ FIXED_ZONE_LOCATIONS: Dict[str, Any] = {
         "id": "loc_S8",
         "name": "Северный хутор у болота",
         "region": "swamps",
-        "terrain_type": "plain",
+        "terrain_type": "swamp",
         "anomaly_activity": 2,
         "connections": [
             {"to": "loc_S6", "travel_time": 13},

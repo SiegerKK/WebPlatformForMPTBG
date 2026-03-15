@@ -85,9 +85,11 @@ class CommandPipeline:
             if envelope.command_type == "set_auto_tick":
                 import copy as _copy
                 enabled = bool(envelope.payload.get("enabled", False))
+                slow_mode = bool(envelope.payload.get("slow_mode", False)) if enabled else False
                 new_state = _copy.deepcopy(state)
                 new_state["auto_tick_enabled"] = enabled
-                new_events = [{"event_type": "auto_tick_changed", "payload": {"enabled": enabled}}]
+                new_state["auto_tick_slow_mode"] = slow_mode
+                new_events = [{"event_type": "auto_tick_changed", "payload": {"enabled": enabled, "slow_mode": slow_mode}}]
                 save_context_state(context.id, new_state, context, force_persist=True)
 
                 seq_range = allocate_sequence_numbers(context.id, len(new_events), db)

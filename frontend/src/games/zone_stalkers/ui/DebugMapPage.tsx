@@ -93,7 +93,7 @@ function botDecisionMade(
   return false;
 }
 
-export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand }: DebugMapPageProps) {
+export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
 
@@ -317,11 +317,24 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // the platform meta-command "set_auto_tick").  Any tab / any game can use
   // this — no game-specific implementation required.
   const autoRunning = zoneState.auto_tick_enabled ?? false;
+  const slowRunning = autoRunning && (zoneState.auto_tick_slow_mode ?? false);
+  const fastRunning = autoRunning && !slowRunning;
 
   const handleToggleAutoTick = useCallback(async () => {
-    const running = zoneState.auto_tick_enabled ?? false;
-    await sendCommand('set_auto_tick', { enabled: !running });
-  }, [sendCommand, zoneState.auto_tick_enabled]);
+    if (fastRunning) {
+      await sendCommand('set_auto_tick', { enabled: false });
+    } else {
+      await sendCommand('set_auto_tick', { enabled: true, slow_mode: false });
+    }
+  }, [sendCommand, fastRunning]);
+
+  const handleToggleSlowTick = useCallback(async () => {
+    if (slowRunning) {
+      await sendCommand('set_auto_tick', { enabled: false });
+    } else {
+      await sendCommand('set_auto_tick', { enabled: true, slow_mode: true });
+    }
+  }, [sendCommand, slowRunning]);
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
@@ -1112,12 +1125,20 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 {skipping ? '⏹ Стоп' : '⏩ До решения'}
               </button>
               <button
-                style={{ ...s.toolBtn, color: autoRunning ? '#fca5a5' : '#86efac', borderColor: autoRunning ? '#ef4444' : '#22c55e' }}
+                style={{ ...s.toolBtn, color: fastRunning ? '#fca5a5' : '#86efac', borderColor: fastRunning ? '#ef4444' : '#22c55e' }}
                 onClick={handleToggleAutoTick}
                 disabled={ticking || skipping}
-                title={autoRunning ? 'Пауза (синхр. со всеми вкладками)' : 'Запустить течение времени (синхр. со всеми вкладками)'}
+                title={fastRunning ? 'Пауза (синхр. со всеми вкладками)' : 'Запустить быстрое течение времени (синхр. со всеми вкладками)'}
               >
-                {autoRunning ? '⏸ Пауза' : '▶ Авто'}
+                {fastRunning ? '⏸ Пауза' : '▶ Авто'}
+              </button>
+              <button
+                style={{ ...s.toolBtn, color: slowRunning ? '#fca5a5' : '#fde68a', borderColor: slowRunning ? '#ef4444' : '#f59e0b' }}
+                onClick={handleToggleSlowTick}
+                disabled={ticking || skipping}
+                title={slowRunning ? 'Остановить медленное течение времени' : 'Медленное течение: 1 ход = 3 секунды'}
+              >
+                {slowRunning ? '⏸ Стоп' : '🐢 Медл.'}
               </button>
               <button
                 style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}
@@ -1565,6 +1586,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           locations={zoneState.locations}
           onClose={() => setProfileAgentId(null)}
           sendCommand={sendCommand}
+          contextId={contextId}
         />
       )}
 
@@ -1589,7 +1611,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           action_used: false,
           scheduled_action: null,
           controller: { kind: 'npc' },
-          memory: t.memory ?? [],
+          memory: [],
         };
         return (
           <AgentProfileModal
@@ -1598,6 +1620,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             locations={zoneState.locations}
             onClose={() => setProfileTraderId(null)}
             sendCommand={sendCommand}
+            contextId={contextId}
           />
         );
       })()}

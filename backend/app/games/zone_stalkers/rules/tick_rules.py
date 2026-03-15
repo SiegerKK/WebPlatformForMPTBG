@@ -24,7 +24,7 @@ EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exp
 DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
 
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
-MAX_AGENT_MEMORY = 500
+MAX_AGENT_MEMORY = 2000
 
 # Default risk_tolerance used when an agent or item does not specify one.
 DEFAULT_RISK_TOLERANCE = 0.5
@@ -45,13 +45,21 @@ _EMISSION_WARNING_TURNS = 30          # legacy flee-window kept for emergency fa
 _EMISSION_WARNING_MIN_TURNS = 10      # warning observation written min 10 turns before emission
 _EMISSION_WARNING_MAX_TURNS = 15      # warning observation written max 15 turns before emission
 # Terrain types where stalkers are killed by an emission
-_EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
+_EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({
+    "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
+})
 
 # Anomaly search parameters for the get_rich NPC goal path.
 # Search radius is skill-based: 4 + agent["skill_stalker"] hops (e.g. 5 for level-1 stalker).
 _ANOMALY_DISTANCE_PENALTY = 5.0        # Score reduction per hop of distance
 _ANOMALY_SCORE_NOISE = 0.5             # Small random jitter to break ties between equal-scoring locations
 _ANOMALY_RISK_MISMATCH_PENALTY = 150.0  # Penalty for full risk-tolerance mismatch; exceeds max base score (10*10=100) so agents strongly prefer zones that match their risk profile
+
+# Item purchase scoring — weights must sum to 1.0.
+# Three factors are balanced: risk-tolerance fit (dominant), value/quality, and inverse weight.
+_ITEM_SCORE_WEIGHT_RISK = 0.7        # Risk-tolerance match is the primary factor
+_ITEM_SCORE_WEIGHT_VALUE = 0.2       # Higher base value (better quality item) is preferred
+_ITEM_SCORE_WEIGHT_INV_WEIGHT = 0.1  # Lighter items are preferred
 
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -63,6 +71,19 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     state = copy.deepcopy(state)
     events: List[Dict[str, Any]] = []
     world_turn = state.get("world_turn", 1)
+
+    # One-time migration: normalize terrain types that were removed in the v3 update
+    # (urban → plain, underground → plain) and any other unknown types.
+    if not state.get("_terrain_migrated_v3"):
+        _valid_v3: frozenset = frozenset({
+            "plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings",
+            "hamlet", "farm", "field_camp", "dungeon", "x_lab", "bridge",
+            "tunnel", "swamp", "scientific_bunker",
+        })
+        for loc in state.get("locations", {}).values():
+            if loc.get("terrain_type") not in _valid_v3:
+                loc["terrain_type"] = "plain"
+        state["_terrain_migrated_v3"] = True
 
     # 1. Process scheduled actions for each alive stalker agent
     for agent_id, agent in state.get("agents", {}).items():
@@ -331,6 +352,25 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 # Scheduled action processing
 # ─────────────────────────────────────────────────────────────────
 
+def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """Return True if an active emission or a live emission_imminent warning
+    (not yet superseded by emission_ended) is present in the agent's memory."""
+    if state.get("emission_active", False):
+        return True
+    _last_ended: int = 0
+    _last_imminent: int = 0
+    for _mem in agent.get("memory", []):
+        if _mem.get("type") != "observation":
+            continue
+        _mk = _mem.get("effects", {}).get("action_kind")
+        _mt = _mem.get("world_turn", 0)
+        if _mk == "emission_ended" and _mt > _last_ended:
+            _last_ended = _mt
+        elif _mk == "emission_imminent" and _mt > _last_imminent:
+            _last_imminent = _mt
+    return _last_imminent > _last_ended
+
+
 def _process_scheduled_action(
     agent_id: str,
     agent: Dict[str, Any],
@@ -344,6 +384,45 @@ def _process_scheduled_action(
     sched["turns_remaining"] = turns_remaining
 
     if turns_remaining > 0:
+        # ── Emergency interrupt: emission warning during any long-running action ──
+        # If an emission becomes active or the agent received an ``emission_imminent``
+        # observation, cancel the current action immediately so that the bot decision
+        # loop runs on this same tick and can choose to flee or shelter.
+        # This fires for both exploration (30-turn) and multi-hop travel actions.
+        # EXCEPTION: travel that was itself scheduled as an emergency flee-to-shelter
+        # must NEVER be interrupted — doing so creates an infinite cancel/reschedule
+        # loop that prevents the agent from reaching safety.
+        if action_type in ("explore_anomaly_location", "travel"):
+            if not sched.get("emergency_flee") and _is_emission_threat(agent, state):
+                agent["scheduled_action"] = None
+                _int_loc_name = state.get("locations", {}).get(
+                    agent.get("location_id", ""), {}
+                ).get("name", "текущей позиции")
+                if action_type == "explore_anomaly_location":
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "⚡ Прерываю исследование из-за выброса",
+                        f"Получено предупреждение о выбросе во время исследования «{_int_loc_name}». "
+                        "Прерываю разведку аномалии — нужно найти укрытие.",
+                        {"action_kind": "exploration_interrupted", "reason": "emission_warning",
+                         "location_id": agent.get("location_id")},
+                        reason="выброс во время исследования аномалии",
+                    )
+                else:  # travel
+                    _cancelled = sched.get("final_target_id", sched.get("target_id"))
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "⚡ Прерываю движение из-за выброса",
+                        f"Получено предупреждение о выбросе во время движения. "
+                        f"Нахожусь в «{_int_loc_name}» — прерываю маршрут, нужно найти укрытие.",
+                        {"action_kind": "travel_interrupted", "reason": "emission_warning",
+                         "location_id": agent.get("location_id"),
+                         "cancelled_target": _cancelled},
+                        reason="выброс во время движения",
+                    )
+                # Return without events; the bot decision loop will run this tick
+                # (since scheduled_action is now None) and will order a flee/shelter.
+                return events
         return events
 
     # Action complete — resolve effects
@@ -375,6 +454,26 @@ def _process_scheduled_action(
                     total_dmg = 5 + hop_anomaly_activity
                     agent["hp"] = max(0, agent["hp"] - total_dmg)
             if remaining_route:
+                # ── Emergency interrupt: don't continue travel when emission is active/warned ──
+                # Even if the route is still open, staying put on dangerous terrain is a
+                # better choice than continuing to move.  The bot decision loop runs on
+                # the same tick (scheduled_action is None already) and will order a flee
+                # or shelter action.
+                # EXCEPTION: emergency flee travel is never interrupted (same reason as above).
+                if not sched.get("emergency_flee") and _is_emission_threat(agent, state):
+                    _dest_name_em = state.get("locations", {}).get(destination, {}).get("name", destination)
+                    _final_name_em = state.get("locations", {}).get(final_target, {}).get("name", final_target)
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "⚡ Прерываю движение из-за выброса",
+                        f"Получено предупреждение о выбросе. Остановился в «{_dest_name_em}» "
+                        f"вместо продолжения к «{_final_name_em}».",
+                        {"action_kind": "travel_interrupted", "reason": "emission_warning",
+                         "stopped_at": destination, "cancelled_target": final_target},
+                        reason="выброс — остановка на промежуточной точке маршрута",
+                    )
+                    _write_location_observations(agent_id, agent, destination, state, world_turn)
+                    return events
                 # More hops to go — verify the pre-computed next hop is still accessible.
                 next_hop = remaining_route[0]
                 conns = state["locations"].get(destination, {}).get("connections", [])
@@ -601,26 +700,17 @@ def _resolve_exploration(
             "payload": {"agent_id": agent_id, "artifact": art},
         })
     else:
-        # Did not pick up an artifact — determine why and write appropriate memory
-        if not existing_artifacts:
-            # Location is genuinely empty — record as confirmed empty to block future tries.
-            # Written as an "observation" (not "decision") so the stalker treats it as
-            # a factual note about the world state rather than an active choice.
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"Аномалия в «{loc_name}» пустая",
-                f"Тщательно обыскал «{loc_name}» — артефактов нет.",
-                {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
-            )
-        else:
-            # Bad luck — artifacts are present but agent missed them
-            _add_memory(
-                agent, world_turn, state, "decision",
-                f"Не нашёл артефакт в «{loc_name}»",
-                f"Искал в «{loc_name}» — не повезло, ничего не нашёл.",
-                {"action_kind": "explore_miss", "location_id": loc_id},
-                reason="разведка аномалии не дала результата",
-            )
+        # Did not pick up an artifact — write an observation that blocks re-searching
+        # this location.  We treat both a genuinely empty zone and a bad-luck miss
+        # identically: the stalker notes the search as fruitless and moves on.
+        # The block is lifted by a future emission that refreshes anomaly zones
+        # (see `_confirmed_empty_locations` invalidation logic).
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Аномалия в «{loc_name}» не дала артефакт",
+            f"Обыскал «{loc_name}» — артефактов не нашёл.",
+            {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
+        )
 
     # Always record that an exploration action was performed (satisfies memory tests
     # and gives the agent a record of every search attempt regardless of outcome).
@@ -1044,8 +1134,8 @@ def _add_trader_memory(
         "effects": effects,
     }
     trader.setdefault("memory", []).append(entry)
-    if len(trader["memory"]) > 50:
-        trader["memory"] = trader["memory"][-50:]
+    if len(trader["memory"]) > MAX_AGENT_MEMORY:
+        trader["memory"] = trader["memory"][-MAX_AGENT_MEMORY:]
 
 
 def _bot_sell_to_trader(
@@ -1142,8 +1232,15 @@ def _bot_schedule_travel(
     target_loc_id: str,
     state: Dict[str, Any],
     world_turn: int,
+    emergency_flee: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Schedule hop-by-hop travel for a bot toward target_loc_id. Returns events."""
+    """Schedule hop-by-hop travel for a bot toward target_loc_id. Returns events.
+
+    Set *emergency_flee=True* when the travel is a direct response to an
+    emission warning.  This flag is stored on the ``scheduled_action`` and
+    prevents the emission-interrupt logic from cancelling the very flee that
+    was just scheduled.
+    """
     from app.games.zone_stalkers.rules.world_rules import _bfs_route
     route = _bfs_route(state["locations"], agent["location_id"], target_loc_id)
     if not route:
@@ -1154,7 +1251,7 @@ def _bot_schedule_travel(
         (c.get("travel_time", 12) for c in conns if c["to"] == first_hop),
         12,
     )
-    agent["scheduled_action"] = {
+    sched: Dict[str, Any] = {
         "type": "travel",
         "turns_remaining": hop_time,
         "turns_total": hop_time,
@@ -1163,6 +1260,9 @@ def _bot_schedule_travel(
         "remaining_route": route[1:],
         "started_turn": world_turn,
     }
+    if emergency_flee:
+        sched["emergency_flee"] = True
+    agent["scheduled_action"] = sched
     agent["action_used"] = True
     return [{
         "event_type": "agent_travel_started",
@@ -1170,36 +1270,63 @@ def _bot_schedule_travel(
     }]
 
 
+def _score_item_for_purchase(
+    info: Dict[str, Any],
+    agent_risk: float,
+    max_value: float,
+    max_weight: float,
+) -> float:
+    """Return a composite purchase score for *info* relative to *agent_risk*.
+
+    Higher score = better fit.  Three factors contribute:
+
+    * **Risk-tolerance match** (weight ``_ITEM_SCORE_WEIGHT_RISK``): the closer
+      the item's ``risk_tolerance`` is to the agent's own, the better.
+    * **Value / quality** (weight ``_ITEM_SCORE_WEIGHT_VALUE``): a more
+      expensive item is considered higher quality and preferred.
+    * **Inverse weight** (weight ``_ITEM_SCORE_WEIGHT_INV_WEIGHT``): lighter
+      items are preferred (lower carry burden).
+
+    All three sub-scores are normalised to [0, 1] using the per-candidate-set
+    maximums supplied by the caller.
+    """
+    rt_score = 1.0 - abs(info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE) - agent_risk)
+    val_score = (info.get("value", 0) / max_value) if max_value > 0 else 0.0
+    weight_score = (1.0 - info.get("weight", 0.0) / max_weight) if max_weight > 0 else 1.0
+    return (
+        _ITEM_SCORE_WEIGHT_RISK * rt_score
+        + _ITEM_SCORE_WEIGHT_VALUE * val_score
+        + _ITEM_SCORE_WEIGHT_INV_WEIGHT * weight_score
+    )
+
+
 def _select_item_by_risk_tolerance(
     item_types: "frozenset[str]",
     agent_risk: float,
 ) -> "tuple[str, float] | None":
-    """Return the (item_key, buy_price) whose ``risk_tolerance`` is closest to
-    *agent_risk* among all items in *item_types* that exist in the catalogue.
+    """Return the ``(item_key, buy_price)`` with the highest composite purchase
+    score among all items in *item_types* that exist in the catalogue.
 
-    Ties are broken by preferring a lower base value (cheaper item wins).
+    Scoring is multi-factor (see :func:`_score_item_for_purchase`):
+    risk-tolerance match dominates, with higher item value and lower item
+    weight as secondary/tertiary factors.
+
     Returns ``None`` when *item_types* is empty or no matching entries exist.
     """
     from app.games.zone_stalkers.balance.items import ITEM_TYPES
 
-    best_key: "str | None" = None
-    best_dist = float("inf")
-    best_value = float("inf")
-
-    for k in item_types:
-        info = ITEM_TYPES.get(k)
-        if info is None:
-            continue
-        dist = abs(info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE) - agent_risk)
-        value = info.get("value", 0)
-        if dist < best_dist or (dist == best_dist and value < best_value):
-            best_key = k
-            best_dist = dist
-            best_value = value
-
-    if best_key is None:
+    candidates = [(k, ITEM_TYPES[k]) for k in item_types if k in ITEM_TYPES]
+    if not candidates:
         return None
-    return best_key, best_value
+
+    max_value = max(info.get("value", 0) for _, info in candidates) or 1
+    max_weight = max(info.get("weight", 0.0) for _, info in candidates) or 1
+
+    best_key = max(
+        candidates,
+        key=lambda kv: _score_item_for_purchase(kv[1], agent_risk, max_value, max_weight),
+    )[0]
+    return best_key, ITEM_TYPES[best_key].get("value", 0)
 
 
 def _can_afford_cheapest(agent: Dict[str, Any], item_types: "frozenset[str]") -> bool:
@@ -1265,17 +1392,27 @@ def _bot_buy_from_trader(
 
     agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
 
-    # Build candidate list sorted by closeness of risk_tolerance to agent's own,
-    # with ties broken by lower value (cheaper preferred).
+    # Build scored candidate list: each entry is (item_key, base_value, item_risk, score).
+    # Normalise value and weight within this candidate set so scores are comparable.
+    raw = [
+        (k, ITEM_TYPES[k].get("value", 0), ITEM_TYPES[k].get("risk_tolerance", DEFAULT_RISK_TOLERANCE),
+         ITEM_TYPES[k].get("weight", 0.0))
+        for k in item_types if k in ITEM_TYPES
+    ]
+    if not raw:
+        return []
+    max_value = max(v for _, v, _, _ in raw) or 1
+    max_weight = max(w for _, _, _, w in raw) or 1
     candidates = sorted(
-        (
-            (k, ITEM_TYPES[k].get("value", 0), ITEM_TYPES[k].get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
-            for k in item_types if k in ITEM_TYPES
-        ),
-        key=lambda x: (abs(x[2] - agent_risk), x[1]),
+        [
+            (k, base_value, item_risk, _score_item_for_purchase(ITEM_TYPES[k], agent_risk, max_value, max_weight))
+            for k, base_value, item_risk, _ in raw
+        ],
+        key=lambda x: x[3],
+        reverse=True,
     )
 
-    for item_type, base_value, item_risk in candidates:
+    for idx, (item_type, base_value, item_risk, score) in enumerate(candidates):
         buy_price = int(base_value * 1.5)
         if agent.get("money", 0) < buy_price:
             continue
@@ -1293,22 +1430,41 @@ def _bot_buy_from_trader(
         agent["action_used"] = True
         item_name = ITEM_TYPES[item_type].get("name", item_type)
         trader_name = trader.get("name", trader["id"])
-        # Decision memory: explain the risk-tolerance match and the reason for purchase
+        # Collect up to 2 runner-ups (next candidates in the scored list, regardless of affordability)
+        runners_up = [
+            {
+                "item_type": rk,
+                "item_name": ITEM_TYPES[rk].get("name", rk),
+                "score": round(rs, 3),
+                "price": int(ITEM_TYPES[rk].get("value", 0) * 1.5),
+            }
+            for rk, _, _, rs in candidates[idx + 1: idx + 3]
+        ]
+        runners_up_text = ""
+        if runners_up:
+            parts = [
+                f"«{r['item_name']}» (счёт {r['score']:.3f}, {r['price']} монет)"
+                for r in runners_up
+            ]
+            runners_up_text = " Ближайшие конкуренты: " + ", ".join(parts) + "."
+        # Decision memory: explain the composite score and the reason for purchase
         _add_memory(
             agent, world_turn, state, "decision",
             f"Решил купить «{item_name}»",
             (
-                f"Выбор основан на склонности к риску: моя толерантность к риску "
-                f"{agent_risk:.2f}, предмет «{item_name}» имеет {item_risk:.2f}. "
-                f"Расхождение {abs(item_risk - agent_risk):.2f} — ближайшее среди доступных. "
-                f"Куплю у торговца {trader_name} за {buy_price} монет."
+                f"Итоговый счёт предмета «{item_name}»: {score:.3f} "
+                f"(риск {item_risk:.2f} vs мой {agent_risk:.2f}, "
+                f"ценность {base_value}, вес {ITEM_TYPES[item_type].get('weight', 0):.1f} кг). "
+                f"Куплю у торговца {trader_name} за {buy_price} монет.{runners_up_text}"
             ),
             {
                 "action_kind": "trade_decision",
                 "item_type": item_type,
                 "agent_risk_tolerance": agent_risk,
                 "item_risk_tolerance": item_risk,
+                "score": round(score, 3),
                 "price": buy_price,
+                "runners_up": runners_up,
             },
             reason=purchase_reason,
         )
@@ -1338,6 +1494,7 @@ def _bot_buy_from_trader(
                 "agent_id": agent_id, "trader_id": trader["id"],
                 "item_type": item_type, "price": buy_price,
                 "agent_risk_tolerance": agent_risk, "item_risk_tolerance": item_risk,
+                "score": round(score, 3),
             },
         }]
     return []
@@ -1434,9 +1591,15 @@ def _bot_pickup_on_arrival(
     This prevents the bot from re-evaluating priorities on the arrival tick and
     travelling away before collecting the item it specifically came for.
 
+    When the item is not found on the ground **and** the location is not a trader
+    (traders are visited to *buy*, not pick up), ``item_not_found_here`` is
+    recorded immediately.  This is critical: without it, an emergency that fires
+    on the same arrival tick redirects the agent before the normal priority tree
+    can record the dead end, causing the agent to loop back to the same empty
+    location on the next search.
+
     Returns pickup events on success, or an empty list if no item was found
-    (the caller then falls through to the normal priority tree which will call
-    ``_maybe_record_item_not_found`` as usual).
+    (the caller then falls through to the normal priority tree).
     """
     loc_id = agent.get("location_id")
     # Find the most recent *decision* memory entry.
@@ -1459,7 +1622,52 @@ def _bot_pickup_on_arrival(
             item_types = _SEEK_CATEGORY_TO_TYPES.get(category)  # type: ignore[assignment]
             if not item_types:
                 return []
-        return _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        pickup_events = _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        if not pickup_events:
+            # Item not on the ground.  If this is not a trader location, record
+            # the dead end immediately so that any interrupt (emergency, higher-
+            # priority need) that fires next cannot cause the agent to loop back
+            # here on the next search cycle.  Trader locations are skipped because
+            # the agent came to *buy*, not pick up, so "not found on ground" is
+            # expected and must not blacklist the trader.
+            if _find_trader_at_location(loc_id, state) is None:
+                loc = state.get("locations", {}).get(loc_id, {})
+                _maybe_record_item_not_found(
+                    agent, world_turn, state, loc_id, loc, item_types, category
+                )
+        return pickup_events
+    return []
+
+
+def _bot_sell_on_arrival(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """If the most recent decision was a ``sell_at_trader`` whose destination
+    matches the agent's current location, sell artifacts to the trader now.
+
+    Called after emergency checks but before equipment-maintenance so that
+    the agent completes the purpose of its trip (selling artifacts) before
+    being redirected to satisfy secondary needs like buying new gear.
+
+    Returns sell events on success, or an empty list if not applicable.
+    """
+    loc_id = agent.get("location_id")
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "decision":
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") != "sell_at_trader":
+            return []  # Latest decision was something else — no pending sell.
+        if effects.get("destination") != loc_id:
+            return []  # Still en-route to a different location.
+        # Arrived at the target trader location — attempt the sale.
+        trader = _find_trader_at_location(loc_id, state)
+        if trader is None:
+            return []  # Trader not present (edge case).
+        return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn)
     return []
 
 
@@ -1583,13 +1791,17 @@ def _maybe_record_item_not_found(
         if mem.get("type") != "decision":
             continue
         effects = mem.get("effects", {})
-        if (
-            effects.get("action_kind") == "seek_item"
-            and effects.get("destination") == loc_id
-            and effects.get("item_category") == item_category
-        ):
+        if effects.get("destination") != loc_id or effects.get("item_category") != item_category:
+            continue
+        ak = effects.get("action_kind")
+        if ak == "seek_item":
             found_seek = True
             break
+        elif ak == "buy_item":
+            # The most recent relevant decision was to travel here for purchasing,
+            # not for picking up from the ground.  "No ground items" is expected
+            # at a trader location, so do not record a dead-end observation.
+            return
     if not found_seek:
         return
 
@@ -1925,24 +2137,15 @@ def _run_bot_action_inner(
                 {"action_kind": "flee_emission", "target_id": target},
                 reason=reason,
             )
-            return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
-
-    # ── ARRIVAL COMMITMENT: pick up the item we travelled here for ────────────
-    # When the most recent decision was a seek_item whose destination is the
-    # current location, immediately attempt to pick up the sought item before
-    # re-evaluating priorities.  This prevents a higher-priority Need from
-    # redirecting the agent on the very tick it arrives, without ever collecting
-    # what it came for.
-    _arrival_events = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
-    if _arrival_events:
-        return _arrival_events
+            return _bot_schedule_travel(agent_id, agent, target, state, world_turn, emergency_flee=True)
 
     # ── EMISSION SHELTER: Stay put when emission is active or imminent ────────
-    # Highest-priority check (after fleeing dangerous terrain).  If the agent is
-    # already on safe terrain but knows an emission is coming (or is ongoing),
-    # it must NOT schedule any new travel or work — doing so risks arriving on
-    # dangerous terrain when the emission fires.  The agent simply waits until
-    # it sees an ``emission_ended`` observation (which resets _emission_warned).
+    # Second-highest priority (after fleeing dangerous terrain, before any pending
+    # tasks or new decisions).  If the agent is already on safe terrain but knows
+    # an emission is coming (or is ongoing), it must NOT do anything — doing so
+    # risks arriving on dangerous terrain when the emission fires.  The agent
+    # simply waits until it sees an ``emission_ended`` observation.
+    # Emission is an "urgent trigger" that overrides all pending arrival tasks.
     if _emission_active or _emission_warned:
         # Only write the decision memory once; avoid flooding the log.
         _last_decision_kind = None
@@ -1959,6 +2162,16 @@ def _run_bot_action_inner(
                 reason="скоро выброс, нахожусь в безопасном месте",
             )
         return []
+
+    # ── ARRIVAL COMMITMENT: pick up the item we travelled here for ────────────
+    # When the most recent decision was a seek_item whose destination is the
+    # current location, immediately attempt to pick up the sought item before
+    # re-evaluating priorities.  This prevents a higher-priority Need from
+    # redirecting the agent on the very tick it arrives, without ever collecting
+    # what it came for.
+    _arrival_events = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
+    if _arrival_events:
+        return _arrival_events
 
     # ── EMERGENCY: Heal ────────────────────────────────────────────────────────
     if agent.get("hp", 100) <= 30:
@@ -2047,6 +2260,16 @@ def _run_bot_action_inner(
             )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
+    # ── ARRIVAL COMMITMENT: sell artifacts at the trader we travelled to ──────
+    # If the agent's most recent decision was to travel to a trader specifically
+    # to sell artifacts (action_kind == "sell_at_trader"), complete that task
+    # now before evaluating other needs.  This ensures the agent finishes what
+    # it came for instead of being side-tracked by e.g. equipment purchases.
+    # Life-threatening emergencies above still override this (they run first).
+    _sell_arrival_evs = _bot_sell_on_arrival(agent_id, agent, state, world_turn)
+    if _sell_arrival_evs:
+        return _sell_arrival_evs
+
     # ── EQUIPMENT MAINTENANCE ─────────────────────────────────────────────────
     # High-priority: ensure the agent is always armed, armored and has basic
     # supplies.  For each need the cascade is:
@@ -2099,7 +2322,7 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     "Иду к торговцу за оружием",
                     f"Нет оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                    {"action_kind": "seek_item", "item_category": "weapon", "destination": trader_loc},
+                    {"action_kind": "buy_item", "item_category": "weapon", "destination": trader_loc},
                     reason="нет оружия в снаряжении, иду к торговцу",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
@@ -2138,7 +2361,7 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     "Иду к торговцу за бронёй",
                     f"Нет брони. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                    {"action_kind": "seek_item", "item_category": "armor", "destination": trader_loc},
+                    {"action_kind": "buy_item", "item_category": "armor", "destination": trader_loc},
                     reason="нет брони в снаряжении, иду к торговцу",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
@@ -2182,7 +2405,7 @@ def _run_bot_action_inner(
                             agent, world_turn, state, "decision",
                             "Иду к торговцу за патронами",
                             f"Нет патронов для оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                            {"action_kind": "seek_item", "item_category": "ammo",
+                            {"action_kind": "buy_item", "item_category": "ammo",
                              "ammo_type": _required_ammo, "destination": trader_loc},
                             reason="нет патронов для оружия, иду к торговцу",
                         )
@@ -2332,7 +2555,7 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     f"Иду к торговцу {trader_name}",
                     f"Иду к торговцу {trader_name}.",
-                    {"destination": trader_loc},
+                    {"action_kind": "sell_at_trader", "destination": trader_loc},
                     reason="есть артефакты для продажи, торговец не здесь",
                 )
 
