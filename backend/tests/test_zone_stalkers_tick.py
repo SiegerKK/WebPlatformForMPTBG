@@ -2069,3 +2069,101 @@ class TestConfirmedEmptyBlocking:
             "Bot should NOT re-explore even when artifacts are present if no emission was observed "
             "(stalkers rely on memory, not omniscient map knowledge)"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Anomaly zone selection respects risk_tolerance
+# ─────────────────────────────────────────────────────────────────
+
+class TestAnomalyRiskTolerance:
+    """Verify that anomaly-zone scoring penalises mismatches between a location's
+    anomaly_activity/10.0 and the agent's risk_tolerance, so that:
+      - low-risk agents gravitate toward low-activity zones, and
+      - high-risk agents gravitate toward high-activity zones.
+    """
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _two_zone_state(self, risk_tolerance: float, wealth_phase: str = "gather"):
+        """Return a state with the agent at A (no anomaly), B (high anomaly=8),
+        C (low anomaly=2) both at distance 1.
+
+        *wealth_phase* controls which Phase the bot enters:
+        - "gather"  → Phase 1 (_bot_gather_resources), material_threshold=999999
+        - "goal"    → Phase 2b (_bot_pursue_goal), material_threshold=0
+        """
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [
+                    {"to": "B", "travel_time": 1},
+                    {"to": "C", "travel_time": 1},
+                ]},
+                "B": {},
+                "C": {},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["B"]["anomaly_activity"] = 8
+        state["locations"]["C"]["anomaly_activity"] = 2
+
+        agent = next(iter(state["agents"].values()))
+        agent["risk_tolerance"] = risk_tolerance
+        if wealth_phase == "gather":
+            agent["material_threshold"] = 999999  # wealth (0) < threshold → Phase 1
+        else:
+            agent["material_threshold"] = 0  # wealth (0) >= threshold → Phase 2b
+        return state
+
+    # ── Phase 1 (_bot_gather_resources) ─────────────────────────────────────
+
+    def test_phase1_low_risk_prefers_low_anomaly_zone(self):
+        """Phase-1 (gather) low-risk agent (0.1) should prefer zone C (activity=2) over B (activity=8)."""
+        state = self._two_zone_state(risk_tolerance=0.1, wealth_phase="gather")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "C", (
+            f"Low-risk agent should head to C (low anomaly), got {sched.get('final_target_id')}"
+        )
+
+    def test_phase1_high_risk_prefers_high_anomaly_zone(self):
+        """Phase-1 (gather) high-risk agent (0.9) should prefer zone B (activity=8) over C (activity=2)."""
+        state = self._two_zone_state(risk_tolerance=0.9, wealth_phase="gather")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "B", (
+            f"High-risk agent should head to B (high anomaly), got {sched.get('final_target_id')}"
+        )
+
+    # ── Phase 2b (_bot_pursue_goal) ──────────────────────────────────────────
+
+    def test_phase2_low_risk_prefers_low_anomaly_zone(self):
+        """Phase-2b (goal) low-risk agent (0.1) should prefer zone C (activity=2) over B (activity=8)."""
+        state = self._two_zone_state(risk_tolerance=0.1, wealth_phase="goal")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "C", (
+            f"Low-risk agent should head to C (low anomaly), got {sched.get('final_target_id')}"
+        )
+
+    def test_phase2_high_risk_prefers_high_anomaly_zone(self):
+        """Phase-2b (goal) high-risk agent (0.9) should prefer zone B (activity=8) over C (activity=2)."""
+        state = self._two_zone_state(risk_tolerance=0.9, wealth_phase="goal")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "B", (
+            f"High-risk agent should head to B (high anomaly), got {sched.get('final_target_id')}"
+        )

@@ -47,8 +47,9 @@ _EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
 
 # Anomaly search parameters for the get_rich NPC goal path.
 # Search radius is skill-based: 4 + agent["skill_stalker"] hops (e.g. 5 for level-1 stalker).
-_ANOMALY_DISTANCE_PENALTY = 5.0   # Score reduction per hop of distance
-_ANOMALY_SCORE_NOISE = 0.5        # Small random jitter to break ties between equal-scoring locations
+_ANOMALY_DISTANCE_PENALTY = 5.0        # Score reduction per hop of distance
+_ANOMALY_SCORE_NOISE = 0.5             # Small random jitter to break ties between equal-scoring locations
+_ANOMALY_RISK_MISMATCH_PENALTY = 150.0  # Penalty for full risk-tolerance mismatch; exceeds max base score (10*10=100) so agents strongly prefer zones that match their risk profile
 
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -2089,7 +2090,10 @@ def _bot_gather_resources(
     reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_gather_search_hops)
 
     def _gather_candidate_score(lid: str, dist: int) -> float:
-        return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY + rng.random() * _ANOMALY_SCORE_NOISE
+        _agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+        _loc_risk = locations.get(lid, {}).get("anomaly_activity", 0) / 10.0
+        _risk_penalty = abs(_loc_risk - _agent_risk) * _ANOMALY_RISK_MISMATCH_PENALTY
+        return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY - _risk_penalty + rng.random() * _ANOMALY_SCORE_NOISE
 
     fresh_gather_candidates = [
         (lid, dist) for lid, dist in reachable.items()
@@ -2178,7 +2182,10 @@ def _bot_pursue_goal(
         reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_anomaly_search_hops)
 
         def _anomaly_candidate_score(lid: str, dist: int) -> float:
-            return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY + rng.random() * _ANOMALY_SCORE_NOISE
+            _agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+            _loc_risk = locations.get(lid, {}).get("anomaly_activity", 0) / 10.0
+            _risk_penalty = abs(_loc_risk - _agent_risk) * _ANOMALY_RISK_MISMATCH_PENALTY
+            return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY - _risk_penalty + rng.random() * _ANOMALY_SCORE_NOISE
 
         fresh_candidates = [
             (lid, dist) for lid, dist in reachable.items()
