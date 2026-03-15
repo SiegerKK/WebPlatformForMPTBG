@@ -26,6 +26,9 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 500
 
+# Default risk_tolerance used when an agent or item does not specify one.
+DEFAULT_RISK_TOLERANCE = 0.5
+
 # Emission (Выброс) mechanic constants
 # 1 game day = 1440 turns (1 turn = 1 minute)
 _EMISSION_MIN_INTERVAL_TURNS = 1440   # earliest next emission: 1 game day after last
@@ -1009,6 +1012,38 @@ def _bot_schedule_travel(
     }]
 
 
+def _select_item_by_risk_tolerance(
+    item_types: "frozenset[str]",
+    agent_risk: float,
+) -> "tuple[str, float] | None":
+    """Return the (item_key, buy_price) whose ``risk_tolerance`` is closest to
+    *agent_risk* among all items in *item_types* that exist in the catalogue.
+
+    Ties are broken by preferring a lower base value (cheaper item wins).
+    Returns ``None`` when *item_types* is empty or no matching entries exist.
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+
+    best_key: "str | None" = None
+    best_dist = float("inf")
+    best_value = float("inf")
+
+    for k in item_types:
+        info = ITEM_TYPES.get(k)
+        if info is None:
+            continue
+        dist = abs(info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE) - agent_risk)
+        value = info.get("value", 0)
+        if dist < best_dist or (dist == best_dist and value < best_value):
+            best_key = k
+            best_dist = dist
+            best_value = value
+
+    if best_key is None:
+        return None
+    return best_key, best_value
+
+
 def _bot_buy_from_trader(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1016,11 +1051,19 @@ def _bot_buy_from_trader(
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Buy the cheapest available item from a trader at the agent's current location.
+    """Buy the best-matching item from a trader at the agent's current location.
+
+    Item selection is based on ``risk_tolerance``: the item whose
+    ``risk_tolerance`` value is closest to the agent's own ``risk_tolerance``
+    is preferred.  If the agent cannot afford that item the function falls back
+    to the next-closest affordable option, descending by matching score.
 
     Implements an infinite-stock stub: the trader does not need to have the
     item in their inventory — they always can supply it.  The agent is
     charged 150 % of the item's base value.
+
+    A "decision" memory entry is written explaining the choice before the
+    purchase, followed by the usual "action" entry on completion.
 
     Returns a non-empty event list on success, empty list when the agent
     cannot afford anything or no trader is present.
@@ -1039,12 +1082,19 @@ def _bot_buy_from_trader(
     if trader is None:
         return []
 
-    # Pick the cheapest buyable item the agent can afford
+    agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+
+    # Build candidate list sorted by closeness of risk_tolerance to agent's own,
+    # with ties broken by lower value (cheaper preferred).
     candidates = sorted(
-        ((k, ITEM_TYPES[k].get("value", 100)) for k in item_types if k in ITEM_TYPES),
-        key=lambda x: x[1],
+        (
+            (k, ITEM_TYPES[k].get("value", 0), ITEM_TYPES[k].get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+            for k in item_types if k in ITEM_TYPES
+        ),
+        key=lambda x: (abs(x[2] - agent_risk), x[1]),
     )
-    for item_type, base_value in candidates:
+
+    for item_type, base_value, item_risk in candidates:
         buy_price = int(base_value * 1.5)
         if agent.get("money", 0) < buy_price:
             continue
@@ -1062,6 +1112,25 @@ def _bot_buy_from_trader(
         agent["action_used"] = True
         item_name = ITEM_TYPES[item_type].get("name", item_type)
         trader_name = trader.get("name", trader["id"])
+        # Decision memory: explain the risk-tolerance match
+        _add_memory(
+            agent, world_turn, state, "decision",
+            f"Решил купить «{item_name}»",
+            (
+                f"Выбор основан на склонности к риску: моя толерантность к риску "
+                f"{agent_risk:.2f}, предмет «{item_name}» имеет {item_risk:.2f}. "
+                f"Расхождение {abs(item_risk - agent_risk):.2f} — ближайшее среди доступных. "
+                f"Куплю у торговца {trader_name} за {buy_price} монет."
+            ),
+            {
+                "action_kind": "trade_decision",
+                "item_type": item_type,
+                "agent_risk_tolerance": agent_risk,
+                "item_risk_tolerance": item_risk,
+                "price": buy_price,
+            },
+        )
+        # Action memory: record the completed purchase
         _add_memory(
             agent, world_turn, state, "action",
             f"Купил «{item_name}» у торговца",
@@ -1073,6 +1142,7 @@ def _bot_buy_from_trader(
             "payload": {
                 "agent_id": agent_id, "trader_id": trader["id"],
                 "item_type": item_type, "price": buy_price,
+                "agent_risk_tolerance": agent_risk, "item_risk_tolerance": item_risk,
             },
         }]
     return []

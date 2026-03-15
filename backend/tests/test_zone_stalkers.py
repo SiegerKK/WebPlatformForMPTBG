@@ -864,6 +864,148 @@ class TestBuyFromTrader:
             assert result.valid, f"buy_from_trader should be valid for new item '{item_type}': {result.error}"
 
 
+class TestRiskToleranceItemSelection:
+    """Unit tests for risk-tolerance-based item selection in bot purchases."""
+
+    def _make_bot_state(self, agent_risk: float = 0.5, agent_money: int = 10000):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=5, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        agent["risk_tolerance"] = agent_risk
+        agent["money"] = agent_money
+        state["traders"]["trader_rt"] = {
+            "id": "trader_rt", "name": "Test Trader",
+            "location_id": loc_id, "inventory": [], "money": 5000, "is_alive": True,
+        }
+        return state, agent
+
+    def test_select_item_prefers_closest_risk_tolerance(self):
+        """_select_item_by_risk_tolerance should pick the item with risk_tolerance closest to agent's."""
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # Find the weapon whose risk_tolerance is exactly 0.5, if one exists; otherwise closest.
+        agent_risk = 0.5
+        result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert result is not None
+        item_key, _ = result
+        # Verify the selected item is indeed the one with minimum |rt - agent_risk|
+        best_dist = min(
+            abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk)
+            for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES
+        )
+        assert abs(ITEM_TYPES[item_key].get("risk_tolerance", 0.5) - agent_risk) == best_dist
+
+    def test_select_item_for_cautious_agent(self):
+        """A cautious agent (low risk_tolerance) should prefer the lowest-risk weapon."""
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        agent_risk = 0.0  # absolute minimum — will pick the weapon with lowest risk_tolerance
+        result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert result is not None
+        item_key, _ = result
+        expected_key = min(
+            (k for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES),
+            key=lambda k: (abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk), ITEM_TYPES[k].get("value", 0)),
+        )
+        assert item_key == expected_key
+
+    def test_select_item_for_aggressive_agent(self):
+        """An aggressive agent (high risk_tolerance) should prefer the highest-risk weapon."""
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        agent_risk = 1.0  # absolute maximum — will pick the weapon with highest risk_tolerance
+        result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert result is not None
+        item_key, _ = result
+        expected_key = min(
+            (k for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES),
+            key=lambda k: (abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk), ITEM_TYPES[k].get("value", 0)),
+        )
+        assert item_key == expected_key
+
+    def test_select_item_empty_set_returns_none(self):
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        assert _select_item_by_risk_tolerance(frozenset(), 0.5) is None
+
+    def test_bot_buys_risk_matched_weapon(self):
+        """Bot should choose the weapon whose risk_tolerance is closest to its own."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader, _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        agent_risk = 0.5
+        state, agent = self._make_bot_state(agent_risk=agent_risk)
+        events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        assert len(events) == 1
+        # Verify the purchased item is the expected best-risk-match (ignoring affordability order)
+        expected = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert expected is not None
+        assert events[0]["payload"]["item_type"] == expected[0]
+
+    def test_bot_buys_risk_matched_armor(self):
+        """Bot should choose the armor whose risk_tolerance is closest to its own."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader, _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import ARMOR_ITEM_TYPES
+        agent_risk = 0.4
+        state, agent = self._make_bot_state(agent_risk=agent_risk)
+        events = _bot_buy_from_trader("agent_p0", agent, ARMOR_ITEM_TYPES, state, world_turn=1)
+        assert len(events) == 1
+        expected = _select_item_by_risk_tolerance(ARMOR_ITEM_TYPES, agent_risk)
+        assert expected is not None
+        assert events[0]["payload"]["item_type"] == expected[0]
+
+    def test_bot_buy_writes_decision_memory(self):
+        """A 'decision' memory entry must be written with risk_tolerance info."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state, agent = self._make_bot_state(agent_risk=0.5)
+        _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        decision_entries = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
+        assert len(decision_entries) >= 1
+        # The decision memory must contain risk_tolerance info
+        last_decision = decision_entries[-1]
+        assert "trade_decision" in last_decision.get("effects", {}).get("action_kind", "")
+        assert "agent_risk_tolerance" in last_decision.get("effects", {})
+
+    def test_bot_buy_event_carries_risk_tolerance_info(self):
+        """bot_bought_item event payload must include both risk_tolerance values."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state, agent = self._make_bot_state(agent_risk=0.6)
+        events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        assert events
+        payload = events[0]["payload"]
+        assert "agent_risk_tolerance" in payload
+        assert "item_risk_tolerance" in payload
+
+    def test_bot_falls_back_when_preferred_item_too_expensive(self):
+        """If the best-matching item is unaffordable, the next-closest is chosen."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # For agent_risk=0.9 the closest weapon is pkm (0.9), price 3500*1.5=5250
+        # Give the agent exactly 5249 — not enough for pkm, should fall back
+        # Next closest to 0.9: svu_svd (0.7), price 4500*1.5=6750 — too expensive
+        # Next: ak74 (0.6), price 1500*1.5=2250 — affordable
+        state, agent = self._make_bot_state(agent_risk=0.9, agent_money=2250)
+        events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        assert events
+        # Must have bought something affordable
+        bought_type = events[0]["payload"]["item_type"]
+        bought_price = int(ITEM_TYPES[bought_type]["value"] * 1.5)
+        assert bought_price <= 2250
+
+    def test_all_items_have_risk_tolerance(self):
+        """Every item in ITEM_TYPES must have a risk_tolerance field."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        for item_key, item_data in ITEM_TYPES.items():
+            assert "risk_tolerance" in item_data, (
+                f"Item '{item_key}' is missing 'risk_tolerance'"
+            )
+            rt = item_data["risk_tolerance"]
+            assert 0.0 <= rt <= 1.0, (
+                f"Item '{item_key}' has risk_tolerance={rt} outside [0, 1]"
+            )
+
+
 class TestDebugUpdateMap:
     """Tests for the debug_update_map meta-command (no player agent required)."""
 

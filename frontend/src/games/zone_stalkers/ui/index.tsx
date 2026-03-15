@@ -235,6 +235,9 @@ const SCHED_ICONS: Record<string, string> = {
 
 // ── Item catalogue — mirrors backend balance/items.py ITEM_TYPES ─────────────
 // Grouped by category for the trader shop UI.  Keep in sync with items.py.
+
+/** Default risk_tolerance used when an agent or item doesn't specify one (matches backend DEFAULT_RISK_TOLERANCE). */
+const DEFAULT_RISK_TOLERANCE = 0.5;
 interface ShopItem {
   type: string;
   name: string;
@@ -242,49 +245,51 @@ interface ShopItem {
   value: number;
   weight: number;
   description: string;
+  /** risk_tolerance (0.0–1.0): how risky/aggressive this item is. Bots prefer items closest to their own risk_tolerance. */
+  risk_tolerance: number;
   // extra stats shown in the shop
   extra?: string;
 }
 
 const ITEM_CATALOGUE: ShopItem[] = [
   // ── Medical ────────────────────────────────────────────────────────────────
-  { type: 'bandage',    name: 'Бинт',               category: 'Медицина',  value: 50,   weight: 0.1, description: 'Перевязочный материал. Восстанавливает 15 HP.', extra: '+15 HP' },
-  { type: 'medkit',     name: 'Аптечка',             category: 'Медицина',  value: 200,  weight: 0.5, description: 'Стандартная полевая аптечка. Восстанавливает 50 HP.', extra: '+50 HP' },
-  { type: 'army_medkit',name: 'Военная аптечка',     category: 'Медицина',  value: 450,  weight: 0.6, description: 'Военная аптечка высшего класса. Восстанавливает 80 HP.', extra: '+80 HP' },
-  { type: 'stimpack',   name: 'Стимпак',             category: 'Медицина',  value: 350,  weight: 0.3, description: 'Боевой стимулятор. Восстанавливает 30 HP, немного повышает голод.', extra: '+30 HP' },
-  { type: 'morphine',   name: 'Морфин',              category: 'Медицина',  value: 300,  weight: 0.15,description: 'Обезболивающее. Восстанавливает 25 HP, снижает усталость на 20.', extra: '+25 HP, −20 сон' },
-  { type: 'antirad',    name: 'Антирад',             category: 'Медицина',  value: 150,  weight: 0.2, description: 'Препарат от радиационного отравления. Снижает радиацию на 30.', extra: '−30 рад.' },
-  { type: 'rad_cure',   name: 'Рад-Пурге',           category: 'Медицина',  value: 380,  weight: 0.2, description: 'Мощный антирадиационный препарат. Снижает радиацию на 60.', extra: '−60 рад.' },
+  { type: 'bandage',    name: 'Бинт',               category: 'Медицина',  value: 50,   weight: 0.1, risk_tolerance: 0.1, description: 'Перевязочный материал. Восстанавливает 15 HP.', extra: '+15 HP' },
+  { type: 'medkit',     name: 'Аптечка',             category: 'Медицина',  value: 200,  weight: 0.5, risk_tolerance: 0.2, description: 'Стандартная полевая аптечка. Восстанавливает 50 HP.', extra: '+50 HP' },
+  { type: 'army_medkit',name: 'Военная аптечка',     category: 'Медицина',  value: 450,  weight: 0.6, risk_tolerance: 0.4, description: 'Военная аптечка высшего класса. Восстанавливает 80 HP.', extra: '+80 HP' },
+  { type: 'stimpack',   name: 'Стимпак',             category: 'Медицина',  value: 350,  weight: 0.3, risk_tolerance: 0.7, description: 'Боевой стимулятор. Восстанавливает 30 HP, немного повышает голод.', extra: '+30 HP' },
+  { type: 'morphine',   name: 'Морфин',              category: 'Медицина',  value: 300,  weight: 0.15,risk_tolerance: 0.5, description: 'Обезболивающее. Восстанавливает 25 HP, снижает усталость на 20.', extra: '+25 HP, −20 сон' },
+  { type: 'antirad',    name: 'Антирад',             category: 'Медицина',  value: 150,  weight: 0.2, risk_tolerance: 0.3, description: 'Препарат от радиационного отравления. Снижает радиацию на 30.', extra: '−30 рад.' },
+  { type: 'rad_cure',   name: 'Рад-Пурге',           category: 'Медицина',  value: 380,  weight: 0.2, risk_tolerance: 0.5, description: 'Мощный антирадиационный препарат. Снижает радиацию на 60.', extra: '−60 рад.' },
   // ── Weapons ────────────────────────────────────────────────────────────────
-  { type: 'pistol',     name: 'Пистолет ПМ',         category: 'Оружие',    value: 500,  weight: 0.7, description: 'Пистолет Макарова. Компактное личное оружие.', extra: 'Урон 15, дал. 2, патрон 9x18' },
-  { type: 'shotgun',    name: 'Обрез ТОЗ-34',        category: 'Оружие',    value: 800,  weight: 3.0, description: 'Двустволка ближнего боя. Высокий урон, малая дальность.', extra: 'Урон 40, дал. 1, патрон 12gauge' },
-  { type: 'ak74',       name: 'АК-74',               category: 'Оружие',    value: 1500, weight: 3.5, description: 'Автомат Калашникова. Надёжное оружие среднего боя.', extra: 'Урон 25, дал. 3, патрон 5.45x39' },
-  { type: 'pkm',        name: 'ПКМ (пулемёт)',        category: 'Оружие',    value: 3500, weight: 7.5, description: 'Ручной пулемёт Калашникова. Высокий DPS, тяжёлый.', extra: 'Урон 35, дал. 3, патрон 7.62x54R' },
-  { type: 'svu_svd',    name: 'СВД (снайперская)',    category: 'Оружие',    value: 4500, weight: 4.2, description: 'Снайперская винтовка. Максимальная дальность и урон.', extra: 'Урон 50, дал. 5, патрон 7.62x54R' },
+  { type: 'pistol',     name: 'Пистолет ПМ',         category: 'Оружие',    value: 500,  weight: 0.7, risk_tolerance: 0.3, description: 'Пистолет Макарова. Компактное личное оружие.', extra: 'Урон 15, дал. 2, патрон 9x18' },
+  { type: 'shotgun',    name: 'Обрез ТОЗ-34',        category: 'Оружие',    value: 800,  weight: 3.0, risk_tolerance: 0.5, description: 'Двустволка ближнего боя. Высокий урон, малая дальность.', extra: 'Урон 40, дал. 1, патрон 12gauge' },
+  { type: 'ak74',       name: 'АК-74',               category: 'Оружие',    value: 1500, weight: 3.5, risk_tolerance: 0.6, description: 'Автомат Калашникова. Надёжное оружие среднего боя.', extra: 'Урон 25, дал. 3, патрон 5.45x39' },
+  { type: 'pkm',        name: 'ПКМ (пулемёт)',        category: 'Оружие',    value: 3500, weight: 7.5, risk_tolerance: 0.9, description: 'Ручной пулемёт Калашникова. Высокий DPS, тяжёлый.', extra: 'Урон 35, дал. 3, патрон 7.62x54R' },
+  { type: 'svu_svd',    name: 'СВД (снайперская)',    category: 'Оружие',    value: 4500, weight: 4.2, risk_tolerance: 0.7, description: 'Снайперская винтовка. Максимальная дальность и урон.', extra: 'Урон 50, дал. 5, патрон 7.62x54R' },
   // ── Armor ──────────────────────────────────────────────────────────────────
-  { type: 'leather_jacket', name: 'Кожаная куртка',  category: 'Броня',     value: 300,  weight: 2.0, description: 'Простейшая защита. Дешёвая, но лучше чем ничего.', extra: 'Защита 5' },
-  { type: 'stalker_suit',   name: 'Комбинезон сталкера', category: 'Броня', value: 1500, weight: 5.0, description: 'Стандартный комбинезон с лёгкой бронёй и радиозащитой.', extra: 'Защита 15' },
-  { type: 'combat_armor',   name: 'Боевой бронежилет',   category: 'Броня', value: 3000, weight: 6.5, description: 'Военный бронежилет. Хорошая защита от пуль и аномалий.', extra: 'Защита 22' },
-  { type: 'seva_suit',      name: 'Костюм СЕВА',         category: 'Броня', value: 3500, weight: 6.0, description: 'Научный комбинезон СЕВА с усиленной радиозащитой.', extra: 'Защита 18' },
-  { type: 'exoskeleton',    name: 'Экзоскелет',          category: 'Броня', value: 6000, weight: 8.0, description: 'Тяжёлый боевой экзоскелет. Максимальная защита в Зоне.', extra: 'Защита 30' },
+  { type: 'leather_jacket', name: 'Кожаная куртка',  category: 'Броня',     value: 300,  weight: 2.0, risk_tolerance: 0.2, description: 'Простейшая защита. Дешёвая, но лучше чем ничего.', extra: 'Защита 5' },
+  { type: 'stalker_suit',   name: 'Комбинезон сталкера', category: 'Броня', value: 1500, weight: 5.0, risk_tolerance: 0.4, description: 'Стандартный комбинезон с лёгкой бронёй и радиозащитой.', extra: 'Защита 15' },
+  { type: 'combat_armor',   name: 'Боевой бронежилет',   category: 'Броня', value: 3000, weight: 6.5, risk_tolerance: 0.7, description: 'Военный бронежилет. Хорошая защита от пуль и аномалий.', extra: 'Защита 22' },
+  { type: 'seva_suit',      name: 'Костюм СЕВА',         category: 'Броня', value: 3500, weight: 6.0, risk_tolerance: 0.5, description: 'Научный комбинезон СЕВА с усиленной радиозащитой.', extra: 'Защита 18' },
+  { type: 'exoskeleton',    name: 'Экзоскелет',          category: 'Броня', value: 6000, weight: 8.0, risk_tolerance: 0.9, description: 'Тяжёлый боевой экзоскелет. Максимальная защита в Зоне.', extra: 'Защита 30' },
   // ── Ammo ───────────────────────────────────────────────────────────────────
-  { type: 'ammo_9mm',     name: 'Патроны 9х18 (20 шт.)',      category: 'Патроны', value: 60,  weight: 0.2, description: 'Пистолетные патроны для ПМ.',            extra: 'для ПМ × 20' },
-  { type: 'ammo_12gauge', name: 'Дробь 12 кал. (10 шт.)',     category: 'Патроны', value: 80,  weight: 0.3, description: 'Дробовые патроны для обреза ТОЗ-34.',    extra: 'для ТОЗ × 10' },
-  { type: 'ammo_545',     name: 'Патроны 5.45х39 (30 шт.)',   category: 'Патроны', value: 100, weight: 0.3, description: 'Стандартные патроны для АК-74.',          extra: 'для АК × 30' },
-  { type: 'ammo_762',     name: 'Патроны 7.62х54R (20 шт.)',  category: 'Патроны', value: 180, weight: 0.4, description: 'Винтовочные патроны для ПКМ и СВД.',    extra: 'для ПКМ/СВД × 20' },
+  { type: 'ammo_9mm',     name: 'Патроны 9х18 (20 шт.)',      category: 'Патроны', value: 60,  weight: 0.2, risk_tolerance: 0.3, description: 'Пистолетные патроны для ПМ.',            extra: 'для ПМ × 20' },
+  { type: 'ammo_12gauge', name: 'Дробь 12 кал. (10 шт.)',     category: 'Патроны', value: 80,  weight: 0.3, risk_tolerance: 0.5, description: 'Дробовые патроны для обреза ТОЗ-34.',    extra: 'для ТОЗ × 10' },
+  { type: 'ammo_545',     name: 'Патроны 5.45х39 (30 шт.)',   category: 'Патроны', value: 100, weight: 0.3, risk_tolerance: 0.6, description: 'Стандартные патроны для АК-74.',          extra: 'для АК × 30' },
+  { type: 'ammo_762',     name: 'Патроны 7.62х54R (20 шт.)',  category: 'Патроны', value: 180, weight: 0.4, risk_tolerance: 0.8, description: 'Винтовочные патроны для ПКМ и СВД.',    extra: 'для ПКМ/СВД × 20' },
   // ── Consumables ────────────────────────────────────────────────────────────
-  { type: 'bread',          name: 'Буханка хлеба',     category: 'Расходники', value: 20,  weight: 0.3, description: 'Простая еда. Утоляет голод на 35 единиц.',                  extra: 'Голод −35' },
-  { type: 'canned_food',    name: 'Тушёнка',            category: 'Расходники', value: 40,  weight: 0.4, description: 'Консервы. Хорошо утоляет голод, немного усиливает жажду.',  extra: 'Голод −50, жажда +5' },
-  { type: 'military_ration',name: 'Сухой паёк',         category: 'Расходники', value: 65,  weight: 0.35,description: 'Военный сухой паёк. Максимально утоляет голод.',            extra: 'Голод −70' },
-  { type: 'water',          name: 'Вода (0.5л)',         category: 'Расходники', value: 30,  weight: 0.5, description: 'Чистая вода. Утоляет жажду на 50 единиц.',                 extra: 'Жажда −50' },
-  { type: 'purified_water', name: 'Очищенная вода (1л)', category: 'Расходники', value: 70,  weight: 1.0, description: 'Очищенная вода 1л. Полностью утоляет жажду.',              extra: 'Жажда −80' },
-  { type: 'energy_drink',   name: 'Энергетик',           category: 'Расходники', value: 80,  weight: 0.3, description: 'Энергетический напиток. Снижает усталость на 30, утоляет жажду.', extra: 'Сон −30, жажда −40' },
-  { type: 'vodka',          name: 'Водка',               category: 'Расходники', value: 50,  weight: 0.5, description: 'Народное средство от радиации. Снижает радиацию, немного портит здоровье.', extra: 'Рад. −10, HP −5' },
-  { type: 'glucose',        name: 'Раствор глюкозы',     category: 'Расходники', value: 120, weight: 0.15,description: 'Питательный раствор. Немного лечит и утоляет голод.',       extra: '+15 HP, голод −20' },
+  { type: 'bread',          name: 'Буханка хлеба',     category: 'Расходники', value: 20,  weight: 0.3, risk_tolerance: 0.1, description: 'Простая еда. Утоляет голод на 35 единиц.',                  extra: 'Голод −35' },
+  { type: 'canned_food',    name: 'Тушёнка',            category: 'Расходники', value: 40,  weight: 0.4, risk_tolerance: 0.2, description: 'Консервы. Хорошо утоляет голод, немного усиливает жажду.',  extra: 'Голод −50, жажда +5' },
+  { type: 'military_ration',name: 'Сухой паёк',         category: 'Расходники', value: 65,  weight: 0.35,risk_tolerance: 0.6, description: 'Военный сухой паёк. Максимально утоляет голод.',            extra: 'Голод −70' },
+  { type: 'water',          name: 'Вода (0.5л)',         category: 'Расходники', value: 30,  weight: 0.5, risk_tolerance: 0.1, description: 'Чистая вода. Утоляет жажду на 50 единиц.',                 extra: 'Жажда −50' },
+  { type: 'purified_water', name: 'Очищенная вода (1л)', category: 'Расходники', value: 70,  weight: 1.0, risk_tolerance: 0.2, description: 'Очищенная вода 1л. Полностью утоляет жажду.',              extra: 'Жажда −80' },
+  { type: 'energy_drink',   name: 'Энергетик',           category: 'Расходники', value: 80,  weight: 0.3, risk_tolerance: 0.5, description: 'Энергетический напиток. Снижает усталость на 30, утоляет жажду.', extra: 'Сон −30, жажда −40' },
+  { type: 'vodka',          name: 'Водка',               category: 'Расходники', value: 50,  weight: 0.5, risk_tolerance: 0.4, description: 'Народное средство от радиации. Снижает радиацию, немного портит здоровье.', extra: 'Рад. −10, HP −5' },
+  { type: 'glucose',        name: 'Раствор глюкозы',     category: 'Расходники', value: 120, weight: 0.15,risk_tolerance: 0.3, description: 'Питательный раствор. Немного лечит и утоляет голод.',       extra: '+15 HP, голод −20' },
   // ── Detectors ──────────────────────────────────────────────────────────────
-  { type: 'echo_detector',  name: 'Детектор «Эхо»',     category: 'Детекторы',  value: 500,  weight: 0.5, description: 'Простой детектор аномалий. Радиус обнаружения 2.', extra: 'Радиус 2' },
-  { type: 'bear_detector',  name: 'Детектор «Медведь»', category: 'Детекторы',  value: 1500, weight: 0.7, description: 'Средний детектор. Радиус обнаружения 3.', extra: 'Радиус 3' },
-  { type: 'veles_detector', name: 'Детектор «Велес»',   category: 'Детекторы',  value: 3000, weight: 0.8, description: 'Продвинутый детектор. Радиус обнаружения 4.', extra: 'Радиус 4' },
+  { type: 'echo_detector',  name: 'Детектор «Эхо»',     category: 'Детекторы',  value: 500,  weight: 0.5, risk_tolerance: 0.2, description: 'Простой детектор аномалий. Радиус обнаружения 2.', extra: 'Радиус 2' },
+  { type: 'bear_detector',  name: 'Детектор «Медведь»', category: 'Детекторы',  value: 1500, weight: 0.7, risk_tolerance: 0.5, description: 'Средний детектор. Радиус обнаружения 3.', extra: 'Радиус 3' },
+  { type: 'veles_detector', name: 'Детектор «Велес»',   category: 'Детекторы',  value: 3000, weight: 0.8, risk_tolerance: 0.7, description: 'Продвинутый детектор. Радиус обнаружения 4.', extra: 'Радиус 4' },
 ];
 
 // Set of consumable item types (medical + consumable categories)
@@ -1628,13 +1633,45 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                     if (tradersHere.length === 0 || !canAct) return null;
                     const trader = tradersHere[0];
                     const myMoney = myAgent?.money ?? 0;
+                    const myRisk = myAgent?.risk_tolerance ?? DEFAULT_RISK_TOLERANCE;
                     // Group catalogue by category
                     const categories = Array.from(new Set(ITEM_CATALOGUE.map(i => i.category)));
+                    // Compute best-match item per category (closest risk_tolerance to myRisk, then lowest price)
+                    const bestMatchPerCategory: Record<string, string> = {};
+                    categories.forEach(cat => {
+                      const catItems = ITEM_CATALOGUE.filter(i => i.category === cat);
+                      const best = catItems.reduce((a, b) => {
+                        const da = Math.abs(a.risk_tolerance - myRisk);
+                        const db = Math.abs(b.risk_tolerance - myRisk);
+                        return da < db || (da === db && a.value < b.value) ? a : b;
+                      });
+                      bestMatchPerCategory[cat] = best.type;
+                    });
+
+                    /** Render a small colour-coded risk-tolerance bar */
+                    const RiskBar = ({ rt }: { rt: number }) => {
+                      const pct = Math.round(rt * 100);
+                      const color = rt < 0.35 ? '#22c55e' : rt < 0.65 ? '#f59e0b' : '#ef4444';
+                      return (
+                        <span title={`Толерантность к риску: ${rt.toFixed(2)}`}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: '0.68rem', color: '#64748b', whiteSpace: 'nowrap' }}>
+                          <span style={{ display: 'inline-block', width: 32, height: 4, background: '#1e293b', borderRadius: 2, verticalAlign: 'middle', overflow: 'hidden' }}>
+                            <span style={{ display: 'block', width: `${pct}%`, height: '100%', background: color, borderRadius: 2 }} />
+                          </span>
+                          <span style={{ color }}>{rt.toFixed(1)}</span>
+                        </span>
+                      );
+                    };
+
                     return (
                       <div style={styles.locDetailSection}>
                         <div style={styles.locDetailLabel}>🏪 Магазин — {(trader as { name: string }).name}</div>
                         <div style={{ color: '#94a3b8', fontSize: '0.72rem', marginBottom: 6 }}>
-                          Цена = базовая × 1.5 | У вас: {myMoney} RU
+                          Цена = базовая × 1.5 | У вас: {myMoney} RU | Ваш риск:&nbsp;
+                          <span style={{ color: myRisk < 0.35 ? '#22c55e' : myRisk < 0.65 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>
+                            {myRisk.toFixed(2)}
+                          </span>
+                          &nbsp;(⭐ = рекомендуется боту)
                         </div>
                         {categories.map((cat) => (
                           <details key={cat} style={{ marginBottom: 4 }}>
@@ -1645,12 +1682,23 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                               {ITEM_CATALOGUE.filter(i => i.category === cat).map((item) => {
                                 const buyPrice = Math.floor(item.value * 1.5);
                                 const canBuy = myMoney >= buyPrice;
+                                const isBestMatch = bestMatchPerCategory[cat] === item.type;
                                 return (
-                                  <div key={item.type} style={{ ...styles.locDetailItem, flexWrap: 'wrap', gap: 4 }}>
+                                  <div key={item.type} style={{
+                                    ...styles.locDetailItem, flexWrap: 'wrap', gap: 4,
+                                    ...(isBestMatch ? { border: '1px solid #854d0e', borderRadius: 4, background: '#1c1307' } : {}),
+                                  }}>
                                     <div style={{ flex: 1, minWidth: 0 }}>
-                                      <span style={{ color: '#e2e8f0', fontWeight: 600, fontSize: '0.8rem' }}>{item.name}</span>
+                                      <span style={{ color: '#e2e8f0', fontWeight: 600, fontSize: '0.8rem' }}>
+                                        {isBestMatch && <span title="Рекомендуется боту с вашим уровнем риска" style={{ marginRight: 4 }}>⭐</span>}
+                                        {item.name}
+                                      </span>
                                       {item.extra && <span style={{ color: '#64748b', fontSize: '0.72rem', marginLeft: 6 }}>{item.extra}</span>}
                                       <div style={{ color: '#94a3b8', fontSize: '0.7rem' }}>{item.description}</div>
+                                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                                        <span style={{ color: '#64748b', fontSize: '0.68rem' }}>Риск:</span>
+                                        <RiskBar rt={item.risk_tolerance} />
+                                      </div>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                                       <span style={{ color: canBuy ? '#fbbf24' : '#64748b', fontSize: '0.78rem', fontWeight: 600 }}>
