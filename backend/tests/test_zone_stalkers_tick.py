@@ -1750,3 +1750,129 @@ class TestEquipmentMaintenance:
                 break
         assert found_water, "No stalker spawned with water across 100 seeds"
         assert found_canned, "No stalker spawned with canned_food across 100 seeds"
+
+    # ── Ammo pickup (ground and observation memory) ───────────────────────────
+
+    def test_pickup_ammo_from_ground(self):
+        """Bot with a weapon but no ammo should pick up matching ammo from the ground."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
+        # Strip inventory of any ammo
+        state["agents"][sid]["inventory"] = []
+        info = ITEM_TYPES["ammo_9mm"]
+        state["locations"][loc_id]["items"] = [
+            {"id": "ammo_ground", "type": "ammo_9mm", "name": info["name"],
+             "weight": info.get("weight", 0.01), "value": info.get("value", 10)}
+        ]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        loc_items = new_state["locations"][loc_id]["items"]
+        assert not any(i["id"] == "ammo_ground" for i in loc_items), "Ammo should be removed from ground"
+        assert any(e["event_type"] == "item_picked_up" for e in events), "item_picked_up event expected"
+        assert any(i["id"] == "ammo_ground" for i in agent["inventory"]), "Ammo should be in inventory"
+
+    def test_seek_ammo_from_observation_memory(self):
+        """Bot with a weapon but no ammo should travel to a location where ammo was observed."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
+        state["agents"][sid]["inventory"] = []
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return  # skip if no neighbours
+        mem_loc = conns[0]["to"]
+        info = ITEM_TYPES["ammo_9mm"]
+        # Place the ammo at mem_loc (so _find_item_memory_location verifies it's still there)
+        state["locations"][mem_loc]["items"] = [
+            {"id": "ammo_mem", "type": "ammo_9mm", "name": info["name"],
+             "weight": info.get("weight", 0.01), "value": info.get("value", 10)}
+        ]
+        # Give agent an observation memory of the ammo at mem_loc
+        state["agents"][sid]["memory"] = [{
+            "world_turn": 1,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "На земле: ammo_9mm",
+            "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["ammo_9mm"]},
+        }]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Bot should have a scheduled travel action"
+        assert sched["type"] == "travel", "Bot should be traveling toward observed ammo location"
+        assert agent.get("current_goal") == "get_ammo"
+
+    # ── Medicine/food/drink observation-memory pickup ─────────────────────────
+
+    def test_seek_medicine_from_observation_memory(self):
+        """Bot with no heal items should travel to a location where medicine was observed."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol", armor="leather_jacket")
+        # Fully equipped; strip heal items from inventory so Need 4 fires
+        state["agents"][sid]["inventory"] = [
+            {"id": "ammo_t", "type": "ammo_9mm",
+             "name": ITEM_TYPES["ammo_9mm"]["name"], "value": ITEM_TYPES["ammo_9mm"]["value"]},
+        ]
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return
+        mem_loc = conns[0]["to"]
+        info = ITEM_TYPES["bandage"]
+        state["locations"][mem_loc]["items"] = [
+            {"id": "heal_mem", "type": "bandage", "name": info["name"],
+             "weight": info.get("weight", 0.1), "value": info.get("value", 50)}
+        ]
+        state["agents"][sid]["memory"] = [{
+            "world_turn": 1,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "На земле: bandage",
+            "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["bandage"]},
+        }]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Bot should have a scheduled travel action"
+        assert sched["type"] == "travel", "Bot should be traveling toward observed medicine"
+        # Verify a 'seek_item' decision memory was written for medical category
+        decision_mems = [
+            m for m in agent.get("memory", [])
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("item_category") == "medical"
+        ]
+        assert decision_mems, "Bot should write a 'seek_item' decision memory for medicine"
+
+    # ── Affordability guard (trader-loop bug) ─────────────────────────────────
+
+    def test_broke_bot_does_not_travel_to_trader(self):
+        """A bot with no money should NOT travel to a trader to buy equipment."""
+        state, sid, loc_id = _make_bare_stalker_state(with_trader=False)
+        # Create a reachable trader location
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return
+        trader_loc = conns[0]["to"]
+        state.setdefault("traders", {})["tr_far"] = {
+            "id": "tr_far",
+            "archetype": "trader_npc",
+            "name": "Far Trader",
+            "location_id": trader_loc,
+            "inventory": [],
+            "money": 10000,
+            "memory": [],
+            "is_alive": True,
+        }
+        state["locations"][trader_loc].setdefault("agents", []).append("tr_far")
+        # Bot has zero money — cannot afford anything
+        state["agents"][sid]["money"] = 0
+        state["agents"][sid]["inventory"] = []
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        # Bot must NOT start traveling to the trader when it can't afford anything
+        if sched and sched["type"] == "travel":
+            # If it is traveling, it must NOT be heading toward the trader for equipment
+            goal = agent.get("current_goal", "")
+            assert goal not in ("get_weapon", "get_armor", "get_ammo"), (
+                f"Broke bot should not seek equipment at trader; current_goal={goal!r}, "
+                f"traveling to {sched.get('final_target_id', '?')!r}"
+            )
