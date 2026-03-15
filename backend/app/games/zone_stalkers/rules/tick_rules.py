@@ -1937,23 +1937,29 @@ def _bot_gather_resources(
         return [{"event_type": "exploration_started",
                  "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-    # G3 — Move toward a more loot-rich adjacent location (higher anomaly_activity)
+    # G3 — Move toward a fresh (not confirmed-empty) anomaly location
     connections = [c for c in loc.get("connections", []) if not c.get("closed")]
     if connections:
-        # Prefer neighbors with higher anomaly_activity that are not confirmed empty
-        def loc_score(conn):
-            nb = locations.get(conn["to"], {})
-            return nb.get("anomaly_activity", 0) * 2
-        best = max(connections, key=loc_score)
-        if rng.random() < 0.70:
-            best_nb_name = locations.get(best["to"], {}).get("name", best["to"])
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Двигаюсь за ресурсами",
-                f"Иду в «{best_nb_name}» — там выше аномальная активность и больше лута.",
-                {"action_kind": "move_for_resources", "destination": best["to"]},
-            )
-            return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+        # Only consider neighbors that have anomaly activity AND are not confirmed empty.
+        # Ignoring confirmed-empty neighbors prevents the bot from oscillating between
+        # two barren anomaly spots (arrive at A → go to B → go back to A → …).
+        fresh_neighbors = [
+            c for c in connections
+            if locations.get(c["to"], {}).get("anomaly_activity", 0) > 0
+            and c["to"] not in confirmed_empty
+        ]
+        if fresh_neighbors:
+            best = max(fresh_neighbors,
+                       key=lambda c: locations.get(c["to"], {}).get("anomaly_activity", 0))
+            if rng.random() < 0.70:
+                best_nb_name = locations.get(best["to"], {}).get("name", best["to"])
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "Двигаюсь к непроверенной аномальной зоне",
+                    f"Иду в «{best_nb_name}» — там есть аномальная активность и я ещё не исследовал это место.",
+                    {"action_kind": "move_for_resources", "destination": best["to"]},
+                )
+                return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
     # G4 — Fallback: explore current location only if not confirmed empty
     if loc_id not in confirmed_empty and rng.random() < 0.40:
@@ -2041,7 +2047,21 @@ def _bot_pursue_goal(
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
-        # All anomaly locations within the search radius are confirmed empty — go to the best one to wait for midnight spawns.
+        # All anomaly locations within the search radius are confirmed empty.
+        # If we are already at an anomaly location, stay here and wait for the
+        # next emission to respawn artifacts — no point in oscillating between
+        # confirmed-empty spots.
+        if loc.get("anomaly_activity", 0) > 0:
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Жду пополнения артефактов на месте",
+                f"Все известные аномальные зоны уже исследованы. Остаюсь в «{loc.get('name', loc_id)}» в ожидании выброса.",
+                {"action_kind": "wait_for_artifacts", "location_id": loc_id},
+            )
+            agent["action_used"] = True
+            return []
+
+        # Not at an anomaly location — go to the best known one to wait.
         all_anomaly_candidates = [
             (lid, dist) for lid, dist in reachable.items()
             if locations.get(lid, {}).get("anomaly_activity", 0) > 0

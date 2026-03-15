@@ -317,10 +317,25 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               </div>
             </div>
           </div>
-          <button style={s.closeBtn} onClick={onClose} title="Закрыть">✕</button>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+            <button
+              style={s.closeBtn}
+              title="Экспорт в JSON"
+              onClick={() => {
+                const json = JSON.stringify(agent, null, 2);
+                const blob = new Blob([json], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `stalker_${agent.name.replace(/\s+/g, '_')}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >📥</button>
+            <button style={s.closeBtn} onClick={onClose} title="Закрыть">✕</button>
+          </div>
         </div>
 
-        {/* ── Location & current action ── */}
         <Section label="📍 Местоположение">
           <div style={s.sectionVal}>{locationName}</div>
           {agent.scheduled_action && (
