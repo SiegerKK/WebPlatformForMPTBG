@@ -596,18 +596,42 @@ def resolve_world_command(
 
     # ── debug_trigger_emission ────────────────────────────────────────────────
     if command_type == "debug_trigger_emission":
-        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        import random as _random
+        from app.games.zone_stalkers.rules.tick_rules import (
+            _add_memory,
+            _EMISSION_WARNING_MIN_TURNS,
+            _EMISSION_WARNING_MAX_TURNS,
+        )
         world_turn = state.get("world_turn", 1)
-        # Schedule emission for right now and tick once so the emission logic fires
-        state["emission_scheduled_turn"] = world_turn
+        # Pick a random warning offset (same range as the live system: 10–15 turns).
+        _rng = _random.Random(f"{state.get('seed', 0)}_debug_trigger_{world_turn}")
+        _warn_offset = _rng.randint(_EMISSION_WARNING_MIN_TURNS, _EMISSION_WARNING_MAX_TURNS)
+        _scheduled_turn = world_turn + _warn_offset
+        state["emission_scheduled_turn"] = _scheduled_turn
         state["emission_active"] = False
-        state, tick_evs = tick_zone_map(state)
-        events.extend(tick_evs)
+        # Pre-write the warning state so the normal tick won't duplicate it.
+        state["emission_warning_written_turn"] = world_turn
+        state["emission_warning_offset"] = _warn_offset
+        # Broadcast emission_imminent to every alive agent right now.
+        for _dbg_agent in state.get("agents", {}).values():
+            if not _dbg_agent.get("is_alive", True):
+                continue
+            _add_memory(
+                _dbg_agent, world_turn, state, "observation",
+                "⚠️ Скоро выброс!",
+                f"Почувствовал приближение выброса. До начала примерно {_warn_offset} минут. Нужно найти укрытие!",
+                {
+                    "action_kind": "emission_imminent",
+                    "turns_until": _warn_offset,
+                    "emission_scheduled_turn": _scheduled_turn,
+                },
+            )
         events.append({
             "event_type": "debug_emission_triggered",
             "payload": {
-                "emission_active": state.get("emission_active", False),
-                "emission_ends_turn": state.get("emission_ends_turn", 0),
+                "emission_scheduled_turn": _scheduled_turn,
+                "turns_until": _warn_offset,
+                "emission_active": False,
             },
         })
         return state, events

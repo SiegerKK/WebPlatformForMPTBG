@@ -3103,3 +3103,95 @@ class TestEmissionShelterBehavior:
         assert agent.get("scheduled_action") is not None, (
             "Bot should have scheduled a travel action to flee"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# debug_trigger_emission via world_rules
+# ─────────────────────────────────────────────────────────────────
+
+class TestDebugTriggerEmission:
+    """Verify that debug_trigger_emission schedules the emission 10–15 turns
+    ahead, broadcasts emission_imminent, and does NOT start the emission
+    immediately."""
+
+    def _make_world_state(self):
+        state = _make_minimal_state(
+            {"A": {"connections": []}},
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = None
+        state["world_turn"] = 100
+        state["seed"] = 42
+        return state
+
+    def _run_command(self, state, command_type, payload=None):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(command_type, payload or {}, state, "player1")
+
+    def test_emission_is_not_active_immediately(self):
+        """debug_trigger_emission should NOT immediately start the emission."""
+        state = self._make_world_state()
+        new_state, events = self._run_command(state, "debug_trigger_emission")
+        assert not new_state.get("emission_active"), (
+            "emission_active must be False right after debug_trigger_emission"
+        )
+
+    def test_emission_scheduled_10_to_15_turns_ahead(self):
+        """The scheduled turn should be world_turn + [10..15]."""
+        from app.games.zone_stalkers.rules.tick_rules import (
+            _EMISSION_WARNING_MIN_TURNS, _EMISSION_WARNING_MAX_TURNS
+        )
+        state = self._make_world_state()
+        world_turn = state["world_turn"]
+        new_state, _ = self._run_command(state, "debug_trigger_emission")
+        scheduled = new_state.get("emission_scheduled_turn")
+        assert scheduled is not None
+        offset = scheduled - world_turn
+        assert _EMISSION_WARNING_MIN_TURNS <= offset <= _EMISSION_WARNING_MAX_TURNS, (
+            f"Expected offset {_EMISSION_WARNING_MIN_TURNS}–{_EMISSION_WARNING_MAX_TURNS}, got {offset}"
+        )
+
+    def test_emission_imminent_written_to_alive_agents(self):
+        """All alive agents should receive an emission_imminent observation."""
+        state = self._make_world_state()
+        new_state, _ = self._run_command(state, "debug_trigger_emission")
+        agent = next(iter(new_state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, (
+            f"Expected 1 emission_imminent memory, got {len(warnings)}"
+        )
+
+    def test_event_emitted_with_correct_payload(self):
+        """debug_emission_triggered event should carry scheduled_turn and turns_until."""
+        state = self._make_world_state()
+        _, events = self._run_command(state, "debug_trigger_emission")
+        trig = [e for e in events if e.get("event_type") == "debug_emission_triggered"]
+        assert len(trig) == 1
+        payload = trig[0]["payload"]
+        assert "emission_scheduled_turn" in payload
+        assert "turns_until" in payload
+        assert payload.get("emission_active") is False
+
+    def test_warning_not_duplicated_by_subsequent_ticks(self):
+        """After debug_trigger_emission, normal ticks should NOT write a second
+        emission_imminent observation (warning_written_turn prevents it)."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_world_state()
+        new_state, _ = self._run_command(state, "debug_trigger_emission")
+        # Tick several times; agent should still have exactly 1 emission_imminent
+        for _ in range(5):
+            new_state["world_turn"] += 1
+            new_state, _ = tick_zone_map(new_state)
+        agent = next(iter(new_state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, (
+            f"Expected 1 emission_imminent memory after ticks, got {len(warnings)}"
+        )
