@@ -2032,18 +2032,18 @@ class TestConfirmedEmptyBlocking:
         )
 
     def test_confirmed_empty_cleared_by_emission_memory(self):
-        """An explore_confirmed_empty entry older than the agent's emission_started memory
-        should NOT block re-exploration — the stalker knows an emission may have refilled the zone."""
+        """An explore_confirmed_empty entry older than the agent's emission_ended memory
+        should NOT block re-exploration — the stalker knows the zone may have been refilled."""
         state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
         agent = state["agents"][sid]
         # The confirmed_empty entry was written at world_turn=1.
-        # Now add a newer emission_started memory (turn 5) → the confirmed_empty is stale.
+        # Now add a newer emission_ended memory (turn 5) → the confirmed_empty is stale.
         agent["memory"].append({
             "world_turn": 5,
             "type": "observation",
-            "title": "⚡ Начался выброс!",
-            "summary": "Начался выброс! Нужно укрыться в безопасном месте.",
-            "effects": {"action_kind": "emission_started"},
+            "title": "✅ Выброс закончился",
+            "summary": "Выброс закончился. Аномальные зоны могут снова содержать артефакты.",
+            "effects": {"action_kind": "emission_ended"},
         })
         # Put an artifact at the location so exploration can succeed
         state["locations"][loc_id]["artifacts"] = [
@@ -2063,7 +2063,7 @@ class TestConfirmedEmptyBlocking:
         state["locations"][loc_id]["artifacts"] = [
             {"id": "art_secret", "type": "crystal", "name": "Кристалл", "value": 500}
         ]
-        # No emission_started in memory → confirmed_empty should still block
+        # No emission_ended in memory → confirmed_empty should still block
         new_state, events = self._tick(state)
         assert not any(e["event_type"] == "exploration_started" for e in events), (
             "Bot should NOT re-explore even when artifacts are present if no emission was observed "

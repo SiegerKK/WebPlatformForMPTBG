@@ -172,6 +172,21 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _EMISSION_MIN_INTERVAL_TURNS, _EMISSION_MAX_INTERVAL_TURNS
         )
         state["emission_scheduled_turn"] = world_turn + _next_emission_delay
+
+        # Write observation memory for every still-alive stalker.
+        # This is the signal used to invalidate stale confirmed-empty zone records:
+        # a stalker who sees this entry knows that artifacts may have been refilled
+        # and will be willing to re-explore zones it previously found empty.
+        for _em_agent_id, _em_agent in state.get("agents", {}).items():
+            if not _em_agent.get("is_alive", True):
+                continue
+            _add_memory(
+                _em_agent, world_turn, state, "observation",
+                "✅ Выброс закончился",
+                "Выброс закончился. Аномальные зоны могут снова содержать артефакты.",
+                {"action_kind": "emission_ended"},
+            )
+
         events.append({
             "event_type": "emission_ended",
             "payload": {
@@ -702,31 +717,31 @@ def _confirmed_empty_locations(agent: Dict[str, Any]) -> "frozenset[str]":
     empty (no artifacts present at all).  The agent relies entirely on its own
     memory — no real-map data is consulted.
 
-    **Emission invalidation (memory-based):** After an emission the agent
-    remembers the ``emission_started`` event.  Because emissions reliably spawn
-    new artifacts in anomaly zones, any ``explore_confirmed_empty`` entry that is
-    *older* than the most recent ``emission_started`` memory entry is treated as
-    stale — the agent knows the location may have been refilled and will be
-    willing to re-explore it.
+    **Emission invalidation (memory-based):** When an emission ends, every alive
+    stalker receives an ``emission_ended`` observation memory entry.  Because
+    emissions reliably spawn new artifacts in anomaly zones, any
+    ``explore_confirmed_empty`` entry that is *older* than the most recent
+    ``emission_ended`` memory entry is treated as stale — the agent knows the
+    location may have been refilled and will be willing to re-explore it.
     """
     memory = agent.get("memory", [])
 
-    # Find the world_turn of the most recent emission the agent is aware of.
-    last_emission_turn: int = 0
+    # Find the world_turn of the most recent emission_ended observation the agent holds.
+    last_emission_ended_turn: int = 0
     for mem in memory:
-        if mem.get("effects", {}).get("action_kind") == "emission_started":
+        if mem.get("effects", {}).get("action_kind") == "emission_ended":
             t = mem.get("world_turn", 0)
-            if t > last_emission_turn:
-                last_emission_turn = t
+            if t > last_emission_ended_turn:
+                last_emission_ended_turn = t
 
     # A confirmed_empty entry is valid only when it was recorded AFTER the last
-    # emission the agent knows about.
+    # emission end the agent is aware of.
     return frozenset(
         mem.get("effects", {}).get("location_id")
         for mem in memory
         if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
         and mem.get("effects", {}).get("location_id")
-        and mem.get("world_turn", 0) > last_emission_turn
+        and mem.get("world_turn", 0) > last_emission_ended_turn
     )
 
 
