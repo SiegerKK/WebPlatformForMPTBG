@@ -2664,3 +2664,160 @@ class TestEmergencyTravelMemory:
         )
         assert decisions[0]["effects"].get("emergency") is True
         assert decisions[0]["effects"].get("destination") == "B"
+
+
+# ─────────────────────────────────────────────────────────────────
+# _bot_pickup_on_arrival: commit to picking up on the arrival tick
+# ─────────────────────────────────────────────────────────────────
+
+class TestPickupOnArrival:
+    """Verify that when an agent arrives at a seek_item destination it picks up
+    the sought item before re-evaluating priorities, even if a higher-priority
+    Need would otherwise redirect it elsewhere."""
+
+    def _make_state(self, agent_extra=None):
+        """Agent at A. A has a weapon on the ground.
+        A memory seek_item(weapon, destination=A) is pre-set so the agent looks
+        as if it just arrived from travelling."""
+        state = _make_minimal_state(
+            {"A": {}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # Weapon on the ground at A
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": "Пистолет", "value": 500,
+             "category": "weapon", "risk_tolerance": 0.5},
+        ]
+        # Inject a seek_item decision pointing at current location
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Ищу оружие по памяти",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "weapon",
+                    "destination": "A",
+                },
+                "reason": "test",
+            }
+        ]
+        if agent_extra:
+            agent.update(agent_extra)
+        return state
+
+    def _run_tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        agent_id = next(iter(state["agents"]))
+        agent = state["agents"][agent_id]
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        return agent
+
+    def test_picks_up_weapon_on_arrival(self):
+        """Agent with seek_item(weapon, A) at location A immediately picks up
+        the weapon before any other priority fires."""
+        state = self._make_state()
+        agent = self._run_tick(state)
+        pickups = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "pickup_ground"
+        ]
+        assert pickups, "Expected a pickup_ground action memory on arrival"
+        assert pickups[0]["effects"]["item_type"] == "pistol"
+        # Item is now in inventory
+        assert any(i["type"] == "pistol" for i in agent.get("inventory", []))
+
+    def test_pickup_happens_before_priority_switch(self):
+        """Even when the agent also lacks armor (Need 2), the arrival commitment
+        for a weapon (higher Need) is honoured first."""
+        state = self._make_state({"equipment": {}})  # no weapon AND no armor
+        agent = self._run_tick(state)
+        # Should have picked up weapon, not scheduled travel to armor
+        pickups = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "pickup_ground"
+        ]
+        assert pickups, "pickup_ground should fire on arrival, not a redirect"
+        seek_armor = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "armor"
+        ]
+        assert not seek_armor, "Should not have sought armor before picking up weapon"
+
+    def test_no_pickup_when_destination_differs(self):
+        """If the seek_item destination is B but agent is at A, _bot_pickup_on_arrival
+        returns [] — the arrival shortcut does not fire."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 10}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": "Пистолет", "value": 500,
+             "category": "weapon", "risk_tolerance": 0.5},
+        ]
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Ищу оружие по памяти",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "weapon",
+                    "destination": "B",   # different location!
+                },
+                "reason": "test",
+            }
+        ]
+        result = _bot_pickup_on_arrival(
+            next(iter(state["agents"])), agent, state, world_turn=2
+        )
+        assert result == [], (
+            "Expected [] when seek_item destination is B but agent is at A"
+        )
+
+    def test_no_pickup_when_no_seek_item_decision(self):
+        """If the latest decision is not seek_item, no arrival pickup fires."""
+        state = self._make_state()
+        agent = next(iter(state["agents"].values()))
+        # Replace memory with a non-seek_item decision
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Иду исследовать",
+                "summary": "...",
+                "effects": {"action_kind": "explore", "destination": "A"},
+                "reason": "test",
+            }
+        ]
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        # The on-arrival pickup should NOT fire; pickup might still happen via
+        # normal Need-1 ground-pickup — that's fine, just verify arrival logic
+        # didn't produce a spurious pickup based on a non-seek decision.
+        # We verify indirectly: arrival check returns [] for non-seek decision.
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        # Reset state for isolated test
+        state2 = self._make_state()
+        agent2 = next(iter(state2["agents"].values()))
+        agent2["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "...",
+                "summary": "...",
+                "effects": {"action_kind": "explore"},
+                "reason": "test",
+            }
+        ]
+        result = _bot_pickup_on_arrival(
+            next(iter(state2["agents"])), agent2, state2, world_turn=2
+        )
+        assert result == [], f"Expected [] for non-seek_item decision, got {result}"

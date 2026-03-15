@@ -1363,6 +1363,60 @@ def _bot_equip_from_inventory(
              "payload": {"agent_id": agent_id, "item_type": item["type"], "slot": slot}}]
 
 
+# Mapping from seek_item "item_category" to the corresponding frozenset of item types.
+# Used by _bot_pickup_on_arrival to resolve the category stored in memory.
+# "ammo" is handled separately (uses the "ammo_type" field from the decision effects).
+_SEEK_CATEGORY_TO_TYPES: Dict[str, "frozenset[str]"] = {
+    "weapon": WEAPON_ITEM_TYPES,
+    "armor": ARMOR_ITEM_TYPES,
+    "medical": HEAL_ITEM_TYPES,
+    "food": FOOD_ITEM_TYPES,
+    "drink": DRINK_ITEM_TYPES,
+}
+
+
+def _bot_pickup_on_arrival(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """If the agent's most recent *decision* memory is a ``seek_item`` whose
+    ``destination`` matches the agent's current location, immediately attempt to
+    pick up items of that category from the ground.
+
+    This prevents the bot from re-evaluating priorities on the arrival tick and
+    travelling away before collecting the item it specifically came for.
+
+    Returns pickup events on success, or an empty list if no item was found
+    (the caller then falls through to the normal priority tree which will call
+    ``_maybe_record_item_not_found`` as usual).
+    """
+    loc_id = agent.get("location_id")
+    # Find the most recent *decision* memory entry.
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "decision":
+            continue
+        # We found the latest decision.
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") != "seek_item":
+            return []  # Latest decision was something else — no pending seek.
+        if effects.get("destination") != loc_id:
+            return []  # Still en-route to a different location.
+        category = effects.get("item_category", "")
+        if category == "ammo":
+            ammo_type = effects.get("ammo_type")
+            if not ammo_type:
+                return []
+            item_types: "frozenset[str]" = frozenset({ammo_type})
+        else:
+            item_types = _SEEK_CATEGORY_TO_TYPES.get(category)  # type: ignore[assignment]
+            if not item_types:
+                return []
+        return _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+    return []
+
+
 def _bot_pickup_item_from_ground(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1815,6 +1869,16 @@ def _run_bot_action_inner(
                 reason=reason,
             )
             return _bot_schedule_travel(agent_id, agent, target, state, world_turn)
+
+    # ── ARRIVAL COMMITMENT: pick up the item we travelled here for ────────────
+    # When the most recent decision was a seek_item whose destination is the
+    # current location, immediately attempt to pick up the sought item before
+    # re-evaluating priorities.  This prevents a higher-priority Need from
+    # redirecting the agent on the very tick it arrives, without ever collecting
+    # what it came for.
+    _arrival_events = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
+    if _arrival_events:
+        return _arrival_events
 
     # ── EMERGENCY: Heal ────────────────────────────────────────────────────────
     if agent.get("hp", 100) <= 30:
