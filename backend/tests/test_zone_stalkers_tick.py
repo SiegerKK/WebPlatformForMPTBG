@@ -2821,3 +2821,155 @@ class TestPickupOnArrival:
             next(iter(state2["agents"])), agent2, state2, world_turn=2
         )
         assert result == [], f"Expected [] for non-seek_item decision, got {result}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission warning observation system
+# ─────────────────────────────────────────────────────────────────
+
+class TestEmissionWarning:
+    """Verify that a 'скоро выброс' observation is written to all alive agents
+    exactly once, at a random 10–15 turn window before emission, and that
+    the bot uses this observation (not raw distance arithmetic) to decide to flee."""
+
+    def _make_state_with_emission(self, scheduled_turn: int, current_turn: int = 1,
+                                  warning_written=None, warning_offset=None):
+        """Minimal state: two locations A (plain) and B (building). Agent at A."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_WARNING_MIN_TURNS
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "plain"
+        state["locations"]["B"]["terrain_type"] = "building"
+        state["emission_scheduled_turn"] = scheduled_turn
+        state["emission_active"] = False
+        state["emission_warning_written_turn"] = warning_written
+        state["emission_warning_offset"] = warning_offset
+        state["world_turn"] = current_turn
+        state["seed"] = 0
+        return state
+
+    def test_warning_written_at_correct_turn(self):
+        """emission_imminent observation is written when world_turn == scheduled - offset."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        # Use offset=12: scheduled=100, warning fires at turn 88
+        scheduled = 100
+        state = self._make_state_with_emission(scheduled, current_turn=88,
+                                               warning_offset=12)
+        state["world_turn"] = 88; state, events = tick_zone_map(state)
+        agent = next(iter(state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, f"Expected 1 emission_imminent memory, got {warnings}"
+        assert state["emission_warning_written_turn"] == 88
+
+    def test_warning_not_written_twice(self):
+        """Once the warning is written, re-running subsequent ticks does NOT add a duplicate."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        scheduled = 100
+        state = self._make_state_with_emission(scheduled, current_turn=88,
+                                               warning_offset=12)
+        state["world_turn"] = 88
+        state, _ = tick_zone_map(state)  # first tick — writes warning
+        state["world_turn"] = 89
+        state, _ = tick_zone_map(state)  # second tick — must NOT add another
+        agent = next(iter(state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, "Duplicate emission_imminent observations written"
+
+    def test_warning_event_emitted(self):
+        """emission_warning world event is in the returned events list."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        scheduled = 100
+        state = self._make_state_with_emission(scheduled, current_turn=88,
+                                               warning_offset=12)
+        state["world_turn"] = 88; state, events = tick_zone_map(state)
+        warn_events = [e for e in events if e.get("event_type") == "emission_warning"]
+        assert len(warn_events) == 1
+
+    def test_bot_flees_on_emission_imminent_memory(self):
+        """A bot on dangerous terrain with emission_imminent memory flees to shelter."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_state_with_emission(scheduled_turn=200, current_turn=1)
+        agent = next(iter(state["agents"].values()))
+        # Manually inject the emission_imminent observation (as if it was written earlier)
+        agent["memory"] = [
+            {
+                "type": "observation",
+                "world_turn": 1,
+                "title": "⚠️ Скоро выброс!",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "emission_imminent",
+                    "turns_until": 12,
+                    "emission_scheduled_turn": 200,
+                },
+            }
+        ]
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=1)
+        flee_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert flee_decisions, (
+            "Bot on dangerous terrain with emission_imminent memory should flee"
+        )
+
+    def test_bot_does_not_flee_after_emission_ended(self):
+        """After emission_ended supersedes emission_imminent, bot no longer flees."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_state_with_emission(scheduled_turn=200, current_turn=50)
+        agent = next(iter(state["agents"].values()))
+        # emission_imminent at turn 1, then emission_ended at turn 15
+        agent["memory"] = [
+            {
+                "type": "observation",
+                "world_turn": 1,
+                "title": "⚠️ Скоро выброс!",
+                "summary": "...",
+                "effects": {"action_kind": "emission_imminent", "turns_until": 12,
+                             "emission_scheduled_turn": 15},
+            },
+            {
+                "type": "observation",
+                "world_turn": 15,
+                "title": "✅ Выброс закончился",
+                "summary": "...",
+                "effects": {"action_kind": "emission_ended"},
+            },
+        ]
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=50)
+        flee_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert not flee_decisions, (
+            "Bot should NOT flee when emission_ended supersedes emission_imminent"
+        )
+
+    def test_warning_state_reset_after_emission_ends(self):
+        """emission_warning_written_turn and offset are cleared when emission ends."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_state_with_emission(scheduled_turn=5, current_turn=5,
+                                               warning_written=3, warning_offset=2)
+        # Tick at emission start — starts emission
+        state["world_turn"] = 5
+        state, _ = tick_zone_map(state)
+        assert state.get("emission_active") is True
+        # Tick until emission ends
+        ends_turn = state.get("emission_ends_turn", 10)
+        state["world_turn"] = ends_turn
+        state, _ = tick_zone_map(state)
+        assert state.get("emission_warning_written_turn") is None
+        assert state.get("emission_warning_offset") is None

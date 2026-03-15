@@ -41,7 +41,9 @@ _EMISSION_MIN_INTERVAL_TURNS = 1440   # earliest next emission: 1 game day after
 _EMISSION_MAX_INTERVAL_TURNS = 2880   # latest next emission: 2 game days after last
 _EMISSION_MIN_DURATION_TURNS = 5      # shortest emission: 5 game minutes
 _EMISSION_MAX_DURATION_TURNS = 10     # longest emission: 10 game minutes
-_EMISSION_WARNING_TURNS = 30          # NPC starts fleeing this many turns before emission
+_EMISSION_WARNING_TURNS = 30          # legacy flee-window kept for emergency fallback (active emission)
+_EMISSION_WARNING_MIN_TURNS = 10      # warning observation written min 10 turns before emission
+_EMISSION_WARNING_MAX_TURNS = 15      # warning observation written max 15 turns before emission
 # Terrain types where stalkers are killed by an emission
 _EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
 
@@ -110,6 +112,47 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     # The emission spawns artifacts in anomaly locations, kills stalkers on open
     # terrain (plains / hills), and notifies all alive stalkers via memory.
     _emission_rng = random.Random(str(state.get("seed", 0)) + str(world_turn))
+
+    # ── Emission warning: write "скоро выброс" observation once, 10–15 turns ──
+    # before the scheduled emission.  A random per-cycle offset is chosen when
+    # no offset is cached yet; the observation is broadcast exactly once
+    # (tracked by `emission_warning_written_turn`).
+    _emission_scheduled = state.get("emission_scheduled_turn")
+    if (
+        _emission_scheduled is not None
+        and not state.get("emission_active", False)
+        and state.get("emission_warning_written_turn") is None
+    ):
+        _turns_until = _emission_scheduled - world_turn
+        # Determine the exact warning turn for this cycle (choose once, cache it).
+        if state.get("emission_warning_offset") is None:
+            # Pick a random offset: warn between MIN and MAX turns before emission
+            _warn_offset = _emission_rng.randint(
+                _EMISSION_WARNING_MIN_TURNS, _EMISSION_WARNING_MAX_TURNS
+            )
+            state["emission_warning_offset"] = _warn_offset
+        _warn_offset = state["emission_warning_offset"]
+        if _turns_until == _warn_offset:
+            state["emission_warning_written_turn"] = world_turn
+            for _ew_agent_id, _ew_agent in state.get("agents", {}).items():
+                if not _ew_agent.get("is_alive", True):
+                    continue
+                _add_memory(
+                    _ew_agent, world_turn, state, "observation",
+                    "⚠️ Скоро выброс!",
+                    f"Почувствовал приближение выброса. До начала примерно {_warn_offset} минут. Нужно найти укрытие!",
+                    {"action_kind": "emission_imminent",
+                     "turns_until": _warn_offset,
+                     "emission_scheduled_turn": _emission_scheduled},
+                )
+            events.append({
+                "event_type": "emission_warning",
+                "payload": {
+                    "world_turn": world_turn,
+                    "emission_scheduled_turn": _emission_scheduled,
+                    "turns_until": _warn_offset,
+                },
+            })
 
     # ── Start emission when the scheduled turn is reached ──────────────────────
     if not state.get("emission_active", False) and state.get("emission_scheduled_turn") == world_turn:
@@ -193,6 +236,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _EMISSION_MIN_INTERVAL_TURNS, _EMISSION_MAX_INTERVAL_TURNS
         )
         state["emission_scheduled_turn"] = world_turn + _next_emission_delay
+        # Reset warning state so the next cycle gets a fresh random offset.
+        state["emission_warning_written_turn"] = None
+        state["emission_warning_offset"] = None
 
         # Write observation memory for every still-alive stalker.
         # This is the signal used to invalidate stale confirmed-empty zone records:
@@ -1839,18 +1885,29 @@ def _run_bot_action_inner(
     rng = random.Random(agent_id + str(world_turn))
     inventory = agent.get("inventory", [])
 
-    # ── EMISSION ESCAPE: Flee dangerous terrain before emission ───────────────
-    # If emission is active OR imminent (within warning window), and the agent is
-    # on open terrain (plains / hills), immediately travel to a safer location.
+    # ── EMISSION ESCAPE: Flee dangerous terrain when emission is active or imminent ──
+    # "Imminent" is now determined by whether the agent received an
+    # ``emission_imminent`` observation memory that is newer than any
+    # ``emission_ended`` observation (i.e. the warning hasn't been superseded).
+    # Fallback: if emission is already active the bot also flees regardless of memory.
     _emission_active = state.get("emission_active", False)
-    _emission_scheduled = state.get("emission_scheduled_turn")
     _on_dangerous_terrain = loc.get("terrain_type", "") in _EMISSION_DANGEROUS_TERRAIN
-    _emission_imminent = (
-        _emission_scheduled is not None
-        and not _emission_active
-        and 0 < (_emission_scheduled - world_turn) <= _EMISSION_WARNING_TURNS
-    )
-    if _on_dangerous_terrain and (_emission_active or _emission_imminent):
+    _emission_warned = False
+    if not _emission_active:
+        # Check agent memory for a live emission_imminent observation
+        _last_ended_turn: int = 0
+        _last_imminent_turn: int = 0
+        for _mem in agent.get("memory", []):
+            if _mem.get("type") != "observation":
+                continue
+            _mem_kind = _mem.get("effects", {}).get("action_kind")
+            _mem_turn = _mem.get("world_turn", 0)
+            if _mem_kind == "emission_ended" and _mem_turn > _last_ended_turn:
+                _last_ended_turn = _mem_turn
+            elif _mem_kind == "emission_imminent" and _mem_turn > _last_imminent_turn:
+                _last_imminent_turn = _mem_turn
+        _emission_warned = _last_imminent_turn > _last_ended_turn
+    if _on_dangerous_terrain and (_emission_active or _emission_warned):
         # Find a connected location that is NOT on dangerous terrain
         safe_escape_targets = [
             c["to"] for c in loc.get("connections", [])
@@ -1860,11 +1917,11 @@ def _run_bot_action_inner(
         if safe_escape_targets:
             target = rng.choice(safe_escape_targets)
             agent["current_goal"] = "flee_emission"
-            reason = "активный выброс" if _emission_active else "скорый выброс"
+            reason = "активный выброс" if _emission_active else "скоро будет выброс"
             _add_memory(
                 agent, world_turn, state, "decision",
                 "⚡ Бегу от выброса!",
-                f"Нахожусь на открытой местности во время выброса ({reason}). Бегу в укрытие.",
+                f"Нахожусь на открытой местности, {'идёт' if _emission_active else 'скоро начнётся'} выброс. Бегу в укрытие.",
                 {"action_kind": "flee_emission", "target_id": target},
                 reason=reason,
             )
