@@ -512,9 +512,11 @@ def _resolve_exploration(
     else:
         # Did not pick up an artifact — determine why and write appropriate memory
         if not existing_artifacts:
-            # Location is genuinely empty — record as confirmed empty to block future tries
+            # Location is genuinely empty — record as confirmed empty to block future tries.
+            # Written as an "observation" (not "decision") so the stalker treats it as
+            # a factual note about the world state rather than an active choice.
             _add_memory(
-                agent, world_turn, state, "decision",
+                agent, world_turn, state, "observation",
                 f"Аномалия в «{loc_name}» пустая",
                 f"Тщательно обыскал «{loc_name}» — артефактов нет.",
                 {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
@@ -1113,8 +1115,14 @@ def _bot_buy_from_trader(
     item_types: "frozenset[str]",
     state: Dict[str, Any],
     world_turn: int,
+    purchase_reason: str = "",
 ) -> List[Dict[str, Any]]:
     """Buy the best-matching item from a trader at the agent's current location.
+
+    *purchase_reason* is a short human-readable string explaining WHY the agent
+    needs this item (e.g. "нет оружия", "критически низкое HP").  When provided
+    it is prepended to the ``trade_decision`` memory entry so the stalker's
+    memory clearly shows the motivation for the purchase.
 
     Item selection is based on ``risk_tolerance``: the item whose
     ``risk_tolerance`` value is closest to the agent's own ``risk_tolerance``
@@ -1175,11 +1183,13 @@ def _bot_buy_from_trader(
         agent["action_used"] = True
         item_name = ITEM_TYPES[item_type].get("name", item_type)
         trader_name = trader.get("name", trader["id"])
-        # Decision memory: explain the risk-tolerance match
+        # Decision memory: explain the risk-tolerance match and the reason for purchase
+        reason_prefix = f"Причина покупки: {purchase_reason}. " if purchase_reason else ""
         _add_memory(
             agent, world_turn, state, "decision",
             f"Решил купить «{item_name}»",
             (
+                f"{reason_prefix}"
                 f"Выбор основан на склонности к риску: моя толерантность к риску "
                 f"{agent_risk:.2f}, предмет «{item_name}» имеет {item_risk:.2f}. "
                 f"Расхождение {abs(item_risk - agent_risk):.2f} — ближайшее среди доступных. "
@@ -1191,6 +1201,7 @@ def _bot_buy_from_trader(
                 "agent_risk_tolerance": agent_risk,
                 "item_risk_tolerance": item_risk,
                 "price": buy_price,
+                "purchase_reason": purchase_reason,
             },
         )
         # Action memory: record the completed purchase
@@ -1474,7 +1485,8 @@ def _bot_try_upgrade_equipment(
                 },
             )
             # Buy the upgrade — _bot_buy_from_trader will also write "decision" + "action" memories
-            bought = _bot_buy_from_trader(agent_id, agent, frozenset({upgrade_key}), state, world_turn)
+            bought = _bot_buy_from_trader(agent_id, agent, frozenset({upgrade_key}), state, world_turn,
+                                          purchase_reason=f"апгрейд снаряжения в слоте «{slot}»")
             if bought:
                 # Now equip the freshly bought item (it was added to inventory)
                 agent["current_goal"] = "upgrade_equipment"
@@ -1598,7 +1610,10 @@ def _run_bot_action_inner(
         # No heal item — try to buy from a nearby trader
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
+            bought = _bot_buy_from_trader(
+                agent_id, agent, HEAL_ITEM_TYPES, state, world_turn,
+                purchase_reason=f"критически низкое HP ({agent.get('hp', 0)}%)",
+            )
             if bought:
                 return bought
         elif trader_loc is not None and _can_afford_cheapest(agent, HEAL_ITEM_TYPES):
@@ -1622,7 +1637,8 @@ def _run_bot_action_inner(
         # No food — try to buy from a nearby trader
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
+            bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn,
+                                           purchase_reason=f"сильный голод ({agent.get('hunger', 0)}%)")
             if bought:
                 return bought
         elif trader_loc is not None and _can_afford_cheapest(agent, FOOD_ITEM_TYPES):
@@ -1636,7 +1652,8 @@ def _run_bot_action_inner(
         # No drink — try to buy from a nearby trader
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
+            bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn,
+                                           purchase_reason=f"сильная жажда ({agent.get('thirst', 0)}%)")
             if bought:
                 return bought
         elif trader_loc is not None and _can_afford_cheapest(agent, DRINK_ITEM_TYPES):
@@ -1682,7 +1699,8 @@ def _run_bot_action_inner(
         if _can_buy_equipment:
             trader_loc = _find_nearest_trader_location(loc_id, state)
             if trader_loc == loc_id:
-                bought = _bot_buy_from_trader(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
+                bought = _bot_buy_from_trader(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn,
+                                              purchase_reason="нет оружия")
                 if bought:
                     return bought
             elif trader_loc is not None and _can_afford_cheapest(agent, WEAPON_ITEM_TYPES):
@@ -1717,7 +1735,8 @@ def _run_bot_action_inner(
         if _can_buy_equipment:
             trader_loc = _find_nearest_trader_location(loc_id, state)
             if trader_loc == loc_id:
-                bought = _bot_buy_from_trader(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
+                bought = _bot_buy_from_trader(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn,
+                                              purchase_reason="нет брони")
                 if bought:
                     return bought
             elif trader_loc is not None and _can_afford_cheapest(agent, ARMOR_ITEM_TYPES):
@@ -1757,7 +1776,8 @@ def _run_bot_action_inner(
                 if _can_buy_equipment:
                     trader_loc = _find_nearest_trader_location(loc_id, state)
                     if trader_loc == loc_id:
-                        bought = _bot_buy_from_trader(agent_id, agent, _required_ammo_set, state, world_turn)
+                        bought = _bot_buy_from_trader(agent_id, agent, _required_ammo_set, state, world_turn,
+                                                      purchase_reason=f"нет патронов для {_weapon_type}")
                         if bought:
                             return bought
                     elif trader_loc is not None and _can_afford_cheapest(agent, _required_ammo_set):
@@ -1790,7 +1810,8 @@ def _run_bot_action_inner(
         # Only buy locally — don't travel just for medicine stockpile
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn)
+            bought = _bot_buy_from_trader(agent_id, agent, HEAL_ITEM_TYPES, state, world_turn,
+                                           purchase_reason="создаю запас медикаментов")
             if bought:
                 return bought
 
@@ -1812,7 +1833,8 @@ def _run_bot_action_inner(
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn)
+            bought = _bot_buy_from_trader(agent_id, agent, FOOD_ITEM_TYPES, state, world_turn,
+                                           purchase_reason="создаю запас еды")
             if bought:
                 return bought
 
@@ -1834,7 +1856,8 @@ def _run_bot_action_inner(
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         trader_loc = _find_nearest_trader_location(loc_id, state)
         if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn)
+            bought = _bot_buy_from_trader(agent_id, agent, DRINK_ITEM_TYPES, state, world_turn,
+                                           purchase_reason="создаю запас воды")
             if bought:
                 return bought
 

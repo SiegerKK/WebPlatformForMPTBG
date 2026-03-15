@@ -1965,10 +1965,11 @@ class TestConfirmedEmptyBlocking:
             {"id": "water_t", "type": "water", "name": ITEM_TYPES["water"]["name"],
              "weight": ITEM_TYPES["water"].get("weight", 0.5), "value": ITEM_TYPES["water"]["value"]},
         ]
-        # Plant the confirmed_empty memory entry for the current location
+        # Plant the confirmed_empty memory entry for the current location.
+        # Note: written as "observation" (not "decision") — see tick_rules.py.
         stalker["memory"] = [{
             "world_turn": 1,
-            "type": "decision",
+            "type": "observation",
             "title": "Аномалия пустая",
             "summary": "Тщательно обыскал — артефактов нет.",
             "effects": {"action_kind": "explore_confirmed_empty", "location_id": stalker_loc},
