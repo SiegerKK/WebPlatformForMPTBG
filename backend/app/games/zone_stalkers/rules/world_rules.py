@@ -28,7 +28,8 @@ Supported commands:
 - debug_delete_agent(agent_id) — remove any single agent/mutant/trader by id (meta)
 - debug_set_time(day?, hour?, minute?) — override current world time (meta)
 - debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
-- debug_preview_bot_decision(agent_id) — dry-run bot decision logic and return decision description without mutating state (meta)
+- debug_add_item(agent_id, item_type) — add an item to an agent's inventory in debug mode (meta)
+- debug_remove_item(agent_id, item_id) — remove an item from an agent's inventory or equipment slot in debug mode (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -102,6 +103,12 @@ def validate_world_command(
 
     if command_type == "debug_preview_bot_decision":
         return _validate_debug_preview_bot_decision(payload, state)
+
+    if command_type == "debug_add_item":
+        return _validate_debug_add_item(payload, state)
+
+    if command_type == "debug_remove_item":
+        return _validate_debug_remove_item(payload, state)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -493,6 +500,52 @@ def resolve_world_command(
         events.append({
             "event_type": "debug_agent_money_set",
             "payload": {"agent_id": target_id, "amount": amount},
+        })
+        return state, events
+
+    # ── debug_add_item: meta-command, add an item to an agent's inventory ────
+    if command_type == "debug_add_item":
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
+        target_id = str(payload["agent_id"])
+        item_type = str(payload["item_type"])
+        item_info = _ITEM_TYPES[item_type]
+        world_turn = state.get("world_turn", 1)
+        new_item: Dict[str, Any] = {
+            "id": f"{item_type}_{target_id}_debug_{world_turn}",
+            "type": item_type,
+            "name": item_info.get("name", item_type),
+            "weight": item_info.get("weight", 0),
+            "value": item_info.get("value", 0),
+        }
+        state["agents"][target_id].setdefault("inventory", []).append(new_item)
+        events.append({
+            "event_type": "debug_item_added",
+            "payload": {"agent_id": target_id, "item_type": item_type, "item_id": new_item["id"]},
+        })
+        return state, events
+
+    # ── debug_remove_item: meta-command, remove an item from inventory/equipment ──
+    if command_type == "debug_remove_item":
+        target_id = str(payload["agent_id"])
+        item_id = str(payload["item_id"])
+        agent_obj = state["agents"][target_id]
+        removed = False
+        # Try inventory first
+        inv = agent_obj.get("inventory", [])
+        new_inv = [i for i in inv if i.get("id") != item_id]
+        if len(new_inv) < len(inv):
+            agent_obj["inventory"] = new_inv
+            removed = True
+        # Also check equipment slots — set to None rather than deleting so slot remains defined
+        if not removed:
+            for slot, eq_item in list(agent_obj.get("equipment", {}).items()):
+                if eq_item and eq_item.get("id") == item_id:
+                    agent_obj["equipment"][slot] = None
+                    removed = True
+                    break
+        events.append({
+            "event_type": "debug_item_removed",
+            "payload": {"agent_id": target_id, "item_id": item_id, "removed": removed},
         })
         return state, events
 
@@ -1251,4 +1304,37 @@ def _validate_debug_set_agent_money(
         int(amount)
     except (TypeError, ValueError):
         return RuleCheckResult(valid=False, error="amount must be an integer")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_add_item(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    if agent_id not in state.get("agents", {}):
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    item_type = payload.get("item_type")
+    if not item_type:
+        return RuleCheckResult(valid=False, error="item_type is required")
+    if item_type not in _ITEM_TYPES:
+        return RuleCheckResult(valid=False, error=f"Unknown item_type: {item_type}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_remove_item(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    if agent_id not in state.get("agents", {}):
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    item_id = payload.get("item_id")
+    if not item_id:
+        return RuleCheckResult(valid=False, error="item_id is required")
     return RuleCheckResult(valid=True)

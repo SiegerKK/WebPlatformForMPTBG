@@ -82,6 +82,48 @@ const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${St
 const MINUTES_PER_TURN = 1;
 const TURNS_PER_HOUR = 60 / MINUTES_PER_TURN;
 
+/** All available item types with display names — mirrors ITEM_TYPES in items.py */
+const ALL_ITEM_OPTIONS: Array<{ value: string; label: string }> = [
+  // Medical
+  { value: 'bandage',       label: 'Бинт' },
+  { value: 'medkit',        label: 'Аптечка' },
+  { value: 'army_medkit',   label: 'Военная аптечка' },
+  { value: 'stimpack',      label: 'Стимпак' },
+  { value: 'morphine',      label: 'Морфин' },
+  { value: 'antirad',       label: 'Антирад' },
+  { value: 'rad_cure',      label: 'Рад-Пурге' },
+  // Weapons
+  { value: 'pistol',        label: 'Пистолет ПМ' },
+  { value: 'shotgun',       label: 'Обрез ТОЗ-34' },
+  { value: 'ak74',          label: 'АК-74' },
+  { value: 'pkm',           label: 'ПКМ (пулемёт)' },
+  { value: 'svu_svd',       label: 'СВД (снайперская)' },
+  // Armor
+  { value: 'leather_jacket',label: 'Кожаная куртка' },
+  { value: 'stalker_suit',  label: 'Комбинезон сталкера' },
+  { value: 'combat_armor',  label: 'Боевой бронежилет' },
+  { value: 'seva_suit',     label: 'Костюм СЕВА' },
+  { value: 'exoskeleton',   label: 'Экзоскелет' },
+  // Ammo
+  { value: 'ammo_9mm',      label: 'Патроны 9х18' },
+  { value: 'ammo_12gauge',  label: 'Дробь 12 кал.' },
+  { value: 'ammo_545',      label: 'Патроны 5.45х39' },
+  { value: 'ammo_762',      label: 'Патроны 7.62х54R' },
+  // Consumables
+  { value: 'bread',         label: 'Буханка хлеба' },
+  { value: 'canned_food',   label: 'Тушёнка' },
+  { value: 'military_ration',label: 'Сухой паёк' },
+  { value: 'water',         label: 'Вода (0.5л)' },
+  { value: 'purified_water',label: 'Очищенная вода (1л)' },
+  { value: 'energy_drink',  label: 'Энергетик' },
+  { value: 'vodka',         label: 'Водка' },
+  { value: 'glucose',       label: 'Раствор глюкозы' },
+  // Detectors
+  { value: 'echo_detector', label: 'Детектор «Эхо»' },
+  { value: 'bear_detector', label: 'Детектор «Медведь»' },
+  { value: 'veles_detector',label: 'Детектор «Велес»' },
+];
+
 /**
  * Derive game day/hour/minute from world_turn.
  * The game starts at turn 1 = day 1, 06:00.
@@ -148,6 +190,11 @@ const CURRENT_GOAL_LABELS: Record<string, string> = {
   goal_survive:                 'Выживание',
   goal_explore_zone:            'Исследование зоны',
   goal_serve_faction:           'Служу фракции',
+  upgrade_equipment:            'Апгрейд снаряжения',
+  get_weapon:                   'Ищу оружие',
+  get_armor:                    'Ищу броню',
+  get_ammo:                     'Ищу патроны',
+  flee_emission:                'Убегаю от выброса',
 };
 
 /** Return a display label for a current_goal identifier. */
@@ -168,6 +215,30 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   // first paint without needing a button click.
   const [moneyEdit, setMoneyEdit] = React.useState<string | null>(null);
   const [moneySaving, setMoneySaving] = React.useState(false);
+  // Inventory management state
+  const [addItemType, setAddItemType] = React.useState<string>('bandage');
+  const [addItemSaving, setAddItemSaving] = React.useState(false);
+  const [removingItemId, setRemovingItemId] = React.useState<string | null>(null);
+
+  const handleAddItem = async () => {
+    if (!sendCommand || !addItemType) return;
+    setAddItemSaving(true);
+    try {
+      await sendCommand('debug_add_item', { agent_id: agent.id, item_type: addItemType });
+    } finally {
+      setAddItemSaving(false);
+    }
+  };
+
+  const handleRemoveItem = async (itemId: string) => {
+    if (!sendCommand) return;
+    setRemovingItemId(itemId);
+    try {
+      await sendCommand('debug_remove_item', { agent_id: agent.id, item_id: itemId });
+    } finally {
+      setRemovingItemId(null);
+    }
+  };
 
   const handleMoneySave = async () => {
     if (!sendCommand || moneyEdit === null) return;
@@ -364,13 +435,23 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               };
               const label = slotLabel[slot] ?? slot;
               return (
-                <div key={slot} style={s.equipRow}>
+                <div key={slot} style={{ ...s.equipRow, alignItems: 'center' }}>
                   <span style={s.equipSlot}>{label}</span>
                   <span style={item ? s.equipItem : s.equipEmpty}>
                     {item ? item.name : '— пусто —'}
                   </span>
                   {item?.value != null && (
                     <span style={s.equipVal}>{item.value} RU</span>
+                  )}
+                  {sendCommand && item?.id && (
+                    <button
+                      onClick={() => handleRemoveItem(item.id)}
+                      disabled={removingItemId === item.id}
+                      title="Снять с экипировки"
+                      style={s.removeItemBtn}
+                    >
+                      {removingItemId === item.id ? '…' : '✕'}
+                    </button>
                   )}
                 </div>
               );
@@ -384,7 +465,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
             <span style={s.empty}>Пусто</span>
           ) : (
             agent.inventory.map((item) => (
-              <div key={item.id} style={s.invRow}>
+              <div key={item.id} style={{ ...s.invRow, alignItems: 'center' }}>
                 <span style={s.invName}>{item.name}</span>
                 {item.weight != null && (
                   <span style={s.invWeight}>{item.weight} кг</span>
@@ -392,8 +473,40 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 {item.value != null && (
                   <span style={s.invVal}>{item.value} RU</span>
                 )}
+                {sendCommand && (
+                  <button
+                    onClick={() => handleRemoveItem(item.id)}
+                    disabled={removingItemId === item.id}
+                    title="Удалить предмет"
+                    style={s.removeItemBtn}
+                  >
+                    {removingItemId === item.id ? '…' : '✕'}
+                  </button>
+                )}
               </div>
             ))
+          )}
+          {/* ── Add Item panel (debug only) ── */}
+          {sendCommand && (
+            <div style={s.addItemRow}>
+              <select
+                value={addItemType}
+                onChange={(e) => setAddItemType(e.target.value)}
+                style={s.addItemSelect}
+              >
+                {ALL_ITEM_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <button
+                onClick={handleAddItem}
+                disabled={addItemSaving}
+                style={s.addItemBtn}
+                title="Добавить предмет в инвентарь"
+              >
+                {addItemSaving ? '…' : '+ Добавить'}
+              </button>
+            </div>
           )}
         </Section>
 
@@ -604,6 +717,44 @@ const s: Record<string, React.CSSProperties> = {
   invName: { color: '#cbd5e1', flex: 1 },
   invWeight: { color: '#475569', fontSize: '0.7rem' },
   invVal: { color: '#64748b', fontSize: '0.7rem' },
+  removeItemBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    color: '#ef4444',
+    cursor: 'pointer',
+    fontSize: '0.68rem',
+    padding: '1px 5px',
+    lineHeight: '1.2',
+    flexShrink: 0,
+  },
+  addItemRow: {
+    display: 'flex',
+    gap: 6,
+    alignItems: 'center',
+    marginTop: 6,
+    paddingTop: 6,
+    borderTop: '1px solid #1e293b',
+  },
+  addItemSelect: {
+    flex: 1,
+    background: '#1e293b',
+    color: '#cbd5e1',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: '0.75rem',
+    padding: '3px 6px',
+  },
+  addItemBtn: {
+    background: '#14532d',
+    border: '1px solid #16a34a',
+    borderRadius: 4,
+    color: '#86efac',
+    cursor: 'pointer',
+    fontSize: '0.75rem',
+    padding: '3px 8px',
+    whiteSpace: 'nowrap' as const,
+  },
   empty: { color: '#334155', fontSize: '0.72rem' },
   memoryList: {
     display: 'flex',
@@ -821,6 +972,11 @@ function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
       label:  'Богатство',
       status: wealthFrac >= 1 ? 'green' : wealthFrac >= 0.5 ? 'yellow' : 'red',
       detail: `${wealth} / ${threshold} RU`,
+    },
+    {
+      label:  'Апгрейд снаряжения',
+      status: wealthFrac >= 1 ? 'yellow' : 'green',
+      detail: wealthFrac >= 1 ? 'Достаточно средств — возможен апгрейд' : 'Ещё накапливаю ресурсы',
     },
     {
       label:  'Артефакты',

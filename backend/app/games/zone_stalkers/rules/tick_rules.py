@@ -1281,6 +1281,174 @@ def _find_item_memory_location(
     return None
 
 
+def _find_upgrade_target(
+    item_types: "frozenset[str]",
+    current_item_type: "str | None",
+    agent_risk: float,
+    agent_money: int,
+) -> "str | None":
+    """Return the item key that would be a meaningful upgrade over *current_item_type*.
+
+    An item is considered an upgrade when ALL of the following hold:
+    1. Its ``risk_tolerance`` is *closer* to *agent_risk* than the current item's.
+    2. Its base ``value`` is *higher* than the current item's (it is a "better" item).
+    3. The agent can afford it at trader price (base_value × 1.5).
+
+    Returns ``None`` when no upgrade target exists.
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+
+    current_info = ITEM_TYPES.get(current_item_type or "", {})
+    if not current_item_type:
+        # No current item in slot — initial equipment handled by maintenance layer, not upgrade
+        return None
+    current_rt = float(current_info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+    current_value = int(current_info.get("value", 0))
+    current_dist = abs(current_rt - agent_risk)
+
+    best_key: "str | None" = None
+    best_dist = current_dist
+    best_value = current_value
+
+    for k in item_types:
+        if k == current_item_type:
+            continue
+        info = ITEM_TYPES.get(k)
+        if info is None:
+            continue
+        dist = abs(float(info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE)) - agent_risk)
+        value = int(info.get("value", 0))
+        # Must be a strictly better risk-tolerance match (or same distance) AND more expensive
+        if dist > current_dist:
+            continue
+        if value <= current_value:
+            continue
+        buy_price = int(value * 1.5)
+        if agent_money < buy_price:
+            continue
+        # Pick the candidate with the best (smallest) risk distance; tie-break: higher value
+        if dist < best_dist or (dist == best_dist and value > best_value):
+            best_key = k
+            best_dist = dist
+            best_value = value
+
+    return best_key
+
+
+def _bot_try_upgrade_equipment(
+    agent_id: str,
+    agent: Dict[str, Any],
+    loc_id: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Attempt to upgrade an equipped weapon or armor with a better-matching item.
+
+    "Better" means: closer ``risk_tolerance`` to the agent's own AND a higher
+    base value (more expensive = higher tier).  The agent must be able to
+    afford the upgrade at trader price (base_value × 1.5).
+
+    Upgrade cascade per slot:
+      1) Buy from trader at current location (if present)
+      2) Travel to nearest trader if not local
+    Equipping the new item automatically returns the old one to inventory.
+
+    Returns a non-empty event list when an upgrade action is taken, else [].
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+
+    equipment = agent.get("equipment", {})
+    agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+    agent_money = agent.get("money", 0)
+
+    upgrade_slots = [
+        ("weapon", WEAPON_ITEM_TYPES),
+        ("armor", ARMOR_ITEM_TYPES),
+    ]
+
+    for slot, item_types in upgrade_slots:
+        current = equipment.get(slot)
+        if current is None:
+            continue  # no existing item to upgrade — handled by initial equipment layer
+        current_type = current.get("type")
+
+        upgrade_key = _find_upgrade_target(item_types, current_type, agent_risk, agent_money)
+        if upgrade_key is None:
+            continue
+
+        upgrade_info = ITEM_TYPES[upgrade_key]
+        upgrade_name = upgrade_info.get("name", upgrade_key)
+        upgrade_value = int(upgrade_info.get("value", 0))
+        upgrade_rt = float(upgrade_info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+        buy_price = int(upgrade_value * 1.5)
+
+        current_info = ITEM_TYPES.get(current_type or "", {})
+        current_name = current.get("name", current_type or "?")
+        current_rt = float(current_info.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
+
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+
+        if trader_loc == loc_id:
+            # Decision memory: explain WHY the upgrade is chosen
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Решил обновить {slot}: «{current_name}» → «{upgrade_name}»",
+                (
+                    f"Накопил достаточно средств. Текущий предмет «{current_name}» "
+                    f"(риск {current_rt:.2f}) хуже соответствует моей склонности к риску "
+                    f"{agent_risk:.2f}, чем «{upgrade_name}» (риск {upgrade_rt:.2f}). "
+                    f"Покупаю апгрейд за {buy_price} монет."
+                ),
+                {
+                    "action_kind": "upgrade_decision",
+                    "slot": slot,
+                    "old_item": current_type,
+                    "new_item": upgrade_key,
+                    "agent_risk_tolerance": agent_risk,
+                    "old_item_risk_tolerance": current_rt,
+                    "new_item_risk_tolerance": upgrade_rt,
+                    "price": buy_price,
+                },
+            )
+            # Buy the upgrade — _bot_buy_from_trader will also write "decision" + "action" memories
+            bought = _bot_buy_from_trader(agent_id, agent, frozenset({upgrade_key}), state, world_turn)
+            if bought:
+                # Now equip the freshly bought item (it was added to inventory)
+                agent["current_goal"] = "upgrade_equipment"
+                evs = _bot_equip_from_inventory(agent_id, agent, frozenset({upgrade_key}), slot, state, world_turn)
+                return bought + evs
+
+        elif trader_loc is not None:
+            # Need to travel to a trader first
+            agent["current_goal"] = "upgrade_equipment"
+            trader_name_obj = next(
+                (t for t in state.get("traders", {}).values()
+                 if t.get("location_id") == trader_loc and t.get("is_alive", True)),
+                None,
+            )
+            trader_name = trader_name_obj.get("name", "торговец") if trader_name_obj else "торговец"
+            trader_loc_name = state.get("locations", {}).get(trader_loc, {}).get("name", trader_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"Иду к торговцу за апгрейдом {slot}",
+                (
+                    f"Хочу заменить «{current_name}» на «{upgrade_name}» — "
+                    f"лучше соответствует моей склонности к риску ({agent_risk:.2f}). "
+                    f"Иду к торговцу {trader_name} в «{trader_loc_name}»."
+                ),
+                {
+                    "action_kind": "upgrade_travel",
+                    "slot": slot,
+                    "old_item": current_type,
+                    "new_item": upgrade_key,
+                    "destination": trader_loc,
+                },
+            )
+            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+
+    return []
+
+
 def _run_bot_action(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1293,8 +1461,10 @@ def _run_bot_action(
     Decision layers:
       EMERGENCY – Heal / eat / drink (always overrides goal logic)
       SURVIVAL  – Sleep when exhausted
+      EQUIPMENT – Initial equipment acquisition (no weapon/armor/ammo)
       GOAL      – If wealth < material_threshold: gather resources
-                  Else: pursue global_goal
+                  If wealth >= material_threshold: try equipment upgrade
+                  Then: pursue global_goal
     """
     prev_goal = agent.get("current_goal")
     events = _run_bot_action_inner(agent_id, agent, state, world_turn)
@@ -1643,7 +1813,17 @@ def _run_bot_action_inner(
     # itself handles both artifact gathering and selling, so the generic
     # resource-accumulation phase would only slow them down.
     if global_goal == "get_rich" or wealth >= threshold:
-        # Phase 2: Pursue global goal
+        # Phase 2a: Equipment upgrade (only when wealth >= threshold)
+        # Before pursuing the global goal, check whether better-matching equipment
+        # is available.  Upgrade attempts only fire when the agent already has
+        # basic equipment (no point upgrading an empty slot — handled by Phase 1).
+        if wealth >= threshold:
+            upgrade_evs = _bot_try_upgrade_equipment(
+                agent_id, agent, loc_id, state, world_turn
+            )
+            if upgrade_evs:
+                return upgrade_evs
+        # Phase 2b: Pursue global goal
         agent["current_goal"] = f"goal_{global_goal}"
         return _bot_pursue_goal(agent_id, agent, global_goal, loc_id, loc, state, world_turn, rng)
     else:

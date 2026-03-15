@@ -1006,6 +1006,223 @@ class TestRiskToleranceItemSelection:
             )
 
 
+class TestEquipmentUpgrade:
+    """Tests for the equipment-upgrade bot priority layer and debug inventory commands."""
+
+    def _make_state_with_agent(self, agent_risk: float = 0.5, agent_money: int = 10000,
+                                equipped_weapon: str = "pistol"):
+        """Return (state, agent) where the agent already has a weapon equipped."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state = generate_zone(seed=3, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        agent["risk_tolerance"] = agent_risk
+        agent["money"] = agent_money
+        # Give agent a weapon already equipped
+        info = ITEM_TYPES[equipped_weapon]
+        agent.setdefault("equipment", {})["weapon"] = {
+            "id": f"{equipped_weapon}_init",
+            "type": equipped_weapon,
+            "name": info.get("name", equipped_weapon),
+            "value": info.get("value", 0),
+        }
+        # Place a trader at the same location
+        state["traders"]["trader_upg"] = {
+            "id": "trader_upg", "name": "UpgradeTrader",
+            "location_id": loc_id, "inventory": [], "money": 50000, "is_alive": True,
+        }
+        return state, agent
+
+    # ── _find_upgrade_target tests ─────────────────────────────────────────
+
+    def test_find_upgrade_target_returns_better_match(self):
+        """_find_upgrade_target should return an item with better risk match and higher value."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # Current: pistol (rt=0.3, value=500). Agent risk=0.6. Better match: ak74 (rt=0.6, val=1500)
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "pistol", 0.6, 50000)
+        assert result is not None
+        # The result must be closer to 0.6 than pistol (0.3) AND more expensive than pistol
+        assert ITEM_TYPES[result]["risk_tolerance"] != 0.3  # not the same as current
+        assert ITEM_TYPES[result]["value"] > ITEM_TYPES["pistol"]["value"]
+
+    def test_find_upgrade_target_no_upgrade_when_already_best(self):
+        """No upgrade when current item is the best risk-tolerance match."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # Current: shotgun (rt=0.5), agent_risk=0.5 → already best match
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "shotgun", 0.5, 50000)
+        assert result is None
+
+    def test_find_upgrade_target_no_upgrade_when_cant_afford(self):
+        """No upgrade returned when agent cannot afford the better item."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        # pistol → ak74 costs 1500*1.5=2250; agent only has 100 money
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "pistol", 0.6, 100)
+        assert result is None
+
+    def test_find_upgrade_target_no_upgrade_for_none_current(self):
+        """No upgrade when there is no current item (slot empty)."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        # current_item_type=None → nothing to upgrade
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, None, 0.5, 50000)
+        assert result is None
+
+    # ── _bot_try_upgrade_equipment tests ──────────────────────────────────
+
+    def test_upgrade_buys_better_weapon_when_trader_present(self):
+        """Bot should buy and equip a better weapon when the trader is at the same location."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        # pistol (rt=0.3) equipped; agent risk=0.6 → upgrade target should be ak74 (rt=0.6)
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        events = _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        assert events, "Expected upgrade events"
+        event_types = {e["event_type"] for e in events}
+        assert "bot_bought_item" in event_types
+
+    def test_upgrade_equips_new_weapon_in_slot(self):
+        """After upgrade, the agent's weapon slot should contain the new (better) item."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        new_weapon = agent.get("equipment", {}).get("weapon")
+        assert new_weapon is not None
+        new_type = new_weapon.get("type")
+        # The new weapon must have a closer risk_tolerance to 0.6 than pistol (0.3)
+        assert abs(ITEM_TYPES[new_type]["risk_tolerance"] - 0.6) < abs(0.3 - 0.6)
+
+    def test_upgrade_old_weapon_returns_to_inventory(self):
+        """The old equipped weapon should go back to inventory after upgrade."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        inv_types = {i["type"] for i in agent.get("inventory", [])}
+        assert "pistol" in inv_types, "Old weapon should be returned to inventory"
+
+    def test_upgrade_writes_decision_memory(self):
+        """Upgrade decision must be recorded in agent memory."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        decision_mem = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
+        kinds = [m.get("effects", {}).get("action_kind", "") for m in decision_mem]
+        assert "upgrade_decision" in kinds
+
+    def test_no_upgrade_when_no_equipment(self):
+        """No upgrade events when agent has no weapon equipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=4, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        agent = state["agents"]["agent_p0"]
+        agent["risk_tolerance"] = 0.6
+        agent["money"] = 50000
+        agent["equipment"] = {}  # no equipment at all
+        loc_id = agent["location_id"]
+        state["traders"]["trader_t"] = {
+            "id": "trader_t", "name": "T", "location_id": loc_id,
+            "inventory": [], "money": 50000, "is_alive": True,
+        }
+        events = _bot_try_upgrade_equipment("agent_p0", agent, loc_id, state, 1)
+        assert events == []
+
+    # ── Debug command: debug_add_item ────────────────────────────────────
+
+    def _base_state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=6, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        return state
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "any_user")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "any_user")
+
+    def test_debug_add_item_valid(self):
+        state = self._base_state()
+        result = self._v("debug_add_item", {"agent_id": "agent_p0", "item_type": "bandage"}, state)
+        assert result.valid
+
+    def test_debug_add_item_invalid_no_agent(self):
+        state = self._base_state()
+        result = self._v("debug_add_item", {"agent_id": "nonexistent", "item_type": "bandage"}, state)
+        assert not result.valid
+
+    def test_debug_add_item_invalid_unknown_type(self):
+        state = self._base_state()
+        result = self._v("debug_add_item", {"agent_id": "agent_p0", "item_type": "nuclear_bomb"}, state)
+        assert not result.valid
+
+    def test_debug_add_item_resolve_adds_to_inventory(self):
+        state = self._base_state()
+        inv_before = len(state["agents"]["agent_p0"].get("inventory", []))
+        new_state, events = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "ak74"}, state)
+        assert len(new_state["agents"]["agent_p0"]["inventory"]) == inv_before + 1
+        types_in_inv = {i["type"] for i in new_state["agents"]["agent_p0"]["inventory"]}
+        assert "ak74" in types_in_inv
+        assert any(e["event_type"] == "debug_item_added" for e in events)
+
+    # ── Debug command: debug_remove_item ─────────────────────────────────
+
+    def test_debug_remove_item_valid(self):
+        state = self._base_state()
+        # Add an item first so we have an id
+        new_state, _ = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "bandage"}, state)
+        item_id = new_state["agents"]["agent_p0"]["inventory"][-1]["id"]
+        result = self._v("debug_remove_item", {"agent_id": "agent_p0", "item_id": item_id}, new_state)
+        assert result.valid
+
+    def test_debug_remove_item_invalid_no_agent(self):
+        state = self._base_state()
+        result = self._v("debug_remove_item", {"agent_id": "ghost", "item_id": "x"}, state)
+        assert not result.valid
+
+    def test_debug_remove_item_resolve_removes_from_inventory(self):
+        state = self._base_state()
+        new_state, _ = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "medkit"}, state)
+        item_id = new_state["agents"]["agent_p0"]["inventory"][-1]["id"]
+        final_state, events = self._r("debug_remove_item", {"agent_id": "agent_p0", "item_id": item_id}, new_state)
+        inv_types = {i["type"] for i in final_state["agents"]["agent_p0"]["inventory"]}
+        assert "medkit" not in inv_types
+        ev = next(e for e in events if e["event_type"] == "debug_item_removed")
+        assert ev["payload"]["removed"] is True
+
+    def test_debug_remove_item_resolve_removes_from_equipment(self):
+        """debug_remove_item should set equipment slots to None (not delete them)."""
+        state = self._base_state()
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        eq_item = {
+            "id": "pistol_eq_test", "type": "pistol",
+            "name": ITEM_TYPES["pistol"]["name"], "value": 500,
+        }
+        state["agents"]["agent_p0"].setdefault("equipment", {})["weapon"] = eq_item
+        final_state, events = self._r(
+            "debug_remove_item",
+            {"agent_id": "agent_p0", "item_id": "pistol_eq_test"},
+            state,
+        )
+        # Slot should be set to None, not deleted
+        assert final_state["agents"]["agent_p0"]["equipment"]["weapon"] is None
+        ev = next(e for e in events if e["event_type"] == "debug_item_removed")
+        assert ev["payload"]["removed"] is True
+
+    def test_debug_remove_nonexistent_item_returns_removed_false(self):
+        state = self._base_state()
+        final_state, events = self._r(
+            "debug_remove_item",
+            {"agent_id": "agent_p0", "item_id": "nonexistent_id"},
+            state,
+        )
+        ev = next(e for e in events if e["event_type"] == "debug_item_removed")
+        assert ev["payload"]["removed"] is False
+
+
 class TestDebugUpdateMap:
     """Tests for the debug_update_map meta-command (no player agent required)."""
 
