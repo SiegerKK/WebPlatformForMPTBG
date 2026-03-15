@@ -2886,15 +2886,22 @@ def _bot_pursue_goal(
         # hold it and continue wandering until further mechanics are added.
         docs_in_inv = [i for i in agent.get("inventory", []) if i.get("type") in SECRET_DOCUMENT_ITEM_TYPES]
         if docs_in_inv:
-            doc_names = ", ".join(d.get("name", d.get("type", "?")) for d in docs_in_inv)
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "🔍 Документы найдены — продолжаю изучение",
-                f"В инвентаре есть секретные документы: {doc_names}. Продолжаю разгадывать тайну Зоны.",
-                {"action_kind": "goal_unravel_has_docs",
-                 "doc_types": [d.get("type") for d in docs_in_inv]},
-                reason="несу секретные документы — цель выполнена",
-            )
+            # Anti-spam: only write the decision once while the state doesn't change.
+            _last_unravel_kind = None
+            for _sm in reversed(agent.get("memory", [])):
+                if _sm.get("type") == "decision":
+                    _last_unravel_kind = _sm.get("effects", {}).get("action_kind")
+                    break
+            if _last_unravel_kind != "goal_unravel_has_docs":
+                doc_names = ", ".join(d.get("name", d.get("type", "?")) for d in docs_in_inv)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "🔍 Документы найдены — продолжаю изучение",
+                    f"В инвентаре есть секретные документы: {doc_names}. Продолжаю разгадывать тайну Зоны.",
+                    {"action_kind": "goal_unravel_has_docs",
+                     "doc_types": [d.get("type") for d in docs_in_inv]},
+                    reason="несу секретные документы — цель выполнена",
+                )
             agent["action_used"] = True
             return []
 
@@ -2932,10 +2939,49 @@ def _bot_pursue_goal(
             )
             return _bot_schedule_travel(agent_id, agent, intel_loc, state, world_turn)
 
-        # Step 5: Wander and ask — no leads, explore to find documents.
-        # Prefer locations with dungeon/x_lab/scientific_bunker terrain where
-        # documents are most likely to be found.
+        # Step 5: No leads, no co-located stalkers to ask.
+        # Strategy: go to the nearest trader and wait there for a non-trader
+        # stalker to appear; when one shows up, Step 4 will handle asking them.
+        # This avoids spamming the decision log with meaningless wander entries.
         _SECRET_DOC_TERRAIN = frozenset({"dungeon", "x_lab", "scientific_bunker", "military_buildings"})
+
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+
+        # Case A: there's a trader somewhere — go to it (or wait there).
+        if trader_loc is not None:
+            if trader_loc != loc_id:
+                # Not yet at trader — travel there.
+                trader_loc_name = locations.get(trader_loc, {}).get("name", trader_loc)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"🏪 Иду к торговцу в «{trader_loc_name}» в поисках информации",
+                    f"Не знаю, где искать секретные документы. Иду к торговцу в «{trader_loc_name}», чтобы расспросить других сталкеров там.",
+                    {"action_kind": "wait_at_trader", "destination": trader_loc},
+                    reason="нет сведений о секретных документах — иду к торговцу ждать других сталкеров",
+                )
+                return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+            else:
+                # Already at trader — idle and wait for a non-trader stalker to appear.
+                # Use anti-spam: only write the decision once (while still waiting).
+                _last_unravel_decision = None
+                for _sm in reversed(agent.get("memory", [])):
+                    if _sm.get("type") == "decision":
+                        _last_unravel_decision = _sm.get("effects", {}).get("action_kind")
+                        break
+                if _last_unravel_decision != "wait_at_trader":
+                    trader_loc_name = locations.get(trader_loc, {}).get("name", trader_loc)
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        f"⏳ Жду у торговца в «{trader_loc_name}» — ищу сталкера с информацией",
+                        f"Нахожусь у торговца в «{trader_loc_name}». Жду, пока появится другой сталкер, которого можно расспросить о секретных документах.",
+                        {"action_kind": "wait_at_trader", "location_id": trader_loc},
+                        reason="нахожусь у торговца и жду сталкера с информацией о документах",
+                    )
+                agent["action_used"] = True
+                return []
+
+        # Case B: no trader reachable — prefer locations with interesting terrain
+        # (dungeons, labs) where documents are most likely to be found.
         interesting_connections = [
             c for c in connections
             if locations.get(c["to"], {}).get("terrain_type", "") in _SECRET_DOC_TERRAIN
@@ -2946,21 +2992,20 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"🔍 Ищу секретные документы в «{conn_name}»",
-                f"Не знаю где искать секретные документы. Иду в «{conn_name}» — это подходящее место.",
+                f"Не знаю где искать секретные документы и нет доступных торговцев. Иду в «{conn_name}» — это подходящее место.",
                 {"action_kind": "seek_item", "item_category": "secret_document", "destination": conn["to"]},
-                reason="нет сведений о секретных документах — иду в подходящую зону",
+                reason="нет сведений о секретных документах и нет торговца — иду в подходящую зону",
             )
             return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
 
-        # No leads, no interesting locations nearby — wander randomly and hope to
-        # meet a stalker who knows something.
+        # No leads, no trader, no interesting terrain — wander randomly.
         if connections:
             conn = rng.choice(connections)
             conn_name = locations.get(conn["to"], {}).get("name", conn["to"])
             _add_memory(
                 agent, world_turn, state, "decision",
                 "❓ Брожу в поисках секретных документов",
-                f"Не знаю где искать секретные документы и не у кого спросить. Иду в «{conn_name}» наугад.",
+                f"Не знаю где искать секретные документы, нет торговца и нет подходящих мест рядом. Иду в «{conn_name}» наугад.",
                 {"action_kind": "wander", "destination": conn["to"]},
                 reason="нет сведений о секретных документах — брожу в поисках",
             )

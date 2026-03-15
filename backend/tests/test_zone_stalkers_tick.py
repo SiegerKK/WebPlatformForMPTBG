@@ -4022,6 +4022,24 @@ class TestUnravelZoneMysteryGoal:
             "memory": [],
         }
 
+    def _make_mystery_agent_equipped(self, loc_id: str, state: dict) -> dict:
+        """Return an agent with weapon, armor, and ammo so equipment-purchase logic is skipped."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        agent = self._make_mystery_agent(loc_id, state)
+        agent["equipment"] = {
+            "weapon": {"id": "w1", "type": "pistol",
+                       **{k: ITEM_TYPES["pistol"][k] for k in ("name", "weight", "value")}},
+            "armor":  {"id": "a1", "type": "leather_jacket",
+                       **{k: ITEM_TYPES["leather_jacket"][k] for k in ("name", "weight", "value")}},
+            "detector": None,
+        }
+        ammo_info = ITEM_TYPES["ammo_9mm"]
+        agent["inventory"] = [
+            {"id": "ammo1", "type": "ammo_9mm",
+             **{k: ammo_info[k] for k in ("name", "weight", "value")}},
+        ]
+        return agent
+
     def _minimal_state(self, loc_id: str = "A") -> dict:
         """Minimal two-location state for testing."""
         return {
@@ -4211,3 +4229,161 @@ class TestUnravelZoneMysteryGoal:
         assert new_agent_ids, "Should have spawned a new agent"
         new_agent = new_state["agents"][next(iter(new_agent_ids))]
         assert new_agent["global_goal"] == "unravel_zone_mystery"
+
+    def test_bot_travels_to_trader_when_no_leads(self):
+        """With no doc intel and a reachable trader, the bot should head to the trader."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state("A")
+        # Add a trader location C reachable from B
+        state["locations"]["B"]["connections"].append({"to": "C", "type": "normal"})
+        state["locations"]["C"] = {
+            "name": "Торговая база",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "items": [], "artifacts": [],
+            "agents": ["trader_t1"],
+            "connections": [{"to": "B", "type": "normal"}],
+        }
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "C",
+            "is_alive": True,
+        }
+        # Place agent at B (plain terrain, no interesting terrain connections back to x_lab)
+        agent = self._make_mystery_agent("B", state)
+        agent["location_id"] = "B"
+        state["locations"]["B"]["agents"] = ["agent_ai_m"]
+        state["locations"]["A"]["agents"] = []
+        state["agents"]["agent_ai_m"] = agent
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "B", state["locations"]["B"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        assert decisions, "Bot should record a decision"
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "wait_at_trader" in action_kinds, (
+            f"Bot with trader reachable should head to trader, got: {action_kinds}"
+        )
+
+    def test_bot_waits_at_trader_without_stalkers(self):
+        """When at trader location with no other stalkers, bot should idle (wait_at_trader)."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state("A")
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["agent_ai_m", "trader_t1"]
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        assert decisions, "Bot should record a decision"
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "wait_at_trader" in action_kinds, (
+            f"Bot at trader with no other stalkers should wait, got: {action_kinds}"
+        )
+        assert agent.get("action_used"), "Bot should have consumed its action while waiting"
+
+    def test_bot_wait_at_trader_no_spam(self):
+        """Waiting at trader should not write repeated decision entries on consecutive ticks."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state("A")
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["agent_ai_m", "trader_t1"]
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        # Simulate two consecutive ticks
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        agent["action_used"] = False
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 2, random.Random(0))
+        wait_decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m["effects"].get("action_kind") == "wait_at_trader"
+        ]
+        assert len(wait_decisions) == 1, (
+            f"wait_at_trader decision should not be written more than once, got: {len(wait_decisions)}"
+        )
+
+    def test_bot_asks_stalker_at_trader_location(self):
+        """When at trader and a non-trader stalker appears, bot should ask them about docs."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["agent_ai_m", "trader_t1", "agent_informant"]
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        # Add an informant who has seen a secret document in B
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        # Bot should have asked the informant and decided to travel to B
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "seek_item" in action_kinds, (
+            f"Bot at trader with informed stalker should seek_item, got: {action_kinds}"
+        )
+        seek_decision = next(
+            d for d in decisions if d["effects"].get("action_kind") == "seek_item"
+        )
+        assert seek_decision["effects"].get("destination") == "B"
+
+    def test_bot_has_docs_no_spam(self):
+        """goal_unravel_has_docs decision should not be written on every tick."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        doc_info = ITEM_TYPES[doc_type]
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        agent["inventory"] = [{"id": "doc_001", "type": doc_type, "name": doc_info["name"],
+                                "weight": doc_info["weight"], "value": doc_info["value"]}]
+        state["agents"]["agent_ai_m"] = agent
+        # Simulate two ticks
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        agent["action_used"] = False
+        _run_bot_action_inner("agent_ai_m", agent, state, 2)
+        has_docs_decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m["effects"].get("action_kind") == "goal_unravel_has_docs"
+        ]
+        assert len(has_docs_decisions) == 1, (
+            f"goal_unravel_has_docs should only be written once, got: {len(has_docs_decisions)}"
+        )
