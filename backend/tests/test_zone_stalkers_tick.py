@@ -698,6 +698,14 @@ def _make_trader_scenario():
 
     # Generate a world with no bots/traders (we'll add them manually)
     state = generate_zone(seed=99, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+    # Offset world_turn so that the first exploration attempt (which resolves at
+    # world_turn = state["world_turn"] + EXPLORE_DURATION_TURNS) uses an RNG seed
+    # that guarantees a hit.  With initial world_turn=7 the resolution wt is 37:
+    #   random.Random("bot_stalker37").random() == 0.2393 < 0.5  → HIT
+    # This is necessary because the new behavior writes `explore_confirmed_empty`
+    # after ANY failed search, so a miss on the first try would block all retries
+    # until an emission cycle invalidates the block.
+    state["world_turn"] = 7
 
     # Pick two connected locations
     locs = list(state["locations"].keys())

@@ -687,26 +687,17 @@ def _resolve_exploration(
             "payload": {"agent_id": agent_id, "artifact": art},
         })
     else:
-        # Did not pick up an artifact — determine why and write appropriate memory
-        if not existing_artifacts:
-            # Location is genuinely empty — record as confirmed empty to block future tries.
-            # Written as an "observation" (not "decision") so the stalker treats it as
-            # a factual note about the world state rather than an active choice.
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"Аномалия в «{loc_name}» пустая",
-                f"Тщательно обыскал «{loc_name}» — артефактов нет.",
-                {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
-            )
-        else:
-            # Bad luck — artifacts are present but agent missed them
-            _add_memory(
-                agent, world_turn, state, "decision",
-                f"Не нашёл артефакт в «{loc_name}»",
-                f"Искал в «{loc_name}» — не повезло, ничего не нашёл.",
-                {"action_kind": "explore_miss", "location_id": loc_id},
-                reason="разведка аномалии не дала результата",
-            )
+        # Did not pick up an artifact — write an observation that blocks re-searching
+        # this location.  We treat both a genuinely empty zone and a bad-luck miss
+        # identically: the stalker notes the search as fruitless and moves on.
+        # The block is lifted by a future emission that refreshes anomaly zones
+        # (see `_confirmed_empty_locations` invalidation logic).
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Аномалия в «{loc_name}» не дала артефакт",
+            f"Обыскал «{loc_name}» — артефактов не нашёл.",
+            {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
+        )
 
     # Always record that an exploration action was performed (satisfies memory tests
     # and gives the agent a record of every search attempt regardless of outcome).
