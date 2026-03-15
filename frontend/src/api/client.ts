@@ -58,6 +58,9 @@ export const contextsApi = {
   get: (id: string) => apiClient.get(`/contexts/${id}`),
   getTree: (matchId: string) => apiClient.get(`/matches/${matchId}/contexts`),
   getProjection: (id: string) => apiClient.get(`/contexts/${id}/projection`),
+  /** Fetch the full memory array for one agent on demand (stripped from getTree). */
+  getAgentMemory: (contextId: string, agentId: string) =>
+    apiClient.get(`/contexts/${contextId}/agents/${agentId}/memory`),
   createZoneEvent: (data: {
     match_id: string;
     zone_map_context_id: string;

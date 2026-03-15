@@ -339,6 +339,17 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // Agent whose profile modal is open (null = list view)
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  // On-demand memory cache: agentId → MemoryEntry[].
+  // Memory is no longer included in the getTree() state_blob to save bandwidth.
+  // It is fetched lazily when the memory tab is opened or an agent profile is viewed.
+  const [agentMemoryCache, setAgentMemoryCache] = useState<Record<string, MemoryEntry[]>>({});
+  const loadAgentMemory = useCallback(async (agentId: string) => {
+    if (!context) return;
+    try {
+      const res = await contextsApi.getAgentMemory(context.id, agentId);
+      setAgentMemoryCache((prev) => ({ ...prev, [agentId]: res.data as MemoryEntry[] }));
+    } catch { /* non-fatal */ }
+  }, [context]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lobbyPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // ─── refresh rate-limiting ────────────────────────────────────────────────
@@ -525,6 +536,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     return () => { if (lobbyPollRef.current) clearInterval(lobbyPollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isWaiting, match.id, match.status]);
+
+  // ─── lazy-load agent memory when memory tab or profile opens ────────────
+  useEffect(() => {
+    if (activeTab === 'memory' && myAgentId) {
+      loadAgentMemory(myAgentId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, myAgentId]);
+
+  useEffect(() => {
+    if (profileAgentId) {
+      loadAgentMemory(profileAgentId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileAgentId]);
 
   // ─── active polling (fallback when WebSocket is not connected) ──────────
   useEffect(() => {
@@ -1154,23 +1180,27 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               </div>
 
               {/* ── Memory ── */}
-              {stalker.memory.length > 0 && (
-                <div style={styles.profileSection}>
-                  <div style={styles.profileSectionLabel}>🧠 Memory ({stalker.memory.length} entries)</div>
-                  <div style={styles.profileMemoryList}>
-                    {[...stalker.memory].reverse().slice(0, 10).map((m, i) => (
-                      <div key={i} style={styles.memoryEntry}>
-                        <div style={styles.memoryHeader}>
-                          <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
-                          <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
+              {(() => {
+                const mem = agentMemoryCache[agentId] ?? [];
+                if (mem.length === 0) return null;
+                return (
+                  <div style={styles.profileSection}>
+                    <div style={styles.profileSectionLabel}>🧠 Memory ({mem.length} entries)</div>
+                    <div style={styles.profileMemoryList}>
+                      {[...mem].reverse().slice(0, 10).map((m, i) => (
+                        <div key={i} style={styles.memoryEntry}>
+                          <div style={styles.memoryHeader}>
+                            <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
+                            <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
+                          </div>
+                          <div style={styles.memoryTitle}>{m.title}</div>
+                          <div style={styles.memorySummary}>{m.summary}</div>
                         </div>
-                        <div style={styles.memoryTitle}>{m.title}</div>
-                        <div style={styles.memorySummary}>{m.summary}</div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </>
           )}
 
@@ -1860,31 +1890,35 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           {activeTab === 'memory' && (
             <div style={styles.memoryPanel}>
               <div style={styles.panelTitle}>🧠 Stalker Memory</div>
-              {(!myAgent || myAgent.memory.length === 0) ? (
-                <p style={styles.emptyText}>No memories yet. Go explore the Zone!</p>
-              ) : (
-                <div style={styles.memoryList}>
-                  {[...myAgent.memory].reverse().map((m, i) => (
-                    <div key={i} style={styles.memoryEntry}>
-                      <div style={styles.memoryHeader}>
-                        <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
-                        <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
-                      </div>
-                      <div style={styles.memoryTitle}>{m.title}</div>
-                      <div style={styles.memorySummary}>{m.summary}</div>
-                      {Object.keys(m.effects).filter(k => m.effects[k] !== 0).length > 0 && (
-                        <div style={styles.memoryEffects}>
-                          {Object.entries(m.effects).filter(([, v]) => v !== 0).map(([k, v]) => (
-                            <span key={k} style={{ ...styles.effectChip, color: v > 0 ? '#86efac' : '#fca5a5' }}>
-                              {k}: {v > 0 ? '+' : ''}{v}
-                            </span>
-                          ))}
+              {(() => {
+                const myMemory = myAgentId ? (agentMemoryCache[myAgentId] ?? []) : [];
+                if (!myAgent || myMemory.length === 0) {
+                  return <p style={styles.emptyText}>No memories yet. Go explore the Zone!</p>;
+                }
+                return (
+                  <div style={styles.memoryList}>
+                    {[...myMemory].reverse().map((m, i) => (
+                      <div key={i} style={styles.memoryEntry}>
+                        <div style={styles.memoryHeader}>
+                          <span style={styles.memoryType}>{SCHED_ICONS[m.type] ?? '📝'} {m.type}</span>
+                          <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                         </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
+                        <div style={styles.memoryTitle}>{m.title}</div>
+                        <div style={styles.memorySummary}>{m.summary}</div>
+                        {Object.keys(m.effects).filter(k => m.effects[k] !== 0).length > 0 && (
+                          <div style={styles.memoryEffects}>
+                            {Object.entries(m.effects).filter(([, v]) => v !== 0).map(([k, v]) => (
+                              <span key={k} style={{ ...styles.effectChip, color: v > 0 ? '#86efac' : '#fca5a5' }}>
+                                {k}: {v > 0 ? '+' : ''}{v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

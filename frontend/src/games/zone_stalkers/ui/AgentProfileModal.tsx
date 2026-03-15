@@ -4,7 +4,8 @@
  * Import `AgentForProfile` to build a compatible agent object.
  * Closing: clicking the semi-transparent overlay or the ✕ button calls `onClose`.
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { contextsApi } from '../../../api/client';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,12 @@ interface Props {
   locations?: Record<string, { name: string; region?: string }>;
   /** When provided (debug mode), bot agents show a "preview decision" panel. */
   sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
+  /**
+   * Zone-map context ID.  When provided, the modal fetches agent memory
+   * on-demand via the API (``GET /contexts/{contextId}/agents/{id}/memory``)
+   * because memory is no longer included in the ``getTree`` state_blob.
+   */
+  contextId?: string;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -208,7 +215,7 @@ type DecisionPreview = {
   layers?: Array<{ name: string; skipped: boolean; action: string; reason: string }>;
 };
 
-export default function AgentProfileModal({ agent, locationName, onClose, locations, sendCommand }: Props) {
+export default function AgentProfileModal({ agent, locationName, onClose, locations, sendCommand, contextId }: Props) {
   // Initialise immediately with the client-side hint so the panel renders on
   // first paint without needing a button click.
   const [moneyEdit, setMoneyEdit] = React.useState<string | null>(null);
@@ -220,6 +227,20 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   const [addItemType, setAddItemType] = React.useState<string>('bandage');
   const [addItemSaving, setAddItemSaving] = React.useState(false);
   const [removingItemId, setRemovingItemId] = React.useState<string | null>(null);
+  // On-demand memory: fetched from API when contextId is provided
+  // (state_blob no longer carries memory to save bandwidth).
+  type MemEntry = NonNullable<AgentForProfile['memory']>[number];
+  const [fetchedMemory, setFetchedMemory] = useState<MemEntry[] | null>(null);
+  useEffect(() => {
+    if (!contextId) return;
+    contextsApi.getAgentMemory(contextId, agent.id)
+      .then((res) => setFetchedMemory(res.data as MemEntry[]))
+      .catch(() => { /* non-fatal */ });
+  // Intentionally omit agent.id / contextId from deps — load once on mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Prefer freshly-fetched memory, fall back to whatever was passed in agent.memory.
+  const displayMemory: MemEntry[] = fetchedMemory ?? (agent.memory ?? []);
 
   const handleAddItem = async () => {
     if (!sendCommand || !addItemType) return;
@@ -578,10 +599,10 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         </Section>
 
         {/* ── Memory ── */}
-        {agent.memory && agent.memory.length > 0 && (
-          <Section label={`🧠 Память (${agent.memory.length})`}>
+        {displayMemory.length > 0 && (
+          <Section label={`🧠 Память (${displayMemory.length})`}>
             <div style={s.memoryList}>
-              {[...agent.memory].reverse().map((m, i) => {
+              {[...displayMemory].reverse().map((m, i) => {
                 const icon = MEM_ICONS[m.type] ?? '📝';
                 const color = MEM_COLORS[m.type] ?? '#94a3b8';
                 const subLabel = m.effects?.action_kind
