@@ -7,7 +7,7 @@ export const CARD_H = 112;
 export const RING_RADIUS = 210;
 export const CANVAS_PAD = 100;
 /** px upper bound for draggable card positions */
-export const MAX_CANVAS_COORD = 4000;
+export const MAX_CANVAS_COORD = 16000;
 
 // ─── BFS radial layout ───────────────────────────────────────────────────────
 
