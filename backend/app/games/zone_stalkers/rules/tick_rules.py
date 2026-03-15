@@ -46,7 +46,7 @@ _EMISSION_WARNING_TURNS = 30          # NPC starts fleeing this many turns befor
 _EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
 
 # Anomaly search parameters for the get_rich NPC goal path.
-# Search radius is skill-based: 1 + agent["skill_survival"] hops (e.g. 2 for level-1 survival).
+# Search radius is skill-based: 4 + agent["skill_stalker"] hops (e.g. 5 for level-1 stalker).
 _ANOMALY_DISTANCE_PENALTY = 5.0   # Score reduction per hop of distance
 _ANOMALY_SCORE_NOISE = 0.5        # Small random jitter to break ties between equal-scoring locations
 
@@ -2173,8 +2173,8 @@ def _bot_pursue_goal(
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
         # Current location confirmed empty or no anomaly activity here.
-        # BFS radius is skill-based: 1 + skill_survival hops (e.g. 2 for level-1 survival).
-        _max_anomaly_search_hops = 1 + int(agent.get("skill_survival", 1))
+        # BFS radius is skill-based: 4 + skill_stalker hops (e.g. 5 for level-1 stalker).
+        _max_anomaly_search_hops = 4 + int(agent.get("skill_stalker", 1))
         reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_anomaly_search_hops)
 
         def _anomaly_candidate_score(lid: str, dist: int) -> float:
