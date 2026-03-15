@@ -933,7 +933,9 @@ function _worstStatus(criteria: PriorityCriterion[]): StatusColor {
  */
 function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
   const { hp, max_hp, hunger, thirst, sleepiness, radiation } = agent;
-  const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
+  const wealth = agent.money
+    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
+    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
   const threshold = agent.material_threshold ?? 3000;
   const eq = agent.equipment;
   const inv = agent.inventory;
@@ -1023,7 +1025,7 @@ function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
     {
       label:  'Богатство',
       status: wealthFrac >= 1 ? 'green' : wealthFrac >= 0.5 ? 'yellow' : 'red',
-      detail: `${wealth} / ${threshold} RU`,
+      detail: `${wealth} / ${threshold} RU (деньги + инвентарь + снаряжение)`,
     },
     {
       // Upgrade check only activates once the wealth threshold is reached.
@@ -1201,7 +1203,9 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const hunger = agent.hunger;
   const thirst = agent.thirst;
   const sleepiness = agent.sleepiness;
-  const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
+  const wealth = agent.money
+    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
+    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
   const threshold = agent.material_threshold ?? 3000;
   const goal = agent.current_goal ?? '—';
   const scheduled = agent.scheduled_action;

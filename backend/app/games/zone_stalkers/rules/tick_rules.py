@@ -772,9 +772,14 @@ _ARTIFACT_ITEM_TYPES: frozenset = frozenset(ARTIFACT_TYPES.keys())
 # ─────────────────────────────────────────────────────────────────
 
 def _agent_wealth(agent: Dict[str, Any]) -> int:
-    """Sum of money + total inventory item values."""
+    """Sum of money + inventory item values + equipped item values."""
     inv_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
-    return agent.get("money", 0) + inv_value
+    eq_value = sum(
+        item.get("value", 0)
+        for item in agent.get("equipment", {}).values()
+        if item is not None
+    )
+    return agent.get("money", 0) + inv_value + eq_value
 
 
 def _agent_artifacts_in_inventory(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
