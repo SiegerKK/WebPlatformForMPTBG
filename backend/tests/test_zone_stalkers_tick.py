@@ -2973,3 +2973,133 @@ class TestEmissionWarning:
         state, _ = tick_zone_map(state)
         assert state.get("emission_warning_written_turn") is None
         assert state.get("emission_warning_offset") is None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission shelter priority (wait_in_shelter)
+# ─────────────────────────────────────────────────────────────────
+
+class TestEmissionShelterBehavior:
+    """Verify that an agent with emission_imminent in memory stays put when
+    already on safe terrain instead of starting new work."""
+
+    def _make_safe_state(self):
+        """Two locations: S (building=safe) and D (plain=dangerous). Agent at S."""
+        state = _make_minimal_state(
+            {
+                "S": {"connections": [{"to": "D", "travel_time": 1}]},
+                "D": {"connections": [{"to": "S", "travel_time": 1}]},
+            },
+            agent_loc_id="S",
+        )
+        state["locations"]["S"]["terrain_type"] = "building"
+        state["locations"]["D"]["terrain_type"] = "plain"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+        return state
+
+    def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": world_turn,
+            "title": "⚠️ Скоро выброс!",
+            "summary": "...",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": 12,
+                "emission_scheduled_turn": scheduled_turn,
+            },
+        })
+
+    def test_bot_waits_in_shelter_when_emission_imminent(self):
+        """Agent on safe terrain with emission_imminent memory should return []
+        (no new scheduled action) and write a wait_in_shelter decision."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        events = _run_bot_action(agent_id, agent, state, world_turn=2)
+
+        assert events == [], "Bot should return no events while sheltering"
+        assert agent.get("scheduled_action") is None, "No travel should be scheduled"
+        shelter_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        assert shelter_decisions, "Bot should write wait_in_shelter decision memory"
+
+    def test_shelter_decision_written_only_once(self):
+        """Calling _run_bot_action repeatedly while emission_imminent should not
+        spam duplicate wait_in_shelter memories."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        _run_bot_action(agent_id, agent, state, world_turn=3)
+        _run_bot_action(agent_id, agent, state, world_turn=4)
+
+        shelter_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        assert len(shelter_decisions) == 1, (
+            f"Expected exactly 1 wait_in_shelter memory, got {len(shelter_decisions)}"
+        )
+
+    def test_shelter_superseded_by_emission_ended(self):
+        """After emission_ended, the agent should resume normal decisions (not shelter)."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        # Add some anomaly so the bot has something to do
+        state["locations"]["S"]["anomaly_activity"] = 5
+        state["emission_scheduled_turn"] = 5000  # far in the future
+        agent = next(iter(state["agents"].values()))
+        # Emission_imminent at turn 1, then emission_ended at turn 50
+        self._inject_emission_imminent(agent, world_turn=1)
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": 50,
+            "title": "✅ Выброс закончился",
+            "summary": "...",
+            "effects": {"action_kind": "emission_ended"},
+        })
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=51)
+
+        # Should NOT have added another wait_in_shelter after the emission ended
+        shelter_after_ended = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+            and m.get("world_turn", 0) > 50
+        ]
+        assert not shelter_after_ended, (
+            "Bot should not shelter after emission_ended supersedes emission_imminent"
+        )
+
+    def test_bot_still_flees_dangerous_terrain_when_emission_imminent(self):
+        """Agent on DANGEROUS terrain with emission_imminent should flee (not just wait)."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        agent = next(iter(state["agents"].values()))
+        # Move agent to the dangerous location
+        agent["location_id"] = "D"
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+
+        flee_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert flee_decisions, "Bot on dangerous terrain should flee when emission_imminent"
+        # scheduled_action should be a travel action
+        assert agent.get("scheduled_action") is not None, (
+            "Bot should have scheduled a travel action to flee"
+        )

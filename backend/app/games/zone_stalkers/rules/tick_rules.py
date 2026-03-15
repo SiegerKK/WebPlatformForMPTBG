@@ -1937,6 +1937,29 @@ def _run_bot_action_inner(
     if _arrival_events:
         return _arrival_events
 
+    # ── EMISSION SHELTER: Stay put when emission is active or imminent ────────
+    # Highest-priority check (after fleeing dangerous terrain).  If the agent is
+    # already on safe terrain but knows an emission is coming (or is ongoing),
+    # it must NOT schedule any new travel or work — doing so risks arriving on
+    # dangerous terrain when the emission fires.  The agent simply waits until
+    # it sees an ``emission_ended`` observation (which resets _emission_warned).
+    if _emission_active or _emission_warned:
+        # Only write the decision memory once; avoid flooding the log.
+        _last_decision_kind = None
+        for _sm in reversed(agent.get("memory", [])):
+            if _sm.get("type") == "decision":
+                _last_decision_kind = _sm.get("effects", {}).get("action_kind")
+                break
+        if _last_decision_kind != "wait_in_shelter":
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "🛡️ Жду в укрытии",
+                "Получено предупреждение о выбросе. Нахожусь в безопасном месте — жду окончания.",
+                {"action_kind": "wait_in_shelter"},
+                reason="скоро выброс, нахожусь в безопасном месте",
+            )
+        return []
+
     # ── EMERGENCY: Heal ────────────────────────────────────────────────────────
     if agent.get("hp", 100) <= 30:
         heal_item = next((i for i in inventory if i["type"] in HEAL_ITEM_TYPES), None)
