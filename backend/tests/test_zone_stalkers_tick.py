@@ -2574,3 +2574,93 @@ class TestPickupBlocksResearch:
         assert result == "B", (
             f"Newer observed:items should lift the pickup block on B; got {result}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emergency travel-to-trader decisions write a memory entry
+# ─────────────────────────────────────────────────────────────────
+
+class TestEmergencyTravelMemory:
+    """Verify that all three emergency travel-to-trader branches (low HP, hunger,
+    thirst) write a 'decision' memory entry before scheduling travel."""
+
+    def _make_state_with_remote_trader(self, agent_hp=100, hunger=0, thirst=0, money=5000):
+        """Agent at A, trader at B (requires travel). Agent has no consumables."""
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 10}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["hp"] = agent_hp
+        agent["hunger"] = hunger
+        agent["thirst"] = thirst
+        agent["money"] = money
+        agent["inventory"] = []
+        # Place a trader at B
+        trader_id = "t1"
+        state["traders"][trader_id] = {
+            "id": trader_id,
+            "name": "Сидорович",
+            "location_id": "B",
+            "is_alive": True,
+        }
+        state["locations"]["B"]["agents"] = [trader_id]
+        return state
+
+    def _run_tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        agent_id = next(iter(state["agents"]))
+        agent = state["agents"][agent_id]
+        _run_bot_action(agent_id, agent, state, world_turn=1)
+        return agent
+
+    def test_low_hp_travel_writes_decision_memory(self):
+        """When HP is critical and trader requires travel, a decision memory is written."""
+        state = self._make_state_with_remote_trader(agent_hp=25, money=5000)
+        agent = self._run_tick(state)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "medical"
+        ]
+        assert len(decisions) == 1, (
+            f"Expected 1 seek_item/medical decision for emergency HP; got {decisions}"
+        )
+        assert decisions[0]["effects"].get("emergency") is True
+        assert decisions[0]["effects"].get("destination") == "B"
+
+    def test_high_hunger_travel_writes_decision_memory(self):
+        """When hunger is critical and trader requires travel, a decision memory is written."""
+        state = self._make_state_with_remote_trader(hunger=75, money=5000)
+        agent = self._run_tick(state)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "food"
+        ]
+        assert len(decisions) == 1, (
+            f"Expected 1 seek_item/food decision for emergency hunger; got {decisions}"
+        )
+        assert decisions[0]["effects"].get("emergency") is True
+        assert decisions[0]["effects"].get("destination") == "B"
+
+    def test_high_thirst_travel_writes_decision_memory(self):
+        """When thirst is critical and trader requires travel, a decision memory is written."""
+        state = self._make_state_with_remote_trader(thirst=75, money=5000)
+        agent = self._run_tick(state)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "drink"
+        ]
+        assert len(decisions) == 1, (
+            f"Expected 1 seek_item/drink decision for emergency thirst; got {decisions}"
+        )
+        assert decisions[0]["effects"].get("emergency") is True
+        assert decisions[0]["effects"].get("destination") == "B"

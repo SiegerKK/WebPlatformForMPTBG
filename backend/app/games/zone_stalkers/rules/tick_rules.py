@@ -1831,6 +1831,16 @@ def _run_bot_action_inner(
             if bought:
                 return bought
         elif trader_loc is not None and _can_afford_cheapest(agent, HEAL_ITEM_TYPES):
+            trader_loc_name = state.get("locations", {}).get(trader_loc, {}).get("name", trader_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду к торговцу за аптечкой (экстренно)",
+                f"Критически низкое HP ({agent.get('hp', 0)}%). Нет аптечки в инвентаре. "
+                f"Иду к торговцу в «{trader_loc_name}».",
+                {"action_kind": "seek_item", "item_category": "medical",
+                 "destination": trader_loc, "emergency": True},
+                reason=f"HP {agent.get('hp', 0)}% — нужна аптечка срочно",
+            )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
         # No trader reachable (or can't afford) — flee to low-anomaly neighbor
         safe_neighbors = [
@@ -1856,6 +1866,16 @@ def _run_bot_action_inner(
             if bought:
                 return bought
         elif trader_loc is not None and _can_afford_cheapest(agent, FOOD_ITEM_TYPES):
+            trader_loc_name = state.get("locations", {}).get(trader_loc, {}).get("name", trader_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду к торговцу за едой (экстренно)",
+                f"Сильный голод ({agent.get('hunger', 0)}%). Нет еды в инвентаре. "
+                f"Иду к торговцу в «{trader_loc_name}».",
+                {"action_kind": "seek_item", "item_category": "food",
+                 "destination": trader_loc, "emergency": True},
+                reason=f"голод {agent.get('hunger', 0)}% — нужна еда срочно",
+            )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── EMERGENCY: Drink ──────────────────────────────────────────────────────
@@ -1871,6 +1891,16 @@ def _run_bot_action_inner(
             if bought:
                 return bought
         elif trader_loc is not None and _can_afford_cheapest(agent, DRINK_ITEM_TYPES):
+            trader_loc_name = state.get("locations", {}).get(trader_loc, {}).get("name", trader_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "Иду к торговцу за водой (экстренно)",
+                f"Сильная жажда ({agent.get('thirst', 0)}%). Нет воды в инвентаре. "
+                f"Иду к торговцу в «{trader_loc_name}».",
+                {"action_kind": "seek_item", "item_category": "drink",
+                 "destination": trader_loc, "emergency": True},
+                reason=f"жажда {agent.get('thirst', 0)}% — нужна вода срочно",
+            )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # ── EQUIPMENT MAINTENANCE ─────────────────────────────────────────────────
