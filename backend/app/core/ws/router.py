@@ -65,6 +65,12 @@ async def match_websocket(
     the connection alive.  Any other client message is ignored.
     """
     # ── Auth ──────────────────────────────────────────────────────────────────
+    # Accept the connection first so we can send a proper WebSocket close frame
+    # with code 4401 on auth failure.  Without accept(), Starlette/FastAPI
+    # rejects the upgrade at the HTTP level (HTTP 403), causing the browser to
+    # receive close code 1006 (Abnormal Closure) instead of 4401.  Our frontend
+    # guards on code 4401 to stop infinite reconnect loops.
+    await ws.accept()
     if not _authenticate_token(token):
         await ws.close(code=4401)
         return

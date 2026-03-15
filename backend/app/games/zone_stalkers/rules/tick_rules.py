@@ -1434,9 +1434,15 @@ def _bot_pickup_on_arrival(
     This prevents the bot from re-evaluating priorities on the arrival tick and
     travelling away before collecting the item it specifically came for.
 
+    When the item is not found on the ground **and** the location is not a trader
+    (traders are visited to *buy*, not pick up), ``item_not_found_here`` is
+    recorded immediately.  This is critical: without it, an emergency that fires
+    on the same arrival tick redirects the agent before the normal priority tree
+    can record the dead end, causing the agent to loop back to the same empty
+    location on the next search.
+
     Returns pickup events on success, or an empty list if no item was found
-    (the caller then falls through to the normal priority tree which will call
-    ``_maybe_record_item_not_found`` as usual).
+    (the caller then falls through to the normal priority tree).
     """
     loc_id = agent.get("location_id")
     # Find the most recent *decision* memory entry.
@@ -1459,7 +1465,20 @@ def _bot_pickup_on_arrival(
             item_types = _SEEK_CATEGORY_TO_TYPES.get(category)  # type: ignore[assignment]
             if not item_types:
                 return []
-        return _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        pickup_events = _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        if not pickup_events:
+            # Item not on the ground.  If this is not a trader location, record
+            # the dead end immediately so that any interrupt (emergency, higher-
+            # priority need) that fires next cannot cause the agent to loop back
+            # here on the next search cycle.  Trader locations are skipped because
+            # the agent came to *buy*, not pick up, so "not found on ground" is
+            # expected and must not blacklist the trader.
+            if _find_trader_at_location(loc_id, state) is None:
+                loc = state.get("locations", {}).get(loc_id, {})
+                _maybe_record_item_not_found(
+                    agent, world_turn, state, loc_id, loc, item_types, category
+                )
+        return pickup_events
     return []
 
 

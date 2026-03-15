@@ -2822,6 +2822,199 @@ class TestPickupOnArrival:
         )
         assert result == [], f"Expected [] for non-seek_item decision, got {result}"
 
+    def test_item_not_found_recorded_at_non_trader_on_arrival(self):
+        """When arriving at a non-trader seek_item destination and the item is not
+        on the ground, item_not_found_here is recorded immediately so that any
+        emergency that fires next (before the normal priority tree runs) cannot
+        cause the agent to loop back to the same empty location."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+
+        state = _make_minimal_state(
+            {"A": {}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # No items on the ground at A (the food was taken)
+        state["locations"]["A"]["items"] = []
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Иду за едой",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "food",
+                    "destination": "A",
+                },
+                "reason": "test",
+            }
+        ]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result == [], "No items on ground — should return []"
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(not_found) == 1, (
+            f"Expected item_not_found_here to be recorded at A on arrival; got {len(not_found)}"
+        )
+
+    def test_item_not_found_NOT_recorded_at_trader_on_arrival(self):
+        """When arriving at a trader location with a seek_item decision, the absence
+        of ground items must NOT record item_not_found_here — traders sell items,
+        so 'nothing on the floor' is expected and must not blacklist the trader."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+
+        state = _make_minimal_state(
+            {"A": {}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = []
+        # Place a trader at location A — must appear in both traders dict AND
+        # loc["agents"] because _find_trader_at_location checks loc["agents"].
+        state.setdefault("traders", {})["t1"] = {
+            "id": "t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+            "inventory": [],
+        }
+        state["locations"]["A"]["agents"] = ["t1"]
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Иду за водой (экстренно)",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "drink",
+                    "destination": "A",
+                    "emergency": True,
+                },
+                "reason": "test",
+            }
+        ]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result == [], "No ground items — should return []"
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            "item_not_found_here must NOT be written at a trader location"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# _bot_sell_on_arrival: commit to selling artifacts at the trader
+# ─────────────────────────────────────────────────────────────────
+
+class TestSellOnArrival:
+    """Verify that when an agent arrives at the trader it specifically travelled to
+    in order to sell artifacts, the sale is executed before any other need fires."""
+
+    def _make_state(self, agent_extra=None):
+        """Agent at A (trader location). The agent holds an artifact and has a
+        ``sell_at_trader`` decision in memory pointing at A."""
+        state = _make_minimal_state(
+            {"A": {}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # Place a trader at location A
+        state.setdefault("traders", {})["t1"] = {
+            "id": "t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "archetype": "trader_npc",
+            "inventory": [],
+            "money": 10000,
+            "memory": [],
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["t1"]
+        # Give the agent an artifact to sell
+        artifact = {"id": "art1", "type": "soul", "name": "Душа", "value": 800,
+                    "category": "artifact", "risk_tolerance": 0.5}
+        agent.setdefault("inventory", []).append(artifact)
+        # Inject a sell_at_trader decision pointing at current location
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Иду к торговцу",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "sell_at_trader",
+                    "destination": "A",
+                },
+                "reason": "test",
+            }
+        ]
+        if agent_extra:
+            agent.update(agent_extra)
+        return state
+
+    def test_sells_artifact_on_arrival(self):
+        """When the latest decision is sell_at_trader pointing at the current
+        location and a trader is present, the artifact is sold immediately."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_sell_on_arrival
+        state = self._make_state()
+        agent = next(iter(state["agents"].values()))
+        agent_id = next(iter(state["agents"]))
+        result = _bot_sell_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result, "_bot_sell_on_arrival should return events when artifact sold"
+        sell_mem = [
+            m for m in agent["memory"]
+            if m.get("type") == "action"
+            and m.get("effects", {}).get("action_kind") == "trade_sell"
+        ]
+        assert sell_mem, "trade_sell action memory should be written after sale"
+
+    def test_no_sell_when_destination_differs(self):
+        """If the sell_at_trader destination is B but agent is at A, no sale fires."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_sell_on_arrival
+        state = self._make_state()
+        agent = next(iter(state["agents"].values()))
+        # Override destination to point at a different location
+        agent["memory"][0]["effects"]["destination"] = "B"
+        agent_id = next(iter(state["agents"]))
+        result = _bot_sell_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result == [], "Should not sell when destination differs from current location"
+
+    def test_sell_happens_before_equipment_maintenance(self):
+        """sell_at_trader arrival commitment fires before equipment-maintenance
+        so the agent completes its trading trip before buying new gear."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_state()
+        # Make the agent wealthy enough to trigger equipment buy
+        agent = next(iter(state["agents"].values()))
+        agent["money"] = 10000
+        agent["material_threshold"] = 100  # well above threshold
+        # No weapon equipped — Need 1 would normally try to buy one
+        agent.setdefault("equipment", {})["weapon"] = None
+        # Equip the trader with a weapon for sale
+        state["traders"]["t1"]["inventory"] = [
+            {"id": "wpn1", "type": "pistol", "name": "Пистолет",
+             "value": 500, "category": "weapon", "risk_tolerance": 0.5}
+        ]
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=1)
+        sell_mem = [
+            m for m in agent["memory"]
+            if m.get("type") == "action"
+            and m.get("effects", {}).get("action_kind") == "trade_sell"
+        ]
+        assert sell_mem, (
+            "Artifact sale should fire on arrival even when equipment needs are present"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────
 # Emission warning observation system
