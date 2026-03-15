@@ -189,7 +189,6 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     return null;
   });
   const [loadingDecision, setLoadingDecision] = React.useState(false);
-  const [showAllLayers, setShowAllLayers] = React.useState(false);
 
   // Fire the backend preview command whenever the displayed agent changes.
   // The result is discarded here — we rely on the client-side hint for
@@ -432,10 +431,14 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
 
         {/* ── Bot decision preview (debug, bots only) ── */}
         {sendCommand && agent.controller.kind === 'bot' && (
-          <Section label="🤖 Решение в этом ходу">
-            {decisionPreview ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {/* Chosen action — highlighted in green */}
+          <Section label="🤖 Приоритеты и решение">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+
+              {/* Priority groups panel — always visible, derived from agent data */}
+              <PriorityGroupsPanel agent={agent} />
+
+              {/* Chosen action — from decisionPreview (client-side or backend) */}
+              {decisionPreview && (
                 <div style={s.decisionChosen}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span>✅</span>
@@ -444,71 +447,16 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                   <div style={s.decisionChosenReason}>{decisionPreview.reason}</div>
                   <div style={s.decisionChosenGoal}>🎯 Цель: {decisionPreview.goal}</div>
                 </div>
+              )}
 
-                {/* Collapsible all-layers list */}
-                {decisionPreview.layers && decisionPreview.layers.length > 0 && (
-                  <div>
-                    <button
-                      style={s.decisionToggleBtn}
-                      onClick={() => setShowAllLayers(!showAllLayers)}
-                    >
-                      {showAllLayers ? '▲ Скрыть варианты' : '▼ Все варианты'}
-                    </button>
-                    {showAllLayers && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
-                        {decisionPreview.layers.map((layer, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              display: 'flex',
-                              gap: 6,
-                              alignItems: 'flex-start',
-                              padding: '0.3rem 0.5rem',
-                              borderRadius: 6,
-                              background: layer.skipped ? 'transparent' : '#052e16',
-                              border: layer.skipped ? '1px solid #1e293b' : '1px solid #22c55e',
-                              opacity: layer.skipped ? 0.6 : 1,
-                            }}
-                          >
-                            <span style={{ flexShrink: 0, fontSize: '0.8rem' }}>
-                              {layer.skipped ? '⏭' : '✅'}
-                            </span>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                              <span style={{
-                                color: layer.skipped ? '#64748b' : '#86efac',
-                                fontSize: '0.75rem',
-                                fontWeight: 600,
-                              }}>
-                                {layer.name} → {layer.action}
-                              </span>
-                              <span style={{ color: '#475569', fontSize: '0.68rem' }}>
-                                {layer.reason}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <button
-                  style={s.decisionRefreshBtn}
-                  onClick={handlePreviewDecision}
-                  disabled={loadingDecision}
-                >
-                  {loadingDecision ? '…' : '🔄 Обновить'}
-                </button>
-              </div>
-            ) : (
               <button
-                style={s.decisionPreviewBtn}
+                style={s.decisionRefreshBtn}
                 onClick={handlePreviewDecision}
                 disabled={loadingDecision}
               >
-                {loadingDecision ? '⏳ Анализ…' : '🔍 Предсказать решение'}
+                {loadingDecision ? '⏳ Анализ…' : '🔄 Обновить решение'}
               </button>
-            )}
+            </div>
           </Section>
         )}
       </div>
@@ -696,24 +644,11 @@ const s: Record<string, React.CSSProperties> = {
     color: '#475569',
     fontSize: '0.7rem',
   },
-  decisionToggleBtn: {
-    background: 'transparent',
-    border: '1px solid #334155',
-    color: '#64748b',
-    borderRadius: 6,
-    padding: '0.2rem 0.55rem',
-    fontSize: '0.72rem',
-    cursor: 'pointer',
-  },
   decisionPreviewBtn: {
-    background: '#1e3a5f',
-    border: '1px solid #3b82f6',
-    color: '#93c5fd',
-    borderRadius: 7,
-    padding: '0.35rem 0.85rem',
-    fontSize: '0.8rem',
-    cursor: 'pointer',
-    alignSelf: 'flex-start',
+    display: 'none', // kept for backwards compat but no longer shown
+  },
+  decisionToggleBtn: {
+    display: 'none', // kept for backwards compat but no longer shown
   },
   decisionRefreshBtn: {
     background: 'transparent',
@@ -736,10 +671,290 @@ const _ARTIFACT_TYPES = new Set([
   'goldfish', 'night_star', 'stone_blood', 'spring',
 ]);
 
+// ─── Priority groups ──────────────────────────────────────────────────────────
+
+/** Weapon type → required ammo type (mirrors AMMO_FOR_WEAPON in items.py). */
+const _AMMO_FOR_WEAPON: Record<string, string> = {
+  ak74:    'ammo_545',
+  pistol:  'ammo_9mm',
+  shotgun: 'ammo_12gauge',
+};
+
+type StatusColor = 'green' | 'yellow' | 'red';
+
+/** Hex colours for each status level. */
+const _STATUS_HEX: Record<StatusColor, string> = {
+  green:  '#22c55e',
+  yellow: '#f59e0b',
+  red:    '#ef4444',
+};
+
+/** Emoji dot for each status level. */
+const _STATUS_DOT: Record<StatusColor, string> = {
+  green:  '🟢',
+  yellow: '🟡',
+  red:    '🔴',
+};
+
+interface PriorityCriterion {
+  label: string;
+  status: StatusColor;
+  detail: string;
+}
+
+interface PriorityGroup {
+  id: string;
+  icon: string;
+  label: string;
+  criteria: PriorityCriterion[];
+}
+
+/** Return the worst (most urgent) status among a list of criteria. */
+function _worstStatus(criteria: PriorityCriterion[]): StatusColor {
+  if (criteria.some(c => c.status === 'red'))    return 'red';
+  if (criteria.some(c => c.status === 'yellow')) return 'yellow';
+  return 'green';
+}
+
+/**
+ * Derive the 4 priority groups with per-criterion colour-coded status.
+ * Groups:
+ *   1. Жизненные   — HP / hunger / thirst / sleep / radiation
+ *   2. Экипировка  — weapon / armor / ammo / medicine / food / water
+ *   3. Материальное — wealth vs threshold / artifacts to sell
+ *   4. Глобальная цель — current global goal
+ */
+function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
+  const { hp, max_hp, hunger, thirst, sleepiness, radiation } = agent;
+  const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
+  const threshold = agent.material_threshold ?? 1000;
+  const eq = agent.equipment;
+  const inv = agent.inventory;
+
+  // ── Group 1: Vital signs ─────────────────────────────────────────────────
+  const hpPct = max_hp > 0 ? hp / max_hp : 1;
+  const vitalCriteria: PriorityCriterion[] = [
+    {
+      label:  'HP',
+      // Mirror backend emergency threshold (≤30%) for red; yellow 31–60%; green >60%.
+      status: hpPct <= 0.3 ? 'red' : hpPct <= 0.6 ? 'yellow' : 'green',
+      detail: `${hp} / ${max_hp}`,
+    },
+    {
+      label:  'Голод',
+      status: hunger >= 70 ? 'red' : hunger >= 50 ? 'yellow' : 'green',
+      detail: `${hunger}/100`,
+    },
+    {
+      label:  'Жажда',
+      status: thirst >= 70 ? 'red' : thirst >= 50 ? 'yellow' : 'green',
+      detail: `${thirst}/100`,
+    },
+    {
+      label:  'Сон',
+      status: sleepiness >= 75 ? 'red' : sleepiness >= 50 ? 'yellow' : 'green',
+      detail: `${sleepiness}/100`,
+    },
+    {
+      label:  'Радиация',
+      status: radiation >= 60 ? 'red' : radiation >= 30 ? 'yellow' : 'green',
+      detail: `${radiation}`,
+    },
+  ];
+
+  // ── Group 2: Equipment ────────────────────────────────────────────────────
+  const weaponItem = eq['weapon'] ?? null;
+  const armorItem  = eq['armor']  ?? null;
+  const reqAmmo    = weaponItem ? (_AMMO_FOR_WEAPON[weaponItem.type] ?? null) : null;
+  const hasAmmo    = reqAmmo ? inv.some(i => i.type === reqAmmo) : null;
+
+  const hasHeal  = inv.some(i => ['medkit', 'bandage', 'stimpack'].includes(i.type));
+  const hasFood  = inv.some(i => ['bread', 'canned_food', 'energy_drink'].includes(i.type));
+  const hasDrink = inv.some(i => ['water', 'vodka', 'energy_drink'].includes(i.type));
+
+  const equipCriteria: PriorityCriterion[] = [
+    {
+      label:  'Оружие',
+      status: weaponItem ? 'green' : 'red',
+      detail: weaponItem ? weaponItem.name : '— не экипировано —',
+    },
+    {
+      label:  'Броня',
+      status: armorItem ? 'green' : 'red',
+      detail: armorItem ? armorItem.name : '— не экипирована —',
+    },
+    {
+      label:  'Патроны',
+      status: reqAmmo === null ? 'yellow'
+            : hasAmmo          ? 'green'
+            :                    'red',
+      detail: reqAmmo === null  ? 'Нет оружия'
+            : hasAmmo           ? `Есть (${reqAmmo})`
+            :                     `Нет (нужны ${reqAmmo})`,
+    },
+    {
+      label:  'Медицина',
+      status: hasHeal ? 'green' : 'red',
+      detail: hasHeal ? 'В наличии' : 'Нет аптечки',
+    },
+    {
+      label:  'Еда',
+      // Empty supply is always at least yellow (a warning), red when hunger is already high.
+      status: hasFood ? 'green' : hunger >= 70 ? 'red' : 'yellow',
+      detail: hasFood ? 'В наличии' : 'Запас пуст',
+    },
+    {
+      label:  'Вода',
+      // Empty supply is always at least yellow (a warning), red when thirst is already high.
+      status: hasDrink ? 'green' : thirst >= 70 ? 'red' : 'yellow',
+      detail: hasDrink ? 'В наличии' : 'Запас пуст',
+    },
+  ];
+
+  // ── Group 3: Material state ───────────────────────────────────────────────
+  const artifactCount = inv.filter(i => _ARTIFACT_TYPES.has(i.type)).length;
+  const wealthFrac    = threshold > 0 ? wealth / threshold : 1;
+  const materialCriteria: PriorityCriterion[] = [
+    {
+      label:  'Богатство',
+      status: wealthFrac >= 1 ? 'green' : wealthFrac >= 0.5 ? 'yellow' : 'red',
+      detail: `${wealth} / ${threshold} RU`,
+    },
+    {
+      label:  'Артефакты',
+      status: artifactCount > 0 ? 'yellow' : 'green',
+      detail: artifactCount > 0 ? `${artifactCount} шт. — продать торговцу` : 'Нет артефактов',
+    },
+  ];
+
+  // ── Group 4: Global goal ──────────────────────────────────────────────────
+  const goalCriteria: PriorityCriterion[] = [
+    {
+      label:  'Цель',
+      status: 'green',
+      detail: agent.global_goal
+        ? agent.global_goal + (agent.current_goal ? ` → ${currentGoalLabel(agent.current_goal)}` : '')
+        : '—',
+    },
+  ];
+
+  return [
+    { id: 'vital',    icon: '❤️',  label: 'Жизненные',            criteria: vitalCriteria    },
+    { id: 'equip',    icon: '🔫',  label: 'Экипировка',           criteria: equipCriteria    },
+    { id: 'material', icon: '💰',  label: 'Материальное состояние', criteria: materialCriteria },
+    { id: 'goal',     icon: '🎯',  label: 'Глобальная цель',      criteria: goalCriteria     },
+  ];
+}
+
+/**
+ * Collapsible panel showing agent priorities in 4 groups.
+ * Groups with red criteria start expanded; others start collapsed.
+ */
+function PriorityGroupsPanel({ agent }: { agent: AgentForProfile }) {
+  const groups = _buildPriorityGroups(agent);
+
+  // Pre-expand any group that has a red criterion.
+  const [open, setOpen] = React.useState<Set<string>>(
+    () => new Set(groups.filter(g => _worstStatus(g.criteria) === 'red').map(g => g.id)),
+  );
+
+  const toggle = (id: string) =>
+    setOpen(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {groups.map(group => {
+        const overall  = _worstStatus(group.criteria);
+        const isOpen   = open.has(group.id);
+        const hex      = _STATUS_HEX[overall];
+
+        return (
+          <div
+            key={group.id}
+            style={{
+              borderRadius: 7,
+              border: `1px solid ${hex}44`,
+              overflow: 'hidden',
+            }}
+          >
+            {/* ── Group header (always visible) ── */}
+            <button
+              onClick={() => toggle(group.id)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '0.38rem 0.6rem',
+                background: `${hex}18`,
+                border: 'none',
+                cursor: 'pointer',
+                textAlign: 'left' as const,
+              }}
+            >
+              <span style={{ color: '#64748b', fontSize: '0.65rem', flexShrink: 0 }}>
+                {isOpen ? '▼' : '▶'}
+              </span>
+              <span style={{ fontSize: '0.8rem', flexShrink: 0 }}>{group.icon}</span>
+              <span style={{ flex: 1, color: '#e2e8f0', fontSize: '0.78rem', fontWeight: 600 }}>
+                {group.label}
+              </span>
+              {/* Mini status dots for each criterion */}
+              <span style={{ display: 'flex', gap: 2, marginRight: 4 }}>
+                {group.criteria.map((c, i) => (
+                  <span key={i} style={{ fontSize: '0.5rem', color: _STATUS_HEX[c.status] }}>●</span>
+                ))}
+              </span>
+              <span style={{ fontSize: '0.75rem', flexShrink: 0 }}>
+                {_STATUS_DOT[overall]}
+              </span>
+            </button>
+
+            {/* ── Expanded criteria rows ── */}
+            {isOpen && (
+              <div style={{ background: '#070e1a', padding: '0.3rem 0.55rem 0.4rem' }}>
+                {group.criteria.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '0.2rem 0',
+                      borderBottom: i < group.criteria.length - 1 ? '1px solid #1e293b' : 'none',
+                    }}
+                  >
+                    <span style={{ fontSize: '0.6rem', color: _STATUS_HEX[c.status], flexShrink: 0 }}>
+                      ●
+                    </span>
+                    <span style={{ color: '#64748b', fontSize: '0.72rem', width: 76, flexShrink: 0 }}>
+                      {c.label}
+                    </span>
+                    <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1 }}>
+                      {c.detail}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', flexShrink: 0 }}>
+                      {_STATUS_DOT[c.status]}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Client-side approximation of the backend `_describe_bot_decision_tree` logic.
  *
- * Evaluates the same 7-layer priority tree using agent fields available in the
+ * Evaluates the same 8-layer priority tree using agent fields available in the
  * frontend state, returning an immediate result that is displayed before (or
  * instead of) a backend round-trip.  The backend version is authoritative;
  * this function is used only for instantaneous UI feedback.
@@ -760,6 +975,16 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const scheduled = agent.scheduled_action;
   const globalGoal = agent.global_goal ?? 'survive';
   const artifactCount = agent.inventory.filter((i) => _ARTIFACT_TYPES.has(i.type)).length;
+
+  const eq  = agent.equipment;
+  const inv = agent.inventory;
+  const noWeapon = !(eq['weapon']);
+  const noArmor  = !(eq['armor']);
+  const weaponType  = eq['weapon']?.type ?? null;
+  const reqAmmoType = weaponType ? (_AMMO_FOR_WEAPON[weaponType] ?? null) : null;
+  const noAmmo = weaponType !== null && reqAmmoType !== null
+    && !inv.some(i => i.type === reqAmmoType);
+  const condEquip = noWeapon || noArmor || noAmmo;
 
   type Layer = { name: string; skipped: boolean; action: string; reason: string };
   const layers: Layer[] = [];
@@ -791,45 +1016,57 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
     reason: cond3 ? `Жажда = ${thirst} (порог ≥70)` : `Жажда = ${thirst}, терпимо`,
   });
 
-  // Layer 4: ВЫЖИВАНИЕ: Сон
-  const cond4 = sleepiness >= 75;
+  // Layer 4: СНАРЯЖЕНИЕ: Оружие / броня / патроны (added in equipment maintenance PR)
+  const equipReason = noWeapon ? 'Нет оружия'
+    : noArmor ? 'Нет брони'
+    : noAmmo  ? `Нет патронов (${reqAmmoType})`
+    :           'Снаряжение в порядке';
   layers.push({
-    name: 'ВЫЖИВАНИЕ: Сон',
-    skipped: !cond4,
-    action: 'Спать 6ч',
-    reason: cond4 ? `Усталость = ${sleepiness} (порог ≥75)` : `Усталость = ${sleepiness}, норма`,
+    name: 'СНАРЯЖЕНИЕ: Оружие / броня / патроны',
+    skipped: !condEquip,
+    action: 'Найти/купить снаряжение',
+    reason: equipReason,
   });
 
-  // Layer 5: ТОРГОВЛЯ: Продать артефакты
+  // Layer 5: ВЫЖИВАНИЕ: Сон
+  const cond5 = sleepiness >= 75;
+  layers.push({
+    name: 'ВЫЖИВАНИЕ: Сон',
+    skipped: !cond5,
+    action: 'Спать 6ч',
+    reason: cond5 ? `Усталость = ${sleepiness} (порог ≥75)` : `Усталость = ${sleepiness}, норма`,
+  });
+
+  // Layer 6: ТОРГОВЛЯ: Продать артефакты
   // Note: client-side can't check for a trader at the location, so we only check inventory.
-  const cond5 = artifactCount > 0;
+  const cond6 = artifactCount > 0;
   layers.push({
     name: 'ТОРГОВЛЯ: Продать артефакты',
-    skipped: !cond5,
+    skipped: !cond6,
     action: 'Продать артефакты',
-    reason: cond5
+    reason: cond6
       ? `${artifactCount} артефактов (наличие торговца неизвестно)`
       : 'Нет артефактов в инвентаре',
   });
 
-  // Layer 6: ЦЕЛЬ: Накопить богатство
-  const cond6 = wealth < threshold;
+  // Layer 7: ЦЕЛЬ: Накопить богатство
+  const cond7 = wealth < threshold;
   layers.push({
     name: 'ЦЕЛЬ: Накопить богатство',
-    skipped: !cond6,
+    skipped: !cond7,
     action: 'Собирать ресурсы',
-    reason: cond6
+    reason: cond7
       ? `Богатство ${wealth} < порог ${threshold}`
       : `Богатство ${wealth} ≥ порог ${threshold}`,
   });
 
-  // Layer 7: ЦЕЛЬ: Глобальная цель
-  const cond7 = wealth >= threshold;
+  // Layer 8: ЦЕЛЬ: Глобальная цель
+  const cond8 = wealth >= threshold;
   layers.push({
     name: 'ЦЕЛЬ: Глобальная цель',
-    skipped: !cond7,
+    skipped: !cond8,
     action: `Преследование цели «${globalGoal}»`,
-    reason: cond7
+    reason: cond8
       ? `Богатство ${wealth} ≥ порог ${threshold}, цель: ${globalGoal}`
       : `Богатство ${wealth} < порог ${threshold}`,
   });
@@ -859,13 +1096,16 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   } else if (cond3) {
     action = 'Поиск воды';
     reason = `Жажда ${thirst}/100`;
-  } else if (cond4) {
+  } else if (condEquip) {
+    action = 'Добыть снаряжение';
+    reason = equipReason;
+  } else if (cond5) {
     action = 'Спать 6 часов';
     reason = `Усталость ${sleepiness}/100`;
-  } else if (cond5) {
+  } else if (cond6) {
     action = 'Продажа или путь к торговцу';
     reason = `${artifactCount} артефактов в инвентаре`;
-  } else if (cond6) {
+  } else if (cond7) {
     action = 'Сбор ресурсов';
     reason = `Богатство ${wealth} < порог ${threshold}`;
   } else {
