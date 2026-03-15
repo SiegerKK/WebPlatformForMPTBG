@@ -1397,6 +1397,107 @@ def _bot_pickup_item_from_ground(
                          "item_id": item["id"], "location_id": loc_id}}]
 
 
+def _item_not_found_locations(
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+) -> "set[str]":
+    """Return loc_ids where the agent previously looked for items of the given types
+    but arrived and found nothing (``item_not_found_here`` observation).
+
+    An entry is superseded — and the block lifted — when a *newer* ``observed:items``
+    memory for those item types exists at the same location (e.g. a fresh item spawn).
+    """
+    last_item_obs_turn: Dict[str, int] = {}   # loc_id → most recent observed-items turn
+    last_not_found_turn: Dict[str, int] = {}  # loc_id → most recent item_not_found_here turn
+
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        effects = mem.get("effects", {})
+        turn = mem.get("world_turn", 0)
+        loc_id = effects.get("location_id")
+        if not loc_id:
+            continue
+
+        if effects.get("action_kind") == "item_not_found_here":
+            mem_types = frozenset(effects.get("item_types", []))
+            if item_types.intersection(mem_types):
+                last_not_found_turn[loc_id] = max(last_not_found_turn.get(loc_id, 0), turn)
+
+        elif effects.get("observed") == "items":
+            obs_types = set(effects.get("item_types", []))
+            if item_types.intersection(obs_types):
+                last_item_obs_turn[loc_id] = max(last_item_obs_turn.get(loc_id, 0), turn)
+
+    result: set = set()
+    for loc_id, nf_turn in last_not_found_turn.items():
+        # Only block if the not_found observation is newer than (or same turn as) the
+        # most recent item observation at that location.
+        obs_turn = last_item_obs_turn.get(loc_id, 0)
+        if nf_turn >= obs_turn:
+            result.add(loc_id)
+    return result
+
+
+def _maybe_record_item_not_found(
+    agent: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    loc_id: str,
+    loc: Dict[str, Any],
+    item_types: "frozenset[str]",
+    item_category: str,
+) -> None:
+    """Write an ``item_not_found_here`` observation if the agent arrived at *loc_id*
+    specifically to retrieve an item of *item_category* but found nothing on the ground.
+
+    The check: the agent must have a prior ``seek_item`` decision memory that named
+    *loc_id* as the destination for *item_category*.  If no such decision exists, the
+    visit is incidental and no observation is written.
+    Duplicate entries for the same location and item category within the same turn are
+    suppressed.
+    """
+    # Only record if the agent explicitly decided to travel here for this item.
+    found_seek = False
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "decision":
+            continue
+        effects = mem.get("effects", {})
+        if (
+            effects.get("action_kind") == "seek_item"
+            and effects.get("destination") == loc_id
+            and effects.get("item_category") == item_category
+        ):
+            found_seek = True
+            break
+    if not found_seek:
+        return
+
+    # Suppress duplicates: don't write the same not_found entry twice in the same turn.
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("world_turn") != world_turn:
+            break
+        effects = mem.get("effects", {})
+        if (
+            effects.get("action_kind") == "item_not_found_here"
+            and effects.get("location_id") == loc_id
+            and frozenset(effects.get("item_types", [])).intersection(item_types)
+        ):
+            return  # already recorded this turn
+
+    loc_name = loc.get("name", loc_id)
+    _add_memory(
+        agent, world_turn, state, "observation",
+        f"⚠️ Предмет исчез из «{loc_name}»",
+        f"Пришёл в «{loc_name}» за {item_category}, но предмет уже забрали.",
+        {
+            "action_kind": "item_not_found_here",
+            "location_id": loc_id,
+            "item_types": sorted(item_types),
+        },
+    )
+
+
 def _find_item_memory_location(
     agent: Dict[str, Any],
     item_types: "frozenset[str]",
@@ -1406,9 +1507,12 @@ def _find_item_memory_location(
 
     Returns the ``loc_id`` of the most recently remembered location where
     one of the requested item types was seen, or ``None`` if no such memory
-    exists.  Only locations that are reachable (non-closed connections) are
-    considered.
+    exists.  Locations where the agent previously arrived and found nothing
+    (recorded via ``_maybe_record_item_not_found``) are excluded.
+
+    Relies purely on the agent's memory — no omniscient ground-truth check.
     """
+    excluded = _item_not_found_locations(agent, item_types)
     locations = state.get("locations", {})
     # Collect candidate locations from memory (newest first)
     for mem in reversed(agent.get("memory", [])):
@@ -1420,13 +1524,12 @@ def _find_item_memory_location(
         loc_id = effects.get("location_id")
         if not loc_id or loc_id not in locations:
             continue
+        if loc_id in excluded:
+            continue
         remembered_types = set(effects.get("item_types", []))
         if not remembered_types.intersection(item_types):
             continue
-        # Verify that the location still has the item (ground truth check)
-        ground_items = locations.get(loc_id, {}).get("items", [])
-        if any(gi.get("type") in item_types for gi in ground_items):
-            return loc_id
+        return loc_id
     return None
 
 
@@ -1762,6 +1865,7 @@ def _run_bot_action_inner(
         evs = _bot_pickup_item_from_ground(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
         if evs:
             return evs
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, WEAPON_ITEM_TYPES, "weapon")
         # c) travel to remembered item location
         mem_loc = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         if mem_loc and mem_loc != loc_id:
@@ -1801,6 +1905,7 @@ def _run_bot_action_inner(
         evs = _bot_pickup_item_from_ground(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
         if evs:
             return evs
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, ARMOR_ITEM_TYPES, "armor")
         mem_loc = _find_item_memory_location(agent, ARMOR_ITEM_TYPES, state)
         if mem_loc and mem_loc != loc_id:
             agent["current_goal"] = "get_armor"
@@ -1843,6 +1948,7 @@ def _run_bot_action_inner(
                 evs = _bot_pickup_item_from_ground(agent_id, agent, _required_ammo_set, state, world_turn)
                 if evs:
                     return evs
+                _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, _required_ammo_set, "ammo")
                 mem_loc = _find_item_memory_location(agent, _required_ammo_set, state)
                 if mem_loc and mem_loc != loc_id:
                     agent["current_goal"] = "get_ammo"
@@ -1882,6 +1988,7 @@ def _run_bot_action_inner(
         if evs:
             return evs
         # Travel to a location where healing items were observed (observation memory)
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, HEAL_ITEM_TYPES, "medical")
         mem_loc = _find_item_memory_location(agent, HEAL_ITEM_TYPES, state)
         if mem_loc and mem_loc != loc_id:
             _add_memory(
@@ -1907,6 +2014,7 @@ def _run_bot_action_inner(
         if evs:
             return evs
         # Travel to a location where food was observed (observation memory)
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, FOOD_ITEM_TYPES, "food")
         mem_loc = _find_item_memory_location(agent, FOOD_ITEM_TYPES, state)
         if mem_loc and mem_loc != loc_id:
             _add_memory(
@@ -1931,6 +2039,7 @@ def _run_bot_action_inner(
         if evs:
             return evs
         # Travel to a location where drinks were observed (observation memory)
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, DRINK_ITEM_TYPES, "drink")
         mem_loc = _find_item_memory_location(agent, DRINK_ITEM_TYPES, state)
         if mem_loc and mem_loc != loc_id:
             _add_memory(

@@ -2167,3 +2167,191 @@ class TestAnomalyRiskTolerance:
         assert sched["final_target_id"] == "B", (
             f"High-risk agent should head to B (high anomaly), got {sched.get('final_target_id')}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Item-not-found loop prevention
+# ─────────────────────────────────────────────────────────────────
+
+class TestItemNotFoundLoop:
+    """Verify that when a stalker travels to a memorised item location but finds nothing,
+    an observation is written that blocks repeated trips to the same location."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _agent_with_seek_weapon_memory(self, loc_id_target: str):
+        """Return a minimal state (agent at A, target loc_id_target) where
+        the agent has both an item-observation and a seek_item decision memory
+        pointing to loc_id_target for "weapon"."""
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": loc_id_target, "travel_time": 1}]
+                      if loc_id_target != "A" else []},
+                **({loc_id_target: {}} if loc_id_target != "A" else {}),
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # Memory: agent observed a weapon at the target
+        agent["memory"].append({
+            "world_turn": 0,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "pistol на земле",
+            "effects": {"observed": "items", "location_id": loc_id_target,
+                        "item_types": sorted(WEAPON_ITEM_TYPES)},
+        })
+        # Memory: agent decided to travel there to get a weapon
+        agent["memory"].append({
+            "world_turn": 0,
+            "type": "decision",
+            "title": "Ищу оружие по памяти",
+            "summary": "Иду за оружием",
+            "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                        "destination": loc_id_target},
+        })
+        return state
+
+    # ── Unit tests for helper functions ─────────────────────────────────────
+
+    def test_item_not_found_locations_returns_blocked_loc(self):
+        """_item_not_found_locations returns the location that has an item_not_found_here entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" in result, f"B should be blocked; got {result}"
+
+    def test_newer_item_obs_lifts_block(self):
+        """A newer items-observed entry for the same location supersedes the not_found block."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # Newer observation — item spawned again
+            {"world_turn": 2, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" not in result, f"B should not be blocked after newer item obs; got {result}"
+
+    def test_find_item_memory_location_excludes_not_found(self):
+        """_find_item_memory_location returns None when the only remembered location has a
+        newer item_not_found_here entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, f"Should return None when B is blocked; got {result}"
+
+    def test_find_item_memory_location_not_blocked_without_not_found(self):
+        """_find_item_memory_location returns the location normally when no not_found entry exists."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "B", f"Should return B normally; got {result}"
+
+    # ── Integration tests via tick ───────────────────────────────────────────
+
+    def test_observation_written_when_sought_item_gone(self):
+        """When the agent arrives at a memorised weapon location and finds nothing,
+        an item_not_found_here observation is written into agent memory."""
+        # Agent is already at the target location (simulates post-travel arrival)
+        state = self._agent_with_seek_weapon_memory("A")
+        # No weapon on the ground at A
+        state["locations"]["A"]["items"] = []
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(not_found) == 1, (
+            f"Expected 1 item_not_found_here observation for A, got {len(not_found)}"
+        )
+
+    def test_no_observation_when_item_found(self):
+        """If the weapon IS on the ground when the agent arrives, no not_found entry is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state = self._agent_with_seek_weapon_memory("A")
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            f"Should not write not_found when weapon was actually found; got {not_found}"
+        )
+
+    def test_no_observation_without_seek_intent(self):
+        """Without a prior seek_item decision for this location, arriving at an empty location
+        does NOT write a not_found observation (incidental visit)."""
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        # Only an item-observation memory — no seek_item decision
+        agent["memory"].append({
+            "world_turn": 0,
+            "type": "observation",
+            "effects": {"observed": "items", "location_id": "A",
+                        "item_types": sorted(WEAPON_ITEM_TYPES)},
+        })
+        state["locations"]["A"]["items"] = []
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            f"Should not write not_found without a seek_item decision; got {not_found}"
+        )
