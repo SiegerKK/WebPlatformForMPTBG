@@ -24,6 +24,17 @@ _debug_ctx_cache: Dict[str, str] = {}
 _debug_ctx_cache_ts: float = 0.0
 _DEBUG_CACHE_TTL: float = 5.0  # seconds between DB refreshes
 
+# ── Slow-tick throttle ────────────────────────────────────────────────────────
+# In-memory map of context_id → monotonic timestamp of the last tick for
+# contexts running in slow mode (3 s/turn).  Not persisted — resets on
+# server restart (acceptable for a debug feature).
+#
+# Thread-safety note: tick_debug_auto_matches() is invoked exclusively from
+# the single _debug_auto_ticker background task (via asyncio.to_thread), so
+# only one call runs at a time.  No locking is required.
+_slow_tick_last: Dict[str, float] = {}
+_SLOW_TICK_INTERVAL: float = 3.0  # seconds between ticks in slow mode
+
 
 def tick_match(match_id_str: str, db: Session) -> dict:
     """
@@ -142,6 +153,14 @@ def tick_debug_auto_matches() -> dict:
                 if not (get_context_flag(ctx_id, "auto_tick_enabled", default=False)
                         or get_context_flag(ctx_id, "debug_auto_tick", default=False)):
                     continue
+
+                # Slow-mode throttle: only tick if 3 s have elapsed since last tick.
+                if get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
+                    now = time.monotonic()
+                    if now - _slow_tick_last.get(ctx_id, 0.0) < _SLOW_TICK_INTERVAL:
+                        continue
+                    _slow_tick_last[ctx_id] = now
+
                 result = tick_match(match_id, db)
                 if "error" not in result:
                     ticked += 1
