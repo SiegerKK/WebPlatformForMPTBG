@@ -668,14 +668,13 @@ def _add_memory(
     """Append a memory entry to an agent.
 
     *reason* is only meaningful for ``memory_type == "decision"`` entries.
-    When provided it is:
-    - prepended to *summary* as ``"Причина: {reason}. "``
-    - stored in *effects* under the key ``"reason"``
+    When provided it is stored in *effects* under the key ``"почему"`` (the
+    conditions that triggered this decision).  The ``summary`` field carries
+    the purpose of the decision ("зачем") and is left unmodified.
     For all other memory types *reason* is silently ignored.
     """
     if reason and memory_type == "decision":
-        effects = {**effects, "reason": reason}
-        summary = f"Причина: {reason}. " + summary
+        effects = {**effects, "почему": reason}
     memory_entry = {
         "world_turn": world_turn,
         "type": memory_type,

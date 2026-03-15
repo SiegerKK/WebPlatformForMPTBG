@@ -601,7 +601,24 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>
-                    <div style={s.memorySummary}>{m.summary}</div>
+                    {m.type === 'decision' ? (
+                      <>
+                        {m.effects?.['почему'] && (
+                          <div style={s.memorySummary}>
+                            <span style={s.memoryFieldLabel}>Почему: </span>
+                            {String(m.effects['почему'])}
+                          </div>
+                        )}
+                        {m.summary && (
+                          <div style={s.memorySummary}>
+                            <span style={s.memoryFieldLabel}>Зачем: </span>
+                            {m.summary}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={s.memorySummary}>{m.summary}</div>
+                    )}
                   </div>
                 );
               })}
@@ -836,6 +853,7 @@ const s: Record<string, React.CSSProperties> = {
   memoryWhen: { color: '#475569', fontSize: '0.7rem' },
   memoryTitle: { color: '#f8fafc', fontWeight: 600, fontSize: '0.82rem', marginBottom: 2 },
   memorySummary: { color: '#94a3b8', fontSize: '0.78rem', lineHeight: 1.5 },
+  memoryFieldLabel: { color: '#64748b', fontWeight: 600 },
   // ── Bot decision preview ──
   decisionRow: { display: 'flex', gap: 8, alignItems: 'flex-start' },
   decisionLabel: { color: '#64748b', fontSize: '0.75rem', minWidth: 68, flexShrink: 0, paddingTop: 1 },
