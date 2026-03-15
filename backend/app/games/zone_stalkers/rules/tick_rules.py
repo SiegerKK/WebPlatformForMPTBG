@@ -45,7 +45,9 @@ _EMISSION_WARNING_TURNS = 30          # legacy flee-window kept for emergency fa
 _EMISSION_WARNING_MIN_TURNS = 10      # warning observation written min 10 turns before emission
 _EMISSION_WARNING_MAX_TURNS = 15      # warning observation written max 15 turns before emission
 # Terrain types where stalkers are killed by an emission
-_EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({"plain", "hills"})
+_EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({
+    "plain", "hills", "swamp", "field_camp", "slag_heaps",
+})
 
 # Anomaly search parameters for the get_rich NPC goal path.
 # Search radius is skill-based: 4 + agent["skill_stalker"] hops (e.g. 5 for level-1 stalker).

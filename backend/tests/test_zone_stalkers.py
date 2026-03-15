@@ -1659,7 +1659,7 @@ class TestDebugLocationCommands:
         state = self._state()
         for loc in state["locations"].values():
             assert "terrain_type" in loc
-            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings", "hamlet", "farm", "field_camp"}
+            assert loc["terrain_type"] in {"plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings", "hamlet", "farm", "field_camp", "swamp"}
             assert "anomaly_activity" in loc
             assert isinstance(loc["anomaly_activity"], int)
             assert 0 <= loc["anomaly_activity"] <= 10
@@ -2302,3 +2302,44 @@ class TestCustomTerrainTypes:
         state, loc_id = self._state_with_custom_loc("plain")
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "ocean"}, state)
         assert not result.valid
+
+
+class TestEmissionDangerousTerrain:
+    """Unit tests for the _EMISSION_DANGEROUS_TERRAIN constant."""
+
+    def test_dangerous_terrain_contains_required_types(self):
+        """All five user-specified dangerous terrain types must be present."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        required = {"plain", "hills", "swamp", "field_camp", "slag_heaps"}
+        assert required <= _EMISSION_DANGEROUS_TERRAIN, (
+            f"Missing from dangerous terrain: {required - _EMISSION_DANGEROUS_TERRAIN}"
+        )
+
+    def test_swamp_terrain_locations_exist_in_fixed_map(self):
+        """Fixed zone map should contain at least one location with terrain_type='swamp'."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        swamp_locs = [
+            loc for loc in state["locations"].values()
+            if loc.get("terrain_type") == "swamp"
+        ]
+        assert len(swamp_locs) >= 1, "Expected at least one swamp-terrain location in the fixed map"
+
+    def test_swamp_location_is_dangerous(self):
+        """A location with terrain_type='swamp' must be classified as dangerous for emission."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "swamp" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_field_camp_terrain_is_dangerous(self):
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "field_camp" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_slag_heaps_terrain_is_dangerous(self):
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "slag_heaps" in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_industrial_and_buildings_remain_safe(self):
+        """Industrial structures and buildings must remain safe (not in dangerous set)."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "industrial" not in _EMISSION_DANGEROUS_TERRAIN
+        assert "buildings" not in _EMISSION_DANGEROUS_TERRAIN
