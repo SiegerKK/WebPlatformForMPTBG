@@ -1876,3 +1876,159 @@ class TestEquipmentMaintenance:
                 f"Broke bot should not seek equipment at trader; current_goal={goal!r}, "
                 f"traveling to {sched.get('final_target_id', '?')!r}"
             )
+
+
+class TestConfirmedEmptyBlocking:
+    """Verify that explore_confirmed_empty memory blocks re-exploration in all code paths."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _make_state_with_confirmed_empty(
+        self, global_goal: str = "get_rich", material_threshold: int = 999999
+    ):
+        """Return (state, sid, loc_id) where the bot is at an anomaly location it
+        previously confirmed as empty (has explore_confirmed_empty memory)."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone, _make_stalker_agent
+        import random
+
+        state = generate_zone(seed=7, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        locs = list(state["locations"].keys())
+        stalker_loc = locs[0]
+
+        # Ensure the location has anomaly_activity so exploration would normally fire
+        state["locations"][stalker_loc]["anomaly_activity"] = 5
+        # Empty it of artifacts
+        state["locations"][stalker_loc]["artifacts"] = []
+
+        rng = random.Random(42)
+        stalker = _make_stalker_agent(
+            agent_id="bot_ce",
+            name="Confirmed Empty Bot",
+            location_id=stalker_loc,
+            controller_kind="bot",
+            participant_id=None,
+            rng=rng,
+        )
+        stalker["global_goal"] = global_goal
+        stalker["material_threshold"] = material_threshold
+        stalker["money"] = 5000
+        stalker["hp"] = 100
+        stalker["hunger"] = 10
+        stalker["thirst"] = 10
+        stalker["sleepiness"] = 10
+        # Fully equipped to skip equipment-maintenance layer
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        stalker["equipment"] = {
+            "weapon": {"id": "w1", "type": "pistol", "name": ITEM_TYPES["pistol"]["name"],
+                       "weight": ITEM_TYPES["pistol"]["weight"], "value": ITEM_TYPES["pistol"]["value"]},
+            "armor": {"id": "a1", "type": "leather_jacket", "name": ITEM_TYPES["leather_jacket"]["name"],
+                      "weight": ITEM_TYPES["leather_jacket"]["weight"], "value": ITEM_TYPES["leather_jacket"]["value"]},
+            "detector": None,
+        }
+        stalker["inventory"] = [
+            {"id": "ammo_t", "type": "ammo_9mm", "name": ITEM_TYPES["ammo_9mm"]["name"],
+             "weight": ITEM_TYPES["ammo_9mm"].get("weight", 0.01), "value": ITEM_TYPES["ammo_9mm"]["value"]},
+            {"id": "heal_t", "type": "bandage", "name": ITEM_TYPES["bandage"]["name"],
+             "weight": ITEM_TYPES["bandage"].get("weight", 0.1), "value": ITEM_TYPES["bandage"]["value"]},
+            {"id": "food_t", "type": "bread", "name": ITEM_TYPES["bread"]["name"],
+             "weight": ITEM_TYPES["bread"].get("weight", 0.3), "value": ITEM_TYPES["bread"]["value"]},
+            {"id": "water_t", "type": "water", "name": ITEM_TYPES["water"]["name"],
+             "weight": ITEM_TYPES["water"].get("weight", 0.5), "value": ITEM_TYPES["water"]["value"]},
+        ]
+        # Plant the confirmed_empty memory entry for the current location
+        stalker["memory"] = [{
+            "world_turn": 1,
+            "type": "decision",
+            "title": "Аномалия пустая",
+            "summary": "Тщательно обыскал — артефактов нет.",
+            "effects": {"action_kind": "explore_confirmed_empty", "location_id": stalker_loc},
+        }]
+
+        state["agents"]["bot_ce"] = stalker
+        state["locations"][stalker_loc]["agents"].append("bot_ce")
+        return state, "bot_ce", stalker_loc
+
+    def test_get_rich_does_not_reexplore_confirmed_empty(self):
+        """get_rich bot at a confirmed-empty anomaly location should NOT schedule exploration."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "get_rich bot should not re-explore a confirmed-empty anomaly location"
+        )
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        if sched:
+            assert sched["type"] != "explore", (
+                f"get_rich bot should not schedule explore, got {sched['type']!r}"
+            )
+
+    def test_gather_resources_does_not_reexplore_confirmed_empty(self):
+        """Phase-1 (gather resources) bot should NOT re-explore confirmed-empty locations."""
+        # material_threshold=0 so agent is NOT in phase 1 (wealth >= 0) → stays in phase 2
+        # To force phase-1, make threshold very high
+        state, sid, loc_id = self._make_state_with_confirmed_empty(
+            global_goal="get_rich", material_threshold=999999
+        )
+        # Drain money to force phase-1 (wealth < threshold)
+        state["agents"][sid]["money"] = 10
+        state["agents"][sid]["equipment"] = {"weapon": None, "armor": None, "detector": None}
+        state["agents"][sid]["inventory"] = []
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "Phase-1 (gather_resources) bot should not re-explore confirmed-empty location"
+        )
+
+    def test_explore_zone_does_not_reexplore_confirmed_empty(self):
+        """explore_zone bot should NOT re-explore a confirmed-empty location."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="explore_zone")
+        # Remove connections so bot can't travel, forcing it to consider local explore
+        state["locations"][loc_id]["connections"] = []
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "explore_zone bot should not re-explore confirmed-empty location"
+        )
+
+    def test_explore_goal_does_not_reexplore_confirmed_empty(self):
+        """Agent with old 'explore' goal (= explore_zone alias) should NOT re-explore confirmed-empty."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="explore")
+        state["locations"][loc_id]["connections"] = []
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "'explore' goal bot should not re-explore confirmed-empty location"
+        )
+
+    def test_explore_goal_handled_like_explore_zone(self):
+        """An agent with global_goal='explore' should use the explore_zone handler (not fallback)."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="explore")
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return  # need connections for this test
+        # Force the agent into Phase 2 (wealth >= threshold) so goal branch runs
+        state["agents"][sid]["material_threshold"] = 0
+        # Clear confirmed_empty memory so the bot sees fresh unvisited locations
+        state["agents"][sid]["memory"] = []
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        # With fresh explore goal, agent should be traveling to unvisited connection
+        if sched:
+            assert sched["type"] == "travel", (
+                f"explore goal bot should travel to unvisited locations, got {sched['type']!r}"
+            )
+
+    def test_generator_uses_explore_zone_not_explore(self):
+        """zone_generator should generate 'explore_zone' (not 'explore') as a goal."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        goals_found = set()
+        for seed in range(50):
+            state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
+            for ag in state["agents"].values():
+                goals_found.add(ag.get("global_goal"))
+        assert "explore" not in goals_found, (
+            f"Generator should not create agents with goal 'explore'; found goals: {goals_found}"
+        )
+        assert "explore_zone" in goals_found, (
+            "Generator should create agents with goal 'explore_zone'"
+        )

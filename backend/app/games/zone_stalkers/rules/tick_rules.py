@@ -686,6 +686,21 @@ def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Opti
     return None
 
 
+def _confirmed_empty_locations(agent: Dict[str, Any]) -> "frozenset[str]":
+    """Return the set of location IDs the agent has confirmed as artifact-free.
+
+    An entry is written when an exploration action finds the location genuinely
+    empty (no artifacts present at all).  This frozenset is used to prevent
+    the bot from scheduling pointless re-explorations of barren anomaly spots.
+    """
+    return frozenset(
+        mem.get("effects", {}).get("location_id")
+        for mem in agent.get("memory", [])
+        if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
+        and mem.get("effects", {}).get("location_id")
+    )
+
+
 def _write_location_observations(
     agent_id: str,
     agent: Dict[str, Any],
@@ -1901,9 +1916,10 @@ def _bot_gather_resources(
     Resource-gathering mode: pick up artifacts, explore high-anomaly areas, move to loot-rich locations.
     """
     locations = state.get("locations", {})
+    confirmed_empty = _confirmed_empty_locations(agent)
 
     # G2 — Explore if anomalies are present (must explore to obtain artifacts)
-    if loc.get("anomaly_activity", 0) > 0:
+    if loc.get("anomaly_activity", 0) > 0 and loc_id not in confirmed_empty:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую аномальную зону",
@@ -1924,7 +1940,7 @@ def _bot_gather_resources(
     # G3 — Move toward a more loot-rich adjacent location (higher anomaly_activity)
     connections = [c for c in loc.get("connections", []) if not c.get("closed")]
     if connections:
-        # Prefer neighbors with higher anomaly_activity
+        # Prefer neighbors with higher anomaly_activity that are not confirmed empty
         def loc_score(conn):
             nb = locations.get(conn["to"], {})
             return nb.get("anomaly_activity", 0) * 2
@@ -1939,8 +1955,8 @@ def _bot_gather_resources(
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
-    # G4 — Fallback: explore current location anyway
-    if rng.random() < 0.40:
+    # G4 — Fallback: explore current location only if not confirmed empty
+    if loc_id not in confirmed_empty and rng.random() < 0.40:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую текущую локацию",
@@ -2014,46 +2030,13 @@ def _bot_pursue_goal(
         # Artifacts can only be obtained through the explore action, not picked up directly.
         # Stalkers do NOT have omniscient knowledge of which locations have artifacts —
         # they can only explore anomaly zones and learn from memory.
-        if loc.get("anomaly_activity", 0) > 0:
-            # Build confirmed-empty set to avoid re-exploring fruitless spots
-            confirmed_empty_here: frozenset = frozenset(
-                mem.get("effects", {}).get("location_id")
-                for mem in agent.get("memory", [])
-                if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
-                and mem.get("effects", {}).get("location_id")
-            )
-            if loc_id not in confirmed_empty_here:
-                loc_name = loc.get("name", loc_id)
-                _add_memory(
-                    agent, world_turn, state, "decision",
-                    f"Исследую «{loc_name}»",
-                    f"На локации «{loc_name}» есть аномальная активность — нужно провести разведку чтобы найти артефакты.",
-                    {"action_kind": "explore_decision", "location_id": loc_id},
-                )
-                agent["scheduled_action"] = {
-                    "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS,
-                    "turns_total": EXPLORE_DURATION_TURNS,
-                    "target_id": loc_id, "started_turn": world_turn,
-                }
-                agent["action_used"] = True
-                return [{"event_type": "exploration_started",
-                         "payload": {"agent_id": agent_id, "location_id": loc_id}}]
-
-        # Current location has no anomaly activity or already confirmed empty.
-        # Build the set of locations the agent has confirmed as empty through exploration.
-        confirmed_empty: frozenset = frozenset(
-            mem.get("effects", {}).get("location_id")
-            for mem in agent.get("memory", [])
-            if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
-            and mem.get("effects", {}).get("location_id")
-        )
-
-        # If current location has anomalies AND activity > 0 AND is not yet confirmed empty → explore it.
+        confirmed_empty = _confirmed_empty_locations(agent)
         if loc.get("anomaly_activity", 0) > 0 and loc_id not in confirmed_empty:
+            loc_name = loc.get("name", loc_id)
             _add_memory(
                 agent, world_turn, state, "decision",
-                "Исследую зону в ожидании артефактов",
-                f"Артефактов нигде нет. Исследую «{loc.get('name', loc_id)}» в надежде найти что-нибудь.",
+                f"Исследую «{loc_name}»",
+                f"На локации «{loc_name}» есть аномальная активность — нужно провести разведку чтобы найти артефакты.",
                 {"action_kind": "explore_decision", "location_id": loc_id},
             )
             agent["scheduled_action"] = {
@@ -2118,8 +2101,9 @@ def _bot_pursue_goal(
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
-    elif global_goal == "explore_zone":
+    elif global_goal in ("explore_zone", "explore"):
         # Visit as many unique locations as possible
+        confirmed_empty = _confirmed_empty_locations(agent)
         visited = {mem.get("effects", {}).get("to_loc") for mem in agent.get("memory", [])
                    if mem.get("type") == "travel"}
         visited.add(loc_id)
@@ -2134,8 +2118,8 @@ def _bot_pursue_goal(
                 {"action_kind": "explore_new_location", "destination": target["to"]},
             )
             return _bot_schedule_travel(agent_id, agent, target["to"], state, world_turn)
-        # Explore current location if not recently explored
-        if rng.random() < 0.50:
+        # Explore current location only if not confirmed empty
+        if loc_id not in confirmed_empty and rng.random() < 0.50:
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Исследую текущую локацию",
@@ -2197,7 +2181,8 @@ def _bot_pursue_goal(
             {"action_kind": "wander", "destination": conn["to"]},
         )
         return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
-    if rng.random() < 0.30:
+    _fallback_confirmed_empty = _confirmed_empty_locations(agent)
+    if loc_id not in _fallback_confirmed_empty and rng.random() < 0.30:
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую текущую локацию",

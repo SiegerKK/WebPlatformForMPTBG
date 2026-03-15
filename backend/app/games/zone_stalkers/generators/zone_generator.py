@@ -241,7 +241,7 @@ def _make_stalker_agent(
 
     # Choose global goal for the agent.
     chosen_global_goal = global_goal if global_goal else rng.choice(
-        ["survive", "get_rich", "explore", "serve_faction"]
+        ["survive", "get_rich", "explore_zone", "serve_faction"]
     )
     # All agents start with the same modest wealth buffer before pursuing their
     # global goal.  material_threshold is strictly in [MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX].

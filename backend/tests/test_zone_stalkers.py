@@ -662,7 +662,7 @@ class TestNewAgentFields:
     def test_global_goal_present(self):
         agent = self._agent()
         assert "global_goal" in agent
-        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+        assert agent["global_goal"] in ("survive", "get_rich", "explore_zone", "serve_faction")
 
     def test_risk_tolerance_present(self):
         agent = self._agent()
@@ -2069,12 +2069,12 @@ class TestUnifiedStalkerModel:
     def test_player_agent_has_global_goal(self):
         state = self._state()
         agent = state["agents"]["agent_p0"]
-        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+        assert agent["global_goal"] in ("survive", "get_rich", "explore_zone", "serve_faction")
 
     def test_npc_agent_has_global_goal(self):
         state = self._state()
         agent = state["agents"]["agent_ai_0"]
-        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+        assert agent["global_goal"] in ("survive", "get_rich", "explore_zone", "serve_faction")
 
     def test_all_agents_have_material_threshold(self):
         state = self._state()
