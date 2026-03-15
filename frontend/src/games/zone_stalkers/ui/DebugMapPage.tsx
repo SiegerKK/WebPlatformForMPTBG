@@ -1126,7 +1126,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   catch { /* ignore */ }
                 }}
                 disabled={zoneState.emission_active}
-                title={zoneState.emission_active ? 'Выброс уже активен' : 'Немедленно запустить выброс (debug)'}
+                title={zoneState.emission_active ? 'Выброс уже активен' : 'Запланировать выброс через 10–15 минут (debug)'}
               >
                 ⚡ Выброс
               </button>

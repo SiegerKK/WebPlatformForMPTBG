@@ -222,30 +222,31 @@ def _make_stalker_agent(
         inventory.append(_make_item_instance("medkit", rng))
     if rng.random() < 0.6:
         inventory.append(_make_item_instance("bread", rng))
+    if rng.random() < 0.5:
+        inventory.append(_make_item_instance("water", rng))
+    if rng.random() < 0.4:
+        inventory.append(_make_item_instance("canned_food", rng))
 
     equipment: Dict[str, Any] = {"weapon": None, "armor": None, "detector": None}
     if weapon:
         equip_item = _make_item_instance(weapon, rng)
         equipment["weapon"] = equip_item
-        # Ammo
-        ammo_map = {"pistol": "ammo_9mm", "ak74": "ammo_545", "shotgun": "ammo_12gauge"}
-        ammo_type = ammo_map.get(weapon)
+        # Give ammo for the equipped weapon (use AMMO_FOR_WEAPON for single source of truth)
+        from app.games.zone_stalkers.balance.items import AMMO_FOR_WEAPON as _AMMO_FOR_WEAPON
+        ammo_type = _AMMO_FOR_WEAPON.get(weapon)
         if ammo_type:
             inventory.append(_make_item_instance(ammo_type, rng))
     if armor:
         equipment["armor"] = _make_item_instance(armor, rng)
 
-    # Choose global goal first so the material_threshold can be calibrated to it.
-    # get_rich agents aim for a large wealth target; others just need a modest buffer.
+    # Choose global goal for the agent.
     chosen_global_goal = global_goal if global_goal else rng.choice(
-        ["survive", "get_rich", "explore", "serve_faction"]
+        ["get_rich"]
     )
-    if chosen_global_goal == "get_rich":
-        # High threshold: agent pursues the global goal once truly wealthy
-        chosen_threshold = rng.randint(50_000, 1_000_000)
-    else:
-        # Modest buffer before switching to the global goal
-        chosen_threshold = rng.randint(3_000, 10_000)
+    # All agents start with the same modest wealth buffer before pursuing their
+    # global goal.  material_threshold is strictly in [MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX].
+    from app.games.zone_stalkers.rules.tick_rules import MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX
+    chosen_threshold = rng.randint(MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX)
 
     return {
         "id": agent_id,
@@ -287,8 +288,7 @@ def _make_stalker_agent(
         "global_goal": chosen_global_goal,
         "current_goal": None,
         "risk_tolerance": round(rng.uniform(0.2, 0.9), 2),
-        # Wealth target: for get_rich agents this is a high bar (50k–1M);
-        # for others it's a modest buffer (3k–10k) before pursuing their global goal.
+        # Wealth buffer (3000–10000) the agent accumulates before pursuing their global goal.
         "material_threshold": chosen_threshold,
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
@@ -312,10 +312,22 @@ def _make_item_instance(item_type: str, rng: random.Random) -> Dict[str, Any]:
 def _generate_trader_inventory(rng: random.Random) -> List[Dict[str, Any]]:
     """Generate a trader's starting inventory."""
     stock: List[Dict[str, Any]] = []
-    sell_types = ["medkit", "bandage", "antirad", "ak74", "pistol",
-                  "ammo_545", "ammo_9mm", "stalker_suit", "leather_jacket",
-                  "energy_drink", "vodka", "echo_detector"]
-    for item_type in rng.sample(sell_types, rng.randint(5, len(sell_types))):
+    sell_types = [
+        # Medical
+        "bandage", "medkit", "army_medkit", "antirad", "rad_cure", "stimpack", "morphine",
+        # Weapons
+        "pistol", "shotgun", "ak74", "pkm", "svu_svd",
+        # Armor
+        "leather_jacket", "stalker_suit", "combat_armor", "seva_suit",
+        # Ammo
+        "ammo_9mm", "ammo_12gauge", "ammo_545", "ammo_762",
+        # Consumables
+        "bread", "canned_food", "military_ration", "water", "purified_water",
+        "energy_drink", "vodka", "glucose",
+        # Detectors
+        "echo_detector", "bear_detector",
+    ]
+    for item_type in rng.sample(sell_types, rng.randint(8, min(14, len(sell_types)))):
         info = ITEM_TYPES[item_type]
         stock.append({
             "id": _make_id("trader_item", rng),

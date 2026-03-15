@@ -9,6 +9,8 @@ Supported commands:
 - join_event(event_context_id)        — join an active zone_event
 - pick_up_artifact(artifact_id)
 - pick_up_item(item_id)
+- consume_item(item_id)
+- buy_from_trader(item_type)          — buy any item from catalogue at a trader (1 action)
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 - debug_update_map(positions, connections, regions?) — persist debug canvas layout (meta, no action cost)
@@ -26,7 +28,9 @@ Supported commands:
 - debug_delete_agent(agent_id) — remove any single agent/mutant/trader by id (meta)
 - debug_set_time(day?, hour?, minute?) — override current world time (meta)
 - debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
-- debug_preview_bot_decision(agent_id) — dry-run bot decision logic and return decision description without mutating state (meta)
+- debug_add_item(agent_id, item_type) — add an item to an agent's inventory in debug mode (meta)
+- debug_remove_item(agent_id, item_id) — remove an item from an agent's inventory or equipment slot in debug mode (meta)
+- debug_set_agent_threshold(agent_id, amount) — set agent's material_threshold (3000–10000) in debug mode (meta)
 """
 import collections
 from typing import List, Tuple, Dict, Any
@@ -46,7 +50,7 @@ _VALID_TERRAIN_TYPES = frozenset([
 ])
 
 _VALID_GLOBAL_GOALS = frozenset([
-    "get_rich", "explore_zone", "survive", "help_others", "find_wish",
+    "get_rich",
 ])
 
 
@@ -95,11 +99,20 @@ def validate_world_command(
     if command_type == "debug_set_agent_money":
         return _validate_debug_set_agent_money(payload, state)
 
+    if command_type == "debug_set_agent_threshold":
+        return _validate_debug_set_agent_threshold(payload, state)
+
     if command_type == "debug_delete_agent":
         return _validate_debug_delete_agent(payload, state)
 
     if command_type == "debug_preview_bot_decision":
         return _validate_debug_preview_bot_decision(payload, state)
+
+    if command_type == "debug_add_item":
+        return _validate_debug_add_item(payload, state)
+
+    if command_type == "debug_remove_item":
+        return _validate_debug_remove_item(payload, state)
 
     agent_id = _get_player_agent(state, player_id)
     if agent_id is None:
@@ -145,6 +158,9 @@ def validate_world_command(
 
     if command_type == "consume_item":
         return _validate_consume_item(payload, state, agent)
+
+    if command_type == "buy_from_trader":
+        return _validate_buy_from_trader(payload, state, agent)
 
     return RuleCheckResult(valid=False, error=f"Unknown command for zone_map: {command_type}")
 
@@ -491,6 +507,65 @@ def resolve_world_command(
         })
         return state, events
 
+    # ── debug_set_agent_threshold: meta-command, set material_threshold ──────
+    if command_type == "debug_set_agent_threshold":
+        target_id = str(payload["agent_id"])
+        from app.games.zone_stalkers.rules.tick_rules import MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX
+        amount = max(MATERIAL_THRESHOLD_MIN, min(MATERIAL_THRESHOLD_MAX, int(payload["amount"])))
+        if target_id in state.get("agents", {}):
+            state["agents"][target_id]["material_threshold"] = amount
+        events.append({
+            "event_type": "debug_agent_threshold_set",
+            "payload": {"agent_id": target_id, "amount": amount},
+        })
+        return state, events
+
+    # ── debug_add_item: meta-command, add an item to an agent's inventory ────
+    if command_type == "debug_add_item":
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
+        target_id = str(payload["agent_id"])
+        item_type = str(payload["item_type"])
+        item_info = _ITEM_TYPES[item_type]
+        world_turn = state.get("world_turn", 1)
+        new_item: Dict[str, Any] = {
+            "id": f"{item_type}_{target_id}_debug_{world_turn}",
+            "type": item_type,
+            "name": item_info.get("name", item_type),
+            "weight": item_info.get("weight", 0),
+            "value": item_info.get("value", 0),
+        }
+        state["agents"][target_id].setdefault("inventory", []).append(new_item)
+        events.append({
+            "event_type": "debug_item_added",
+            "payload": {"agent_id": target_id, "item_type": item_type, "item_id": new_item["id"]},
+        })
+        return state, events
+
+    # ── debug_remove_item: meta-command, remove an item from inventory/equipment ──
+    if command_type == "debug_remove_item":
+        target_id = str(payload["agent_id"])
+        item_id = str(payload["item_id"])
+        agent_obj = state["agents"][target_id]
+        removed = False
+        # Try inventory first
+        inv = agent_obj.get("inventory", [])
+        new_inv = [i for i in inv if i.get("id") != item_id]
+        if len(new_inv) < len(inv):
+            agent_obj["inventory"] = new_inv
+            removed = True
+        # Also check equipment slots — set to None rather than deleting so slot remains defined
+        if not removed:
+            for slot, eq_item in list(agent_obj.get("equipment", {}).items()):
+                if eq_item and eq_item.get("id") == item_id:
+                    agent_obj["equipment"][slot] = None
+                    removed = True
+                    break
+        events.append({
+            "event_type": "debug_item_removed",
+            "payload": {"agent_id": target_id, "item_id": item_id, "removed": removed},
+        })
+        return state, events
+
     # ── debug_advance_turns ───────────────────────────────────────────────────
     if command_type == "debug_advance_turns":
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
@@ -521,18 +596,42 @@ def resolve_world_command(
 
     # ── debug_trigger_emission ────────────────────────────────────────────────
     if command_type == "debug_trigger_emission":
-        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        import random as _random
+        from app.games.zone_stalkers.rules.tick_rules import (
+            _add_memory,
+            _EMISSION_WARNING_MIN_TURNS,
+            _EMISSION_WARNING_MAX_TURNS,
+        )
         world_turn = state.get("world_turn", 1)
-        # Schedule emission for right now and tick once so the emission logic fires
-        state["emission_scheduled_turn"] = world_turn
+        # Pick a random warning offset (same range as the live system: 10–15 turns).
+        _rng = _random.Random(f"{state.get('seed', 0)}_debug_trigger_{world_turn}")
+        _warn_offset = _rng.randint(_EMISSION_WARNING_MIN_TURNS, _EMISSION_WARNING_MAX_TURNS)
+        _scheduled_turn = world_turn + _warn_offset
+        state["emission_scheduled_turn"] = _scheduled_turn
         state["emission_active"] = False
-        state, tick_evs = tick_zone_map(state)
-        events.extend(tick_evs)
+        # Pre-write the warning state so the normal tick won't duplicate it.
+        state["emission_warning_written_turn"] = world_turn
+        state["emission_warning_offset"] = _warn_offset
+        # Broadcast emission_imminent to every alive agent right now.
+        for _dbg_agent in state.get("agents", {}).values():
+            if not _dbg_agent.get("is_alive", True):
+                continue
+            _add_memory(
+                _dbg_agent, world_turn, state, "observation",
+                "⚠️ Скоро выброс!",
+                f"Почувствовал приближение выброса. До начала примерно {_warn_offset} минут. Нужно найти укрытие!",
+                {
+                    "action_kind": "emission_imminent",
+                    "turns_until": _warn_offset,
+                    "emission_scheduled_turn": _scheduled_turn,
+                },
+            )
         events.append({
             "event_type": "debug_emission_triggered",
             "payload": {
-                "emission_active": state.get("emission_active", False),
-                "emission_ends_turn": state.get("emission_ends_turn", 0),
+                "emission_scheduled_turn": _scheduled_turn,
+                "turns_until": _warn_offset,
+                "emission_active": False,
             },
         })
         return state, events
@@ -686,6 +785,15 @@ def resolve_world_command(
                 })
                 if agent["hp"] <= 0:
                     agent["is_alive"] = False
+                    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+                    _move_loc_name = new_loc_data.get("name", target_loc_id)
+                    _add_memory(
+                        agent, state.get("world_turn", 1), state, "observation",
+                        "💀 Смерть",
+                        f"Погиб от аномалии при перемещении в «{_move_loc_name}». Тип аномалии: {anomaly_type}.",
+                        {"action_kind": "death", "cause": "anomaly",
+                         "location_id": target_loc_id, "anomaly_type": anomaly_type},
+                    )
                     events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
 
     elif command_type == "travel":
@@ -724,7 +832,7 @@ def resolve_world_command(
         loc_id = agent["location_id"]
         loc = state["locations"].get(loc_id, {})
         agent["scheduled_action"] = {
-            "type": "explore",
+            "type": "explore_anomaly_location",
             "turns_remaining": 1,
             "turns_total": 1,
             "target_id": loc_id,
@@ -824,6 +932,57 @@ def resolve_world_command(
                 },
             })
 
+    elif command_type == "buy_from_trader":
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        item_type = payload["item_type"]
+        item_info = ITEM_TYPES[item_type]
+        buy_price = int(item_info.get("value", 0) * 1.5)
+        loc_id = agent["location_id"]
+        trader = next(
+            (t for t in state.get("traders", {}).values()
+             if t.get("location_id") == loc_id and t.get("is_alive", True)),
+            None,
+        )
+        if trader:
+            import uuid as _uuid
+            agent["money"] = agent.get("money", 0) - buy_price
+            trader["money"] = trader.get("money", 0) + buy_price
+            new_item: Dict[str, Any] = {
+                "id": str(_uuid.uuid4()),
+                "type": item_type,
+                "name": item_info["name"],
+                "weight": item_info.get("weight", 0),
+                "value": item_info.get("value", 0),
+            }
+            agent.setdefault("inventory", []).append(new_item)
+            agent["action_used"] = True
+            events.append({
+                "event_type": "item_bought",
+                "payload": {
+                    "agent_id": agent_id,
+                    "player_id": player_id,
+                    "trader_id": trader["id"],
+                    "item_id": new_item["id"],
+                    "item_type": item_type,
+                    "price": buy_price,
+                },
+            })
+            # Trader memory: record the sale from the trader's perspective
+            from app.games.zone_stalkers.rules.tick_rules import _add_trader_memory
+            _wt = state.get("world_turn", 1)
+            buyer_name = agent.get("name", agent_id)
+            loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+            _add_trader_memory(
+                trader, _wt, state, "trade_sale",
+                f"Продал «{item_info['name']}» сталкеру {buyer_name}",
+                f"Продал «{item_info['name']}» сталкеру {buyer_name} в «{loc_name}» за {buy_price} монет.",
+                {
+                    "item_type": item_type,
+                    "price": buy_price,
+                    "buyer_id": agent_id,
+                },
+            )
+
     return state, events
 
 
@@ -916,8 +1075,30 @@ def _validate_consume_item(payload: Dict[str, Any], state: Dict[str, Any], agent
     return RuleCheckResult(valid=True)
 
 
+def _validate_buy_from_trader(payload: Dict[str, Any], state: Dict[str, Any], agent: Dict[str, Any]) -> RuleCheckResult:
+    item_type = payload.get("item_type")
+    if not item_type:
+        return RuleCheckResult(valid=False, error="item_type is required")
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+    if item_type not in ITEM_TYPES:
+        return RuleCheckResult(valid=False, error=f"Unknown item type: '{item_type}'")
+    loc_id = agent.get("location_id")
+    traders = state.get("traders", {})
+    trader = next(
+        (t for t in traders.values()
+         if t.get("location_id") == loc_id and t.get("is_alive", True)),
+        None,
+    )
+    if not trader:
+        return RuleCheckResult(valid=False, error="No trader at your current location")
+    buy_price = int(ITEM_TYPES[item_type].get("value", 0) * 1.5)
+    if agent.get("money", 0) < buy_price:
+        return RuleCheckResult(valid=False, error=f"Not enough money (need {buy_price} RU)")
+    return RuleCheckResult(valid=True)
+
+
 def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
-    """Apply item effect dict to agent stats (hp, radiation, hunger, thirst)."""
+    """Apply item effect dict to agent stats (hp, radiation, hunger, thirst, sleepiness)."""
     if "hp" in effects:
         agent["hp"] = max(0, min(agent.get("max_hp", 100), agent.get("hp", 100) + effects["hp"]))
     if "radiation" in effects:
@@ -926,6 +1107,8 @@ def _apply_item_effects(agent: Dict[str, Any], effects: Dict[str, Any]) -> None:
         agent["hunger"] = max(0, agent.get("hunger", 0) + effects["hunger"])
     if "thirst" in effects:
         agent["thirst"] = max(0, agent.get("thirst", 0) + effects["thirst"])
+    if "sleepiness" in effects:
+        agent["sleepiness"] = max(0, agent.get("sleepiness", 0) + effects["sleepiness"])
 
 
 def _bfs_route(locations: Dict[str, Any], start: str, goal: str) -> List[str]:
@@ -1186,4 +1369,62 @@ def _validate_debug_set_agent_money(
         int(amount)
     except (TypeError, ValueError):
         return RuleCheckResult(valid=False, error="amount must be an integer")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_add_item(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    if agent_id not in state.get("agents", {}):
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    item_type = payload.get("item_type")
+    if not item_type:
+        return RuleCheckResult(valid=False, error="item_type is required")
+    if item_type not in _ITEM_TYPES:
+        return RuleCheckResult(valid=False, error=f"Unknown item_type: {item_type}")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_remove_item(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    if agent_id not in state.get("agents", {}):
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    item_id = payload.get("item_id")
+    if not item_id:
+        return RuleCheckResult(valid=False, error="item_id is required")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_set_agent_threshold(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    agent_id = payload.get("agent_id")
+    if not agent_id:
+        return RuleCheckResult(valid=False, error="agent_id is required")
+    if agent_id not in state.get("agents", {}):
+        return RuleCheckResult(valid=False, error=f"Agent not found: {agent_id}")
+    amount = payload.get("amount")
+    if amount is None:
+        return RuleCheckResult(valid=False, error="amount is required")
+    try:
+        val = int(amount)
+    except (TypeError, ValueError):
+        return RuleCheckResult(valid=False, error="amount must be an integer")
+    from app.games.zone_stalkers.rules.tick_rules import MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX
+    if not (MATERIAL_THRESHOLD_MIN <= val <= MATERIAL_THRESHOLD_MAX):
+        return RuleCheckResult(
+            valid=False,
+            error=f"amount must be between {MATERIAL_THRESHOLD_MIN} and {MATERIAL_THRESHOLD_MAX}"
+        )
     return RuleCheckResult(valid=True)

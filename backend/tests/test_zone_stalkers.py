@@ -662,7 +662,7 @@ class TestNewAgentFields:
     def test_global_goal_present(self):
         agent = self._agent()
         assert "global_goal" in agent
-        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+        assert agent["global_goal"] == "get_rich"
 
     def test_risk_tolerance_present(self):
         agent = self._agent()
@@ -751,6 +751,586 @@ class TestConsumeItem:
     def test_consume_no_item_id_invalid(self):
         state = self._state_with_item()
         assert not self._v("consume_item", {}, state).valid
+
+    def test_consume_morphine_reduces_sleepiness(self):
+        state = self._state_with_item("morphine")
+        state["agents"]["agent_p0"]["sleepiness"] = 60
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["sleepiness"] < 60
+
+    def test_consume_energy_drink_reduces_sleepiness(self):
+        state = self._state_with_item("energy_drink")
+        state["agents"]["agent_p0"]["sleepiness"] = 50
+        new_state, _ = self._r("consume_item", {"item_id": "test_item_1"}, state)
+        assert new_state["agents"]["agent_p0"]["sleepiness"] < 50
+
+
+class TestBuyFromTrader:
+    """Unit tests for the buy_from_trader zone_map command."""
+
+    def _make_state(self, agent_money: int = 5000):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=7, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        state["agents"]["agent_p0"]["money"] = agent_money
+        # Place a trader at the same location as the player's agent
+        loc_id = state["agents"]["agent_p0"]["location_id"]
+        state["traders"]["trader_test"] = {
+            "id": "trader_test",
+            "name": "Sidorovich",
+            "location_id": loc_id,
+            "inventory": [],
+            "money": 5000,
+            "is_alive": True,
+        }
+        state["locations"][loc_id].setdefault("agents", []).append("trader_test")
+        return state
+
+    def _v(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command("buy_from_trader", payload, state, "player1")
+
+    def _r(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("buy_from_trader", payload, state, "player1")
+
+    def test_buy_valid(self):
+        state = self._make_state()
+        result = self._v({"item_type": "medkit"}, state)
+        assert result.valid
+
+    def test_buy_unknown_item_type_invalid(self):
+        state = self._make_state()
+        result = self._v({"item_type": "nonexistent_item"}, state)
+        assert not result.valid
+        assert "unknown" in result.error.lower()
+
+    def test_buy_missing_item_type_invalid(self):
+        state = self._make_state()
+        result = self._v({}, state)
+        assert not result.valid
+        assert "item_type" in result.error.lower()
+
+    def test_buy_no_trader_at_location_invalid(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=7, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        state["player_agents"]["player1"] = "agent_p0"
+        state["agents"]["agent_p0"]["controller"]["participant_id"] = "player1"
+        result = self._v({"item_type": "medkit"}, state)
+        assert not result.valid
+        assert "trader" in result.error.lower()
+
+    def test_buy_not_enough_money_invalid(self):
+        state = self._make_state(agent_money=10)
+        result = self._v({"item_type": "medkit"}, state)
+        assert not result.valid
+        assert "money" in result.error.lower()
+
+    def test_buy_transfers_item_to_inventory(self):
+        state = self._make_state(agent_money=5000)
+        new_state, events = self._r({"item_type": "bandage"}, state)
+        agent = new_state["agents"]["agent_p0"]
+        assert any(i["type"] == "bandage" for i in agent["inventory"])
+        assert any(e["event_type"] == "item_bought" for e in events)
+
+    def test_buy_deducts_money_at_150_pct(self):
+        state = self._make_state(agent_money=5000)
+        new_state, _ = self._r({"item_type": "bandage"}, state)
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        expected_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+        assert new_state["agents"]["agent_p0"]["money"] == 5000 - expected_price
+
+    def test_buy_credits_trader_money(self):
+        state = self._make_state(agent_money=5000)
+        new_state, _ = self._r({"item_type": "bandage"}, state)
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        expected_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+        assert new_state["traders"]["trader_test"]["money"] == 5000 + expected_price
+
+    def test_buy_all_new_items_valid(self):
+        """All new item types should be purchasable from a trader."""
+        new_items = [
+            "army_medkit", "morphine", "rad_cure",
+            "pkm", "svu_svd",
+            "combat_armor", "seva_suit",
+            "ammo_762",
+            "military_ration", "purified_water", "glucose",
+            "bear_detector",
+        ]
+        for item_type in new_items:
+            state = self._make_state(agent_money=50000)
+            result = self._v({"item_type": item_type}, state)
+            assert result.valid, f"buy_from_trader should be valid for new item '{item_type}': {result.error}"
+
+
+class TestRiskToleranceItemSelection:
+    """Unit tests for risk-tolerance-based item selection in bot purchases."""
+
+    def _make_bot_state(self, agent_risk: float = 0.5, agent_money: int = 10000):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=5, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        agent["risk_tolerance"] = agent_risk
+        agent["money"] = agent_money
+        state["traders"]["trader_rt"] = {
+            "id": "trader_rt", "name": "Test Trader",
+            "location_id": loc_id, "inventory": [], "money": 5000, "is_alive": True,
+        }
+        return state, agent
+
+    def test_select_item_prefers_closest_risk_tolerance(self):
+        """_select_item_by_risk_tolerance should pick the item with risk_tolerance closest to agent's."""
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # Find the weapon whose risk_tolerance is exactly 0.5, if one exists; otherwise closest.
+        agent_risk = 0.5
+        result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert result is not None
+        item_key, _ = result
+        # Verify the selected item is indeed the one with minimum |rt - agent_risk|
+        best_dist = min(
+            abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk)
+            for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES
+        )
+        assert abs(ITEM_TYPES[item_key].get("risk_tolerance", 0.5) - agent_risk) == best_dist
+
+    def test_select_item_for_cautious_agent(self):
+        """A cautious agent (low risk_tolerance) should prefer the lowest-risk weapon."""
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        agent_risk = 0.0  # absolute minimum — will pick the weapon with lowest risk_tolerance
+        result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert result is not None
+        item_key, _ = result
+        expected_key = min(
+            (k for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES),
+            key=lambda k: (abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk), ITEM_TYPES[k].get("value", 0)),
+        )
+        assert item_key == expected_key
+
+    def test_select_item_for_aggressive_agent(self):
+        """An aggressive agent (high risk_tolerance) should prefer the highest-risk weapon."""
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        agent_risk = 1.0  # absolute maximum — will pick the weapon with highest risk_tolerance
+        result = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert result is not None
+        item_key, _ = result
+        expected_key = min(
+            (k for k in WEAPON_ITEM_TYPES if k in ITEM_TYPES),
+            key=lambda k: (abs(ITEM_TYPES[k].get("risk_tolerance", 0.5) - agent_risk), ITEM_TYPES[k].get("value", 0)),
+        )
+        assert item_key == expected_key
+
+    def test_select_item_empty_set_returns_none(self):
+        from app.games.zone_stalkers.rules.tick_rules import _select_item_by_risk_tolerance
+        assert _select_item_by_risk_tolerance(frozenset(), 0.5) is None
+
+    def test_bot_buys_risk_matched_weapon(self):
+        """Bot should choose the weapon whose risk_tolerance is closest to its own."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader, _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        agent_risk = 0.5
+        state, agent = self._make_bot_state(agent_risk=agent_risk)
+        events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        assert len(events) == 1
+        # Verify the purchased item is the expected best-risk-match (ignoring affordability order)
+        expected = _select_item_by_risk_tolerance(WEAPON_ITEM_TYPES, agent_risk)
+        assert expected is not None
+        assert events[0]["payload"]["item_type"] == expected[0]
+
+    def test_bot_buys_risk_matched_armor(self):
+        """Bot should choose the armor whose risk_tolerance is closest to its own."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader, _select_item_by_risk_tolerance
+        from app.games.zone_stalkers.balance.items import ARMOR_ITEM_TYPES
+        agent_risk = 0.4
+        state, agent = self._make_bot_state(agent_risk=agent_risk)
+        events = _bot_buy_from_trader("agent_p0", agent, ARMOR_ITEM_TYPES, state, world_turn=1)
+        assert len(events) == 1
+        expected = _select_item_by_risk_tolerance(ARMOR_ITEM_TYPES, agent_risk)
+        assert expected is not None
+        assert events[0]["payload"]["item_type"] == expected[0]
+
+    def test_bot_buy_writes_decision_memory(self):
+        """A 'decision' memory entry must be written with risk_tolerance info."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state, agent = self._make_bot_state(agent_risk=0.5)
+        _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        decision_entries = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
+        assert len(decision_entries) >= 1
+        # The decision memory must contain risk_tolerance info
+        last_decision = decision_entries[-1]
+        assert "trade_decision" in last_decision.get("effects", {}).get("action_kind", "")
+        assert "agent_risk_tolerance" in last_decision.get("effects", {})
+
+    def test_bot_buy_event_carries_risk_tolerance_info(self):
+        """bot_bought_item event payload must include both risk_tolerance values."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state, agent = self._make_bot_state(agent_risk=0.6)
+        events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        assert events
+        payload = events[0]["payload"]
+        assert "agent_risk_tolerance" in payload
+        assert "item_risk_tolerance" in payload
+
+    def test_bot_falls_back_when_preferred_item_too_expensive(self):
+        """If the best-matching item is unaffordable, the next-closest is chosen."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # For agent_risk=0.9 the closest weapon is pkm (0.9), price 3500*1.5=5250
+        # Give the agent exactly 5249 — not enough for pkm, should fall back
+        # Next closest to 0.9: svu_svd (0.7), price 4500*1.5=6750 — too expensive
+        # Next: ak74 (0.6), price 1500*1.5=2250 — affordable
+        state, agent = self._make_bot_state(agent_risk=0.9, agent_money=2250)
+        events = _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
+        assert events
+        # Must have bought something affordable
+        bought_type = events[0]["payload"]["item_type"]
+        bought_price = int(ITEM_TYPES[bought_type]["value"] * 1.5)
+        assert bought_price <= 2250
+
+    def test_all_items_have_risk_tolerance(self):
+        """Every item in ITEM_TYPES must have a risk_tolerance field."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        for item_key, item_data in ITEM_TYPES.items():
+            assert "risk_tolerance" in item_data, (
+                f"Item '{item_key}' is missing 'risk_tolerance'"
+            )
+            rt = item_data["risk_tolerance"]
+            assert 0.0 <= rt <= 1.0, (
+                f"Item '{item_key}' has risk_tolerance={rt} outside [0, 1]"
+            )
+
+
+class TestEquipmentUpgrade:
+    """Tests for the equipment-upgrade bot priority layer and debug inventory commands."""
+
+    def _make_state_with_agent(self, agent_risk: float = 0.5, agent_money: int = 10000,
+                                equipped_weapon: str = "pistol"):
+        """Return (state, agent) where the agent already has a weapon equipped."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state = generate_zone(seed=3, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        agent = state["agents"]["agent_p0"]
+        loc_id = agent["location_id"]
+        agent["risk_tolerance"] = agent_risk
+        agent["money"] = agent_money
+        # Give agent a weapon already equipped
+        info = ITEM_TYPES[equipped_weapon]
+        agent.setdefault("equipment", {})["weapon"] = {
+            "id": f"{equipped_weapon}_init",
+            "type": equipped_weapon,
+            "name": info.get("name", equipped_weapon),
+            "value": info.get("value", 0),
+        }
+        # Place a trader at the same location
+        state["traders"]["trader_upg"] = {
+            "id": "trader_upg", "name": "UpgradeTrader",
+            "location_id": loc_id, "inventory": [], "money": 50000, "is_alive": True,
+        }
+        return state, agent
+
+    # ── _find_upgrade_target tests ─────────────────────────────────────────
+
+    def test_find_upgrade_target_returns_better_match(self):
+        """_find_upgrade_target should return an item with better risk match and higher value."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # Current: pistol (rt=0.3, value=500). Agent risk=0.6. Better match: ak74 (rt=0.6, val=1500)
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "pistol", 0.6, 50000)
+        assert result is not None
+        # The result must be closer to 0.6 than pistol (0.3) AND more expensive than pistol
+        assert ITEM_TYPES[result]["risk_tolerance"] != 0.3  # not the same as current
+        assert ITEM_TYPES[result]["value"] > ITEM_TYPES["pistol"]["value"]
+
+    def test_find_upgrade_target_no_upgrade_when_already_best(self):
+        """No upgrade when current item is the best risk-tolerance match."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ITEM_TYPES
+        # Current: shotgun (rt=0.5), agent_risk=0.5 → already best match
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "shotgun", 0.5, 50000)
+        assert result is None
+
+    def test_find_upgrade_target_no_upgrade_when_cant_afford(self):
+        """No upgrade returned when agent cannot afford the better item."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        # pistol → ak74 costs 1500*1.5=2250; agent only has 100 money
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, "pistol", 0.6, 100)
+        assert result is None
+
+    def test_find_upgrade_target_no_upgrade_for_none_current(self):
+        """No upgrade when there is no current item (slot empty)."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        # current_item_type=None → nothing to upgrade
+        result = _find_upgrade_target(WEAPON_ITEM_TYPES, None, 0.5, 50000)
+        assert result is None
+
+    # ── _bot_try_upgrade_equipment tests ──────────────────────────────────
+
+    def test_upgrade_buys_better_weapon_when_trader_present(self):
+        """Bot should buy and equip a better weapon when the trader is at the same location."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        # pistol (rt=0.3) equipped; agent risk=0.6 → upgrade target should be ak74 (rt=0.6)
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        events = _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        assert events, "Expected upgrade events"
+        event_types = {e["event_type"] for e in events}
+        assert "bot_bought_item" in event_types
+
+    def test_upgrade_equips_new_weapon_in_slot(self):
+        """After upgrade, the agent's weapon slot should contain the new (better) item."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        new_weapon = agent.get("equipment", {}).get("weapon")
+        assert new_weapon is not None
+        new_type = new_weapon.get("type")
+        # The new weapon must have a closer risk_tolerance to 0.6 than pistol (0.3)
+        assert abs(ITEM_TYPES[new_type]["risk_tolerance"] - 0.6) < abs(0.3 - 0.6)
+
+    def test_upgrade_old_weapon_returns_to_inventory(self):
+        """The old equipped weapon should go back to inventory after upgrade."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        inv_types = {i["type"] for i in agent.get("inventory", [])}
+        assert "pistol" in inv_types, "Old weapon should be returned to inventory"
+
+    def test_upgrade_writes_decision_memory(self):
+        """Upgrade decision must be recorded in agent memory."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
+        _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
+        decision_mem = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
+        kinds = [m.get("effects", {}).get("action_kind", "") for m in decision_mem]
+        assert "upgrade_decision" in kinds
+
+    def test_no_upgrade_when_no_equipment(self):
+        """No upgrade events when agent has no weapon equipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=4, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        agent = state["agents"]["agent_p0"]
+        agent["risk_tolerance"] = 0.6
+        agent["money"] = 50000
+        agent["equipment"] = {}  # no equipment at all
+        loc_id = agent["location_id"]
+        state["traders"]["trader_t"] = {
+            "id": "trader_t", "name": "T", "location_id": loc_id,
+            "inventory": [], "money": 50000, "is_alive": True,
+        }
+        events = _bot_try_upgrade_equipment("agent_p0", agent, loc_id, state, 1)
+        assert events == []
+
+    # ── Debug command: debug_add_item ────────────────────────────────────
+
+    def _base_state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=6, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        return state
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "any_user")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "any_user")
+
+    def test_debug_add_item_valid(self):
+        state = self._base_state()
+        result = self._v("debug_add_item", {"agent_id": "agent_p0", "item_type": "bandage"}, state)
+        assert result.valid
+
+    def test_debug_add_item_invalid_no_agent(self):
+        state = self._base_state()
+        result = self._v("debug_add_item", {"agent_id": "nonexistent", "item_type": "bandage"}, state)
+        assert not result.valid
+
+    def test_debug_add_item_invalid_unknown_type(self):
+        state = self._base_state()
+        result = self._v("debug_add_item", {"agent_id": "agent_p0", "item_type": "nuclear_bomb"}, state)
+        assert not result.valid
+
+    def test_debug_add_item_resolve_adds_to_inventory(self):
+        state = self._base_state()
+        inv_before = len(state["agents"]["agent_p0"].get("inventory", []))
+        new_state, events = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "ak74"}, state)
+        assert len(new_state["agents"]["agent_p0"]["inventory"]) == inv_before + 1
+        types_in_inv = {i["type"] for i in new_state["agents"]["agent_p0"]["inventory"]}
+        assert "ak74" in types_in_inv
+        assert any(e["event_type"] == "debug_item_added" for e in events)
+
+    # ── Debug command: debug_remove_item ─────────────────────────────────
+
+    def test_debug_remove_item_valid(self):
+        state = self._base_state()
+        # Add an item first so we have an id
+        new_state, _ = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "bandage"}, state)
+        item_id = new_state["agents"]["agent_p0"]["inventory"][-1]["id"]
+        result = self._v("debug_remove_item", {"agent_id": "agent_p0", "item_id": item_id}, new_state)
+        assert result.valid
+
+    def test_debug_remove_item_invalid_no_agent(self):
+        state = self._base_state()
+        result = self._v("debug_remove_item", {"agent_id": "ghost", "item_id": "x"}, state)
+        assert not result.valid
+
+    def test_debug_remove_item_resolve_removes_from_inventory(self):
+        state = self._base_state()
+        new_state, _ = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "medkit"}, state)
+        item_id = new_state["agents"]["agent_p0"]["inventory"][-1]["id"]
+        final_state, events = self._r("debug_remove_item", {"agent_id": "agent_p0", "item_id": item_id}, new_state)
+        inv_types = {i["type"] for i in final_state["agents"]["agent_p0"]["inventory"]}
+        assert "medkit" not in inv_types
+        ev = next(e for e in events if e["event_type"] == "debug_item_removed")
+        assert ev["payload"]["removed"] is True
+
+    def test_debug_remove_item_resolve_removes_from_equipment(self):
+        """debug_remove_item should set equipment slots to None (not delete them)."""
+        state = self._base_state()
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        eq_item = {
+            "id": "pistol_eq_test", "type": "pistol",
+            "name": ITEM_TYPES["pistol"]["name"], "value": 500,
+        }
+        state["agents"]["agent_p0"].setdefault("equipment", {})["weapon"] = eq_item
+        final_state, events = self._r(
+            "debug_remove_item",
+            {"agent_id": "agent_p0", "item_id": "pistol_eq_test"},
+            state,
+        )
+        # Slot should be set to None, not deleted
+        assert final_state["agents"]["agent_p0"]["equipment"]["weapon"] is None
+        ev = next(e for e in events if e["event_type"] == "debug_item_removed")
+        assert ev["payload"]["removed"] is True
+
+    def test_debug_remove_nonexistent_item_returns_removed_false(self):
+        state = self._base_state()
+        final_state, events = self._r(
+            "debug_remove_item",
+            {"agent_id": "agent_p0", "item_id": "nonexistent_id"},
+            state,
+        )
+        ev = next(e for e in events if e["event_type"] == "debug_item_removed")
+        assert ev["payload"]["removed"] is False
+
+
+class TestMaterialThreshold:
+    """Tests for material_threshold separation from global_goal and the debug command."""
+
+    def _base_state(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        return generate_zone(seed=7, num_players=1, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+
+    def _v(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command
+        return validate_world_command(cmd, payload, state, "any_user")
+
+    def _r(self, cmd, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(cmd, payload, state, "any_user")
+
+    # ── Generator: all agents get threshold in [3000, 10000] ───────────────
+
+    def test_all_generated_agents_have_threshold_in_range(self):
+        """Generator must set material_threshold in [3000, 10000] for all stalkers."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        for seed in range(20):
+            state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
+            for agent_id, agent in state.get("agents", {}).items():
+                t = agent.get("material_threshold", 0)
+                assert 3000 <= t <= 10000, (
+                    f"seed={seed} agent={agent_id}: material_threshold={t} out of [3000,10000]"
+                )
+
+    def test_get_rich_agent_has_same_threshold_range(self):
+        """get_rich agents must also have threshold in [3000, 10000], not 50k-1M."""
+        from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
+        import random
+        found_get_rich = False
+        for seed in range(100):
+            rng = random.Random(seed)
+            agent = _make_stalker_agent(
+                agent_id=f"a{seed}", name=f"S{seed}", location_id="loc0",
+                controller_kind="bot", participant_id=None, rng=rng,
+                global_goal="get_rich",
+            )
+            assert 3000 <= agent["material_threshold"] <= 10000, (
+                f"get_rich agent seed={seed}: threshold={agent['material_threshold']}"
+            )
+            found_get_rich = True
+        assert found_get_rich
+
+    # ── Bot decision: ALL agents go through threshold gate ─────────────────
+
+    def test_get_rich_agent_below_threshold_gathers_resources(self):
+        """A get_rich agent below material_threshold must gather resources, not pursue goal directly."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        state = generate_zone(seed=8, num_players=0, num_ai_stalkers=1, num_mutants=0, num_traders=0)
+        agent_id = list(state["agents"].keys())[0]
+        agent = state["agents"][agent_id]
+        agent["global_goal"] = "get_rich"
+        agent["material_threshold"] = 5000
+        agent["money"] = 100  # far below threshold
+        agent["inventory"] = []
+        agent["equipment"] = {"weapon": None, "armor": None, "detector": None}
+        # We just need to verify current_goal gets set to gather_resources
+        _run_bot_action_inner(agent_id, agent, state, world_turn=1)
+        assert agent.get("current_goal") in ("gather_resources", "get_weapon", "get_armor"), (
+            f"Expected resource gathering for underfunded get_rich agent, got {agent.get('current_goal')}"
+        )
+
+    def test_validate_set_threshold_valid(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 5000}, state)
+        assert result.valid
+
+    def test_validate_set_threshold_below_min(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 2999}, state)
+        assert not result.valid
+
+    def test_validate_set_threshold_above_max(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 10001}, state)
+        assert not result.valid
+
+    def test_validate_set_threshold_missing_agent(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "ghost_agent", "amount": 5000}, state)
+        assert not result.valid
+
+    def test_validate_set_threshold_missing_amount(self):
+        state = self._base_state()
+        result = self._v("debug_set_agent_threshold", {"agent_id": "agent_p0"}, state)
+        assert not result.valid
+
+    # ── debug_set_agent_threshold: resolve ─────────────────────────────────
+
+    def test_resolve_set_threshold_updates_agent(self):
+        state = self._base_state()
+        new_state, events = self._r("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 7500}, state)
+        assert new_state["agents"]["agent_p0"]["material_threshold"] == 7500
+        assert any(e["event_type"] == "debug_agent_threshold_set" for e in events)
+
+    def test_resolve_set_threshold_at_boundary_3000(self):
+        state = self._base_state()
+        new_state, _ = self._r("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 3000}, state)
+        assert new_state["agents"]["agent_p0"]["material_threshold"] == 3000
+
+    def test_resolve_set_threshold_at_boundary_10000(self):
+        state = self._base_state()
+        new_state, _ = self._r("debug_set_agent_threshold", {"agent_id": "agent_p0", "amount": 10000}, state)
+        assert new_state["agents"]["agent_p0"]["material_threshold"] == 10000
 
 
 class TestDebugUpdateMap:
@@ -1466,12 +2046,12 @@ class TestUnifiedStalkerModel:
     def test_player_agent_has_global_goal(self):
         state = self._state()
         agent = state["agents"]["agent_p0"]
-        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+        assert agent["global_goal"] == "get_rich"
 
     def test_npc_agent_has_global_goal(self):
         state = self._state()
         agent = state["agents"]["agent_ai_0"]
-        assert agent["global_goal"] in ("survive", "get_rich", "explore", "serve_faction")
+        assert agent["global_goal"] == "get_rich"
 
     def test_all_agents_have_material_threshold(self):
         state = self._state()

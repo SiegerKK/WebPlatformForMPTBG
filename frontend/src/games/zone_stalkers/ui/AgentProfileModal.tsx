@@ -82,6 +82,48 @@ const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${St
 const MINUTES_PER_TURN = 1;
 const TURNS_PER_HOUR = 60 / MINUTES_PER_TURN;
 
+/** All available item types with display names — mirrors ITEM_TYPES in items.py */
+const ALL_ITEM_OPTIONS: Array<{ value: string; label: string }> = [
+  // Medical
+  { value: 'bandage',       label: 'Бинт' },
+  { value: 'medkit',        label: 'Аптечка' },
+  { value: 'army_medkit',   label: 'Военная аптечка' },
+  { value: 'stimpack',      label: 'Стимпак' },
+  { value: 'morphine',      label: 'Морфин' },
+  { value: 'antirad',       label: 'Антирад' },
+  { value: 'rad_cure',      label: 'Рад-Пурге' },
+  // Weapons
+  { value: 'pistol',        label: 'Пистолет ПМ' },
+  { value: 'shotgun',       label: 'Обрез ТОЗ-34' },
+  { value: 'ak74',          label: 'АК-74' },
+  { value: 'pkm',           label: 'ПКМ (пулемёт)' },
+  { value: 'svu_svd',       label: 'СВД (снайперская)' },
+  // Armor
+  { value: 'leather_jacket',label: 'Кожаная куртка' },
+  { value: 'stalker_suit',  label: 'Комбинезон сталкера' },
+  { value: 'combat_armor',  label: 'Боевой бронежилет' },
+  { value: 'seva_suit',     label: 'Костюм СЕВА' },
+  { value: 'exoskeleton',   label: 'Экзоскелет' },
+  // Ammo
+  { value: 'ammo_9mm',      label: 'Патроны 9х18' },
+  { value: 'ammo_12gauge',  label: 'Дробь 12 кал.' },
+  { value: 'ammo_545',      label: 'Патроны 5.45х39' },
+  { value: 'ammo_762',      label: 'Патроны 7.62х54R' },
+  // Consumables
+  { value: 'bread',         label: 'Буханка хлеба' },
+  { value: 'canned_food',   label: 'Тушёнка' },
+  { value: 'military_ration',label: 'Сухой паёк' },
+  { value: 'water',         label: 'Вода (0.5л)' },
+  { value: 'purified_water',label: 'Очищенная вода (1л)' },
+  { value: 'energy_drink',  label: 'Энергетик' },
+  { value: 'vodka',         label: 'Водка' },
+  { value: 'glucose',       label: 'Раствор глюкозы' },
+  // Detectors
+  { value: 'echo_detector', label: 'Детектор «Эхо»' },
+  { value: 'bear_detector', label: 'Детектор «Медведь»' },
+  { value: 'veles_detector',label: 'Детектор «Велес»' },
+];
+
 /**
  * Derive game day/hour/minute from world_turn.
  * The game starts at turn 1 = day 1, 06:00.
@@ -109,7 +151,7 @@ const schedRemaining = (type: string, turns: number): string => {
 
 const SCHED_ICONS: Record<string, string> = {
   travel: '🚶',
-  explore: '🔍',
+  explore_anomaly_location: '🔍',
   sleep: '😴',
   event: '📖',
 };
@@ -121,7 +163,7 @@ const MEM_ICONS: Record<string, string> = {
   observation: '👁️',
   // legacy types kept for backwards compat with old save data
   travel: '🚶',
-  explore: '🔍',
+  explore_anomaly_location: '🔍',
   sleep: '😴',
   pickup: '🎁',
   trade_sell: '💰',
@@ -132,7 +174,7 @@ const MEM_COLORS: Record<string, string> = {
   action: '#34d399',     // emerald – the "deed"
   observation: '#fbbf24', // amber – the "sight"
   travel: '#34d399',
-  explore: '#34d399',
+  explore_anomaly_location: '#34d399',
   sleep: '#34d399',
   pickup: '#34d399',
   trade_sell: '#34d399',
@@ -145,9 +187,12 @@ const CURRENT_GOAL_LABELS: Record<string, string> = {
   goal_get_rich_seek_artifacts: 'Ищу артефакты',
   sell_artifacts:               'Продаю артефакты',
   flee_to_safety:               'Бегство',
-  goal_survive:                 'Выживание',
-  goal_explore_zone:            'Исследование зоны',
-  goal_serve_faction:           'Служу фракции',
+
+  upgrade_equipment:            'Апгрейд снаряжения',
+  get_weapon:                   'Ищу оружие',
+  get_armor:                    'Ищу броню',
+  get_ammo:                     'Ищу патроны',
+  flee_emission:                'Убегаю от выброса',
 };
 
 /** Return a display label for a current_goal identifier. */
@@ -168,6 +213,33 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   // first paint without needing a button click.
   const [moneyEdit, setMoneyEdit] = React.useState<string | null>(null);
   const [moneySaving, setMoneySaving] = React.useState(false);
+  // Threshold editor state
+  const [thresholdEdit, setThresholdEdit] = React.useState<string | null>(null);
+  const [thresholdSaving, setThresholdSaving] = React.useState(false);
+  // Inventory management state
+  const [addItemType, setAddItemType] = React.useState<string>('bandage');
+  const [addItemSaving, setAddItemSaving] = React.useState(false);
+  const [removingItemId, setRemovingItemId] = React.useState<string | null>(null);
+
+  const handleAddItem = async () => {
+    if (!sendCommand || !addItemType) return;
+    setAddItemSaving(true);
+    try {
+      await sendCommand('debug_add_item', { agent_id: agent.id, item_type: addItemType });
+    } finally {
+      setAddItemSaving(false);
+    }
+  };
+
+  const handleRemoveItem = async (itemId: string) => {
+    if (!sendCommand) return;
+    setRemovingItemId(itemId);
+    try {
+      await sendCommand('debug_remove_item', { agent_id: agent.id, item_id: itemId });
+    } finally {
+      setRemovingItemId(null);
+    }
+  };
 
   const handleMoneySave = async () => {
     if (!sendCommand || moneyEdit === null) return;
@@ -182,6 +254,20 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     }
   };
 
+  const handleThresholdSave = async () => {
+    if (!sendCommand || thresholdEdit === null) return;
+    const raw = parseInt(thresholdEdit, 10);
+    if (isNaN(raw)) { setThresholdEdit(null); return; }
+    const parsed = Math.max(3000, Math.min(10000, raw));
+    setThresholdSaving(true);
+    try {
+      await sendCommand('debug_set_agent_threshold', { agent_id: agent.id, amount: parsed });
+    } finally {
+      setThresholdSaving(false);
+      setThresholdEdit(null);
+    }
+  };
+
   const [decisionPreview, setDecisionPreview] = React.useState<DecisionPreview | null>(() => {
     if (sendCommand && agent.controller.kind === 'bot') {
       return _clientSideDecisionHint(agent);
@@ -189,7 +275,6 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     return null;
   });
   const [loadingDecision, setLoadingDecision] = React.useState(false);
-  const [showAllLayers, setShowAllLayers] = React.useState(false);
 
   // Fire the backend preview command whenever the displayed agent changes.
   // The result is discarded here — we rely on the client-side hint for
@@ -232,10 +317,25 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               </div>
             </div>
           </div>
-          <button style={s.closeBtn} onClick={onClose} title="Закрыть">✕</button>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexShrink: 0 }}>
+            <button
+              style={s.closeBtn}
+              title="Экспорт в JSON"
+              onClick={() => {
+                const json = JSON.stringify(agent, null, 2);
+                const blob = new Blob([json], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `stalker_${agent.name.replace(/\s+/g, '_')}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >📥</button>
+            <button style={s.closeBtn} onClick={onClose} title="Закрыть">✕</button>
+          </div>
         </div>
 
-        {/* ── Location & current action ── */}
         <Section label="📍 Местоположение">
           <div style={s.sectionVal}>{locationName}</div>
           {agent.scheduled_action && (
@@ -349,6 +449,43 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 )}
               </div>
             )}
+            {/* ── Material threshold editor ── */}
+            {agent.material_threshold != null && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>💼 Порог богатства:</span>
+                {sendCommand && thresholdEdit !== null ? (
+                  <>
+                    <input
+                      type="number"
+                      min={3000}
+                      max={10000}
+                      value={thresholdEdit}
+                      onChange={(e) => setThresholdEdit(e.target.value)}
+                      onBlur={handleThresholdSave}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleThresholdSave(); if (e.key === 'Escape') setThresholdEdit(null); }}
+                      style={s.moneyInput}
+                      autoFocus
+                      disabled={thresholdSaving}
+                    />
+                    <span style={s.moneyRu}>RU</span>
+                    <button style={s.moneySaveBtn} onClick={handleThresholdSave} disabled={thresholdSaving} title="Сохранить">
+                      {thresholdSaving ? '…' : '💾'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span
+                      style={sendCommand ? s.moneyLineEditable : { color: '#e2e8f0', fontSize: '0.82rem' }}
+                      onClick={() => sendCommand && setThresholdEdit(String(agent.material_threshold))}
+                      title={sendCommand ? 'Нажмите для редактирования (3000–10000)' : undefined}
+                    >
+                      {agent.material_threshold} RU
+                    </span>
+                    {sendCommand && <span style={s.moneyEditHint}>✏️</span>}
+                  </>
+                )}
+              </div>
+            )}
           </Section>
         )}
 
@@ -357,17 +494,35 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
           {Object.keys(agent.equipment).length === 0 ? (
             <span style={s.empty}>Нет снаряжения</span>
           ) : (
-            Object.entries(agent.equipment).map(([slot, item]) => (
-              <div key={slot} style={s.equipRow}>
-                <span style={s.equipSlot}>{slot}</span>
-                <span style={item ? s.equipItem : s.equipEmpty}>
-                  {item ? item.name : '—'}
-                </span>
-                {item?.value != null && (
-                  <span style={s.equipVal}>{item.value} RU</span>
-                )}
-              </div>
-            ))
+            Object.entries(agent.equipment).map(([slot, item]) => {
+              const slotLabel: Record<string, string> = {
+                weapon: '🔫 Оружие',
+                armor: '🛡️ Броня',
+                detector: '📡 Детектор',
+              };
+              const label = slotLabel[slot] ?? slot;
+              return (
+                <div key={slot} style={{ ...s.equipRow, alignItems: 'center' }}>
+                  <span style={s.equipSlot}>{label}</span>
+                  <span style={item ? s.equipItem : s.equipEmpty}>
+                    {item ? item.name : '— пусто —'}
+                  </span>
+                  {item?.value != null && (
+                    <span style={s.equipVal}>{item.value} RU</span>
+                  )}
+                  {sendCommand && item?.id && (
+                    <button
+                      onClick={() => handleRemoveItem(item.id)}
+                      disabled={removingItemId === item.id}
+                      title="Снять с экипировки"
+                      style={s.removeItemBtn}
+                    >
+                      {removingItemId === item.id ? '…' : '✕'}
+                    </button>
+                  )}
+                </div>
+              );
+            })
           )}
         </Section>
 
@@ -377,7 +532,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
             <span style={s.empty}>Пусто</span>
           ) : (
             agent.inventory.map((item) => (
-              <div key={item.id} style={s.invRow}>
+              <div key={item.id} style={{ ...s.invRow, alignItems: 'center' }}>
                 <span style={s.invName}>{item.name}</span>
                 {item.weight != null && (
                   <span style={s.invWeight}>{item.weight} кг</span>
@@ -385,8 +540,40 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 {item.value != null && (
                   <span style={s.invVal}>{item.value} RU</span>
                 )}
+                {sendCommand && (
+                  <button
+                    onClick={() => handleRemoveItem(item.id)}
+                    disabled={removingItemId === item.id}
+                    title="Удалить предмет"
+                    style={s.removeItemBtn}
+                  >
+                    {removingItemId === item.id ? '…' : '✕'}
+                  </button>
+                )}
               </div>
             ))
+          )}
+          {/* ── Add Item panel (debug only) ── */}
+          {sendCommand && (
+            <div style={s.addItemRow}>
+              <select
+                value={addItemType}
+                onChange={(e) => setAddItemType(e.target.value)}
+                style={s.addItemSelect}
+              >
+                {ALL_ITEM_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <button
+                onClick={handleAddItem}
+                disabled={addItemSaving}
+                style={s.addItemBtn}
+                title="Добавить предмет в инвентарь"
+              >
+                {addItemSaving ? '…' : '+ Добавить'}
+              </button>
+            </div>
           )}
         </Section>
 
@@ -414,7 +601,24 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>
-                    <div style={s.memorySummary}>{m.summary}</div>
+                    {m.type === 'decision' ? (
+                      <>
+                        {m.effects?.['почему'] && (
+                          <div style={s.memorySummary}>
+                            <span style={s.memoryFieldLabel}>Почему: </span>
+                            {String(m.effects['почему'])}
+                          </div>
+                        )}
+                        {m.summary && (
+                          <div style={s.memorySummary}>
+                            <span style={s.memoryFieldLabel}>Зачем: </span>
+                            {m.summary}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={s.memorySummary}>{m.summary}</div>
+                    )}
                   </div>
                 );
               })}
@@ -424,10 +628,14 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
 
         {/* ── Bot decision preview (debug, bots only) ── */}
         {sendCommand && agent.controller.kind === 'bot' && (
-          <Section label="🤖 Решение в этом ходу">
-            {decisionPreview ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {/* Chosen action — highlighted in green */}
+          <Section label="🤖 Приоритеты и решение">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+
+              {/* Priority groups panel — always visible, derived from agent data */}
+              <PriorityGroupsPanel agent={agent} />
+
+              {/* Chosen action — from decisionPreview (client-side or backend) */}
+              {decisionPreview && (
                 <div style={s.decisionChosen}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span>✅</span>
@@ -436,71 +644,16 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                   <div style={s.decisionChosenReason}>{decisionPreview.reason}</div>
                   <div style={s.decisionChosenGoal}>🎯 Цель: {decisionPreview.goal}</div>
                 </div>
+              )}
 
-                {/* Collapsible all-layers list */}
-                {decisionPreview.layers && decisionPreview.layers.length > 0 && (
-                  <div>
-                    <button
-                      style={s.decisionToggleBtn}
-                      onClick={() => setShowAllLayers(!showAllLayers)}
-                    >
-                      {showAllLayers ? '▲ Скрыть варианты' : '▼ Все варианты'}
-                    </button>
-                    {showAllLayers && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
-                        {decisionPreview.layers.map((layer, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              display: 'flex',
-                              gap: 6,
-                              alignItems: 'flex-start',
-                              padding: '0.3rem 0.5rem',
-                              borderRadius: 6,
-                              background: layer.skipped ? 'transparent' : '#052e16',
-                              border: layer.skipped ? '1px solid #1e293b' : '1px solid #22c55e',
-                              opacity: layer.skipped ? 0.6 : 1,
-                            }}
-                          >
-                            <span style={{ flexShrink: 0, fontSize: '0.8rem' }}>
-                              {layer.skipped ? '⏭' : '✅'}
-                            </span>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                              <span style={{
-                                color: layer.skipped ? '#64748b' : '#86efac',
-                                fontSize: '0.75rem',
-                                fontWeight: 600,
-                              }}>
-                                {layer.name} → {layer.action}
-                              </span>
-                              <span style={{ color: '#475569', fontSize: '0.68rem' }}>
-                                {layer.reason}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <button
-                  style={s.decisionRefreshBtn}
-                  onClick={handlePreviewDecision}
-                  disabled={loadingDecision}
-                >
-                  {loadingDecision ? '…' : '🔄 Обновить'}
-                </button>
-              </div>
-            ) : (
               <button
-                style={s.decisionPreviewBtn}
+                style={s.decisionRefreshBtn}
                 onClick={handlePreviewDecision}
                 disabled={loadingDecision}
               >
-                {loadingDecision ? '⏳ Анализ…' : '🔍 Предсказать решение'}
+                {loadingDecision ? '⏳ Анализ…' : '🔄 Обновить решение'}
               </button>
-            )}
+            </div>
           </Section>
         )}
       </div>
@@ -648,6 +801,44 @@ const s: Record<string, React.CSSProperties> = {
   invName: { color: '#cbd5e1', flex: 1 },
   invWeight: { color: '#475569', fontSize: '0.7rem' },
   invVal: { color: '#64748b', fontSize: '0.7rem' },
+  removeItemBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    color: '#ef4444',
+    cursor: 'pointer',
+    fontSize: '0.68rem',
+    padding: '1px 5px',
+    lineHeight: '1.2',
+    flexShrink: 0,
+  },
+  addItemRow: {
+    display: 'flex',
+    gap: 6,
+    alignItems: 'center',
+    marginTop: 6,
+    paddingTop: 6,
+    borderTop: '1px solid #1e293b',
+  },
+  addItemSelect: {
+    flex: 1,
+    background: '#1e293b',
+    color: '#cbd5e1',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: '0.75rem',
+    padding: '3px 6px',
+  },
+  addItemBtn: {
+    background: '#14532d',
+    border: '1px solid #16a34a',
+    borderRadius: 4,
+    color: '#86efac',
+    cursor: 'pointer',
+    fontSize: '0.75rem',
+    padding: '3px 8px',
+    whiteSpace: 'nowrap' as const,
+  },
   empty: { color: '#334155', fontSize: '0.72rem' },
   memoryList: {
     display: 'flex',
@@ -662,6 +853,7 @@ const s: Record<string, React.CSSProperties> = {
   memoryWhen: { color: '#475569', fontSize: '0.7rem' },
   memoryTitle: { color: '#f8fafc', fontWeight: 600, fontSize: '0.82rem', marginBottom: 2 },
   memorySummary: { color: '#94a3b8', fontSize: '0.78rem', lineHeight: 1.5 },
+  memoryFieldLabel: { color: '#64748b', fontWeight: 600 },
   // ── Bot decision preview ──
   decisionRow: { display: 'flex', gap: 8, alignItems: 'flex-start' },
   decisionLabel: { color: '#64748b', fontSize: '0.75rem', minWidth: 68, flexShrink: 0, paddingTop: 1 },
@@ -688,24 +880,11 @@ const s: Record<string, React.CSSProperties> = {
     color: '#475569',
     fontSize: '0.7rem',
   },
-  decisionToggleBtn: {
-    background: 'transparent',
-    border: '1px solid #334155',
-    color: '#64748b',
-    borderRadius: 6,
-    padding: '0.2rem 0.55rem',
-    fontSize: '0.72rem',
-    cursor: 'pointer',
-  },
   decisionPreviewBtn: {
-    background: '#1e3a5f',
-    border: '1px solid #3b82f6',
-    color: '#93c5fd',
-    borderRadius: 7,
-    padding: '0.35rem 0.85rem',
-    fontSize: '0.8rem',
-    cursor: 'pointer',
-    alignSelf: 'flex-start',
+    display: 'none', // kept for backwards compat but no longer shown
+  },
+  decisionToggleBtn: {
+    display: 'none', // kept for backwards compat but no longer shown
   },
   decisionRefreshBtn: {
     background: 'transparent',
@@ -728,13 +907,322 @@ const _ARTIFACT_TYPES = new Set([
   'goldfish', 'night_star', 'stone_blood', 'spring',
 ]);
 
+// ─── Priority groups ──────────────────────────────────────────────────────────
+
+/** Weapon type → required ammo type (mirrors AMMO_FOR_WEAPON in items.py). */
+const _AMMO_FOR_WEAPON: Record<string, string> = {
+  ak74:    'ammo_545',
+  pistol:  'ammo_9mm',
+  shotgun: 'ammo_12gauge',
+  pkm:     'ammo_762',
+  svu_svd: 'ammo_762',
+};
+
+type StatusColor = 'green' | 'yellow' | 'red';
+
+/** Hex colours for each status level. */
+const _STATUS_HEX: Record<StatusColor, string> = {
+  green:  '#22c55e',
+  yellow: '#f59e0b',
+  red:    '#ef4444',
+};
+
+/** Emoji dot for each status level. */
+const _STATUS_DOT: Record<StatusColor, string> = {
+  green:  '🟢',
+  yellow: '🟡',
+  red:    '🔴',
+};
+
+interface PriorityCriterion {
+  label: string;
+  status: StatusColor;
+  detail: string;
+}
+
+interface PriorityGroup {
+  id: string;
+  icon: string;
+  label: string;
+  criteria: PriorityCriterion[];
+}
+
+/** Return the worst (most urgent) status among a list of criteria. */
+function _worstStatus(criteria: PriorityCriterion[]): StatusColor {
+  if (criteria.some(c => c.status === 'red'))    return 'red';
+  if (criteria.some(c => c.status === 'yellow')) return 'yellow';
+  return 'green';
+}
+
+/**
+ * Derive the 4 priority groups with per-criterion colour-coded status.
+ * Groups:
+ *   1. Жизненные   — HP / hunger / thirst / sleep / radiation
+ *   2. Экипировка  — weapon / armor / ammo / medicine / food / water
+ *   3. Материальное — wealth vs threshold / upgrade-available / artifacts to sell
+ *   4. Глобальная цель — threshold gate (locked/unlocked) + current global goal
+ */
+function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
+  const { hp, max_hp, hunger, thirst, sleepiness, radiation } = agent;
+  const wealth = agent.money
+    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
+    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
+  const threshold = agent.material_threshold ?? 3000;
+  const eq = agent.equipment;
+  const inv = agent.inventory;
+  const hpPct = max_hp > 0 ? hp / max_hp : 1;
+  const vitalCriteria: PriorityCriterion[] = [
+    {
+      label:  'HP',
+      // Mirror backend emergency threshold (≤30%) for red; yellow 31–60%; green >60%.
+      status: hpPct <= 0.3 ? 'red' : hpPct <= 0.6 ? 'yellow' : 'green',
+      detail: `${hp} / ${max_hp}`,
+    },
+    {
+      label:  'Голод',
+      status: hunger >= 70 ? 'red' : hunger >= 50 ? 'yellow' : 'green',
+      detail: `${hunger}/100`,
+    },
+    {
+      label:  'Жажда',
+      status: thirst >= 70 ? 'red' : thirst >= 50 ? 'yellow' : 'green',
+      detail: `${thirst}/100`,
+    },
+    {
+      label:  'Сон',
+      status: sleepiness >= 75 ? 'red' : sleepiness >= 50 ? 'yellow' : 'green',
+      detail: `${sleepiness}/100`,
+    },
+    {
+      label:  'Радиация',
+      status: radiation >= 60 ? 'red' : radiation >= 30 ? 'yellow' : 'green',
+      detail: `${radiation}`,
+    },
+  ];
+
+  // ── Group 2: Equipment ────────────────────────────────────────────────────
+  const weaponItem = eq['weapon'] ?? null;
+  const armorItem  = eq['armor']  ?? null;
+  const reqAmmo    = weaponItem ? (_AMMO_FOR_WEAPON[weaponItem.type] ?? null) : null;
+  const hasAmmo    = reqAmmo ? inv.some(i => i.type === reqAmmo) : null;
+
+  const hasHeal  = inv.some(i => ['bandage', 'medkit', 'army_medkit', 'stimpack', 'morphine'].includes(i.type));
+  const hasFood  = inv.some(i => ['bread', 'canned_food', 'military_ration', 'energy_drink', 'glucose'].includes(i.type));
+  const hasDrink = inv.some(i => ['water', 'purified_water', 'vodka', 'energy_drink'].includes(i.type));
+
+  const equipCriteria: PriorityCriterion[] = [
+    {
+      label:  'Оружие',
+      status: weaponItem ? 'green' : 'red',
+      detail: weaponItem ? weaponItem.name : '— не экипировано —',
+    },
+    {
+      label:  'Броня',
+      status: armorItem ? 'green' : 'red',
+      detail: armorItem ? armorItem.name : '— не экипирована —',
+    },
+    {
+      label:  'Патроны',
+      status: reqAmmo === null ? 'yellow'
+            : hasAmmo          ? 'green'
+            :                    'red',
+      detail: reqAmmo === null  ? 'Нет оружия'
+            : hasAmmo           ? `Есть (${reqAmmo})`
+            :                     `Нет (нужны ${reqAmmo})`,
+    },
+    {
+      label:  'Медицина',
+      status: hasHeal ? 'green' : 'red',
+      detail: hasHeal ? 'В наличии' : 'Нет аптечки',
+    },
+    {
+      label:  'Еда',
+      // Empty supply is always at least yellow (a warning), red when hunger is already high.
+      status: hasFood ? 'green' : hunger >= 70 ? 'red' : 'yellow',
+      detail: hasFood ? 'В наличии' : 'Запас пуст',
+    },
+    {
+      label:  'Вода',
+      // Empty supply is always at least yellow (a warning), red when thirst is already high.
+      status: hasDrink ? 'green' : thirst >= 70 ? 'red' : 'yellow',
+      detail: hasDrink ? 'В наличии' : 'Запас пуст',
+    },
+  ];
+
+  // ── Group 3: Material state ───────────────────────────────────────────────
+  const artifactCount = inv.filter(i => _ARTIFACT_TYPES.has(i.type)).length;
+  const wealthFrac    = threshold > 0 ? wealth / threshold : 1;
+  const materialCriteria: PriorityCriterion[] = [
+    {
+      label:  'Богатство',
+      status: wealthFrac >= 1 ? 'green' : wealthFrac >= 0.5 ? 'yellow' : 'red',
+      detail: `${wealth} / ${threshold} RU (деньги + инвентарь + снаряжение)`,
+    },
+    {
+      // Upgrade check only activates once the wealth threshold is reached.
+      label:  'Апгрейд снаряжения',
+      status: wealthFrac >= 1 ? 'yellow' : 'green',
+      detail: wealthFrac >= 1
+        ? 'Порог достигнут — проверяю апгрейд'
+        : `Накапливаю ресурсы (${Math.round(wealthFrac * 100)}% от порога)`,
+    },
+    {
+      label:  'Артефакты',
+      status: artifactCount > 0 ? 'yellow' : 'green',
+      detail: artifactCount > 0 ? `${artifactCount} шт. — продать торговцу` : 'Нет артефактов',
+    },
+  ];
+
+  // ── Group 4: Global goal ──────────────────────────────────────────────────
+  const goalUnlocked = wealthFrac >= 1;
+  const goalCriteria: PriorityCriterion[] = [
+    {
+      label:  'Порог богатства',
+      status: goalUnlocked ? 'green' : 'yellow',
+      detail: goalUnlocked
+        ? `Открыто (${wealth} ≥ ${threshold} RU)`
+        : `Заблокировано — нужно ещё ${threshold - wealth} RU`,
+    },
+    {
+      label:  'Цель',
+      status: goalUnlocked ? 'green' : 'yellow',
+      detail: agent.global_goal
+        ? agent.global_goal + (agent.current_goal ? ` → ${currentGoalLabel(agent.current_goal)}` : '')
+        : '—',
+    },
+  ];
+
+  return [
+    { id: 'vital',    icon: '❤️',  label: 'Жизненные',            criteria: vitalCriteria    },
+    { id: 'equip',    icon: '🔫',  label: 'Экипировка',           criteria: equipCriteria    },
+    { id: 'material', icon: '💰',  label: 'Материальное состояние', criteria: materialCriteria },
+    { id: 'goal',     icon: '🎯',  label: 'Глобальная цель',      criteria: goalCriteria     },
+  ];
+}
+
+/**
+ * Collapsible panel showing agent priorities in 4 groups.
+ * Groups with red criteria start expanded; others start collapsed.
+ */
+function PriorityGroupsPanel({ agent }: { agent: AgentForProfile }) {
+  const groups = _buildPriorityGroups(agent);
+
+  // Pre-expand any group that has a red criterion.
+  const [open, setOpen] = React.useState<Set<string>>(
+    () => new Set(groups.filter(g => _worstStatus(g.criteria) === 'red').map(g => g.id)),
+  );
+
+  const toggle = (id: string) =>
+    setOpen(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {groups.map(group => {
+        const overall  = _worstStatus(group.criteria);
+        const isOpen   = open.has(group.id);
+        const hex      = _STATUS_HEX[overall];
+
+        return (
+          <div
+            key={group.id}
+            style={{
+              borderRadius: 7,
+              border: `1px solid ${hex}44`,
+              overflow: 'hidden',
+            }}
+          >
+            {/* ── Group header (always visible) ── */}
+            <button
+              onClick={() => toggle(group.id)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '0.38rem 0.6rem',
+                background: `${hex}18`,
+                border: 'none',
+                cursor: 'pointer',
+                textAlign: 'left' as const,
+              }}
+            >
+              <span style={{ color: '#64748b', fontSize: '0.65rem', flexShrink: 0 }}>
+                {isOpen ? '▼' : '▶'}
+              </span>
+              <span style={{ fontSize: '0.8rem', flexShrink: 0 }}>{group.icon}</span>
+              <span style={{ flex: 1, color: '#e2e8f0', fontSize: '0.78rem', fontWeight: 600 }}>
+                {group.label}
+              </span>
+              {/* Mini status dots for each criterion */}
+              <span style={{ display: 'flex', gap: 2, marginRight: 4 }}>
+                {group.criteria.map((c, i) => (
+                  <span key={i} style={{ fontSize: '0.5rem', color: _STATUS_HEX[c.status] }}>●</span>
+                ))}
+              </span>
+              <span style={{ fontSize: '0.75rem', flexShrink: 0 }}>
+                {_STATUS_DOT[overall]}
+              </span>
+            </button>
+
+            {/* ── Expanded criteria rows ── */}
+            {isOpen && (
+              <div style={{ background: '#070e1a', padding: '0.3rem 0.55rem 0.4rem' }}>
+                {group.criteria.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '0.2rem 0',
+                      borderBottom: i < group.criteria.length - 1 ? '1px solid #1e293b' : 'none',
+                    }}
+                  >
+                    <span style={{ fontSize: '0.6rem', color: _STATUS_HEX[c.status], flexShrink: 0 }}>
+                      ●
+                    </span>
+                    <span style={{ color: '#64748b', fontSize: '0.72rem', width: 76, flexShrink: 0 }}>
+                      {c.label}
+                    </span>
+                    <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1 }}>
+                      {c.detail}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', flexShrink: 0 }}>
+                      {_STATUS_DOT[c.status]}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Client-side approximation of the backend `_describe_bot_decision_tree` logic.
  *
- * Evaluates the same 7-layer priority tree using agent fields available in the
+ * Evaluates the same 9-layer priority tree using agent fields available in the
  * frontend state, returning an immediate result that is displayed before (or
  * instead of) a backend round-trip.  The backend version is authoritative;
  * this function is used only for instantaneous UI feedback.
+ *
+ * Layers:
+ *  1. EMERGENCY: HP критический
+ *  2. EMERGENCY: Голод
+ *  3. EMERGENCY: Жажда
+ *  4. СНАРЯЖЕНИЕ: Оружие / броня / патроны
+ *  5. ВЫЖИВАНИЕ: Сон
+ *  6. ТОРГОВЛЯ: Продать артефакты (all agents)
+ *  7. ЦЕЛЬ: Накопить богатство   (wealth < threshold)
+ *  8. АПГРЕЙД: Улучшение снаряжения  (wealth >= threshold, before global goal)
+ *  9. ЦЕЛЬ: Глобальная цель      (wealth >= threshold)
  *
  * @param agent - The bot agent whose decision should be previewed.
  * @returns A `DecisionPreview` with `goal`, `action`, `reason`, and the full
@@ -746,12 +1234,24 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const hunger = agent.hunger;
   const thirst = agent.thirst;
   const sleepiness = agent.sleepiness;
-  const wealth = agent.money + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
-  const threshold = agent.material_threshold ?? 1000;
+  const wealth = agent.money
+    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
+    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
+  const threshold = agent.material_threshold ?? 3000;
   const goal = agent.current_goal ?? '—';
   const scheduled = agent.scheduled_action;
-  const globalGoal = agent.global_goal ?? 'survive';
+  const globalGoal = agent.global_goal ?? 'get_rich';
   const artifactCount = agent.inventory.filter((i) => _ARTIFACT_TYPES.has(i.type)).length;
+
+  const eq  = agent.equipment;
+  const inv = agent.inventory;
+  const noWeapon = !(eq['weapon']);
+  const noArmor  = !(eq['armor']);
+  const weaponType  = eq['weapon']?.type ?? null;
+  const reqAmmoType = weaponType ? (_AMMO_FOR_WEAPON[weaponType] ?? null) : null;
+  const noAmmo = weaponType !== null && reqAmmoType !== null
+    && !inv.some(i => i.type === reqAmmoType);
+  const condEquip = noWeapon || noArmor || noAmmo;
 
   type Layer = { name: string; skipped: boolean; action: string; reason: string };
   const layers: Layer[] = [];
@@ -783,45 +1283,72 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
     reason: cond3 ? `Жажда = ${thirst} (порог ≥70)` : `Жажда = ${thirst}, терпимо`,
   });
 
-  // Layer 4: ВЫЖИВАНИЕ: Сон
-  const cond4 = sleepiness >= 75;
+  // Layer 4: СНАРЯЖЕНИЕ: Оружие / броня / патроны (added in equipment maintenance PR)
+  const equipReason = noWeapon ? 'Нет оружия'
+    : noArmor ? 'Нет брони'
+    : noAmmo  ? `Нет патронов (${reqAmmoType})`
+    :           'Снаряжение в порядке';
   layers.push({
-    name: 'ВЫЖИВАНИЕ: Сон',
-    skipped: !cond4,
-    action: 'Спать 6ч',
-    reason: cond4 ? `Усталость = ${sleepiness} (порог ≥75)` : `Усталость = ${sleepiness}, норма`,
+    name: 'СНАРЯЖЕНИЕ: Оружие / броня / патроны',
+    skipped: !condEquip,
+    action: 'Найти/купить снаряжение',
+    reason: equipReason,
   });
 
-  // Layer 5: ТОРГОВЛЯ: Продать артефакты
-  // Note: client-side can't check for a trader at the location, so we only check inventory.
-  const cond5 = artifactCount > 0;
+  // Layer 5: ВЫЖИВАНИЕ: Сон
+  const cond5 = sleepiness >= 75;
+  layers.push({
+    name: 'ВЫЖИВАНИЕ: Сон',
+    skipped: !cond5,
+    action: 'Спать 6ч',
+    reason: cond5 ? `Усталость = ${sleepiness} (порог ≥75)` : `Усталость = ${sleepiness}, норма`,
+  });
+
+  // Layer 6: ТОРГОВЛЯ: Продать артефакты
+  // All agents travel to sell artifacts (not just get_rich since the previous fix).
+  // Client-side can't check for a trader at the current location, so we show
+  // only whether artifacts are in inventory; the backend will handle routing.
+  const cond6 = artifactCount > 0;
   layers.push({
     name: 'ТОРГОВЛЯ: Продать артефакты',
-    skipped: !cond5,
-    action: 'Продать артефакты',
-    reason: cond5
-      ? `${artifactCount} артефактов (наличие торговца неизвестно)`
+    skipped: !cond6,
+    action: 'Продать артефакты торговцу',
+    reason: cond6
+      ? `${artifactCount} арт. в инвентаре — идти к торговцу`
       : 'Нет артефактов в инвентаре',
   });
 
-  // Layer 6: ЦЕЛЬ: Накопить богатство
-  const cond6 = wealth < threshold;
+  // Layer 7: ЦЕЛЬ: Накопить богатство
+  const cond7 = wealth < threshold;
   layers.push({
     name: 'ЦЕЛЬ: Накопить богатство',
-    skipped: !cond6,
+    skipped: !cond7,
     action: 'Собирать ресурсы',
-    reason: cond6
+    reason: cond7
       ? `Богатство ${wealth} < порог ${threshold}`
       : `Богатство ${wealth} ≥ порог ${threshold}`,
   });
 
-  // Layer 7: ЦЕЛЬ: Глобальная цель
-  const cond7 = wealth >= threshold;
+  // Layer 8: АПГРЕЙД: Улучшение снаряжения
+  // Fires when wealth >= threshold. The bot checks for a better-matching item
+  // at a trader before pursuing the global goal.
+  const cond8 = wealth >= threshold;
+  layers.push({
+    name: 'АПГРЕЙД: Улучшение снаряжения',
+    skipped: !cond8,
+    action: 'Купить улучшенное снаряжение',
+    reason: cond8
+      ? `Порог ${threshold} достигнут — проверяю возможность апгрейда`
+      : `Богатство ${wealth} < порог ${threshold}, апгрейд недоступен`,
+  });
+
+  // Layer 9: ЦЕЛЬ: Глобальная цель
+  const cond9 = wealth >= threshold;
   layers.push({
     name: 'ЦЕЛЬ: Глобальная цель',
-    skipped: !cond7,
+    skipped: !cond9,
     action: `Преследование цели «${globalGoal}»`,
-    reason: cond7
+    reason: cond9
       ? `Богатство ${wealth} ≥ порог ${threshold}, цель: ${globalGoal}`
       : `Богатство ${wealth} < порог ${threshold}`,
   });
@@ -838,7 +1365,7 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
     } else if (t === 'sleep') {
       action = 'Спать';
       reason = 'Запланированный отдых';
-    } else if (t === 'explore') {
+    } else if (t === 'explore_anomaly_location') {
       action = 'Исследование';
       reason = 'Запланированное исследование';
     }
@@ -851,15 +1378,21 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   } else if (cond3) {
     action = 'Поиск воды';
     reason = `Жажда ${thirst}/100`;
-  } else if (cond4) {
+  } else if (condEquip) {
+    action = 'Добыть снаряжение';
+    reason = equipReason;
+  } else if (cond5) {
     action = 'Спать 6 часов';
     reason = `Усталость ${sleepiness}/100`;
-  } else if (cond5) {
+  } else if (cond6) {
     action = 'Продажа или путь к торговцу';
     reason = `${artifactCount} артефактов в инвентаре`;
-  } else if (cond6) {
+  } else if (cond7) {
     action = 'Сбор ресурсов';
     reason = `Богатство ${wealth} < порог ${threshold}`;
+  } else if (goal === 'upgrade_equipment') {
+    action = 'Улучшение снаряжения';
+    reason = `Порог ${threshold} достигнут — апгрейд снаряжения`;
   } else {
     action = 'Преследование глобальной цели';
     reason = `Цель: ${globalGoal}`;
@@ -886,10 +1419,6 @@ const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
 
 const GLOBAL_GOAL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'get_rich',    label: 'Разбогатеть'      },
-  { value: 'explore_zone', label: 'Исследовать Зону' },
-  { value: 'survive',     label: 'Выжить'            },
-  { value: 'help_others', label: 'Помогать другим'   },
-  { value: 'find_wish',   label: 'Найти Желание'     },
 ];
 
 export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: AgentCreateProps) {

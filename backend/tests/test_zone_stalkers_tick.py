@@ -109,7 +109,7 @@ class TestWorldRulesNewCommands:
         state = _make_world()
         new_state, events = self._r("explore_location", {}, state)
         agent = new_state["agents"]["agent_p0"]
-        assert agent["scheduled_action"]["type"] == "explore"
+        assert agent["scheduled_action"]["type"] == "explore_anomaly_location"
         assert agent["scheduled_action"]["turns_remaining"] == 1
         assert any(e["event_type"] == "exploration_started" for e in events)
 
@@ -722,6 +722,18 @@ def _make_trader_scenario():
     stalker["material_threshold"] = 999999  # always in "gather" phase initially
     stalker["inventory"] = []  # clear inventory so wealth is just money
     stalker["money"] = 100
+    # Ensure equipment slots are fully filled so equipment-maintenance layer
+    # does not interfere with the artifact-exploration scenario under test.
+    stalker["equipment"] = {
+        "weapon": {"id": "wpn_test", "type": "ak74", "name": "АК-74", "weight": 3.5, "value": 1500},
+        "armor": {"id": "arm_test", "type": "stalker_suit", "name": "Комбинезон сталкера", "weight": 5.0, "value": 1500},
+        "detector": None,
+    }
+    # Give the stalker ammo so the ammo-check layer is also satisfied
+    stalker["inventory"] = [
+        {"id": "ammo_test", "type": "ammo_545", "name": "Патроны 5.45х39 (30 шт.)", "weight": 0.3, "value": 100},
+        {"id": "heal_test", "type": "bandage", "name": "Бинт", "weight": 0.1, "value": 50},
+    ]
     state["agents"]["bot_stalker"] = stalker
     state["locations"][stalker_loc]["agents"].append("bot_stalker")
 
@@ -799,8 +811,8 @@ class TestArtifactToTraderScenario:
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
         assert sched is not None, "Agent should have a scheduled action"
-        assert sched["type"] == "explore", (
-            f"Agent should start exploring, not '{sched['type']}' "
+        assert sched["type"] == "explore_anomaly_location", (
+            f"Agent should start exploring anomaly location, not '{sched['type']}' "
             "(artifacts must be obtained through explore, not direct pickup)"
         )
         assert any(e["event_type"] == "exploration_started" for e in events)
@@ -1217,7 +1229,7 @@ def _make_minimal_state(locations_cfg, agent_loc_id="A"):
         "scheduled_action": None,
         "action_used": False,
         "controller": {"kind": "bot", "participant_id": None},
-        "global_goal": "survive",
+        "global_goal": "get_rich",
         "current_goal": None,
         "material_threshold": 1000,
         "risk_tolerance": 0.5,
@@ -1433,3 +1445,1753 @@ class TestUnreachableTargetHandling:
         assert reroute_mems[0]["effects"]["final_target"] == "C"
         assert reroute_mems[0]["effects"]["rerouted_at"] == "B"
 
+
+
+# ─────────────────────────────────────────────────────────────────
+# Equipment maintenance mechanic tests
+# ─────────────────────────────────────────────────────────────────
+
+def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = None, armor: str | None = None):
+    """Build a minimal world with one bot stalker that has no weapon/armor."""
+    from app.games.zone_stalkers.generators.zone_generator import generate_zone, _make_stalker_agent
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES
+    import random
+
+    state = generate_zone(seed=7, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+    locs = list(state["locations"].keys())
+    stalker_loc = locs[0]
+
+    rng = random.Random(2)
+    stalker = _make_stalker_agent(
+        agent_id="bot_bare",
+        name="Bare Stalker",
+        location_id=stalker_loc,
+        controller_kind="bot",
+        participant_id=None,
+        rng=rng,
+    )
+
+    def _item(item_type: str, item_id: str) -> dict:
+        info = ITEM_TYPES[item_type]
+        return {"id": item_id, "type": item_type, "name": info["name"],
+                "weight": info.get("weight", 0), "value": info.get("value", 0)}
+
+    # Strip equipment and inventory for deterministic tests
+    stalker["inventory"] = [
+        _item("ammo_545", "ammo_t"),
+        _item("bandage", "heal_t"),
+        _item("bread", "food_t"),
+        _item("water", "water_t"),
+    ]
+    stalker["equipment"] = {"weapon": None, "armor": None, "detector": None}
+    stalker["money"] = 2000
+    stalker["hp"] = 100
+    stalker["hunger"] = 20
+    stalker["thirst"] = 20
+    stalker["sleepiness"] = 10
+    stalker["global_goal"] = "get_rich"
+    stalker["material_threshold"] = 999999
+
+    if weapon:
+        info = ITEM_TYPES[weapon]
+        stalker["equipment"]["weapon"] = {
+            "id": "wpn_preset", "type": weapon, "name": info["name"],
+            "weight": info.get("weight", 1.0), "value": info.get("value", 500),
+        }
+    if armor:
+        info = ITEM_TYPES[armor]
+        stalker["equipment"]["armor"] = {
+            "id": "arm_preset", "type": armor, "name": info["name"],
+            "weight": info.get("weight", 2.0), "value": info.get("value", 300),
+        }
+
+    state["agents"]["bot_bare"] = stalker
+    state["locations"][stalker_loc]["agents"].append("bot_bare")
+
+    if with_trader:
+        conns = state["locations"][stalker_loc].get("connections", [])
+        trader = {
+            "id": "trader_bare",
+            "archetype": "trader_npc",
+            "name": "Trader",
+            "location_id": stalker_loc,  # trader at same location
+            "inventory": [],
+            "money": 10000,
+            "memory": [],
+            "is_alive": True,
+        }
+        state.setdefault("traders", {})["trader_bare"] = trader
+        state["locations"][stalker_loc]["agents"].append("trader_bare")
+
+    return state, "bot_bare", stalker_loc
+
+
+class TestEquipmentMaintenance:
+    """Verify that bots properly maintain their equipment."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def test_equip_weapon_from_inventory(self):
+        """Bot should equip a weapon from inventory into the weapon slot."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state()
+        # Put a weapon in inventory using ITEM_TYPES as source of truth
+        info = ITEM_TYPES["pistol"]
+        state["agents"][sid]["inventory"].append(
+            {"id": "wpn_inv", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        )
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        assert agent["equipment"].get("weapon") is not None, "Weapon should be equipped from inventory"
+        assert agent["equipment"]["weapon"]["type"] == "pistol"
+        assert not any(i["id"] == "wpn_inv" for i in agent["inventory"]), "Weapon removed from inventory"
+        assert any(e["event_type"] == "item_equipped" for e in events)
+
+    def test_equip_armor_from_inventory(self):
+        """Bot should equip armor from inventory when no armor is equipped."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
+        info = ITEM_TYPES["leather_jacket"]
+        state["agents"][sid]["inventory"].append(
+            {"id": "arm_inv", "type": "leather_jacket", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        )
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        assert agent["equipment"].get("armor") is not None, "Armor should be equipped from inventory"
+        assert agent["equipment"]["armor"]["type"] == "leather_jacket"
+        assert any(e["event_type"] == "item_equipped" for e in events)
+
+    def test_pickup_weapon_from_ground(self):
+        """Bot should pick up a weapon from the ground when not equipped."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state()
+        # Place weapon on ground using ITEM_TYPES
+        info = ITEM_TYPES["pistol"]
+        state["locations"][loc_id]["items"] = [
+            {"id": "wpn_ground", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        # Weapon should be in inventory now (equip from inventory happens on NEXT tick)
+        loc_items = new_state["locations"][loc_id]["items"]
+        assert not any(i["id"] == "wpn_ground" for i in loc_items), "Weapon removed from ground"
+        assert any(e["event_type"] == "item_picked_up" for e in events)
+        # weapon is in inventory (equip happens next tick)
+        assert any(i["id"] == "wpn_ground" for i in agent["inventory"])
+
+    def test_pickup_armor_from_ground(self):
+        """Bot should pick up armor from the ground when not equipped (weapon already set)."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
+        info = ITEM_TYPES["leather_jacket"]
+        state["locations"][loc_id]["items"] = [
+            {"id": "arm_ground", "type": "leather_jacket", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        new_state, events = self._tick(state)
+        loc_items = new_state["locations"][loc_id]["items"]
+        assert not any(i["id"] == "arm_ground" for i in loc_items), "Armor removed from ground"
+        assert any(e["event_type"] == "item_picked_up" for e in events)
+
+    def test_travel_to_trader_for_weapon_when_no_ground_items(self):
+        """Bot should travel to a trader if no weapon in inventory or on ground,
+        but ONLY when wealth >= material_threshold (Phase 2 / buy is unlocked)."""
+        state, sid, loc_id = _make_bare_stalker_state(with_trader=False)
+        # Put agent into Phase 2 so the equipment-buy step is allowed
+        state["agents"][sid]["material_threshold"] = 100  # wealth (2000) >> threshold (100)
+        conns = state["locations"][loc_id].get("connections", [])
+        if conns:
+            trader_loc = conns[0]["to"]
+            trader = {
+                "id": "tr_distant",
+                "archetype": "trader_npc",
+                "name": "Far Trader",
+                "location_id": trader_loc,
+                "inventory": [],
+                "money": 10000,
+                "memory": [],
+                "is_alive": True,
+            }
+            state.setdefault("traders", {})["tr_distant"] = trader
+            state["locations"][trader_loc]["agents"].append("tr_distant")
+
+            new_state, events = self._tick(state)
+            agent = new_state["agents"][sid]
+            sched = agent.get("scheduled_action")
+            # Should be traveling toward the trader
+            assert sched is not None
+            assert sched["type"] == "travel"
+            goal = agent.get("current_goal")
+            assert goal in ("get_weapon", "get_armor"), f"Expected get_weapon or get_armor goal, got {goal}"
+
+    def test_equipment_buy_skipped_in_phase1(self):
+        """Bot should NOT travel to a trader for equipment when wealth < threshold (Phase 1)."""
+        state, sid, loc_id = _make_bare_stalker_state(with_trader=False)
+        # material_threshold=999999 → agent is firmly in Phase 1 (wealth < threshold)
+        # (this is the default in _make_bare_stalker_state)
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return
+        trader_loc = conns[0]["to"]
+        state.setdefault("traders", {})["tr_phase1"] = {
+            "id": "tr_phase1", "archetype": "trader_npc", "name": "Phase1 Trader",
+            "location_id": trader_loc, "inventory": [], "money": 10000,
+            "memory": [], "is_alive": True,
+        }
+        state["locations"][trader_loc]["agents"].append("tr_phase1")
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        # Bot should NOT be traveling toward trader to buy equipment in Phase 1
+        if sched and sched["type"] == "travel":
+            final_target = sched.get("final_target_id", sched.get("target_id"))
+            assert final_target != trader_loc, (
+                "Phase-1 bot should not travel to a trader to buy equipment; "
+                f"it should gather resources instead. Target: {final_target!r}"
+            )
+
+    def test_buy_weapon_from_local_trader(self):
+        """Bot should buy a weapon from a local trader when wealth >= threshold."""
+        state, sid, loc_id = _make_bare_stalker_state(with_trader=True)
+        # Set threshold below wealth so the equipment-buy step fires
+        state["agents"][sid]["money"] = 3000
+        state["agents"][sid]["material_threshold"] = 100  # wealth (3000) >> threshold (100)
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        # Should have bought a weapon
+        assert any(e["event_type"] == "bot_bought_item" for e in events), \
+            "Bot should have bought an item from trader when wealth >= threshold"
+
+    def test_seek_item_from_memory(self):
+        """Bot should travel to a location remembered as having a weapon."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state()
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return  # Skip if no connections
+        mem_loc = conns[0]["to"]
+        # Place weapon at mem_loc using ITEM_TYPES for consistency
+        info = ITEM_TYPES["pistol"]
+        state["locations"][mem_loc]["items"] = [
+            {"id": "wpn_mem", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        # Give agent a memory of seeing that item at mem_loc
+        state["agents"][sid]["memory"] = [{
+            "world_turn": 1,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "На земле: pistol",
+            "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["pistol"]},
+        }]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have a scheduled action"
+        assert sched["type"] == "travel", "Agent should travel toward remembered item location"
+        assert agent.get("current_goal") == "get_weapon"
+
+    def test_no_equipment_maintenance_when_fully_equipped(self):
+        """Bot with full equipment should skip the equipment maintenance layer."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol", armor="leather_jacket")
+        # Ensure ammo is present (pistol uses 9x18 ammo)
+        info_ammo = ITEM_TYPES["ammo_9mm"]
+        info_heal = ITEM_TYPES["bandage"]
+        state["agents"][sid]["inventory"] = [
+            {"id": "ammo_9mm_t", "type": "ammo_9mm", "name": info_ammo["name"],
+             "weight": info_ammo["weight"], "value": info_ammo["value"]},
+            {"id": "heal_t2", "type": "bandage", "name": info_heal["name"],
+             "weight": info_heal["weight"], "value": info_heal["value"]},
+        ]
+        new_state, events = self._tick(state)
+        # No item_equipped or item_picked_up events should fire
+        assert not any(e["event_type"] == "item_equipped" for e in events), \
+            "Should not equip when already equipped"
+        assert not any(e["event_type"] == "item_picked_up" for e in events), \
+            "Should not pick up when already equipped"
+
+    def test_decision_tree_shows_equipment_layer(self):
+        """_describe_bot_decision_tree should include the equipment maintenance layer."""
+        from app.games.zone_stalkers.rules.tick_rules import _describe_bot_decision_tree
+        state, sid, loc_id = _make_bare_stalker_state()
+        agent = state["agents"][sid]
+        tree = _describe_bot_decision_tree(agent, [], state)
+        layer_names = [l["name"] for l in tree["layers"]]
+        assert any("СНАРЯЖЕНИЕ" in n for n in layer_names), \
+            f"Equipment layer missing from decision tree. Layers: {layer_names}"
+        equip_layer = next(l for l in tree["layers"] if "СНАРЯЖЕНИЕ" in l["name"])
+        assert equip_layer["skipped"] is False, "Equipment layer should NOT be skipped when agent has no weapon"
+
+    def test_items_constants_are_correct(self):
+        """Verify derived item-type constants are consistent with ITEM_TYPES."""
+        from app.games.zone_stalkers.balance.items import (
+            ITEM_TYPES, WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES,
+            AMMO_ITEM_TYPES, AMMO_FOR_WEAPON, HEAL_ITEM_TYPES,
+            FOOD_ITEM_TYPES, DRINK_ITEM_TYPES,
+        )
+        assert "ak74" in WEAPON_ITEM_TYPES
+        assert "pistol" in WEAPON_ITEM_TYPES
+        assert "shotgun" in WEAPON_ITEM_TYPES
+        assert "stalker_suit" in ARMOR_ITEM_TYPES
+        assert "leather_jacket" in ARMOR_ITEM_TYPES
+        assert "ammo_545" in AMMO_ITEM_TYPES
+        assert AMMO_FOR_WEAPON["ak74"] == "ammo_545"
+        assert AMMO_FOR_WEAPON["pistol"] == "ammo_9mm"
+        assert AMMO_FOR_WEAPON["shotgun"] == "ammo_12gauge"
+        assert "medkit" in HEAL_ITEM_TYPES
+        assert "canned_food" in FOOD_ITEM_TYPES
+        assert "water" in DRINK_ITEM_TYPES
+        # All weapon types have an ammo mapping
+        for w in WEAPON_ITEM_TYPES:
+            assert w in AMMO_FOR_WEAPON, f"Weapon {w} missing from AMMO_FOR_WEAPON"
+
+    def test_new_item_canned_food_in_item_types(self):
+        """canned_food should be in ITEM_TYPES and affect hunger."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, FOOD_ITEM_TYPES
+        assert "canned_food" in ITEM_TYPES
+        assert ITEM_TYPES["canned_food"]["type"] == "consumable"
+        assert ITEM_TYPES["canned_food"]["effects"]["hunger"] < 0
+        assert "canned_food" in FOOD_ITEM_TYPES
+
+    def test_generator_spawns_water_and_canned_food(self):
+        """Generated stalkers should sometimes spawn with water and canned_food."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        import random
+        # Run many seeds to find at least one with canned_food and one with water
+        found_water = False
+        found_canned = False
+        for seed in range(100):
+            state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
+            for agent in state["agents"].values():
+                inv_types = {i["type"] for i in agent.get("inventory", [])}
+                if "water" in inv_types:
+                    found_water = True
+                if "canned_food" in inv_types:
+                    found_canned = True
+            if found_water and found_canned:
+                break
+        assert found_water, "No stalker spawned with water across 100 seeds"
+        assert found_canned, "No stalker spawned with canned_food across 100 seeds"
+
+    # ── Ammo pickup (ground and observation memory) ───────────────────────────
+
+    def test_pickup_ammo_from_ground(self):
+        """Bot with a weapon but no ammo should pick up matching ammo from the ground."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
+        # Strip inventory of any ammo
+        state["agents"][sid]["inventory"] = []
+        info = ITEM_TYPES["ammo_9mm"]
+        state["locations"][loc_id]["items"] = [
+            {"id": "ammo_ground", "type": "ammo_9mm", "name": info["name"],
+             "weight": info.get("weight", 0.01), "value": info.get("value", 10)}
+        ]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        loc_items = new_state["locations"][loc_id]["items"]
+        assert not any(i["id"] == "ammo_ground" for i in loc_items), "Ammo should be removed from ground"
+        assert any(e["event_type"] == "item_picked_up" for e in events), "item_picked_up event expected"
+        assert any(i["id"] == "ammo_ground" for i in agent["inventory"]), "Ammo should be in inventory"
+
+    def test_seek_ammo_from_observation_memory(self):
+        """Bot with a weapon but no ammo should travel to a location where ammo was observed."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol")
+        state["agents"][sid]["inventory"] = []
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return  # skip if no neighbours
+        mem_loc = conns[0]["to"]
+        info = ITEM_TYPES["ammo_9mm"]
+        # Place the ammo at mem_loc (so _find_item_memory_location verifies it's still there)
+        state["locations"][mem_loc]["items"] = [
+            {"id": "ammo_mem", "type": "ammo_9mm", "name": info["name"],
+             "weight": info.get("weight", 0.01), "value": info.get("value", 10)}
+        ]
+        # Give agent an observation memory of the ammo at mem_loc
+        state["agents"][sid]["memory"] = [{
+            "world_turn": 1,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "На земле: ammo_9mm",
+            "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["ammo_9mm"]},
+        }]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Bot should have a scheduled travel action"
+        assert sched["type"] == "travel", "Bot should be traveling toward observed ammo location"
+        assert agent.get("current_goal") == "get_ammo"
+
+    # ── Medicine/food/drink observation-memory pickup ─────────────────────────
+
+    def test_seek_medicine_from_observation_memory(self):
+        """Bot with no heal items should travel to a location where medicine was observed."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state, sid, loc_id = _make_bare_stalker_state(weapon="pistol", armor="leather_jacket")
+        # Fully equipped; strip heal items from inventory so Need 4 fires
+        state["agents"][sid]["inventory"] = [
+            {"id": "ammo_t", "type": "ammo_9mm",
+             "name": ITEM_TYPES["ammo_9mm"]["name"], "value": ITEM_TYPES["ammo_9mm"]["value"]},
+        ]
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return
+        mem_loc = conns[0]["to"]
+        info = ITEM_TYPES["bandage"]
+        state["locations"][mem_loc]["items"] = [
+            {"id": "heal_mem", "type": "bandage", "name": info["name"],
+             "weight": info.get("weight", 0.1), "value": info.get("value", 50)}
+        ]
+        state["agents"][sid]["memory"] = [{
+            "world_turn": 1,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "На земле: bandage",
+            "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["bandage"]},
+        }]
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Bot should have a scheduled travel action"
+        assert sched["type"] == "travel", "Bot should be traveling toward observed medicine"
+        # Verify a 'seek_item' decision memory was written for medical category
+        decision_mems = [
+            m for m in agent.get("memory", [])
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("item_category") == "medical"
+        ]
+        assert decision_mems, "Bot should write a 'seek_item' decision memory for medicine"
+
+    # ── Affordability guard (trader-loop bug) ─────────────────────────────────
+
+    def test_broke_bot_does_not_travel_to_trader(self):
+        """A bot with no money should NOT travel to a trader to buy equipment."""
+        state, sid, loc_id = _make_bare_stalker_state(with_trader=False)
+        # Create a reachable trader location
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return
+        trader_loc = conns[0]["to"]
+        state.setdefault("traders", {})["tr_far"] = {
+            "id": "tr_far",
+            "archetype": "trader_npc",
+            "name": "Far Trader",
+            "location_id": trader_loc,
+            "inventory": [],
+            "money": 10000,
+            "memory": [],
+            "is_alive": True,
+        }
+        state["locations"][trader_loc].setdefault("agents", []).append("tr_far")
+        # Bot has zero money — cannot afford anything
+        state["agents"][sid]["money"] = 0
+        state["agents"][sid]["inventory"] = []
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        # Bot must NOT start traveling to the trader when it can't afford anything
+        if sched and sched["type"] == "travel":
+            # If it is traveling, it must NOT be heading toward the trader for equipment
+            goal = agent.get("current_goal", "")
+            assert goal not in ("get_weapon", "get_armor", "get_ammo"), (
+                f"Broke bot should not seek equipment at trader; current_goal={goal!r}, "
+                f"traveling to {sched.get('final_target_id', '?')!r}"
+            )
+
+
+class TestConfirmedEmptyBlocking:
+    """Verify that explore_confirmed_empty memory blocks re-exploration in all code paths."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _make_state_with_confirmed_empty(
+        self, global_goal: str = "get_rich", material_threshold: int = 999999
+    ):
+        """Return (state, sid, loc_id) where the bot is at an anomaly location it
+        previously confirmed as empty (has explore_confirmed_empty memory)."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone, _make_stalker_agent
+        import random
+
+        state = generate_zone(seed=7, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        locs = list(state["locations"].keys())
+        stalker_loc = locs[0]
+
+        # Ensure the location has anomaly_activity so exploration would normally fire
+        state["locations"][stalker_loc]["anomaly_activity"] = 5
+        # Empty it of artifacts
+        state["locations"][stalker_loc]["artifacts"] = []
+
+        rng = random.Random(42)
+        stalker = _make_stalker_agent(
+            agent_id="bot_ce",
+            name="Confirmed Empty Bot",
+            location_id=stalker_loc,
+            controller_kind="bot",
+            participant_id=None,
+            rng=rng,
+        )
+        stalker["global_goal"] = global_goal
+        stalker["material_threshold"] = material_threshold
+        stalker["money"] = 5000
+        stalker["hp"] = 100
+        stalker["hunger"] = 10
+        stalker["thirst"] = 10
+        stalker["sleepiness"] = 10
+        # Fully equipped to skip equipment-maintenance layer
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        stalker["equipment"] = {
+            "weapon": {"id": "w1", "type": "pistol", "name": ITEM_TYPES["pistol"]["name"],
+                       "weight": ITEM_TYPES["pistol"]["weight"], "value": ITEM_TYPES["pistol"]["value"]},
+            "armor": {"id": "a1", "type": "leather_jacket", "name": ITEM_TYPES["leather_jacket"]["name"],
+                      "weight": ITEM_TYPES["leather_jacket"]["weight"], "value": ITEM_TYPES["leather_jacket"]["value"]},
+            "detector": None,
+        }
+        stalker["inventory"] = [
+            {"id": "ammo_t", "type": "ammo_9mm", "name": ITEM_TYPES["ammo_9mm"]["name"],
+             "weight": ITEM_TYPES["ammo_9mm"].get("weight", 0.01), "value": ITEM_TYPES["ammo_9mm"]["value"]},
+            {"id": "heal_t", "type": "bandage", "name": ITEM_TYPES["bandage"]["name"],
+             "weight": ITEM_TYPES["bandage"].get("weight", 0.1), "value": ITEM_TYPES["bandage"]["value"]},
+            {"id": "food_t", "type": "bread", "name": ITEM_TYPES["bread"]["name"],
+             "weight": ITEM_TYPES["bread"].get("weight", 0.3), "value": ITEM_TYPES["bread"]["value"]},
+            {"id": "water_t", "type": "water", "name": ITEM_TYPES["water"]["name"],
+             "weight": ITEM_TYPES["water"].get("weight", 0.5), "value": ITEM_TYPES["water"]["value"]},
+        ]
+        # Plant the confirmed_empty memory entry for the current location.
+        # Note: written as "observation" (not "decision") — see tick_rules.py.
+        stalker["memory"] = [{
+            "world_turn": 1,
+            "type": "observation",
+            "title": "Аномалия пустая",
+            "summary": "Тщательно обыскал — артефактов нет.",
+            "effects": {"action_kind": "explore_confirmed_empty", "location_id": stalker_loc},
+        }]
+
+        state["agents"]["bot_ce"] = stalker
+        state["locations"][stalker_loc]["agents"].append("bot_ce")
+        return state, "bot_ce", stalker_loc
+
+    def test_get_rich_does_not_reexplore_confirmed_empty(self):
+        """get_rich bot at a confirmed-empty anomaly location should NOT schedule exploration."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "get_rich bot should not re-explore a confirmed-empty anomaly location"
+        )
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        if sched:
+            assert sched["type"] != "explore_anomaly_location", (
+                f"get_rich bot should not schedule explore, got {sched['type']!r}"
+            )
+
+    def test_gather_resources_does_not_reexplore_confirmed_empty(self):
+        """Phase-1 (gather resources) bot should NOT re-explore confirmed-empty locations."""
+        # material_threshold=0 so agent is NOT in phase 1 (wealth >= 0) → stays in phase 2
+        # To force phase-1, make threshold very high
+        state, sid, loc_id = self._make_state_with_confirmed_empty(
+            global_goal="get_rich", material_threshold=999999
+        )
+        # Drain money to force phase-1 (wealth < threshold)
+        state["agents"][sid]["money"] = 10
+        state["agents"][sid]["equipment"] = {"weapon": None, "armor": None, "detector": None}
+        state["agents"][sid]["inventory"] = []
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "Phase-1 (gather_resources) bot should not re-explore confirmed-empty location"
+        )
+
+    def test_explore_zone_does_not_reexplore_confirmed_empty(self):
+        """get_rich bot (formerly explore_zone) should NOT re-explore a confirmed-empty location."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        # Remove connections so bot can't travel, forcing it to consider local explore
+        state["locations"][loc_id]["connections"] = []
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "explore_zone bot should not re-explore confirmed-empty location"
+        )
+
+    def test_generator_always_uses_get_rich(self):
+        """zone_generator should always generate 'get_rich' as the only global goal."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        goals_found = set()
+        for seed in range(50):
+            state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
+            for ag in state["agents"].values():
+                goals_found.add(ag.get("global_goal"))
+        assert goals_found == {"get_rich"}, (
+            f"Generator should only create agents with goal 'get_rich'; found goals: {goals_found}"
+        )
+
+    def test_confirmed_empty_cleared_by_emission_memory(self):
+        """An explore_confirmed_empty entry older than the agent's emission_ended memory
+        should NOT block re-exploration — the stalker knows the zone may have been refilled."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        agent = state["agents"][sid]
+        # The confirmed_empty entry was written at world_turn=1.
+        # Now add a newer emission_ended memory (turn 5) → the confirmed_empty is stale.
+        agent["memory"].append({
+            "world_turn": 5,
+            "type": "observation",
+            "title": "✅ Выброс закончился",
+            "summary": "Выброс закончился. Аномальные зоны могут снова содержать артефакты.",
+            "effects": {"action_kind": "emission_ended"},
+        })
+        # Put an artifact at the location so exploration can succeed
+        state["locations"][loc_id]["artifacts"] = [
+            {"id": "art_emission_test", "type": "crystal", "name": "Кристалл", "value": 500}
+        ]
+        new_state, events = self._tick(state)
+        # The agent's emission knowledge should unlock re-exploration
+        assert any(e["event_type"] == "exploration_started" for e in events), (
+            "Bot should re-explore after emission invalidates the confirmed_empty entry"
+        )
+
+    def test_confirmed_empty_still_blocks_without_emission(self):
+        """An explore_confirmed_empty entry blocks re-exploration when no emission has occurred
+        after it — purely memory-based, no peeking at real map data."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        # Put an artifact at the location to confirm we're NOT using ground-truth
+        state["locations"][loc_id]["artifacts"] = [
+            {"id": "art_secret", "type": "crystal", "name": "Кристалл", "value": 500}
+        ]
+        # No emission_ended in memory → confirmed_empty should still block
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "Bot should NOT re-explore even when artifacts are present if no emission was observed "
+            "(stalkers rely on memory, not omniscient map knowledge)"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Anomaly zone selection respects risk_tolerance
+# ─────────────────────────────────────────────────────────────────
+
+class TestAnomalyRiskTolerance:
+    """Verify that anomaly-zone scoring penalises mismatches between a location's
+    anomaly_activity/10.0 and the agent's risk_tolerance, so that:
+      - low-risk agents gravitate toward low-activity zones, and
+      - high-risk agents gravitate toward high-activity zones.
+    """
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _two_zone_state(self, risk_tolerance: float, wealth_phase: str = "gather"):
+        """Return a state with the agent at A (no anomaly), B (high anomaly=8),
+        C (low anomaly=2) both at distance 1.
+
+        *wealth_phase* controls which Phase the bot enters:
+        - "gather"  → Phase 1 (_bot_gather_resources), material_threshold=999999
+        - "goal"    → Phase 2b (_bot_pursue_goal), material_threshold=0
+        """
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [
+                    {"to": "B", "travel_time": 1},
+                    {"to": "C", "travel_time": 1},
+                ]},
+                "B": {},
+                "C": {},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["B"]["anomaly_activity"] = 8
+        state["locations"]["C"]["anomaly_activity"] = 2
+
+        agent = next(iter(state["agents"].values()))
+        agent["risk_tolerance"] = risk_tolerance
+        if wealth_phase == "gather":
+            agent["material_threshold"] = 999999  # wealth (0) < threshold → Phase 1
+        else:
+            agent["material_threshold"] = 0  # wealth (0) >= threshold → Phase 2b
+        return state
+
+    # ── Phase 1 (_bot_gather_resources) ─────────────────────────────────────
+
+    def test_phase1_low_risk_prefers_low_anomaly_zone(self):
+        """Phase-1 (gather) low-risk agent (0.1) should prefer zone C (activity=2) over B (activity=8)."""
+        state = self._two_zone_state(risk_tolerance=0.1, wealth_phase="gather")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "C", (
+            f"Low-risk agent should head to C (low anomaly), got {sched.get('final_target_id')}"
+        )
+
+    def test_phase1_high_risk_prefers_high_anomaly_zone(self):
+        """Phase-1 (gather) high-risk agent (0.9) should prefer zone B (activity=8) over C (activity=2)."""
+        state = self._two_zone_state(risk_tolerance=0.9, wealth_phase="gather")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "B", (
+            f"High-risk agent should head to B (high anomaly), got {sched.get('final_target_id')}"
+        )
+
+    # ── Phase 2b (_bot_pursue_goal) ──────────────────────────────────────────
+
+    def test_phase2_low_risk_prefers_low_anomaly_zone(self):
+        """Phase-2b (goal) low-risk agent (0.1) should prefer zone C (activity=2) over B (activity=8)."""
+        state = self._two_zone_state(risk_tolerance=0.1, wealth_phase="goal")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "C", (
+            f"Low-risk agent should head to C (low anomaly), got {sched.get('final_target_id')}"
+        )
+
+    def test_phase2_high_risk_prefers_high_anomaly_zone(self):
+        """Phase-2b (goal) high-risk agent (0.9) should prefer zone B (activity=8) over C (activity=2)."""
+        state = self._two_zone_state(risk_tolerance=0.9, wealth_phase="goal")
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        sched = agent.get("scheduled_action")
+        assert sched is not None, "Agent should have scheduled a travel action"
+        assert sched["type"] == "travel"
+        assert sched["final_target_id"] == "B", (
+            f"High-risk agent should head to B (high anomaly), got {sched.get('final_target_id')}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Item-not-found loop prevention
+# ─────────────────────────────────────────────────────────────────
+
+class TestItemNotFoundLoop:
+    """Verify that when a stalker travels to a memorised item location but finds nothing,
+    an observation is written that blocks repeated trips to the same location."""
+
+    def _tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        return tick_zone_map(state)
+
+    def _agent_with_seek_weapon_memory(self, loc_id_target: str):
+        """Return a minimal state (agent at A, target loc_id_target) where
+        the agent has both an item-observation and a seek_item decision memory
+        pointing to loc_id_target for "weapon"."""
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": loc_id_target, "travel_time": 1}]
+                      if loc_id_target != "A" else []},
+                **({loc_id_target: {}} if loc_id_target != "A" else {}),
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # Memory: agent observed a weapon at the target
+        agent["memory"].append({
+            "world_turn": 0,
+            "type": "observation",
+            "title": "Вижу предметы",
+            "summary": "pistol на земле",
+            "effects": {"observed": "items", "location_id": loc_id_target,
+                        "item_types": sorted(WEAPON_ITEM_TYPES)},
+        })
+        # Memory: agent decided to travel there to get a weapon
+        agent["memory"].append({
+            "world_turn": 0,
+            "type": "decision",
+            "title": "Ищу оружие по памяти",
+            "summary": "Иду за оружием",
+            "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                        "destination": loc_id_target},
+        })
+        return state
+
+    # ── Unit tests for helper functions ─────────────────────────────────────
+
+    def test_item_not_found_locations_returns_blocked_loc(self):
+        """_item_not_found_locations returns the location that has an item_not_found_here entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" in result, f"B should be blocked; got {result}"
+
+    def test_newer_item_obs_lifts_block(self):
+        """A newer items-observed entry for the same location supersedes the not_found block."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # Newer observation — item spawned again
+            {"world_turn": 2, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" not in result, f"B should not be blocked after newer item obs; got {result}"
+
+    def test_find_item_memory_location_excludes_not_found(self):
+        """_find_item_memory_location returns None when the only remembered location has a
+        newer item_not_found_here entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, f"Should return None when B is blocked; got {result}"
+
+    def test_find_item_memory_location_not_blocked_without_not_found(self):
+        """_find_item_memory_location returns the location normally when no not_found entry exists."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "B", f"Should return B normally; got {result}"
+
+    # ── Integration tests via tick ───────────────────────────────────────────
+
+    def test_observation_written_when_sought_item_gone(self):
+        """When the agent arrives at a memorised weapon location and finds nothing,
+        an item_not_found_here observation is written into agent memory."""
+        # Agent is already at the target location (simulates post-travel arrival)
+        state = self._agent_with_seek_weapon_memory("A")
+        # No weapon on the ground at A
+        state["locations"]["A"]["items"] = []
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(not_found) == 1, (
+            f"Expected 1 item_not_found_here observation for A, got {len(not_found)}"
+        )
+
+    def test_no_observation_when_item_found(self):
+        """When the weapon IS on the ground and is picked up as the last item,
+        a pickup-induced item_not_found_here observation IS written (prevents re-visit).
+        The arrival-based observation from _maybe_record_item_not_found is NOT written
+        because _bot_pickup_item_from_ground returns early on success, never reaching
+        the _maybe_record_item_not_found call."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        state = self._agent_with_seek_weapon_memory("A")
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        # The new behavior: pickup of the last item writes item_not_found_here so
+        # the agent won't plan another trip here for the same category.
+        assert len(not_found) == 1, (
+            f"Expected 1 item_not_found_here written by pickup; got {len(not_found)}"
+        )
+        # Verify it is the pickup-kind, not the arrival-kind.
+        assert not_found[0]["effects"].get("source") == "pickup", (
+            f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
+        )
+
+    def test_no_observation_without_seek_intent(self):
+        """Without a prior seek_item decision for this location, arriving at an empty location
+        does NOT write a not_found observation (incidental visit)."""
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        # Only an item-observation memory — no seek_item decision
+        agent["memory"].append({
+            "world_turn": 0,
+            "type": "observation",
+            "effects": {"observed": "items", "location_id": "A",
+                        "item_types": sorted(WEAPON_ITEM_TYPES)},
+        })
+        state["locations"]["A"]["items"] = []
+        new_state, _events = self._tick(state)
+        agent = next(iter(new_state["agents"].values()))
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            f"Should not write not_found without a seek_item decision; got {not_found}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# _find_item_memory_location skips unreachable locations
+# ─────────────────────────────────────────────────────────────────
+
+class TestItemMemoryUnreachable:
+    """Verify that _find_item_memory_location ignores locations that are cut off
+    by closed connections, so the bot does not try to travel to an unreachable spot."""
+
+    def test_unreachable_location_skipped(self):
+        """_find_item_memory_location returns None when the only remembered location
+        is cut off by a closed connection."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1, "closed": True}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, f"Should return None for unreachable B; got {result}"
+
+    def test_reachable_location_returned(self):
+        """_find_item_memory_location returns the location when the path is open."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "B", f"Should return B; got {result}"
+
+    def test_alternative_reachable_location_preferred(self):
+        """When one path is closed but another route exists to a different location,
+        the reachable location is returned."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [
+                    {"to": "B", "travel_time": 1, "closed": True},
+                    {"to": "C", "travel_time": 1},
+                ]},
+                "B": {},
+                "C": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # B was observed more recently but is unreachable; C is older but reachable
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "C",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "C", f"Should return reachable C, not unreachable B; got {result}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Successful pickup blocks repeated item search at same location
+# ─────────────────────────────────────────────────────────────────
+
+class TestPickupBlocksResearch:
+    """Verify that after picking up the last item of a needed type from a location,
+    an item_not_found_here observation is written so that _find_item_memory_location
+    won't send the agent back to the same spot."""
+
+    def _call_pickup(self, agent, item_types, state, world_turn=1):
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_item_from_ground
+        return _bot_pickup_item_from_ground("agent1", agent, item_types, state, world_turn)
+
+    def _make_agent_at(self, loc_id: str, state: dict) -> dict:
+        agent = next(iter(state["agents"].values()))
+        agent["location_id"] = loc_id
+        return agent
+
+    def test_pickup_last_item_writes_not_found_observation(self):
+        """After picking up the last weapon on the ground, item_not_found_here is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        evs = self._call_pickup(agent, WEAPON_ITEM_TYPES, state)
+        assert evs, "Should have returned pickup event"
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(not_found) == 1, (
+            f"Expected 1 item_not_found_here after last-item pickup, got {len(not_found)}"
+        )
+        assert not_found[0]["effects"].get("source") == "pickup", (
+            f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
+        )
+
+    def test_pickup_with_remaining_items_no_observation(self):
+        """When another weapon remains after pickup, no item_not_found_here is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+            {"id": "wpn2", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+        ]
+        evs = self._call_pickup(agent, WEAPON_ITEM_TYPES, state)
+        assert evs, "Should have returned pickup event"
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            f"Should NOT write not_found when another weapon remains; got {not_found}"
+        )
+
+    def test_not_found_observation_blocks_find_item_memory_location(self):
+        """After picking up the last weapon, _find_item_memory_location no longer
+        returns that location."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = self._make_agent_at("A", state)
+        # Agent remembers having seen a weapon at B
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        # Simulate: agent travelled to B, picked up last weapon there
+        agent["location_id"] = "B"
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["B"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        self._call_pickup(agent, WEAPON_ITEM_TYPES, state)  # picks up + writes not_found for B
+
+        # Back at A: now search again
+        agent["location_id"] = "A"
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, (
+            f"_find_item_memory_location should return None after pickup-block on B; got {result}"
+        )
+
+    def test_newer_item_obs_lifts_pickup_block(self):
+        """A newer observed:items entry for the same location lifts the pickup-induced block."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = self._make_agent_at("A", state)
+        # Simulate: old observation + pickup (writes not_found) + newer observation
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # the block written by pickup on turn 1
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_not_found_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # a new item spawned and agent observed it on turn 2
+            {"world_turn": 2, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "B", (
+            f"Newer observed:items should lift the pickup block on B; got {result}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emergency travel-to-trader decisions write a memory entry
+# ─────────────────────────────────────────────────────────────────
+
+class TestEmergencyTravelMemory:
+    """Verify that all three emergency travel-to-trader branches (low HP, hunger,
+    thirst) write a 'decision' memory entry before scheduling travel."""
+
+    def _make_state_with_remote_trader(self, agent_hp=100, hunger=0, thirst=0, money=5000):
+        """Agent at A, trader at B (requires travel). Agent has no consumables."""
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 10}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["hp"] = agent_hp
+        agent["hunger"] = hunger
+        agent["thirst"] = thirst
+        agent["money"] = money
+        agent["inventory"] = []
+        # Place a trader at B
+        trader_id = "t1"
+        state["traders"][trader_id] = {
+            "id": trader_id,
+            "name": "Сидорович",
+            "location_id": "B",
+            "is_alive": True,
+        }
+        state["locations"]["B"]["agents"] = [trader_id]
+        return state
+
+    def _run_tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        agent_id = next(iter(state["agents"]))
+        agent = state["agents"][agent_id]
+        _run_bot_action(agent_id, agent, state, world_turn=1)
+        return agent
+
+    def test_low_hp_travel_writes_decision_memory(self):
+        """When HP is critical and trader requires travel, a decision memory is written."""
+        state = self._make_state_with_remote_trader(agent_hp=25, money=5000)
+        agent = self._run_tick(state)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "medical"
+        ]
+        assert len(decisions) == 1, (
+            f"Expected 1 seek_item/medical decision for emergency HP; got {decisions}"
+        )
+        assert decisions[0]["effects"].get("emergency") is True
+        assert decisions[0]["effects"].get("destination") == "B"
+
+    def test_high_hunger_travel_writes_decision_memory(self):
+        """When hunger is critical and trader requires travel, a decision memory is written."""
+        state = self._make_state_with_remote_trader(hunger=75, money=5000)
+        agent = self._run_tick(state)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "food"
+        ]
+        assert len(decisions) == 1, (
+            f"Expected 1 seek_item/food decision for emergency hunger; got {decisions}"
+        )
+        assert decisions[0]["effects"].get("emergency") is True
+        assert decisions[0]["effects"].get("destination") == "B"
+
+    def test_high_thirst_travel_writes_decision_memory(self):
+        """When thirst is critical and trader requires travel, a decision memory is written."""
+        state = self._make_state_with_remote_trader(thirst=75, money=5000)
+        agent = self._run_tick(state)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "drink"
+        ]
+        assert len(decisions) == 1, (
+            f"Expected 1 seek_item/drink decision for emergency thirst; got {decisions}"
+        )
+        assert decisions[0]["effects"].get("emergency") is True
+        assert decisions[0]["effects"].get("destination") == "B"
+
+
+# ─────────────────────────────────────────────────────────────────
+# _bot_pickup_on_arrival: commit to picking up on the arrival tick
+# ─────────────────────────────────────────────────────────────────
+
+class TestPickupOnArrival:
+    """Verify that when an agent arrives at a seek_item destination it picks up
+    the sought item before re-evaluating priorities, even if a higher-priority
+    Need would otherwise redirect it elsewhere."""
+
+    def _make_state(self, agent_extra=None):
+        """Agent at A. A has a weapon on the ground.
+        A memory seek_item(weapon, destination=A) is pre-set so the agent looks
+        as if it just arrived from travelling."""
+        state = _make_minimal_state(
+            {"A": {}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # Weapon on the ground at A
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": "Пистолет", "value": 500,
+             "category": "weapon", "risk_tolerance": 0.5},
+        ]
+        # Inject a seek_item decision pointing at current location
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Ищу оружие по памяти",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "weapon",
+                    "destination": "A",
+                },
+                "reason": "test",
+            }
+        ]
+        if agent_extra:
+            agent.update(agent_extra)
+        return state
+
+    def _run_tick(self, state):
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        agent_id = next(iter(state["agents"]))
+        agent = state["agents"][agent_id]
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        return agent
+
+    def test_picks_up_weapon_on_arrival(self):
+        """Agent with seek_item(weapon, A) at location A immediately picks up
+        the weapon before any other priority fires."""
+        state = self._make_state()
+        agent = self._run_tick(state)
+        pickups = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "pickup_ground"
+        ]
+        assert pickups, "Expected a pickup_ground action memory on arrival"
+        assert pickups[0]["effects"]["item_type"] == "pistol"
+        # Item is now in inventory
+        assert any(i["type"] == "pistol" for i in agent.get("inventory", []))
+
+    def test_pickup_happens_before_priority_switch(self):
+        """Even when the agent also lacks armor (Need 2), the arrival commitment
+        for a weapon (higher Need) is honoured first."""
+        state = self._make_state({"equipment": {}})  # no weapon AND no armor
+        agent = self._run_tick(state)
+        # Should have picked up weapon, not scheduled travel to armor
+        pickups = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "pickup_ground"
+        ]
+        assert pickups, "pickup_ground should fire on arrival, not a redirect"
+        seek_armor = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "seek_item"
+            and m.get("effects", {}).get("item_category") == "armor"
+        ]
+        assert not seek_armor, "Should not have sought armor before picking up weapon"
+
+    def test_no_pickup_when_destination_differs(self):
+        """If the seek_item destination is B but agent is at A, _bot_pickup_on_arrival
+        returns [] — the arrival shortcut does not fire."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 10}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": "Пистолет", "value": 500,
+             "category": "weapon", "risk_tolerance": 0.5},
+        ]
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Ищу оружие по памяти",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "weapon",
+                    "destination": "B",   # different location!
+                },
+                "reason": "test",
+            }
+        ]
+        result = _bot_pickup_on_arrival(
+            next(iter(state["agents"])), agent, state, world_turn=2
+        )
+        assert result == [], (
+            "Expected [] when seek_item destination is B but agent is at A"
+        )
+
+    def test_no_pickup_when_no_seek_item_decision(self):
+        """If the latest decision is not seek_item, no arrival pickup fires."""
+        state = self._make_state()
+        agent = next(iter(state["agents"].values()))
+        # Replace memory with a non-seek_item decision
+        agent["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "Иду исследовать",
+                "summary": "...",
+                "effects": {"action_kind": "explore", "destination": "A"},
+                "reason": "test",
+            }
+        ]
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        # The on-arrival pickup should NOT fire; pickup might still happen via
+        # normal Need-1 ground-pickup — that's fine, just verify arrival logic
+        # didn't produce a spurious pickup based on a non-seek decision.
+        # We verify indirectly: arrival check returns [] for non-seek decision.
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        # Reset state for isolated test
+        state2 = self._make_state()
+        agent2 = next(iter(state2["agents"].values()))
+        agent2["memory"] = [
+            {
+                "type": "decision",
+                "world_turn": 0,
+                "label": "...",
+                "summary": "...",
+                "effects": {"action_kind": "explore"},
+                "reason": "test",
+            }
+        ]
+        result = _bot_pickup_on_arrival(
+            next(iter(state2["agents"])), agent2, state2, world_turn=2
+        )
+        assert result == [], f"Expected [] for non-seek_item decision, got {result}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission warning observation system
+# ─────────────────────────────────────────────────────────────────
+
+class TestEmissionWarning:
+    """Verify that a 'скоро выброс' observation is written to all alive agents
+    exactly once, at a random 10–15 turn window before emission, and that
+    the bot uses this observation (not raw distance arithmetic) to decide to flee."""
+
+    def _make_state_with_emission(self, scheduled_turn: int, current_turn: int = 1,
+                                  warning_written=None, warning_offset=None):
+        """Minimal state: two locations A (plain) and B (building). Agent at A."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_WARNING_MIN_TURNS
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "plain"
+        state["locations"]["B"]["terrain_type"] = "building"
+        state["emission_scheduled_turn"] = scheduled_turn
+        state["emission_active"] = False
+        state["emission_warning_written_turn"] = warning_written
+        state["emission_warning_offset"] = warning_offset
+        state["world_turn"] = current_turn
+        state["seed"] = 0
+        return state
+
+    def test_warning_written_at_correct_turn(self):
+        """emission_imminent observation is written when world_turn == scheduled - offset."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        # Use offset=12: scheduled=100, warning fires at turn 88
+        scheduled = 100
+        state = self._make_state_with_emission(scheduled, current_turn=88,
+                                               warning_offset=12)
+        state["world_turn"] = 88; state, events = tick_zone_map(state)
+        agent = next(iter(state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, f"Expected 1 emission_imminent memory, got {warnings}"
+        assert state["emission_warning_written_turn"] == 88
+
+    def test_warning_not_written_twice(self):
+        """Once the warning is written, re-running subsequent ticks does NOT add a duplicate."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        scheduled = 100
+        state = self._make_state_with_emission(scheduled, current_turn=88,
+                                               warning_offset=12)
+        state["world_turn"] = 88
+        state, _ = tick_zone_map(state)  # first tick — writes warning
+        state["world_turn"] = 89
+        state, _ = tick_zone_map(state)  # second tick — must NOT add another
+        agent = next(iter(state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, "Duplicate emission_imminent observations written"
+
+    def test_warning_event_emitted(self):
+        """emission_warning world event is in the returned events list."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        scheduled = 100
+        state = self._make_state_with_emission(scheduled, current_turn=88,
+                                               warning_offset=12)
+        state["world_turn"] = 88; state, events = tick_zone_map(state)
+        warn_events = [e for e in events if e.get("event_type") == "emission_warning"]
+        assert len(warn_events) == 1
+
+    def test_bot_flees_on_emission_imminent_memory(self):
+        """A bot on dangerous terrain with emission_imminent memory flees to shelter."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_state_with_emission(scheduled_turn=200, current_turn=1)
+        agent = next(iter(state["agents"].values()))
+        # Manually inject the emission_imminent observation (as if it was written earlier)
+        agent["memory"] = [
+            {
+                "type": "observation",
+                "world_turn": 1,
+                "title": "⚠️ Скоро выброс!",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "emission_imminent",
+                    "turns_until": 12,
+                    "emission_scheduled_turn": 200,
+                },
+            }
+        ]
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=1)
+        flee_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert flee_decisions, (
+            "Bot on dangerous terrain with emission_imminent memory should flee"
+        )
+
+    def test_bot_does_not_flee_after_emission_ended(self):
+        """After emission_ended supersedes emission_imminent, bot no longer flees."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_state_with_emission(scheduled_turn=200, current_turn=50)
+        agent = next(iter(state["agents"].values()))
+        # emission_imminent at turn 1, then emission_ended at turn 15
+        agent["memory"] = [
+            {
+                "type": "observation",
+                "world_turn": 1,
+                "title": "⚠️ Скоро выброс!",
+                "summary": "...",
+                "effects": {"action_kind": "emission_imminent", "turns_until": 12,
+                             "emission_scheduled_turn": 15},
+            },
+            {
+                "type": "observation",
+                "world_turn": 15,
+                "title": "✅ Выброс закончился",
+                "summary": "...",
+                "effects": {"action_kind": "emission_ended"},
+            },
+        ]
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=50)
+        flee_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert not flee_decisions, (
+            "Bot should NOT flee when emission_ended supersedes emission_imminent"
+        )
+
+    def test_warning_state_reset_after_emission_ends(self):
+        """emission_warning_written_turn and offset are cleared when emission ends."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_state_with_emission(scheduled_turn=5, current_turn=5,
+                                               warning_written=3, warning_offset=2)
+        # Tick at emission start — starts emission
+        state["world_turn"] = 5
+        state, _ = tick_zone_map(state)
+        assert state.get("emission_active") is True
+        # Tick until emission ends
+        ends_turn = state.get("emission_ends_turn", 10)
+        state["world_turn"] = ends_turn
+        state, _ = tick_zone_map(state)
+        assert state.get("emission_warning_written_turn") is None
+        assert state.get("emission_warning_offset") is None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Emission shelter priority (wait_in_shelter)
+# ─────────────────────────────────────────────────────────────────
+
+class TestEmissionShelterBehavior:
+    """Verify that an agent with emission_imminent in memory stays put when
+    already on safe terrain instead of starting new work."""
+
+    def _make_safe_state(self):
+        """Two locations: S (building=safe) and D (plain=dangerous). Agent at S."""
+        state = _make_minimal_state(
+            {
+                "S": {"connections": [{"to": "D", "travel_time": 1}]},
+                "D": {"connections": [{"to": "S", "travel_time": 1}]},
+            },
+            agent_loc_id="S",
+        )
+        state["locations"]["S"]["terrain_type"] = "building"
+        state["locations"]["D"]["terrain_type"] = "plain"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+        return state
+
+    def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": world_turn,
+            "title": "⚠️ Скоро выброс!",
+            "summary": "...",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": 12,
+                "emission_scheduled_turn": scheduled_turn,
+            },
+        })
+
+    def test_bot_waits_in_shelter_when_emission_imminent(self):
+        """Agent on safe terrain with emission_imminent memory should return []
+        (no new scheduled action) and write a wait_in_shelter decision."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        events = _run_bot_action(agent_id, agent, state, world_turn=2)
+
+        assert events == [], "Bot should return no events while sheltering"
+        assert agent.get("scheduled_action") is None, "No travel should be scheduled"
+        shelter_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        assert shelter_decisions, "Bot should write wait_in_shelter decision memory"
+
+    def test_shelter_decision_written_only_once(self):
+        """Calling _run_bot_action repeatedly while emission_imminent should not
+        spam duplicate wait_in_shelter memories."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        _run_bot_action(agent_id, agent, state, world_turn=3)
+        _run_bot_action(agent_id, agent, state, world_turn=4)
+
+        shelter_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        assert len(shelter_decisions) == 1, (
+            f"Expected exactly 1 wait_in_shelter memory, got {len(shelter_decisions)}"
+        )
+
+    def test_shelter_superseded_by_emission_ended(self):
+        """After emission_ended, the agent should resume normal decisions (not shelter)."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        # Add some anomaly so the bot has something to do
+        state["locations"]["S"]["anomaly_activity"] = 5
+        state["emission_scheduled_turn"] = 5000  # far in the future
+        agent = next(iter(state["agents"].values()))
+        # Emission_imminent at turn 1, then emission_ended at turn 50
+        self._inject_emission_imminent(agent, world_turn=1)
+        agent["memory"].append({
+            "type": "observation",
+            "world_turn": 50,
+            "title": "✅ Выброс закончился",
+            "summary": "...",
+            "effects": {"action_kind": "emission_ended"},
+        })
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=51)
+
+        # Should NOT have added another wait_in_shelter after the emission ended
+        shelter_after_ended = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+            and m.get("world_turn", 0) > 50
+        ]
+        assert not shelter_after_ended, (
+            "Bot should not shelter after emission_ended supersedes emission_imminent"
+        )
+
+    def test_bot_still_flees_dangerous_terrain_when_emission_imminent(self):
+        """Agent on DANGEROUS terrain with emission_imminent should flee (not just wait)."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        state = self._make_safe_state()
+        agent = next(iter(state["agents"].values()))
+        # Move agent to the dangerous location
+        agent["location_id"] = "D"
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+
+        flee_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "flee_emission"
+        ]
+        assert flee_decisions, "Bot on dangerous terrain should flee when emission_imminent"
+        # scheduled_action should be a travel action
+        assert agent.get("scheduled_action") is not None, (
+            "Bot should have scheduled a travel action to flee"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────
+# debug_trigger_emission via world_rules
+# ─────────────────────────────────────────────────────────────────
+
+class TestDebugTriggerEmission:
+    """Verify that debug_trigger_emission schedules the emission 10–15 turns
+    ahead, broadcasts emission_imminent, and does NOT start the emission
+    immediately."""
+
+    def _make_world_state(self):
+        state = _make_minimal_state(
+            {"A": {"connections": []}},
+            agent_loc_id="A",
+        )
+        state["locations"]["A"]["terrain_type"] = "building"
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = None
+        state["world_turn"] = 100
+        state["seed"] = 42
+        return state
+
+    def _run_command(self, state, command_type, payload=None):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command(command_type, payload or {}, state, "player1")
+
+    def test_emission_is_not_active_immediately(self):
+        """debug_trigger_emission should NOT immediately start the emission."""
+        state = self._make_world_state()
+        new_state, events = self._run_command(state, "debug_trigger_emission")
+        assert not new_state.get("emission_active"), (
+            "emission_active must be False right after debug_trigger_emission"
+        )
+
+    def test_emission_scheduled_10_to_15_turns_ahead(self):
+        """The scheduled turn should be world_turn + [10..15]."""
+        from app.games.zone_stalkers.rules.tick_rules import (
+            _EMISSION_WARNING_MIN_TURNS, _EMISSION_WARNING_MAX_TURNS
+        )
+        state = self._make_world_state()
+        world_turn = state["world_turn"]
+        new_state, _ = self._run_command(state, "debug_trigger_emission")
+        scheduled = new_state.get("emission_scheduled_turn")
+        assert scheduled is not None
+        offset = scheduled - world_turn
+        assert _EMISSION_WARNING_MIN_TURNS <= offset <= _EMISSION_WARNING_MAX_TURNS, (
+            f"Expected offset {_EMISSION_WARNING_MIN_TURNS}–{_EMISSION_WARNING_MAX_TURNS}, got {offset}"
+        )
+
+    def test_emission_imminent_written_to_alive_agents(self):
+        """All alive agents should receive an emission_imminent observation."""
+        state = self._make_world_state()
+        new_state, _ = self._run_command(state, "debug_trigger_emission")
+        agent = next(iter(new_state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, (
+            f"Expected 1 emission_imminent memory, got {len(warnings)}"
+        )
+
+    def test_event_emitted_with_correct_payload(self):
+        """debug_emission_triggered event should carry scheduled_turn and turns_until."""
+        state = self._make_world_state()
+        _, events = self._run_command(state, "debug_trigger_emission")
+        trig = [e for e in events if e.get("event_type") == "debug_emission_triggered"]
+        assert len(trig) == 1
+        payload = trig[0]["payload"]
+        assert "emission_scheduled_turn" in payload
+        assert "turns_until" in payload
+        assert payload.get("emission_active") is False
+
+    def test_warning_not_duplicated_by_subsequent_ticks(self):
+        """After debug_trigger_emission, normal ticks should NOT write a second
+        emission_imminent observation (warning_written_turn prevents it)."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_world_state()
+        new_state, _ = self._run_command(state, "debug_trigger_emission")
+        # Tick several times; agent should still have exactly 1 emission_imminent
+        for _ in range(5):
+            new_state["world_turn"] += 1
+            new_state, _ = tick_zone_map(new_state)
+        agent = next(iter(new_state["agents"].values()))
+        warnings = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+        ]
+        assert len(warnings) == 1, (
+            f"Expected 1 emission_imminent memory after ticks, got {len(warnings)}"
+        )
