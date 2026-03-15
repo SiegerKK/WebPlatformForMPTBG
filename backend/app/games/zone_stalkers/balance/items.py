@@ -41,7 +41,7 @@ ITEM_TYPES: dict = {
     "stimpack": {
         "name": "Стимпак", "type": "medical",
         "weight": 0.3, "value": 350, "risk_tolerance": 0.7,
-        "effects": {"hp": 30, "hunger": 10},
+        "effects": {"hp": 50, "hunger": 10},
         "description": "Боевой стимулятор. Восстанавливает 30 HP, немного повышает голод.",
     },
     "morphine": {
@@ -65,19 +65,19 @@ ITEM_TYPES: dict = {
     # ── Weapons ───────────────────────────────────────────────────────────────
     "pistol": {
         "name": "Пистолет ПМ", "type": "weapon",
-        "weight": 0.7, "value": 500, "risk_tolerance": 0.3,
+        "weight": 0.7, "value": 500, "risk_tolerance": 0.15,
         "damage": 15, "range": 2, "ammo_type": "9x18",
         "description": "Пистолет Макарова. Компактное личное оружие.",
     },
     "shotgun": {
         "name": "Обрез ТОЗ-34", "type": "weapon",
-        "weight": 3.0, "value": 800, "risk_tolerance": 0.5,
+        "weight": 3.0, "value": 800, "risk_tolerance": 0.25,
         "damage": 40, "range": 1, "ammo_type": "12gauge",
         "description": "Двустволка ближнего боя. Высокий урон, малая дальность.",
     },
     "ak74": {
         "name": "АК-74", "type": "weapon",
-        "weight": 3.5, "value": 1500, "risk_tolerance": 0.6,
+        "weight": 3.5, "value": 1500, "risk_tolerance": 0.5,
         "damage": 25, "range": 3, "ammo_type": "5.45x39",
         "description": "Автомат Калашникова. Надёжное оружие среднего боя.",
     },
@@ -96,17 +96,17 @@ ITEM_TYPES: dict = {
     # ── Armor ─────────────────────────────────────────────────────────────────
     "leather_jacket": {
         "name": "Кожаная куртка", "type": "armor",
-        "weight": 2.0, "value": 300, "defense": 5, "risk_tolerance": 0.2,
+        "weight": 2.0, "value": 300, "defense": 5, "risk_tolerance": 0.1,
         "description": "Простейшая защита. Дешёвая, но лучше чем ничего.",
     },
     "stalker_suit": {
         "name": "Комбинезон сталкера", "type": "armor",
-        "weight": 5.0, "value": 1500, "defense": 15, "risk_tolerance": 0.4,
+        "weight": 5.0, "value": 1500, "defense": 15, "risk_tolerance": 0.3,
         "description": "Стандартный комбинезон с лёгкой бронёй и радиозащитой.",
     },
     "combat_armor": {
         "name": "Боевой бронежилет", "type": "armor",
-        "weight": 6.5, "value": 3000, "defense": 22, "risk_tolerance": 0.7,
+        "weight": 6.5, "value": 3000, "defense": 22, "risk_tolerance": 0.9,
         "description": "Военный бронежилет. Хорошая защита от пуль и аномалий.",
     },
     "seva_suit": {
@@ -116,7 +116,7 @@ ITEM_TYPES: dict = {
     },
     "exoskeleton": {
         "name": "Экзоскелет", "type": "armor",
-        "weight": 8.0, "value": 6000, "defense": 30, "risk_tolerance": 0.9,
+        "weight": 8.0, "value": 6000, "defense": 30, "risk_tolerance": 0.6,
         "description": "Тяжёлый боевой экзоскелет. Максимальная защита в Зоне.",
     },
     # ── Ammo ──────────────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ ITEM_TYPES: dict = {
     # ── Consumables ───────────────────────────────────────────────────────────
     "bread": {
         "name": "Буханка хлеба", "type": "consumable",
-        "weight": 0.3, "value": 20, "risk_tolerance": 0.1,
+        "weight": 0.3, "value": 20, "risk_tolerance": 0.3,
         "effects": {"hunger": -35},
         "description": "Простая еда. Утоляет голод на 35 единиц.",
     },
@@ -165,7 +165,7 @@ ITEM_TYPES: dict = {
     },
     "water": {
         "name": "Вода (0.5л)", "type": "consumable",
-        "weight": 0.5, "value": 30, "risk_tolerance": 0.1,
+        "weight": 0.5, "value": 30, "risk_tolerance": 0.3,
         "effects": {"thirst": -50},
         "description": "Чистая вода. Утоляет жажду на 50 единиц.",
     },
@@ -177,20 +177,20 @@ ITEM_TYPES: dict = {
     },
     "energy_drink": {
         "name": "Энергетик", "type": "consumable",
-        "weight": 0.3, "value": 80, "risk_tolerance": 0.5,
+        "weight": 0.3, "value": 80, "risk_tolerance": 0.6,
         "effects": {"sleepiness": -30, "thirst": -40, "hunger": -10},
         "description": "Энергетический напиток. Снижает усталость на 30, утоляет жажду.",
     },
     "vodka": {
         "name": "Водка", "type": "consumable",
-        "weight": 0.5, "value": 50, "risk_tolerance": 0.4,
+        "weight": 0.5, "value": 50, "risk_tolerance": 0.9,
         "effects": {"radiation": -10, "hp": -5, "thirst": -20},
         "description": "Народное средство от радиации. Снижает радиацию, немного портит здоровье.",
     },
     "glucose": {
         "name": "Раствор глюкозы", "type": "consumable",
-        "weight": 0.15, "value": 120, "risk_tolerance": 0.3,
-        "effects": {"hp": 15, "hunger": -20},
+        "weight": 0.15, "value": 120, "risk_tolerance": 0.7,
+        "effects": {"hp": 15, "hunger": -30},
         "description": "Питательный раствор. Немного лечит и утоляет голод.",
     },
     # ── Detectors ─────────────────────────────────────────────────────────────
