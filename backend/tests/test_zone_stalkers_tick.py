@@ -698,13 +698,22 @@ def _make_trader_scenario():
 
     # Generate a world with no bots/traders (we'll add them manually)
     state = generate_zone(seed=99, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
-    # Offset world_turn so that the first exploration attempt (which resolves at
-    # world_turn = state["world_turn"] + EXPLORE_DURATION_TURNS) uses an RNG seed
-    # that guarantees a hit.  With initial world_turn=7 the resolution wt is 37:
-    #   random.Random("bot_stalker37").random() == 0.2393 < 0.5  → HIT
-    # This is necessary because the new behavior writes `explore_confirmed_empty`
-    # after ANY failed search, so a miss on the first try would block all retries
-    # until an emission cycle invalidates the block.
+    # Offset world_turn so that the first exploration attempt uses an RNG seed that
+    # guarantees a successful artifact pickup.
+    #
+    # Exploration is scheduled with turns_remaining=EXPLORE_DURATION_TURNS (30).
+    # It resolves when turns_remaining reaches 0, at which point the world_turn is
+    #   resolution_wt = initial_wt + EXPLORE_DURATION_TURNS
+    # The exploration RNG is seeded with agent_id + str(resolution_wt):
+    #   random.Random("bot_stalker" + str(resolution_wt)).random()
+    #
+    # With initial_wt=7 → resolution_wt=37:
+    #   random.Random("bot_stalker37").random() ≈ 0.2393 < 0.5  → HIT
+    #
+    # This offset is necessary because any failed search now writes
+    # `explore_confirmed_empty`, blocking all retries until an emission cycle
+    # clears the block.  To recalculate: iterate initial_wt until
+    # random.Random("bot_stalker" + str(initial_wt + EXPLORE_DURATION_TURNS)).random() < 0.5.
     state["world_turn"] = 7
 
     # Pick two connected locations
