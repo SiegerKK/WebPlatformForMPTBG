@@ -20,7 +20,7 @@ from app.games.zone_stalkers.balance.items import ITEM_TYPES
 from app.games.zone_stalkers.generators.fixed_zone_map import FIXED_ZONE_LOCATIONS
 
 # Valid terrain types (kept for reference / external callers)
-TERRAIN_TYPES = ["plain", "hills", "slag_heaps", "swamp", "field_camp", "industrial", "urban"]
+TERRAIN_TYPES = ["plain", "hills", "slag_heaps", "swamp", "field_camp", "industrial", "bridge"]
 
 
 def _make_id(prefix: str, rng: random.Random) -> str:

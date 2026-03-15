@@ -46,7 +46,7 @@ _EMISSION_WARNING_MIN_TURNS = 10      # warning observation written min 10 turns
 _EMISSION_WARNING_MAX_TURNS = 15      # warning observation written max 15 turns before emission
 # Terrain types where stalkers are killed by an emission
 _EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({
-    "plain", "hills", "swamp", "field_camp", "slag_heaps",
+    "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
 })
 
 # Anomaly search parameters for the get_rich NPC goal path.
@@ -71,6 +71,19 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     state = copy.deepcopy(state)
     events: List[Dict[str, Any]] = []
     world_turn = state.get("world_turn", 1)
+
+    # One-time migration: normalize terrain types that were removed in the v3 update
+    # (urban → plain, underground → plain) and any other unknown types.
+    if not state.get("_terrain_migrated_v3"):
+        _valid_v3: frozenset = frozenset({
+            "plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings",
+            "hamlet", "farm", "field_camp", "dungeon", "x_lab", "bridge",
+            "tunnel", "swamp", "scientific_bunker",
+        })
+        for loc in state.get("locations", {}).values():
+            if loc.get("terrain_type") not in _valid_v3:
+                loc["terrain_type"] = "plain"
+        state["_terrain_migrated_v3"] = True
 
     # 1. Process scheduled actions for each alive stalker agent
     for agent_id, agent in state.get("agents", {}).items():

@@ -7,29 +7,27 @@ import { s } from './styles';
 // ─── Terrain type options ─────────────────────────────────────────────────────
 
 export const TERRAIN_TYPES = [
-  'plain', 'hills', 'slag_heaps', 'industrial', 'buildings', 'military_buildings',
-  'hamlet', 'farm', 'field_camp', 'dungeon', 'x_lab',
-  // Additional types for custom imported maps
-  'urban', 'tunnel', 'swamp', 'scientific_bunker', 'underground',
+  'plain', 'hills', 'swamp', 'field_camp', 'slag_heaps', 'bridge',
+  'industrial', 'buildings', 'military_buildings', 'hamlet', 'farm',
+  'dungeon', 'x_lab', 'tunnel', 'scientific_bunker',
 ] as const;
 
 export const TERRAIN_TYPE_LABELS: Record<string, string> = {
   plain: 'Равнина',
   hills: 'Холмы',
-  slag_heaps: 'Террикони',
+  swamp: 'Болото',
+  field_camp: 'Полевой лагерь',
+  slag_heaps: 'Терриконы',
+  bridge: 'Мост',
   industrial: 'Промзона',
   buildings: 'Здания',
-  military_buildings: 'Военные здания',
+  military_buildings: 'Воен. здания',
   hamlet: 'Хутор',
   farm: 'Ферма',
-  field_camp: 'Полевой лагерь',
   dungeon: 'Подземелья',
-  x_lab: 'Лаборатория Х',
-  urban: 'Городская застройка',
-  tunnel: 'Тоннель',
-  swamp: 'Болота',
-  scientific_bunker: 'Научный бункер',
-  underground: 'Подземный комплекс',
+  tunnel: 'Туннель',
+  x_lab: 'Лаборатория X',
+  scientific_bunker: 'Науч. бункер',
 };
 
 export const DOMINANT_ANOMALY_OPTIONS = [

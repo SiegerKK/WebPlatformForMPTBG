@@ -182,33 +182,39 @@ interface ZoneEventState {
 // ─── Location type colour ────────────────────────────────────────────────────
 
 const TERRAIN_TYPE_COLOR: Record<string, string> = {
-  plain: '#166534',
-  hills: '#4c1d95',
-  slag_heaps: '#334155',
-  industrial: '#854d0e',
-  buildings: '#3730a3',
-  military_buildings: '#991b1b',
-  hamlet: '#9a3412',
-  farm: '#14532d',
-  field_camp: '#134e4a',
-  // Extended types for custom imported maps
-  urban: '#334155',
-  tunnel: '#1e293b',
-  swamp: '#365314',
-  scientific_bunker: '#075985',
-  underground: '#1e1b4b',
+  plain: '#4CAF50',
+  hills: '#9ACD32',
+  swamp: '#5E8C31',
+  field_camp: '#20B2AA',
+  slag_heaps: '#6B8E23',
+  bridge: '#66BB6A',
+  industrial: '#FF9800',
+  buildings: '#FFC107',
+  military_buildings: '#F44336',
+  hamlet: '#FF7043',
+  farm: '#FFB74D',
+  dungeon: '#7E57C2',
+  tunnel: '#3949AB',
+  x_lab: '#1E88E5',
+  scientific_bunker: '#42A5F5',
 };
 
 const TERRAIN_TYPE_LABELS: Record<string, string> = {
   plain: 'Равнина',
   hills: 'Холмы',
-  slag_heaps: 'Террикони',
+  swamp: 'Болото',
+  field_camp: 'Пол. лагерь',
+  slag_heaps: 'Терриконы',
+  bridge: 'Мост',
   industrial: 'Промзона',
   buildings: 'Здания',
   military_buildings: 'Воен. здания',
   hamlet: 'Хутор',
   farm: 'Ферма',
-  field_camp: 'Пол. лагерь',
+  dungeon: 'Подземелья',
+  tunnel: 'Туннель',
+  x_lab: 'Лаборатория X',
+  scientific_bunker: 'Науч. бункер',
 };
 
 const TIME_LABEL = (h: number, m: number) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;

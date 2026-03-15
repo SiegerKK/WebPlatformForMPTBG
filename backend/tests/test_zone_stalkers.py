@@ -2266,9 +2266,15 @@ class TestCustomTerrainTypes:
         }
         return state, loc_id
 
-    def test_edit_location_with_urban_terrain(self):
-        state, loc_id = self._state_with_custom_loc("urban")
+    def test_edit_location_with_urban_terrain_now_invalid(self):
+        """urban was removed as a duplicate of buildings; it must now be rejected."""
+        state, loc_id = self._state_with_custom_loc("plain")
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "urban"}, state)
+        assert not result.valid
+
+    def test_edit_location_with_bridge_terrain(self):
+        state, loc_id = self._state_with_custom_loc("bridge")
+        result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "bridge"}, state)
         assert result.valid, result.error
 
     def test_edit_location_with_tunnel_terrain(self):
@@ -2286,10 +2292,11 @@ class TestCustomTerrainTypes:
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "scientific_bunker"}, state)
         assert result.valid, result.error
 
-    def test_edit_location_with_underground_terrain(self):
-        state, loc_id = self._state_with_custom_loc("underground")
+    def test_edit_location_with_underground_terrain_now_invalid(self):
+        """underground was removed as a duplicate of dungeon; it must now be rejected."""
+        state, loc_id = self._state_with_custom_loc("plain")
         result = self._v("debug_update_location", {"loc_id": loc_id, "name": "X", "terrain_type": "underground"}, state)
-        assert result.valid, result.error
+        assert not result.valid
 
     def test_save_custom_terrain_persists(self):
         state, loc_id = self._state_with_custom_loc("tunnel")
@@ -2338,8 +2345,27 @@ class TestEmissionDangerousTerrain:
         from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
         assert "slag_heaps" in _EMISSION_DANGEROUS_TERRAIN
 
+    def test_bridge_terrain_is_dangerous(self):
+        """Мост (bridge) is open terrain — must be dangerous during emission."""
+        from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
+        assert "bridge" in _EMISSION_DANGEROUS_TERRAIN
+
     def test_industrial_and_buildings_remain_safe(self):
         """Industrial structures and buildings must remain safe (not in dangerous set)."""
         from app.games.zone_stalkers.rules.tick_rules import _EMISSION_DANGEROUS_TERRAIN
         assert "industrial" not in _EMISSION_DANGEROUS_TERRAIN
         assert "buildings" not in _EMISSION_DANGEROUS_TERRAIN
+
+    def test_terrain_migration_normalizes_unknown_types(self):
+        """Unknown terrain types (e.g. old 'urban'/'underground') are normalized to 'plain' on first tick."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        # Inject invalid/removed terrain types into two locations
+        locs = list(state["locations"].values())
+        locs[0]["terrain_type"] = "urban"
+        locs[1]["terrain_type"] = "underground"
+        new_state, _ = tick_zone_map(state)
+        assert new_state["locations"][locs[0]["id"]]["terrain_type"] == "plain"
+        assert new_state["locations"][locs[1]["id"]]["terrain_type"] == "plain"
+        assert new_state.get("_terrain_migrated_v3") is True

@@ -3054,7 +3054,7 @@ class TestEmissionWarning:
             agent_loc_id="A",
         )
         state["locations"]["A"]["terrain_type"] = "plain"
-        state["locations"]["B"]["terrain_type"] = "building"
+        state["locations"]["B"]["terrain_type"] = "buildings"
         state["emission_scheduled_turn"] = scheduled_turn
         state["emission_active"] = False
         state["emission_warning_written_turn"] = warning_written
@@ -3202,7 +3202,7 @@ class TestEmissionShelterBehavior:
             },
             agent_loc_id="S",
         )
-        state["locations"]["S"]["terrain_type"] = "building"
+        state["locations"]["S"]["terrain_type"] = "buildings"
         state["locations"]["D"]["terrain_type"] = "plain"
         state["emission_active"] = False
         state["emission_scheduled_turn"] = 200
@@ -3329,7 +3329,7 @@ class TestDebugTriggerEmission:
             {"A": {"connections": []}},
             agent_loc_id="A",
         )
-        state["locations"]["A"]["terrain_type"] = "building"
+        state["locations"]["A"]["terrain_type"] = "buildings"
         state["emission_active"] = False
         state["emission_scheduled_turn"] = None
         state["world_turn"] = 100
@@ -3427,7 +3427,7 @@ class TestExplorationEmissionInterrupt:
         )
         state["locations"]["A"]["terrain_type"] = terrain
         state["locations"]["A"]["anomaly_activity"] = 5
-        state["locations"]["B"]["terrain_type"] = "building"
+        state["locations"]["B"]["terrain_type"] = "buildings"
         state["emission_active"] = False
         state["emission_scheduled_turn"] = 200
         state["seed"] = 0
@@ -3511,7 +3511,7 @@ class TestExplorationEmissionInterrupt:
     def test_bot_shelters_after_interrupt_on_safe_terrain(self):
         """After interrupting exploration on safe terrain, bot writes wait_in_shelter."""
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
-        state = self._make_explore_state(terrain="building")
+        state = self._make_explore_state(terrain="buildings")
         agent = next(iter(state["agents"].values()))
         self._inject_emission_imminent(agent, world_turn=1)
 
@@ -3544,7 +3544,7 @@ class TestExplorationEmissionInterrupt:
     def test_exploration_interrupted_by_active_emission(self):
         """Mid-exploration with emission_active=True: scheduled_action cleared."""
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
-        state = self._make_explore_state(terrain="building")
+        state = self._make_explore_state(terrain="buildings")
         state["emission_active"] = True
         state["emission_ends_turn"] = 300
 
@@ -3587,7 +3587,7 @@ class TestTravelEmissionInterrupt:
         )
         state["locations"]["A"]["terrain_type"] = terrain_at_current
         state["locations"]["B"]["terrain_type"] = "hills"
-        state["locations"]["C"]["terrain_type"] = "building"
+        state["locations"]["C"]["terrain_type"] = "buildings"
         state["emission_active"] = False
         state["emission_scheduled_turn"] = 200
         state["seed"] = 0
@@ -3618,7 +3618,7 @@ class TestTravelEmissionInterrupt:
         )
         state["locations"]["A"]["terrain_type"] = "plain"
         state["locations"]["B"]["terrain_type"] = terrain_at_B
-        state["locations"]["C"]["terrain_type"] = "building"
+        state["locations"]["C"]["terrain_type"] = "buildings"
         state["emission_active"] = False
         state["emission_scheduled_turn"] = 200
         state["seed"] = 0
@@ -3720,7 +3720,7 @@ class TestTravelEmissionInterrupt:
         test_post_hop_bot_flees_dangerous_terrain_after_interrupt.)"""
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         # Use safe terrain at B so the bot waits instead of scheduling a flee travel
-        state = self._make_post_hop_state(terrain_at_B="building")
+        state = self._make_post_hop_state(terrain_at_B="buildings")
         agent = next(iter(state["agents"].values()))
         self._inject_emission_imminent(agent, world_turn=1)
 
@@ -3830,7 +3830,7 @@ class TestFleeEmissionSelfInterrupt:
             agent_loc_id="A",
         )
         state["locations"]["A"]["terrain_type"] = "plain"
-        state["locations"]["B"]["terrain_type"] = "building"
+        state["locations"]["B"]["terrain_type"] = "buildings"
         state["emission_active"] = False
         state["emission_scheduled_turn"] = 200
         state["seed"] = 0
@@ -3907,7 +3907,7 @@ class TestFleeEmissionSelfInterrupt:
             agent_loc_id="A",
         )
         state["locations"]["A"]["terrain_type"] = "plain"
-        state["locations"]["B"]["terrain_type"] = "building"
+        state["locations"]["B"]["terrain_type"] = "buildings"
         state["emission_active"] = False
         state["seed"] = 0
         agent = next(iter(state["agents"].values()))

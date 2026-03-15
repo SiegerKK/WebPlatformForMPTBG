@@ -44,9 +44,9 @@ _MIN_SLEEP_HOURS = 2
 # Valid terrain types (shared between generator and debug commands)
 _VALID_TERRAIN_TYPES = frozenset([
     "plain", "hills", "slag_heaps", "industrial", "buildings", "military_buildings",
-    "hamlet", "farm", "field_camp", "dungeon", "x_lab",
+    "hamlet", "farm", "field_camp", "dungeon", "x_lab", "bridge",
     # Additional types supported for custom imported maps
-    "urban", "tunnel", "swamp", "scientific_bunker", "underground",
+    "tunnel", "swamp", "scientific_bunker",
 ])
 
 _VALID_GLOBAL_GOALS = frozenset([
