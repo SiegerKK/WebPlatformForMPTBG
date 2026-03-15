@@ -1450,7 +1450,8 @@ const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
 ];
 
 const GLOBAL_GOAL_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'get_rich',    label: 'Разбогатеть'      },
+  { value: 'get_rich',              label: 'Разбогатеть'       },
+  { value: 'unravel_zone_mystery',  label: 'Разгадать тайну Зоны' },
 ];
 
 export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: AgentCreateProps) {

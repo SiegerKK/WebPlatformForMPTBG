@@ -251,6 +251,110 @@ export const ARTIFACT_TYPE_LABELS: Record<string, string> = {
   urchin:       'Urchin (ёж)',
 };
 
+// ─── SpawnItemModal ───────────────────────────────────────────────────────────
+
+type ItemOption = { value: string; label: string; category: string };
+
+export const ITEM_TYPE_OPTIONS: ItemOption[] = [
+  // Medical
+  { value: 'bandage',       label: 'Бинт',                   category: '💊 Медицина' },
+  { value: 'medkit',        label: 'Аптечка',                 category: '💊 Медицина' },
+  { value: 'army_medkit',   label: 'Военная аптечка',         category: '💊 Медицина' },
+  { value: 'stimpack',      label: 'Стимпак',                 category: '💊 Медицина' },
+  { value: 'morphine',      label: 'Морфин',                  category: '💊 Медицина' },
+  { value: 'antirad',       label: 'Антирад',                 category: '💊 Медицина' },
+  { value: 'rad_cure',      label: 'Рад-Пурге',               category: '💊 Медицина' },
+  // Weapons
+  { value: 'pistol',        label: 'Пистолет ПМ',             category: '🔫 Оружие' },
+  { value: 'shotgun',       label: 'Обрез ТОЗ-34',            category: '🔫 Оружие' },
+  { value: 'ak74',          label: 'АК-74',                   category: '🔫 Оружие' },
+  { value: 'pkm',           label: 'ПКМ (пулемёт)',           category: '🔫 Оружие' },
+  { value: 'svu_svd',       label: 'СВД (снайперская)',        category: '🔫 Оружие' },
+  // Armor
+  { value: 'leather_jacket',label: 'Кожаная куртка',          category: '🛡 Броня' },
+  { value: 'stalker_suit',  label: 'Комбинезон сталкера',      category: '🛡 Броня' },
+  { value: 'combat_armor',  label: 'Боевой бронежилет',        category: '🛡 Броня' },
+  { value: 'seva_suit',     label: 'Костюм СЕВА',              category: '🛡 Броня' },
+  { value: 'exoskeleton',   label: 'Экзоскелет',               category: '🛡 Броня' },
+  // Ammo
+  { value: 'ammo_9mm',      label: 'Патроны 9х18 (20 шт.)',    category: '🔧 Патроны' },
+  { value: 'ammo_12gauge',  label: 'Дробь 12 кал. (10 шт.)',   category: '🔧 Патроны' },
+  { value: 'ammo_545',      label: 'Патроны 5.45х39 (30 шт.)', category: '🔧 Патроны' },
+  { value: 'ammo_762',      label: 'Патроны 7.62х54R (20 шт.)',category: '🔧 Патроны' },
+  // Consumables
+  { value: 'bread',         label: 'Буханка хлеба',            category: '🍞 Еда и вода' },
+  { value: 'canned_food',   label: 'Тушёнка',                  category: '🍞 Еда и вода' },
+  { value: 'military_ration',label:'Сухой паёк',               category: '🍞 Еда и вода' },
+  { value: 'water',         label: 'Вода (0.5л)',               category: '🍞 Еда и вода' },
+  { value: 'purified_water',label: 'Очищенная вода (1л)',       category: '🍞 Еда и вода' },
+  { value: 'energy_drink',  label: 'Энергетик',                 category: '🍞 Еда и вода' },
+  { value: 'vodka',         label: 'Водка',                     category: '🍞 Еда и вода' },
+  { value: 'glucose',       label: 'Раствор глюкозы',           category: '🍞 Еда и вода' },
+  // Detectors
+  { value: 'echo_detector', label: 'Детектор «Эхо»',           category: '📡 Детекторы' },
+  { value: 'bear_detector', label: 'Детектор «Медведь»',        category: '📡 Детекторы' },
+  { value: 'veles_detector',label: 'Детектор «Велес»',          category: '📡 Детекторы' },
+  // Secret documents
+  { value: 'classified_report',    label: 'Секретный отчёт',             category: '📄 Секр. документы' },
+  { value: 'encrypted_disk',       label: 'Зашифрованный диск',          category: '📄 Секр. документы' },
+  { value: 'zone_research_notes',  label: 'Исследовательские записки',   category: '📄 Секр. документы' },
+];
+
+export function SpawnItemModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (itemType: string) => Promise<void>;
+}) {
+  const [itemType, setItemType] = useState<string>(ITEM_TYPE_OPTIONS[0].value);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setSaving(true); setErr(null);
+    try {
+      await onSave(itemType);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Spawn failed');
+      setSaving(false);
+    }
+  };
+
+  // Group options by category for <optgroup>
+  const categories = Array.from(new Set(ITEM_TYPE_OPTIONS.map((o) => o.category)));
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>📦 Добавить предмет на локацию</h3>
+        <label style={s.modalLabel}>Тип предмета</label>
+        <select
+          style={s.modalInput}
+          value={itemType}
+          onChange={(e) => setItemType(e.target.value)}
+          autoFocus
+        >
+          {categories.map((cat) => (
+            <optgroup key={cat} label={cat}>
+              {ITEM_TYPE_OPTIONS.filter((o) => o.category === cat).map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+        {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
+          <button style={s.modalCancelBtn} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={s.modalSaveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Adding…' : 'Добавить'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SpawnArtifactModal({
   onClose,
   onSave,

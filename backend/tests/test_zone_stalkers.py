@@ -1875,6 +1875,55 @@ class TestDebugLocationCommands:
             result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": art_type}, state)
             assert result.valid, f"Expected valid for artifact_type={art_type}"
 
+    # ── debug_spawn_item_on_location ─────────────────────────────────────────
+
+    def test_spawn_item_on_location_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": "bandage"}, state)
+        assert result.valid
+
+    def test_spawn_item_on_location_adds_to_ground(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        before = len(state["locations"][loc_id]["items"])
+        new_state, events = self._r(
+            "debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": "medkit"}, state
+        )
+        after = len(new_state["locations"][loc_id]["items"])
+        assert after == before + 1
+        item = new_state["locations"][loc_id]["items"][-1]
+        assert item["type"] == "medkit"
+        assert item["value"] > 0
+        assert item["id"].startswith("item_debug_")
+        assert any(e["event_type"] == "debug_item_spawned_on_location" for e in events)
+
+    def test_spawn_item_on_location_invalid_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": "nuclear_bomb"}, state)
+        assert not result.valid
+
+    def test_spawn_item_on_location_missing_item_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id}, state)
+        assert not result.valid
+
+    def test_spawn_item_on_location_invalid_loc(self):
+        state = self._state()
+        result = self._v("debug_spawn_item_on_location", {"loc_id": "nonexistent", "item_type": "bandage"}, state)
+        assert not result.valid
+
+    def test_spawn_secret_document_on_location(self):
+        """Secret document items can be placed on locations via debug command."""
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        for doc_type in sorted(SECRET_DOCUMENT_ITEM_TYPES):
+            result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": doc_type}, state)
+            assert result.valid, f"Expected valid for secret document type={doc_type}"
+
     # ── debug_delete_agent ───────────────────────────────────────────────────
 
     def test_delete_agent_valid(self):

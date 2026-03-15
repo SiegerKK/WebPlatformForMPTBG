@@ -1526,6 +1526,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             onSpawnArtifact={async (artifactType) => {
               await sendCommand('debug_spawn_artifact', { loc_id: selectedLocId!, artifact_type: artifactType });
             }}
+            onSpawnItem={async (itemType) => {
+              await sendCommand('debug_spawn_item_on_location', { loc_id: selectedLocId!, item_type: itemType });
+            }}
             onDeleteConnection={(toId) => deleteConnection(selectedLocId!, toId)}
             onUpdateConnectionWeight={(toId, travelTime) => updateConnectionWeight(selectedLocId!, toId, travelTime)}
             onToggleConnectionClosed={(toId) => toggleConnectionClosed(selectedLocId!, toId)}
