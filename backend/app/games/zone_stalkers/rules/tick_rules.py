@@ -690,14 +690,34 @@ def _confirmed_empty_locations(agent: Dict[str, Any]) -> "frozenset[str]":
     """Return the set of location IDs the agent has confirmed as artifact-free.
 
     An entry is written when an exploration action finds the location genuinely
-    empty (no artifacts present at all).  This frozenset is used to prevent
-    the bot from scheduling pointless re-explorations of barren anomaly spots.
+    empty (no artifacts present at all).  The agent relies entirely on its own
+    memory — no real-map data is consulted.
+
+    **Emission invalidation (memory-based):** After an emission the agent
+    remembers the ``emission_started`` event.  Because emissions reliably spawn
+    new artifacts in anomaly zones, any ``explore_confirmed_empty`` entry that is
+    *older* than the most recent ``emission_started`` memory entry is treated as
+    stale — the agent knows the location may have been refilled and will be
+    willing to re-explore it.
     """
+    memory = agent.get("memory", [])
+
+    # Find the world_turn of the most recent emission the agent is aware of.
+    last_emission_turn: int = 0
+    for mem in memory:
+        if mem.get("effects", {}).get("action_kind") == "emission_started":
+            t = mem.get("world_turn", 0)
+            if t > last_emission_turn:
+                last_emission_turn = t
+
+    # A confirmed_empty entry is valid only when it was recorded AFTER the last
+    # emission the agent knows about.
     return frozenset(
         mem.get("effects", {}).get("location_id")
-        for mem in agent.get("memory", [])
+        for mem in memory
         if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
         and mem.get("effects", {}).get("location_id")
+        and mem.get("world_turn", 0) > last_emission_turn
     )
 
 
@@ -1629,7 +1649,13 @@ def _run_bot_action_inner(
     #   2) Pick up from the ground at the current location
     #   3) Travel to a location remembered as having that item (memory)
     #   4) Buy from a nearby trader / travel to the nearest one
+    #      *** Step (4) is skipped when wealth < material_threshold.  Buying
+    #          equipment is a last resort; a broke agent should gather resources
+    #          first and only purchase once it has passed the wealth gate. ***
     equipment = agent.setdefault("equipment", {})
+    _equip_wealth = _agent_wealth(agent)
+    _equip_threshold = agent.get("material_threshold", DEFAULT_MATERIAL_THRESHOLD)
+    _can_buy_equipment = _equip_wealth >= _equip_threshold
 
     # Need 1 — Weapon ────────────────────────────────────────────────────────
     if not equipment.get("weapon"):
@@ -1652,21 +1678,22 @@ def _run_bot_action_inner(
                 {"action_kind": "seek_item", "item_category": "weapon", "destination": mem_loc},
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
-        # d) buy from trader or travel to one
-        trader_loc = _find_nearest_trader_location(loc_id, state)
-        if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
-            if bought:
-                return bought
-        elif trader_loc is not None and _can_afford_cheapest(agent, WEAPON_ITEM_TYPES):
-            agent["current_goal"] = "get_weapon"
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Иду к торговцу за оружием",
-                f"Нет оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                {"action_kind": "seek_item", "item_category": "weapon", "destination": trader_loc},
-            )
-            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+        # d) buy from trader or travel to one (only when wealth >= threshold)
+        if _can_buy_equipment:
+            trader_loc = _find_nearest_trader_location(loc_id, state)
+            if trader_loc == loc_id:
+                bought = _bot_buy_from_trader(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
+                if bought:
+                    return bought
+            elif trader_loc is not None and _can_afford_cheapest(agent, WEAPON_ITEM_TYPES):
+                agent["current_goal"] = "get_weapon"
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "Иду к торговцу за оружием",
+                    f"Нет оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
+                    {"action_kind": "seek_item", "item_category": "weapon", "destination": trader_loc},
+                )
+                return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # Need 2 — Armor ─────────────────────────────────────────────────────────
     if not equipment.get("armor"):
@@ -1686,20 +1713,22 @@ def _run_bot_action_inner(
                 {"action_kind": "seek_item", "item_category": "armor", "destination": mem_loc},
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
-        trader_loc = _find_nearest_trader_location(loc_id, state)
-        if trader_loc == loc_id:
-            bought = _bot_buy_from_trader(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
-            if bought:
-                return bought
-        elif trader_loc is not None and _can_afford_cheapest(agent, ARMOR_ITEM_TYPES):
-            agent["current_goal"] = "get_armor"
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Иду к торговцу за бронёй",
-                f"Нет брони. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                {"action_kind": "seek_item", "item_category": "armor", "destination": trader_loc},
-            )
-            return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+        # d) buy from trader or travel to one (only when wealth >= threshold)
+        if _can_buy_equipment:
+            trader_loc = _find_nearest_trader_location(loc_id, state)
+            if trader_loc == loc_id:
+                bought = _bot_buy_from_trader(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
+                if bought:
+                    return bought
+            elif trader_loc is not None and _can_afford_cheapest(agent, ARMOR_ITEM_TYPES):
+                agent["current_goal"] = "get_armor"
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "Иду к торговцу за бронёй",
+                    f"Нет брони. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
+                    {"action_kind": "seek_item", "item_category": "armor", "destination": trader_loc},
+                )
+                return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # Need 3 — Ammo for equipped weapon ───────────────────────────────────────
     _equipped_weapon = equipment.get("weapon")
@@ -1724,21 +1753,23 @@ def _run_bot_action_inner(
                          "ammo_type": _required_ammo, "destination": mem_loc},
                     )
                     return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
-                trader_loc = _find_nearest_trader_location(loc_id, state)
-                if trader_loc == loc_id:
-                    bought = _bot_buy_from_trader(agent_id, agent, _required_ammo_set, state, world_turn)
-                    if bought:
-                        return bought
-                elif trader_loc is not None and _can_afford_cheapest(agent, _required_ammo_set):
-                    agent["current_goal"] = "get_ammo"
-                    _add_memory(
-                        agent, world_turn, state, "decision",
-                        "Иду к торговцу за патронами",
-                        f"Нет патронов для оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
-                        {"action_kind": "seek_item", "item_category": "ammo",
-                         "ammo_type": _required_ammo, "destination": trader_loc},
-                    )
-                    return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+                # d) buy from trader or travel to one (only when wealth >= threshold)
+                if _can_buy_equipment:
+                    trader_loc = _find_nearest_trader_location(loc_id, state)
+                    if trader_loc == loc_id:
+                        bought = _bot_buy_from_trader(agent_id, agent, _required_ammo_set, state, world_turn)
+                        if bought:
+                            return bought
+                    elif trader_loc is not None and _can_afford_cheapest(agent, _required_ammo_set):
+                        agent["current_goal"] = "get_ammo"
+                        _add_memory(
+                            agent, world_turn, state, "decision",
+                            "Иду к торговцу за патронами",
+                            f"Нет патронов для оружия. Иду к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}».",
+                            {"action_kind": "seek_item", "item_category": "ammo",
+                             "ammo_type": _required_ammo, "destination": trader_loc},
+                        )
+                        return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
     # Need 4 — Medicine reserve (pick up from ground, travel to observed location, or buy locally) ──
     _has_heal = any(i["type"] in HEAL_ITEM_TYPES for i in agent.get("inventory", []))

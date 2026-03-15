@@ -1599,11 +1599,11 @@ class TestEquipmentMaintenance:
         assert any(e["event_type"] == "item_picked_up" for e in events)
 
     def test_travel_to_trader_for_weapon_when_no_ground_items(self):
-        """Bot should travel to a trader if no weapon in inventory or on ground."""
+        """Bot should travel to a trader if no weapon in inventory or on ground,
+        but ONLY when wealth >= material_threshold (Phase 2 / buy is unlocked)."""
         state, sid, loc_id = _make_bare_stalker_state(with_trader=False)
-        # Remove money from stalker so they can't immediately buy (but ensure they have enough for travel)
-        # Actually no trader at location — bot should seek nearest trader
-        # First create a trader somewhere reachable
+        # Put agent into Phase 2 so the equipment-buy step is allowed
+        state["agents"][sid]["material_threshold"] = 100  # wealth (2000) >> threshold (100)
         conns = state["locations"][loc_id].get("connections", [])
         if conns:
             trader_loc = conns[0]["to"]
@@ -1629,15 +1629,43 @@ class TestEquipmentMaintenance:
             goal = agent.get("current_goal")
             assert goal in ("get_weapon", "get_armor"), f"Expected get_weapon or get_armor goal, got {goal}"
 
+    def test_equipment_buy_skipped_in_phase1(self):
+        """Bot should NOT travel to a trader for equipment when wealth < threshold (Phase 1)."""
+        state, sid, loc_id = _make_bare_stalker_state(with_trader=False)
+        # material_threshold=999999 → agent is firmly in Phase 1 (wealth < threshold)
+        # (this is the default in _make_bare_stalker_state)
+        conns = state["locations"][loc_id].get("connections", [])
+        if not conns:
+            return
+        trader_loc = conns[0]["to"]
+        state.setdefault("traders", {})["tr_phase1"] = {
+            "id": "tr_phase1", "archetype": "trader_npc", "name": "Phase1 Trader",
+            "location_id": trader_loc, "inventory": [], "money": 10000,
+            "memory": [], "is_alive": True,
+        }
+        state["locations"][trader_loc]["agents"].append("tr_phase1")
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+        sched = agent.get("scheduled_action")
+        # Bot should NOT be traveling toward trader to buy equipment in Phase 1
+        if sched and sched["type"] == "travel":
+            final_target = sched.get("final_target_id", sched.get("target_id"))
+            assert final_target != trader_loc, (
+                "Phase-1 bot should not travel to a trader to buy equipment; "
+                f"it should gather resources instead. Target: {final_target!r}"
+            )
+
     def test_buy_weapon_from_local_trader(self):
-        """Bot should buy a weapon from a local trader when it has enough money."""
+        """Bot should buy a weapon from a local trader when wealth >= threshold."""
         state, sid, loc_id = _make_bare_stalker_state(with_trader=True)
-        state["agents"][sid]["money"] = 3000  # Enough for weapon at 150% price
+        # Set threshold below wealth so the equipment-buy step fires
+        state["agents"][sid]["money"] = 3000
+        state["agents"][sid]["material_threshold"] = 100  # wealth (3000) >> threshold (100)
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         # Should have bought a weapon
         assert any(e["event_type"] == "bot_bought_item" for e in events), \
-            "Bot should have bought an item from trader"
+            "Bot should have bought an item from trader when wealth >= threshold"
 
     def test_seek_item_from_memory(self):
         """Bot should travel to a location remembered as having a weapon."""
@@ -2000,4 +2028,43 @@ class TestConfirmedEmptyBlocking:
                 goals_found.add(ag.get("global_goal"))
         assert goals_found == {"get_rich"}, (
             f"Generator should only create agents with goal 'get_rich'; found goals: {goals_found}"
+        )
+
+    def test_confirmed_empty_cleared_by_emission_memory(self):
+        """An explore_confirmed_empty entry older than the agent's emission_started memory
+        should NOT block re-exploration — the stalker knows an emission may have refilled the zone."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        agent = state["agents"][sid]
+        # The confirmed_empty entry was written at world_turn=1.
+        # Now add a newer emission_started memory (turn 5) → the confirmed_empty is stale.
+        agent["memory"].append({
+            "world_turn": 5,
+            "type": "observation",
+            "title": "⚡ Начался выброс!",
+            "summary": "Начался выброс! Нужно укрыться в безопасном месте.",
+            "effects": {"action_kind": "emission_started"},
+        })
+        # Put an artifact at the location so exploration can succeed
+        state["locations"][loc_id]["artifacts"] = [
+            {"id": "art_emission_test", "type": "crystal", "name": "Кристалл", "value": 500}
+        ]
+        new_state, events = self._tick(state)
+        # The agent's emission knowledge should unlock re-exploration
+        assert any(e["event_type"] == "exploration_started" for e in events), (
+            "Bot should re-explore after emission invalidates the confirmed_empty entry"
+        )
+
+    def test_confirmed_empty_still_blocks_without_emission(self):
+        """An explore_confirmed_empty entry blocks re-exploration when no emission has occurred
+        after it — purely memory-based, no peeking at real map data."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
+        # Put an artifact at the location to confirm we're NOT using ground-truth
+        state["locations"][loc_id]["artifacts"] = [
+            {"id": "art_secret", "type": "crystal", "name": "Кристалл", "value": 500}
+        ]
+        # No emission_started in memory → confirmed_empty should still block
+        new_state, events = self._tick(state)
+        assert not any(e["event_type"] == "exploration_started" for e in events), (
+            "Bot should NOT re-explore even when artifacts are present if no emission was observed "
+            "(stalkers rely on memory, not omniscient map knowledge)"
         )
