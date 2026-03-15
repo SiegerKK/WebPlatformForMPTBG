@@ -2355,3 +2355,85 @@ class TestItemNotFoundLoop:
         assert len(not_found) == 0, (
             f"Should not write not_found without a seek_item decision; got {not_found}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# _find_item_memory_location skips unreachable locations
+# ─────────────────────────────────────────────────────────────────
+
+class TestItemMemoryUnreachable:
+    """Verify that _find_item_memory_location ignores locations that are cut off
+    by closed connections, so the bot does not try to travel to an unreachable spot."""
+
+    def test_unreachable_location_skipped(self):
+        """_find_item_memory_location returns None when the only remembered location
+        is cut off by a closed connection."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1, "closed": True}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, f"Should return None for unreachable B; got {result}"
+
+    def test_reachable_location_returned(self):
+        """_find_item_memory_location returns the location when the path is open."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [{"to": "B", "travel_time": 1}]},
+                "B": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "B", f"Should return B; got {result}"
+
+    def test_alternative_reachable_location_preferred(self):
+        """When one path is closed but another route exists to a different location,
+        the reachable location is returned."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {
+                "A": {"connections": [
+                    {"to": "B", "travel_time": 1, "closed": True},
+                    {"to": "C", "travel_time": 1},
+                ]},
+                "B": {},
+                "C": {},
+            },
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        # B was observed more recently but is unreachable; C is older but reachable
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "C",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result == "C", f"Should return reachable C, not unreachable B; got {result}"

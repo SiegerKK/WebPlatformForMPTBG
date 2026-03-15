@@ -1507,13 +1507,17 @@ def _find_item_memory_location(
 
     Returns the ``loc_id`` of the most recently remembered location where
     one of the requested item types was seen, or ``None`` if no such memory
-    exists.  Locations where the agent previously arrived and found nothing
+    exists.  Locations that are unreachable (all paths blocked by closed
+    connections) or that the agent has previously visited and found empty
     (recorded via ``_maybe_record_item_not_found``) are excluded.
 
     Relies purely on the agent's memory — no omniscient ground-truth check.
     """
+    from app.games.zone_stalkers.rules.world_rules import _bfs_route
+
     excluded = _item_not_found_locations(agent, item_types)
     locations = state.get("locations", {})
+    agent_loc = agent.get("location_id", "")
     # Collect candidate locations from memory (newest first)
     for mem in reversed(agent.get("memory", [])):
         if mem.get("type") != "observation":
@@ -1528,6 +1532,14 @@ def _find_item_memory_location(
             continue
         remembered_types = set(effects.get("item_types", []))
         if not remembered_types.intersection(item_types):
+            continue
+        # Skip the agent's current location — ground pickup is handled by the caller
+        # before this function is ever called, so returning the current loc would
+        # yield a zero-distance "travel" that never moves the agent.
+        if loc_id == agent_loc:
+            continue
+        # Skip unreachable locations (closed connections may cut off the path)
+        if not _bfs_route(locations, agent_loc, loc_id):
             continue
         return loc_id
     return None
