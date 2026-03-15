@@ -151,7 +151,7 @@ const schedRemaining = (type: string, turns: number): string => {
 
 const SCHED_ICONS: Record<string, string> = {
   travel: '🚶',
-  explore: '🔍',
+  explore_anomaly_location: '🔍',
   sleep: '😴',
   event: '📖',
 };
@@ -163,7 +163,7 @@ const MEM_ICONS: Record<string, string> = {
   observation: '👁️',
   // legacy types kept for backwards compat with old save data
   travel: '🚶',
-  explore: '🔍',
+  explore_anomaly_location: '🔍',
   sleep: '😴',
   pickup: '🎁',
   trade_sell: '💰',
@@ -174,7 +174,7 @@ const MEM_COLORS: Record<string, string> = {
   action: '#34d399',     // emerald – the "deed"
   observation: '#fbbf24', // amber – the "sight"
   travel: '#34d399',
-  explore: '#34d399',
+  explore_anomaly_location: '#34d399',
   sleep: '#34d399',
   pickup: '#34d399',
   trade_sell: '#34d399',
@@ -187,9 +187,7 @@ const CURRENT_GOAL_LABELS: Record<string, string> = {
   goal_get_rich_seek_artifacts: 'Ищу артефакты',
   sell_artifacts:               'Продаю артефакты',
   flee_to_safety:               'Бегство',
-  goal_survive:                 'Выживание',
-  goal_explore_zone:            'Исследование зоны',
-  goal_serve_faction:           'Служу фракции',
+
   upgrade_equipment:            'Апгрейд снаряжения',
   get_weapon:                   'Ищу оружие',
   get_armor:                    'Ищу броню',
@@ -1209,7 +1207,7 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const threshold = agent.material_threshold ?? 3000;
   const goal = agent.current_goal ?? '—';
   const scheduled = agent.scheduled_action;
-  const globalGoal = agent.global_goal ?? 'survive';
+  const globalGoal = agent.global_goal ?? 'get_rich';
   const artifactCount = agent.inventory.filter((i) => _ARTIFACT_TYPES.has(i.type)).length;
 
   const eq  = agent.equipment;
@@ -1334,7 +1332,7 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
     } else if (t === 'sleep') {
       action = 'Спать';
       reason = 'Запланированный отдых';
-    } else if (t === 'explore') {
+    } else if (t === 'explore_anomaly_location') {
       action = 'Исследование';
       reason = 'Запланированное исследование';
     }
@@ -1388,10 +1386,6 @@ const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
 
 const GLOBAL_GOAL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'get_rich',    label: 'Разбогатеть'      },
-  { value: 'explore_zone', label: 'Исследовать Зону' },
-  { value: 'survive',     label: 'Выжить'            },
-  { value: 'help_others', label: 'Помогать другим'   },
-  { value: 'find_wish',   label: 'Найти Желание'     },
 ];
 
 export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: AgentCreateProps) {

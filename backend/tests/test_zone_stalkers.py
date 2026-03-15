@@ -662,7 +662,7 @@ class TestNewAgentFields:
     def test_global_goal_present(self):
         agent = self._agent()
         assert "global_goal" in agent
-        assert agent["global_goal"] in ("survive", "get_rich", "explore_zone", "serve_faction")
+        assert agent["global_goal"] == "get_rich"
 
     def test_risk_tolerance_present(self):
         agent = self._agent()
@@ -1288,29 +1288,6 @@ class TestMaterialThreshold:
         assert agent.get("current_goal") in ("gather_resources", "get_weapon", "get_armor"), (
             f"Expected resource gathering for underfunded get_rich agent, got {agent.get('current_goal')}"
         )
-
-    def test_survive_agent_above_threshold_pursues_goal(self):
-        """A survive agent above material_threshold must pursue its global goal."""
-        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
-        from app.games.zone_stalkers.generators.zone_generator import generate_zone
-        state = generate_zone(seed=9, num_players=0, num_ai_stalkers=1, num_mutants=0, num_traders=0)
-        agent_id = list(state["agents"].keys())[0]
-        agent = state["agents"][agent_id]
-        agent["global_goal"] = "survive"
-        agent["material_threshold"] = 3000
-        agent["money"] = 10000  # above threshold
-        agent["equipment"] = {
-            "weapon": {"id": "w1", "type": "pistol", "name": "PM", "value": 500},
-            "armor":  {"id": "a1", "type": "leather_jacket", "name": "Куртка", "value": 300},
-            "detector": None,
-        }
-        _run_bot_action_inner(agent_id, agent, state, world_turn=1)
-        goal = agent.get("current_goal", "")
-        assert goal.startswith("goal_") or goal == "upgrade_equipment", (
-            f"Expected goal pursuit for wealthy survive agent, got {goal!r}"
-        )
-
-    # ── debug_set_agent_threshold: validate ────────────────────────────────
 
     def test_validate_set_threshold_valid(self):
         state = self._base_state()
@@ -2069,12 +2046,12 @@ class TestUnifiedStalkerModel:
     def test_player_agent_has_global_goal(self):
         state = self._state()
         agent = state["agents"]["agent_p0"]
-        assert agent["global_goal"] in ("survive", "get_rich", "explore_zone", "serve_faction")
+        assert agent["global_goal"] == "get_rich"
 
     def test_npc_agent_has_global_goal(self):
         state = self._state()
         agent = state["agents"]["agent_ai_0"]
-        assert agent["global_goal"] in ("survive", "get_rich", "explore_zone", "serve_faction")
+        assert agent["global_goal"] == "get_rich"
 
     def test_all_agents_have_material_threshold(self):
         state = self._state()

@@ -399,7 +399,7 @@ def _process_scheduled_action(
                 agent["is_alive"] = False
                 events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "travel_anomaly"}})
 
-    elif action_type == "explore":
+    elif action_type == "explore_anomaly_location":
         loc_id = agent["location_id"]
         loc = state["locations"].get(loc_id, {})
         result_evs = _resolve_exploration(agent_id, agent, loc, loc_id, state, world_turn)
@@ -1880,7 +1880,7 @@ def _run_bot_action_inner(
     # ── GOAL SELECTION ─────────────────────────────────────────────────────────
     wealth = _agent_wealth(agent)
     threshold = agent.get("material_threshold", DEFAULT_MATERIAL_THRESHOLD)
-    global_goal = agent.get("global_goal", "survive")
+    global_goal = agent.get("global_goal", "get_rich")
 
     # All agents accumulate resources until they reach material_threshold first,
     # then switch to equipment upgrade → global goal pursuit.
@@ -1927,7 +1927,7 @@ def _bot_gather_resources(
             {"action_kind": "explore_decision", "location_id": loc_id},
         )
         agent["scheduled_action"] = {
-            "type": "explore",
+            "type": "explore_anomaly_location",
             "turns_remaining": EXPLORE_DURATION_TURNS,
             "turns_total": EXPLORE_DURATION_TURNS,
             "target_id": loc_id,
@@ -1964,7 +1964,7 @@ def _bot_gather_resources(
             {"action_kind": "explore_decision", "location_id": loc_id},
         )
         agent["scheduled_action"] = {
-            "type": "explore",
+            "type": "explore_anomaly_location",
             "turns_remaining": EXPLORE_DURATION_TURNS,
             "turns_total": EXPLORE_DURATION_TURNS,
             "target_id": loc_id,
@@ -1994,38 +1994,7 @@ def _bot_pursue_goal(
     locations = state.get("locations", {})
     connections = [c for c in loc.get("connections", []) if not c.get("closed")]
 
-    if global_goal == "survive":
-        # Stay in safe locations; sleep more; top up supplies
-        if loc.get("anomaly_activity", 0) > 5 and connections:
-            safe_conn = [c for c in connections
-                         if locations.get(c["to"], {}).get("anomaly_activity", 5) <= 3]
-            if safe_conn:
-                chosen = rng.choice(safe_conn)
-                safe_name = locations.get(chosen["to"], {}).get("name", chosen["to"])
-                _add_memory(
-                    agent, world_turn, state, "decision",
-                    "Ухожу в безопасную зону",
-                    f"Аномальная активность слишком высокая. Ухожу в «{safe_name}».",
-                    {"action_kind": "move_to_safety", "destination": chosen["to"]},
-                )
-                return _bot_schedule_travel(agent_id, agent, chosen["to"], state, world_turn)
-        if agent.get("sleepiness", 0) >= 40:
-            _sleep_hours = 4
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Ложусь спать",
-                f"Устал (сонливость {agent.get('sleepiness', 0)}%). Ложусь поспать на {_sleep_hours} ч.",
-                {"action_kind": "sleep_decision", "sleepiness": agent.get("sleepiness", 0), "hours": _sleep_hours},
-            )
-            agent["scheduled_action"] = {
-                "type": "sleep", "turns_remaining": _sleep_hours * _HOUR_IN_TURNS,
-                "turns_total": _sleep_hours * _HOUR_IN_TURNS, "hours": _sleep_hours,
-                "target_id": loc_id, "started_turn": world_turn,
-            }
-            agent["action_used"] = True
-            return [{"event_type": "sleep_started", "payload": {"agent_id": agent_id, "hours": _sleep_hours}}]
-
-    elif global_goal == "get_rich":
+    if global_goal == "get_rich":
         # ── Explore current location to find artifacts (must go through explore) ──────
         # Artifacts can only be obtained through the explore action, not picked up directly.
         # Stalkers do NOT have omniscient knowledge of which locations have artifacts —
@@ -2040,7 +2009,7 @@ def _bot_pursue_goal(
                 {"action_kind": "explore_decision", "location_id": loc_id},
             )
             agent["scheduled_action"] = {
-                "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS,
+                "type": "explore_anomaly_location", "turns_remaining": EXPLORE_DURATION_TURNS,
                 "turns_total": EXPLORE_DURATION_TURNS,
                 "target_id": loc_id, "started_turn": world_turn,
             }
@@ -2101,75 +2070,6 @@ def _bot_pursue_goal(
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
-    elif global_goal in ("explore_zone", "explore"):
-        # Visit as many unique locations as possible
-        confirmed_empty = _confirmed_empty_locations(agent)
-        visited = {mem.get("effects", {}).get("to_loc") for mem in agent.get("memory", [])
-                   if mem.get("type") == "travel"}
-        visited.add(loc_id)
-        unvisited = [c for c in connections if c["to"] not in visited]
-        if unvisited:
-            target = rng.choice(unvisited)
-            target_name = locations.get(target["to"], {}).get("name", target["to"])
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Иду исследовать новое место",
-                f"Хочу посетить как можно больше локаций. Иду в «{target_name}».",
-                {"action_kind": "explore_new_location", "destination": target["to"]},
-            )
-            return _bot_schedule_travel(agent_id, agent, target["to"], state, world_turn)
-        # Explore current location only if not confirmed empty
-        if loc_id not in confirmed_empty and rng.random() < 0.50:
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Исследую текущую локацию",
-                f"Все соседние локации уже посещены. Исследую «{loc.get('name', loc_id)}».",
-                {"action_kind": "explore_decision", "location_id": loc_id},
-            )
-            agent["scheduled_action"] = {
-                "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
-                "target_id": loc_id, "started_turn": world_turn,
-            }
-            agent["action_used"] = True
-            return [{"event_type": "exploration_started",
-                     "payload": {"agent_id": agent_id, "location_id": loc_id}}]
-        if connections:
-            rand_conn = rng.choice(connections)
-            rand_name = locations.get(rand_conn["to"], {}).get("name", rand_conn["to"])
-            _add_memory(
-                agent, world_turn, state, "decision",
-                "Иду в случайном направлении",
-                f"Иду в «{rand_name}» — наугад, продолжаю исследование зоны.",
-                {"action_kind": "wander", "destination": rand_conn["to"]},
-            )
-            return _bot_schedule_travel(agent_id, agent, rand_conn["to"], state, world_turn)
-
-    elif global_goal == "serve_faction":
-        # Patrol: move toward locations where faction members are present
-        faction = agent.get("faction", "loner")
-        faction_locs = []
-        for cid, c_loc in locations.items():
-            for aid in c_loc.get("agents", []):
-                other = state.get("agents", {}).get(aid, {})
-                if other.get("faction") == faction and aid != agent_id:
-                    faction_locs.append(cid)
-                    break
-        # Move toward closest faction location
-        if faction_locs and connections:
-            target_conn = next(
-                (c for c in connections if c["to"] in faction_locs),
-                rng.choice(connections) if connections else None
-            )
-            if target_conn:
-                target_name = locations.get(target_conn["to"], {}).get("name", target_conn["to"])
-                _add_memory(
-                    agent, world_turn, state, "decision",
-                    f"Патрулирую с фракцией «{faction}»",
-                    f"Иду в «{target_name}» — там члены моей фракции.",
-                    {"action_kind": "faction_patrol", "destination": target_conn["to"], "faction": faction},
-                )
-                return _bot_schedule_travel(agent_id, agent, target_conn["to"], state, world_turn)
-
     # Fallback: wander
     if connections and rng.random() < 0.60:
         conn = rng.choice(connections)
@@ -2190,7 +2090,7 @@ def _bot_pursue_goal(
             {"action_kind": "explore_decision", "location_id": loc_id},
         )
         agent["scheduled_action"] = {
-            "type": "explore", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
+            "type": "explore_anomaly_location", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
             "target_id": loc_id, "started_turn": world_turn,
         }
         agent["action_used"] = True
@@ -2227,7 +2127,7 @@ def _describe_bot_decision_tree(
     loc_id = agent.get("location_id", "")
     wealth = _agent_wealth(agent)
     threshold = agent.get("material_threshold", DEFAULT_MATERIAL_THRESHOLD)
-    global_goal = agent.get("global_goal", "survive")
+    global_goal = agent.get("global_goal", "get_rich")
     artifacts = _agent_artifacts_in_inventory(agent)
     trader_here = _find_trader_at_location(loc_id, state)
     equipment = agent.get("equipment", {})
@@ -2366,7 +2266,7 @@ def _describe_bot_decision_tree(
             hrs = sched.get("hours", 0)
             action = f"Спать {hrs}ч"
             reason = "Восстановление сил"
-        elif t == "explore":
+        elif t == "explore_anomaly_location":
             loc_id_s = sched.get("target_id", "")
             loc_name = state.get("locations", {}).get(loc_id_s, {}).get("name", loc_id_s)
             action = f"Исследование {loc_name}"

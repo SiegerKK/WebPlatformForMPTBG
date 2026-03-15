@@ -50,7 +50,7 @@ _VALID_TERRAIN_TYPES = frozenset([
 ])
 
 _VALID_GLOBAL_GOALS = frozenset([
-    "get_rich", "explore_zone", "survive", "help_others", "find_wish",
+    "get_rich",
 ])
 
 
@@ -799,7 +799,7 @@ def resolve_world_command(
         loc_id = agent["location_id"]
         loc = state["locations"].get(loc_id, {})
         agent["scheduled_action"] = {
-            "type": "explore",
+            "type": "explore_anomaly_location",
             "turns_remaining": 1,
             "turns_total": 1,
             "target_id": loc_id,

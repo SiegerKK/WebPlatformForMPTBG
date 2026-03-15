@@ -109,7 +109,7 @@ class TestWorldRulesNewCommands:
         state = _make_world()
         new_state, events = self._r("explore_location", {}, state)
         agent = new_state["agents"]["agent_p0"]
-        assert agent["scheduled_action"]["type"] == "explore"
+        assert agent["scheduled_action"]["type"] == "explore_anomaly_location"
         assert agent["scheduled_action"]["turns_remaining"] == 1
         assert any(e["event_type"] == "exploration_started" for e in events)
 
@@ -811,8 +811,8 @@ class TestArtifactToTraderScenario:
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
         assert sched is not None, "Agent should have a scheduled action"
-        assert sched["type"] == "explore", (
-            f"Agent should start exploring, not '{sched['type']}' "
+        assert sched["type"] == "explore_anomaly_location", (
+            f"Agent should start exploring anomaly location, not '{sched['type']}' "
             "(artifacts must be obtained through explore, not direct pickup)"
         )
         assert any(e["event_type"] == "exploration_started" for e in events)
@@ -1229,7 +1229,7 @@ def _make_minimal_state(locations_cfg, agent_loc_id="A"):
         "scheduled_action": None,
         "action_used": False,
         "controller": {"kind": "bot", "participant_id": None},
-        "global_goal": "survive",
+        "global_goal": "get_rich",
         "current_goal": None,
         "material_threshold": 1000,
         "risk_tolerance": 0.5,
@@ -1489,7 +1489,7 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
     stalker["hunger"] = 20
     stalker["thirst"] = 20
     stalker["sleepiness"] = 10
-    stalker["global_goal"] = "survive"
+    stalker["global_goal"] = "get_rich"
     stalker["material_threshold"] = 999999
 
     if weapon:
@@ -1960,7 +1960,7 @@ class TestConfirmedEmptyBlocking:
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
         if sched:
-            assert sched["type"] != "explore", (
+            assert sched["type"] != "explore_anomaly_location", (
                 f"get_rich bot should not schedule explore, got {sched['type']!r}"
             )
 
@@ -1981,8 +1981,8 @@ class TestConfirmedEmptyBlocking:
         )
 
     def test_explore_zone_does_not_reexplore_confirmed_empty(self):
-        """explore_zone bot should NOT re-explore a confirmed-empty location."""
-        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="explore_zone")
+        """get_rich bot (formerly explore_zone) should NOT re-explore a confirmed-empty location."""
+        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="get_rich")
         # Remove connections so bot can't travel, forcing it to consider local explore
         state["locations"][loc_id]["connections"] = []
         new_state, events = self._tick(state)
@@ -1990,45 +1990,14 @@ class TestConfirmedEmptyBlocking:
             "explore_zone bot should not re-explore confirmed-empty location"
         )
 
-    def test_explore_goal_does_not_reexplore_confirmed_empty(self):
-        """Agent with old 'explore' goal (= explore_zone alias) should NOT re-explore confirmed-empty."""
-        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="explore")
-        state["locations"][loc_id]["connections"] = []
-        new_state, events = self._tick(state)
-        assert not any(e["event_type"] == "exploration_started" for e in events), (
-            "'explore' goal bot should not re-explore confirmed-empty location"
-        )
-
-    def test_explore_goal_handled_like_explore_zone(self):
-        """An agent with global_goal='explore' should use the explore_zone handler (not fallback)."""
-        state, sid, loc_id = self._make_state_with_confirmed_empty(global_goal="explore")
-        conns = state["locations"][loc_id].get("connections", [])
-        if not conns:
-            return  # need connections for this test
-        # Force the agent into Phase 2 (wealth >= threshold) so goal branch runs
-        state["agents"][sid]["material_threshold"] = 0
-        # Clear confirmed_empty memory so the bot sees fresh unvisited locations
-        state["agents"][sid]["memory"] = []
-        new_state, events = self._tick(state)
-        agent = new_state["agents"][sid]
-        sched = agent.get("scheduled_action")
-        # With fresh explore goal, agent should be traveling to unvisited connection
-        if sched:
-            assert sched["type"] == "travel", (
-                f"explore goal bot should travel to unvisited locations, got {sched['type']!r}"
-            )
-
-    def test_generator_uses_explore_zone_not_explore(self):
-        """zone_generator should generate 'explore_zone' (not 'explore') as a goal."""
+    def test_generator_always_uses_get_rich(self):
+        """zone_generator should always generate 'get_rich' as the only global goal."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
         goals_found = set()
         for seed in range(50):
             state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
             for ag in state["agents"].values():
                 goals_found.add(ag.get("global_goal"))
-        assert "explore" not in goals_found, (
-            f"Generator should not create agents with goal 'explore'; found goals: {goals_found}"
-        )
-        assert "explore_zone" in goals_found, (
-            "Generator should create agents with goal 'explore_zone'"
+        assert goals_found == {"get_rich"}, (
+            f"Generator should only create agents with goal 'get_rich'; found goals: {goals_found}"
         )
