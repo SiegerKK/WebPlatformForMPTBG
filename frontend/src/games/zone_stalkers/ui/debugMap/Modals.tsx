@@ -56,6 +56,7 @@ export interface LocationSaveData {
   anomalyActivity: number;
   dominantAnomalyType: string;
   region: string;
+  exitZone: boolean;
 }
 
 export function LocationModal({
@@ -65,6 +66,7 @@ export function LocationModal({
   initialAnomalyActivity = 0,
   initialDominantAnomalyType = '',
   initialRegion = '',
+  initialExitZone = false,
   regions,
   locId,
   onClose,
@@ -76,6 +78,7 @@ export function LocationModal({
   initialAnomalyActivity?: number;
   initialDominantAnomalyType?: string;
   initialRegion?: string;
+  initialExitZone?: boolean;
   regions?: Record<string, { name: string; colorIndex: number }>;
   locId?: string;
   onClose: () => void;
@@ -86,6 +89,7 @@ export function LocationModal({
   const [anomalyActivity, setAnomalyActivity] = useState(initialAnomalyActivity);
   const [dominantAnomalyType, setDominantAnomalyType] = useState(initialDominantAnomalyType);
   const [region, setRegion] = useState(initialRegion);
+  const [exitZone, setExitZone] = useState(initialExitZone);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -94,7 +98,7 @@ export function LocationModal({
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region });
+      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region, exitZone });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -170,6 +174,16 @@ export function LocationModal({
             </select>
           </>
         )}
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', color: '#f8fafc', fontSize: '0.8rem', margin: '10px 0 4px' }}>
+          <input
+            type="checkbox"
+            checked={exitZone}
+            onChange={(e) => setExitZone(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: '#22d3ee', cursor: 'pointer' }}
+          />
+          🚪 Выход из Зоны
+        </label>
 
         {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
 

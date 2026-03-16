@@ -10,6 +10,7 @@ Processes:
   - Random event spawning
 """
 import collections
+import heapq
 import copy
 import random
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,6 +35,10 @@ DEFAULT_RISK_TOLERANCE = 0.5
 DEFAULT_MATERIAL_THRESHOLD = 3000
 MATERIAL_THRESHOLD_MIN = 3000
 MATERIAL_THRESHOLD_MAX = 10000
+
+# Wealth required to COMPLETE the get_rich global goal (random per agent: 50 000–100 000).
+GET_RICH_COMPLETION_MIN = 50_000
+GET_RICH_COMPLETION_MAX = 100_000
 
 # Emission (Выброс) mechanic constants
 # 1 game day = 1440 turns (1 turn = 1 minute)
@@ -107,6 +112,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     # 1. Process scheduled actions for each alive stalker agent
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
+            continue
+        if agent.get("has_left_zone"):
             continue
         sched = agent.get("scheduled_action")
         if sched:
@@ -307,6 +314,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         if not agent.get("is_alive", True):
             continue
         if agent.get("controller", {}).get("kind") != "bot":
+            continue
+        if agent.get("has_left_zone"):
             continue
         if agent.get("scheduled_action"):
             continue
@@ -2386,6 +2395,138 @@ def _run_bot_action(
     return events
 
 
+def _check_global_goal_completion(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> None:
+    """Detect and record global goal achievement. Sets agent['global_goal_achieved']=True."""
+    from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES as _SECRET_TYPES
+    global_goal = agent.get("global_goal")
+    if global_goal == "get_rich":
+        wealth = _agent_wealth(agent)
+        target = agent.get("wealth_goal_target", GET_RICH_COMPLETION_MIN)
+        if wealth >= target:
+            agent["global_goal_achieved"] = True
+            _add_memory(
+                agent, world_turn, state, "observation",
+                "💰 Цель достигнута: разбогател!",
+                {"action_kind": "goal_achieved", "goal": "get_rich",
+                 "wealth": wealth, "target": target},
+                summary=f"Я достиг своей цели — разбогател! Моё состояние: {wealth} руб. Пора покидать Зону",
+            )
+    elif global_goal == "unravel_zone_mystery":
+        has_doc = any(
+            i.get("type") in _SECRET_TYPES
+            for i in agent.get("inventory", [])
+        )
+        if has_doc:
+            agent["global_goal_achieved"] = True
+            _add_memory(
+                agent, world_turn, state, "observation",
+                "🔍 Цель достигнута: тайна раскрыта!",
+                {"action_kind": "goal_achieved", "goal": "unravel_zone_mystery"},
+                summary="Я нашёл секретный документ и раскрыл тайну Зоны. Пора покидать!",
+            )
+
+
+def _bot_route_to_exit(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Route agent toward the nearest exit_zone location (by travel time)."""
+    locations = state.get("locations", {})
+    loc_id = agent.get("location_id", "")
+    # Dijkstra to nearest exit_zone
+    _heap: List = [(0, 0, loc_id)]
+    _dist: Dict[str, int] = {}
+    _best_exit: Optional[str] = None
+    _best_time: Optional[int] = None
+    while _heap:
+        _cur_min, _cur_hops, _cur_id = heapq.heappop(_heap)
+        if _cur_id in _dist:
+            continue
+        _dist[_cur_id] = _cur_min
+        if _best_time is not None and _cur_min > _best_time:
+            break
+        if _cur_id != loc_id and locations.get(_cur_id, {}).get("exit_zone"):
+            if _best_time is None or _cur_min < _best_time:
+                _best_time = _cur_min
+                _best_exit = _cur_id
+            continue  # don't expand from exit
+        for _conn in locations.get(_cur_id, {}).get("connections", []):
+            if _conn.get("closed"):
+                continue
+            _nxt = _conn["to"]
+            if _nxt in _dist:
+                continue
+            _edge_min = _conn.get("travel_time", 12) * MINUTES_PER_TURN
+            _nxt_min = _cur_min + _edge_min
+            if _best_time is None or _nxt_min <= _best_time:
+                heapq.heappush(_heap, (_nxt_min, _cur_hops + 1, _nxt))
+
+    if _best_exit is None:
+        # No exit found — log once
+        _last_kind = None
+        for _m in reversed(agent.get("memory", [])):
+            if _m.get("type") == "decision":
+                _last_kind = _m.get("effects", {}).get("action_kind")
+                break
+        if _last_kind != "no_exit_found":
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "🚪 Нет выхода из Зоны",
+                {"action_kind": "no_exit_found"},
+                summary="Я хочу покинуть Зону, но не могу найти выход",
+            )
+        return []
+
+    # Write "heading to exit" decision once
+    _last_kind = None
+    for _m in reversed(agent.get("memory", [])):
+        if _m.get("type") == "decision":
+            _last_kind = _m.get("effects", {}).get("action_kind")
+            break
+    if _last_kind not in ("heading_to_exit", "travel_arrived"):
+        _exit_name = locations.get(_best_exit, {}).get("name", _best_exit)
+        _add_memory(
+            agent, world_turn, state, "decision",
+            "🚪 Иду к выходу из Зоны",
+            {"action_kind": "heading_to_exit",
+             "exit_id": _best_exit, "exit_name": _exit_name},
+            summary=f"Я решил покинуть Зону через «{_exit_name}», потому что выполнил свою цель",
+        )
+    return _bot_schedule_travel(agent_id, agent, _best_exit, state, world_turn)
+
+
+def _execute_leave_zone(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Agent has reached an exit_zone location after achieving their goal. Mark as left."""
+    loc_id = agent.get("location_id", "")
+    locations = state.get("locations", {})
+    loc = locations.get(loc_id, {})
+    exit_name = loc.get("name", loc_id)
+    agent["has_left_zone"] = True
+    # Remove agent from the exit location's agent list
+    if agent_id in loc.get("agents", []):
+        loc["agents"].remove(agent_id)
+    _add_memory(
+        agent, world_turn, state, "observation",
+        "🚪 Покинул Зону",
+        {"action_kind": "left_zone", "exit_location": loc_id, "exit_name": exit_name},
+        summary=f"Я покинул Зону через «{exit_name}»",
+    )
+    return [{"event_type": "agent_left_zone",
+             "payload": {"agent_id": agent_id, "exit_location": loc_id}}]
+
+
 def _run_bot_action_inner(
     agent_id: str,
     agent: Dict[str, Any],
@@ -2422,52 +2563,46 @@ def _run_bot_action_inner(
                 _last_imminent_turn = _mem_turn
         _emission_warned = _last_imminent_turn > _last_ended_turn
     if _on_dangerous_terrain and (_emission_active or _emission_warned):
-        # ── BFS to find the NEAREST safe (non-dangerous terrain) location ─────
-        # Treat all nodes as traversable; skip only closed connections.
-        # Pick the safe location with the fewest hops; break ties by smallest ID.
-        # Also track cumulative travel_time (in minutes) for each path so the
-        # summary can report actual travel duration instead of a hop count.
-        _bfs_queue: collections.deque = collections.deque([(loc_id, 0, 0)])  # (id, hops, minutes)
-        _bfs_seen: set = {loc_id}
-        _safe_hops: Optional[int] = None
-        _safe_candidates: List[str] = []
-        _safe_minutes: Dict[str, int] = {}  # loc_id → total travel minutes for that path
+        # ── Dijkstra to find the FASTEST (min travel-time) safe location ─────────
+        # Priority queue: (minutes, hops, loc_id).  Explored once per node.
+        _dijk_heap: List = [(0, 0, loc_id)]
+        _dijk_dist: Dict[str, int] = {}     # loc_id → min minutes to reach
+        _safe_candidates: List = []          # list of (minutes, hops, loc_id)
+        _best_minutes: Optional[int] = None
 
-        while _bfs_queue:
-            _cur_id, _hops, _cur_minutes = _bfs_queue.popleft()
-            _next_hops = _hops + 1
-            # Once we have candidates at level k, don't expand beyond level k
-            if _safe_hops is not None and _next_hops > _safe_hops:
+        while _dijk_heap:
+            _cur_min, _cur_hops, _cur_id = heapq.heappop(_dijk_heap)
+            if _cur_id in _dijk_dist:
+                continue
+            _dijk_dist[_cur_id] = _cur_min
+            # Once current cost exceeds best, no better candidates exist
+            if _best_minutes is not None and _cur_min > _best_minutes:
                 break
+            # Check if this is a safe location (skip start node)
+            if _cur_id != loc_id:
+                _nxt_terrain = locations.get(_cur_id, {}).get("terrain_type", "")
+                if _nxt_terrain not in _EMISSION_DANGEROUS_TERRAIN:
+                    _safe_candidates.append((_cur_min, _cur_hops, _cur_id))
+                    if _best_minutes is None:
+                        _best_minutes = _cur_min
+                    continue  # Don't expand from safe terrain
+            # Expand neighbors
             for _conn in locations.get(_cur_id, {}).get("connections", []):
                 if _conn.get("closed"):
                     continue
                 _nxt = _conn["to"]
-                if _nxt in _bfs_seen:
+                if _nxt in _dijk_dist:
                     continue
-                _bfs_seen.add(_nxt)
-                _conn_minutes = _conn.get("travel_time", 12) * MINUTES_PER_TURN
-                _nxt_minutes = _cur_minutes + _conn_minutes
-                _nxt_terrain = locations.get(_nxt, {}).get("terrain_type", "")
-                if _nxt_terrain not in _EMISSION_DANGEROUS_TERRAIN:
-                    # Safe location found
-                    if _safe_hops is None or _next_hops < _safe_hops:
-                        _safe_hops = _next_hops
-                        _safe_candidates = [_nxt]
-                        _safe_minutes[_nxt] = _nxt_minutes
-                    elif _next_hops == _safe_hops:
-                        _safe_candidates.append(_nxt)
-                        _safe_minutes[_nxt] = _nxt_minutes
-                else:
-                    # Still dangerous — only add to queue if within current best distance
-                    if _safe_hops is None or _next_hops <= _safe_hops:
-                        _bfs_queue.append((_nxt, _next_hops, _nxt_minutes))
+                _edge_min = _conn.get("travel_time", 12) * MINUTES_PER_TURN
+                _nxt_min = _cur_min + _edge_min
+                if _best_minutes is None or _nxt_min <= _best_minutes:
+                    heapq.heappush(_dijk_heap, (_nxt_min, _cur_hops + 1, _nxt))
 
         if _safe_candidates:
-            # Pick deterministically: smallest ID among ties at minimum hop distance
-            target = min(_safe_candidates)
-            hops = _safe_hops
-            minutes_to_shelter = _safe_minutes.get(target, hops * 12)
+            # Pick deterministically: smallest ID among ties at minimum travel-time
+            target = min(c[2] for c in _safe_candidates)
+            hops = next(c[1] for c in _safe_candidates if c[2] == target)
+            minutes_to_shelter = _best_minutes if _best_minutes is not None else hops * 12
             _shelter_name = locations.get(target, {}).get("name", target)
             _emission_reason = "идёт выброс" if _emission_active else "скоро будет выброс"
             agent["current_goal"] = "flee_emission"
@@ -2531,6 +2666,15 @@ def _run_bot_action_inner(
                 summary=f"Я решил оставаться в укрытии и ждать, потому что {'идёт выброс' if _emission_active else 'скоро начнётся выброс'}",
             )
         return []
+
+    # ── GLOBAL GOAL: detect achievement and leave zone ─────────────────────────
+    if not agent.get("has_left_zone") and agent.get("is_alive", True):
+        if not agent.get("global_goal_achieved"):
+            _check_global_goal_completion(agent_id, agent, state, world_turn)
+        if agent.get("global_goal_achieved"):
+            if loc.get("exit_zone"):
+                return _execute_leave_zone(agent_id, agent, state, world_turn)
+            return _bot_route_to_exit(agent_id, agent, state, world_turn)
 
     # ── ARRIVAL COMMITMENT: pick up the item we travelled here for ────────────
     # When the most recent decision was a seek_item whose destination is the

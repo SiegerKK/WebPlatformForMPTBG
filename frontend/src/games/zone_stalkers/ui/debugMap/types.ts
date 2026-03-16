@@ -18,6 +18,7 @@ export interface ZoneLocation {
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];
+  exit_zone?: boolean;
 }
 
 export interface StalkerAgent {

@@ -868,7 +868,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
 
 
   const handleSaveEdit = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
       if (!editingLocId) return;
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
@@ -877,13 +877,14 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
+        exit_zone: data.exitZone,
       });
     },
     [editingLocId, sendCommand],
   );
 
   const handleSaveCreate = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
       // Place the new card at the center of the currently visible viewport area.
       // The canvas transform is: translate(panOffset.x, panOffset.y) scale(zoom)
       // So the visible center in canvas-space is:
@@ -902,6 +903,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         anomaly_activity: data.anomalyActivity,
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
+        exit_zone: data.exitZone,
         position: pos,
       });
     },
@@ -1485,6 +1487,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           initialAnomalyActivity={zoneState.locations[editingLocId].anomaly_activity ?? 0}
           initialDominantAnomalyType={zoneState.locations[editingLocId].dominant_anomaly_type ?? ''}
           initialRegion={zoneState.locations[editingLocId].region ?? ''}
+          initialExitZone={zoneState.locations[editingLocId].exit_zone ?? false}
           regions={localRegions}
           locId={editingLocId}
           onClose={() => setEditingLocId(null)}

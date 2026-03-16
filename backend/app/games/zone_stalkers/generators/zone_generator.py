@@ -268,7 +268,10 @@ def _make_stalker_agent(
     )
     # All agents start with the same modest wealth buffer before pursuing their
     # global goal.  material_threshold is strictly in [MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX].
-    from app.games.zone_stalkers.rules.tick_rules import MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX
+    from app.games.zone_stalkers.rules.tick_rules import (
+        MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX,
+        GET_RICH_COMPLETION_MIN, GET_RICH_COMPLETION_MAX,
+    )
     chosen_threshold = rng.randint(MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX)
 
     return {
@@ -313,6 +316,9 @@ def _make_stalker_agent(
         "risk_tolerance": round(rng.uniform(0.2, 0.9), 2),
         # Wealth buffer (3000–10000) the agent accumulates before pursuing their global goal.
         "material_threshold": chosen_threshold,
+        "wealth_goal_target": rng.randint(GET_RICH_COMPLETION_MIN, GET_RICH_COMPLETION_MAX),
+        "global_goal_achieved": False,
+        "has_left_zone": False,
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one

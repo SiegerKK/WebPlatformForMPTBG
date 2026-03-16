@@ -14,7 +14,7 @@ Supported commands:
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 - debug_update_map(positions, connections, regions?) — persist debug canvas layout (meta, no action cost)
-- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?) — edit location params in debug mode (meta)
+- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?, exit_zone?) — edit location params in debug mode (meta)
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_delete_location(loc_id) — remove a location and all its connections in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
@@ -242,6 +242,8 @@ def resolve_world_command(
         if "region" in payload:
             region_val = payload["region"]
             loc["region"] = region_val if region_val else None
+        if "exit_zone" in payload:
+            loc["exit_zone"] = bool(payload["exit_zone"])
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 
@@ -262,6 +264,7 @@ def resolve_world_command(
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
             "region": region_val if region_val else None,
+            "exit_zone": bool(payload.get("exit_zone", False)),
             "connections": [],
             "artifacts": [],
             "agents": [],
