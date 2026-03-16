@@ -201,17 +201,17 @@ ITEM_TYPES: dict = {
     # Sought by stalkers pursuing the ``unravel_zone_mystery`` global goal.
     "classified_report": {
         "name": "Секретный отчёт", "type": "secret_document",
-        "weight": 0.05, "value": 2000, "risk_tolerance": 0.6,
+        "weight": 0.05, "value": 0, "risk_tolerance": 0.6,
         "description": "Засекреченный доклад неизвестного ведомства. Содержит данные об аномальной активности в Зоне.",
     },
     "encrypted_disk": {
         "name": "Зашифрованный диск", "type": "secret_document",
-        "weight": 0.02, "value": 3500, "risk_tolerance": 0.7,
+        "weight": 0.02, "value": 0, "risk_tolerance": 0.7,
         "description": "Жёсткий диск с зашифрованными данными о происхождении Зоны. Представляет большую научную ценность.",
     },
     "zone_research_notes": {
         "name": "Исследовательские записки", "type": "secret_document",
-        "weight": 0.08, "value": 1200, "risk_tolerance": 0.4,
+        "weight": 0.08, "value": 0, "risk_tolerance": 0.4,
         "description": "Рукописные заметки учёного, работавшего в Зоне. Содержат наблюдения за аномалиями и мутантами.",
     },
     # ── Detectors ─────────────────────────────────────────────────────────────
