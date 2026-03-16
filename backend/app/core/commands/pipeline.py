@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -8,6 +9,12 @@ from app.core.auth.models import User
 from app.core.contexts.models import GameContext
 from app.core.events.models import GameEvent
 from app.core.events.service import get_next_sequence_number, allocate_sequence_numbers
+
+logger = logging.getLogger(__name__)
+
+# Valid speed values for the ``set_auto_tick`` meta-command.
+# Must stay in sync with the ticker service and the frontend.
+AUTO_TICK_VALID_SPEEDS: frozenset = frozenset({"realtime", "x10", "x100"})
 
 # Game rule registry: game_id -> RuleSet instance
 _rule_registry: dict = {}
@@ -85,11 +92,38 @@ class CommandPipeline:
             if envelope.command_type == "set_auto_tick":
                 import copy as _copy
                 enabled = bool(envelope.payload.get("enabled", False))
-                slow_mode = bool(envelope.payload.get("slow_mode", False)) if enabled else False
+                # Accept ``speed`` ("realtime" | "x10" | "x100") as the
+                # canonical parameter.  Fall back to legacy ``slow_mode``
+                # boolean for backward compatibility.
+                if not enabled:
+                    speed = None
+                else:
+                    speed = envelope.payload.get("speed") or None
+                    if speed is None:
+                        # legacy slow_mode support
+                        if envelope.payload.get("slow_mode", False):
+                            speed = "realtime"
+                        else:
+                            speed = "x100"
+                _VALID_SPEEDS = AUTO_TICK_VALID_SPEEDS
+                if speed is not None and speed not in _VALID_SPEEDS:
+                    logger.warning(
+                        "set_auto_tick: unknown speed %r — defaulting to 'x100'. "
+                        "Valid values: %s",
+                        speed, sorted(_VALID_SPEEDS),
+                    )
+                    speed = "x100"
                 new_state = _copy.deepcopy(state)
                 new_state["auto_tick_enabled"] = enabled
-                new_state["auto_tick_slow_mode"] = slow_mode
-                new_events = [{"event_type": "auto_tick_changed", "payload": {"enabled": enabled, "slow_mode": slow_mode}}]
+                new_state["auto_tick_speed"] = speed
+                # Keep legacy field for backward compat with old clients
+                new_state["auto_tick_slow_mode"] = (speed == "realtime") if enabled else False
+                new_events = [{"event_type": "auto_tick_changed", "payload": {
+                    "enabled": enabled,
+                    "speed": speed,
+                    # legacy field
+                    "slow_mode": new_state["auto_tick_slow_mode"],
+                }}]
                 save_context_state(context.id, new_state, context, force_persist=True)
 
                 seq_range = allocate_sequence_numbers(context.id, len(new_events), db)
@@ -109,9 +143,13 @@ class CommandPipeline:
                 db.commit()
 
                 from app.core.ws.manager import ws_manager
+                # Broadcast the new speed directly so all clients can update
+                # their UI without an extra HTTP round-trip.
                 ws_manager.notify(str(envelope.match_id), {
-                    "type": "state_updated",
+                    "type": "auto_tick_changed",
                     "match_id": str(envelope.match_id),
+                    "auto_tick_enabled": enabled,
+                    "auto_tick_speed": speed,
                 })
                 return CommandResult(command_id=command.id, status=CommandStatus.RESOLVED, events=new_events)
             # ── End core meta-commands ─────────────────────────────────────────

@@ -13,7 +13,7 @@
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
-import type { DebugMapPageProps, LocationConn, ZoneLocation, ZoneMapState } from './debugMap/types';
+import type { DebugMapPageProps, LocationConn, ZoneLocation } from './debugMap/types';
 import {
   CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
@@ -54,43 +54,6 @@ function getRegionColors(
       border: REGION_BORDER_COLOR[region] ?? '#334155',
     }
   );
-}
-
-/** Snapshot the scheduled_action of all bot agents. */
-function snapBotScheduledActions(
-  state: ZoneMapState,
-): Map<string, { type: string; target_id?: string } | null> {
-  const snap = new Map<string, { type: string; target_id?: string } | null>();
-  for (const [id, agent] of Object.entries(state.agents)) {
-    if (agent.controller.kind === 'bot') {
-      snap.set(
-        id,
-        agent.scheduled_action
-          ? { type: agent.scheduled_action.type, target_id: agent.scheduled_action.target_id }
-          : null,
-      );
-    }
-  }
-  return snap;
-}
-
-/** Returns true if any bot agent gained or changed a scheduled_action. */
-function botDecisionMade(
-  before: Map<string, { type: string; target_id?: string } | null>,
-  after: Map<string, { type: string; target_id?: string } | null>,
-): boolean {
-  for (const [id, afterAction] of after) {
-    const beforeAction = before.get(id);
-    if (!beforeAction && afterAction) return true;
-    if (beforeAction && afterAction) {
-      if (
-        beforeAction.type !== afterAction.type ||
-        beforeAction.target_id !== afterAction.target_id
-      )
-        return true;
-    }
-  }
-  return false;
 }
 
 export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId }: DebugMapPageProps) {
@@ -269,72 +232,25 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     finally { setTicking(false); }
   };
 
-  const skipCancelRef = useRef(false);
-  const [skipping, setSkipping] = useState(false);
-
-  // Keep a ref to the latest zoneState so the skip loop can read fresh state
-  const zoneStateRef = useRef(zoneState);
-  useEffect(() => { zoneStateRef.current = zoneState; }, [zoneState]);
-
-  const handleSkipToDecision = async () => {
-    if (skipping) {
-      // Already running — cancel the loop
-      skipCancelRef.current = true;
-      return;
-    }
-    skipCancelRef.current = false;
-    setSkipping(true);
-    try {
-      for (let i = 0; i < 500; i++) {
-        if (skipCancelRef.current) break;
-
-        // Snapshot scheduled actions before the tick
-        const beforeSnap = snapBotScheduledActions(zoneStateRef.current);
-
-        // Use debug_advance_turns with max_n=1 — this directly calls tick_zone_map
-        // on the backend (one world tick per call) rather than end_turn which is a
-        // player action and doesn't guarantee a world tick in debug mode.
-        await sendCommand('debug_advance_turns', { max_n: 1, stop_on_decision: false });
-        // sendCommand triggers refresh(); wait for React to commit the new state
-        // into zoneStateRef via the useEffect below.
-        await new Promise<void>((r) => setTimeout(r, 200));
-
-        if (skipCancelRef.current) break;
-
-        // Stop the loop if any bot agent gained or changed a scheduled_action
-        // (i.e. it just made a new decision).
-        const afterSnap = snapBotScheduledActions(zoneStateRef.current);
-        if (botDecisionMade(beforeSnap, afterSnap)) break;
-      }
-    } finally {
-      setSkipping(false);
-      skipCancelRef.current = false;
-    }
-  };
-
   // ── Auto-run (течение времени) — server-side, synced across all tabs ────────
-  // The running state lives in zoneState.auto_tick_enabled (core flag, set by
-  // the platform meta-command "set_auto_tick").  Any tab / any game can use
-  // this — no game-specific implementation required.
+  // The running state lives in zoneState.auto_tick_enabled and
+  // zoneState.auto_tick_speed (core flags set by the platform meta-command
+  // "set_auto_tick").  Any tab / any user receives the change via the
+  // "auto_tick_changed" WebSocket message, so all views stay in sync without
+  // an extra HTTP round-trip.
   const autoRunning = zoneState.auto_tick_enabled ?? false;
-  const slowRunning = autoRunning && (zoneState.auto_tick_slow_mode ?? false);
-  const fastRunning = autoRunning && !slowRunning;
+  // When running but no speed is stored (legacy state from old clients), the
+  // backend defaults to no throttle which matches "x100" behaviour.
+  const activeSpeed = autoRunning ? (zoneState.auto_tick_speed ?? 'x100') : null;
 
-  const handleToggleAutoTick = useCallback(async () => {
-    if (fastRunning) {
+  const handleSetSpeed = useCallback(async (speed: 'realtime' | 'x10' | 'x100') => {
+    if (activeSpeed === speed) {
+      // Already at this speed — toggle it off
       await sendCommand('set_auto_tick', { enabled: false });
     } else {
-      await sendCommand('set_auto_tick', { enabled: true, slow_mode: false });
+      await sendCommand('set_auto_tick', { enabled: true, speed });
     }
-  }, [sendCommand, fastRunning]);
-
-  const handleToggleSlowTick = useCallback(async () => {
-    if (slowRunning) {
-      await sendCommand('set_auto_tick', { enabled: false });
-    } else {
-      await sendCommand('set_auto_tick', { enabled: true, slow_mode: true });
-    }
-  }, [sendCommand, slowRunning]);
+  }, [sendCommand, activeSpeed]);
 
   // Build the serializable connections map (all locations) and call backend
   const persistMap = useCallback(
@@ -1111,34 +1027,34 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               <button
                 style={s.toolBtn}
                 onClick={handleTick}
-                disabled={ticking || skipping || autoRunning}
+                disabled={ticking || autoRunning}
                 title="Пропустить 1 ход (1 минута)"
               >
                 {ticking ? '…' : '⏭ Ход'}
               </button>
               <button
-                style={s.toolBtn}
-                onClick={handleSkipToDecision}
-                disabled={ticking || autoRunning}
-                title={skipping ? 'Нажмите для остановки цикла' : 'Пропустить ходы до следующего решения НПЦ (до 500 ходов)'}
+                style={{ ...s.toolBtn, color: activeSpeed === 'realtime' ? '#fca5a5' : '#86efac', borderColor: activeSpeed === 'realtime' ? '#ef4444' : '#22c55e' }}
+                onClick={() => handleSetSpeed('realtime')}
+                disabled={ticking}
+                title={activeSpeed === 'realtime' ? 'Остановить (синхр. со всеми)' : 'Реальное время: 1 ход/сек (синхр. со всеми)'}
               >
-                {skipping ? '⏹ Стоп' : '⏩ До решения'}
+                {activeSpeed === 'realtime' ? '⏸ Реал.' : '▶ Реал.'}
               </button>
               <button
-                style={{ ...s.toolBtn, color: fastRunning ? '#fca5a5' : '#86efac', borderColor: fastRunning ? '#ef4444' : '#22c55e' }}
-                onClick={handleToggleAutoTick}
-                disabled={ticking || skipping}
-                title={fastRunning ? 'Пауза (синхр. со всеми вкладками)' : 'Запустить быстрое течение времени (синхр. со всеми вкладками)'}
+                style={{ ...s.toolBtn, color: activeSpeed === 'x10' ? '#fca5a5' : '#fde68a', borderColor: activeSpeed === 'x10' ? '#ef4444' : '#f59e0b' }}
+                onClick={() => handleSetSpeed('x10')}
+                disabled={ticking}
+                title={activeSpeed === 'x10' ? 'Остановить (синхр. со всеми)' : 'Ускорить ×10: 10 ходов/сек (синхр. со всеми)'}
               >
-                {fastRunning ? '⏸ Пауза' : '▶ Авто'}
+                {activeSpeed === 'x10' ? '⏸ ×10' : '⏩ ×10'}
               </button>
               <button
-                style={{ ...s.toolBtn, color: slowRunning ? '#fca5a5' : '#fde68a', borderColor: slowRunning ? '#ef4444' : '#f59e0b' }}
-                onClick={handleToggleSlowTick}
-                disabled={ticking || skipping}
-                title={slowRunning ? 'Остановить медленное течение времени' : 'Медленное течение: 1 ход = 3 секунды'}
+                style={{ ...s.toolBtn, color: activeSpeed === 'x100' ? '#fca5a5' : '#c4b5fd', borderColor: activeSpeed === 'x100' ? '#ef4444' : '#8b5cf6' }}
+                onClick={() => handleSetSpeed('x100')}
+                disabled={ticking}
+                title={activeSpeed === 'x100' ? 'Остановить (синхр. со всеми)' : 'Максимальная скорость ×100 (синхр. со всеми)'}
               >
-                {slowRunning ? '⏸ Стоп' : '🐢 Медл.'}
+                {activeSpeed === 'x100' ? '⏸ ×100' : '⏩⏩ ×100'}
               </button>
               <button
                 style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}

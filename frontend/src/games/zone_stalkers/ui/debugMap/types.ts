@@ -77,7 +77,9 @@ export interface ZoneMapState {
   };
   /** True while the server-side auto-ticker is advancing this match (core flag) */
   auto_tick_enabled?: boolean;
-  /** True when auto-tick is running in slow mode (3 s per turn) */
+  /** Current tick speed: "realtime" | "x10" | "x100" (null when stopped) */
+  auto_tick_speed?: string | null;
+  /** @deprecated Legacy slow-mode flag (kept for backward compat) */
   auto_tick_slow_mode?: boolean;
 }
 

@@ -157,6 +157,7 @@ interface ZoneMapState {
   active_events: string[];
   game_over: boolean;
   auto_tick_enabled?: boolean;
+  auto_tick_speed?: string | null;
 }
 
 interface ZoneEventState {
@@ -514,6 +515,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         if (visibleAgent) loadAgentMemory(visibleAgent);
       } else if (msg.type === 'state_updated') {
         refresh();
+      } else if (msg.type === 'auto_tick_changed') {
+        // Directly patch auto-tick state — no HTTP round-trip needed.
+        // All connected clients (tabs, users) receive this and sync instantly.
+        setContext((prev) => {
+          if (!prev) return prev;
+          const blob = (prev.state_blob as Record<string, unknown>) ?? {};
+          return {
+            ...prev,
+            state_blob: {
+              ...blob,
+              auto_tick_enabled: msg.auto_tick_enabled as boolean,
+              auto_tick_speed: (msg.auto_tick_speed as string | null) ?? null,
+            },
+          };
+        });
       }
     }, [refresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
