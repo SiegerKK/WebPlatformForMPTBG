@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Valid speed values for the ``set_auto_tick`` meta-command.
 # Must stay in sync with the ticker service and the frontend.
-AUTO_TICK_VALID_SPEEDS: frozenset = frozenset({"realtime", "x10", "x100"})
+AUTO_TICK_VALID_SPEEDS: frozenset = frozenset({"realtime", "x10", "x100", "x600"})
 
 # Game rule registry: game_id -> RuleSet instance
 _rule_registry: dict = {}

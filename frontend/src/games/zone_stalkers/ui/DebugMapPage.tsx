@@ -243,7 +243,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // backend defaults to no throttle which matches "x100" behaviour.
   const activeSpeed = autoRunning ? (zoneState.auto_tick_speed ?? 'x100') : null;
 
-  const handleSetSpeed = useCallback(async (speed: 'realtime' | 'x10' | 'x100') => {
+  const handleSetSpeed = useCallback(async (speed: 'realtime' | 'x10' | 'x100' | 'x600') => {
     if (activeSpeed === speed) {
       // Already at this speed — toggle it off
       await sendCommand('set_auto_tick', { enabled: false });
@@ -1055,6 +1055,14 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 title={activeSpeed === 'x100' ? 'Остановить (синхр. со всеми)' : '×100: 1 ход каждые 0.6 секунды (синхр. со всеми)'}
               >
                 {activeSpeed === 'x100' ? '⏸ ×100' : '⏩⏩ ×100'}
+              </button>
+              <button
+                style={{ ...s.toolBtn, color: activeSpeed === 'x600' ? '#fca5a5' : '#f9a8d4', borderColor: activeSpeed === 'x600' ? '#ef4444' : '#ec4899' }}
+                onClick={() => handleSetSpeed('x600')}
+                disabled={ticking}
+                title={activeSpeed === 'x600' ? 'Остановить (синхр. со всеми)' : '×600: 1 ход каждые 0.1 секунды (синхр. со всеми)'}
+              >
+                {activeSpeed === 'x600' ? '⏸ ×600' : '⚡⚡ ×600'}
               </button>
               <button
                 style={{ ...s.toolBtn, color: '#fca5a5', borderColor: '#ef4444' }}

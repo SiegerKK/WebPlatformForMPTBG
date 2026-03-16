@@ -40,6 +40,7 @@ _TICK_INTERVALS: Dict[str, float] = {
     "realtime": 60.0,  # 1 tick/min — 1 game-minute per real minute (true 1:1)
     "x10":       6.0,  # 10× realtime — 1 tick per 6 real seconds
     "x100":      0.6,  # 100× realtime — 1 tick per 0.6 real seconds
+    "x600":      0.1,  # 600× realtime — 1 tick per 0.1 real seconds
 }
 
 
