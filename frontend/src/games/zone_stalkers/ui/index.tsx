@@ -1233,7 +1233,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                             <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                           </div>
                           <div style={styles.memoryTitle}>{m.title}</div>
-                          {m.effects?.['причина'] && (
+                          {!!m.effects?.['причина'] && (
                             <div style={styles.memorySummary}>{String(m.effects['причина'])}</div>
                           )}
                         </div>
@@ -1946,7 +1946,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                           <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                         </div>
                         <div style={styles.memoryTitle}>{m.title}</div>
-                        {m.effects?.['причина'] && (
+                        {!!m.effects?.['причина'] && (
                           <div style={styles.memorySummary}>{String(m.effects['причина'])}</div>
                         )}
                         {Object.keys(m.effects).filter(k => k !== 'причина' && k !== 'action_kind' && m.effects[k] !== 0).length > 0 && (

@@ -641,7 +641,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>
-                    {m.effects?.['причина'] && (
+                    {!!m.effects?.['причина'] && (
                       <div style={s.memorySummary}>
                         <span style={s.memoryFieldLabel}>Причина: </span>
                         {String(m.effects['причина'])}
