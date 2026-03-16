@@ -74,10 +74,16 @@ _TERRAIN_NAME_RU: Dict[str, str] = {
 }
 
 # Anomaly search parameters for the get_rich NPC goal path.
-# Search radius is skill-based: 4 + agent["skill_stalker"] hops (e.g. 5 for level-1 stalker).
-_ANOMALY_DISTANCE_PENALTY = 5.0        # Score reduction per hop of distance
+# Search radius is skill-based: 4 + agent["skill_stalker"] hops × default travel_time minutes.
+# Distance penalty is expressed per travel-minute so that long roads (high travel_time) are
+# correctly penalised relative to short ones.  With a default edge of 12 min, this is
+# equivalent to the old per-hop penalty of 5.0 / 12 ≈ 0.42 per min.
+_ANOMALY_DISTANCE_PENALTY_PER_MIN = 5.0 / 12.0  # Score reduction per travel-minute of distance
 _ANOMALY_SCORE_NOISE = 0.5             # Small random jitter to break ties between equal-scoring locations
 _ANOMALY_RISK_MISMATCH_PENALTY = 150.0  # Penalty for full risk-tolerance mismatch; exceeds max base score (10*10=100) so agents strongly prefer zones that match their risk profile
+# Max travel-time radius for anomaly search (minutes).  Based on default edge of 12 min;
+# previously the radius was (4 + skill_stalker) hops × 12 min/hop = (4+1)*12 = 60 min default.
+_ANOMALY_SEARCH_MINUTES_PER_HOP = 12   # one "hop" in minutes (default travel_time)
 
 # Item purchase scoring — weights must sum to 1.0.
 # Three factors are balanced: risk-tolerance fit (dominant), value/quality, and inverse weight.
@@ -941,6 +947,41 @@ def _bfs_reachable_locations(
     return visited
 
 
+def _dijkstra_reachable_locations(
+    from_loc_id: str,
+    locations: Dict[str, Any],
+    max_minutes: float,
+) -> Dict[str, float]:
+    """Return {loc_id: travel_minutes} for every location reachable from *from_loc_id*
+    within *max_minutes* of total travel time via open (non-closed) connections.
+
+    Uses Dijkstra's algorithm so that connections with different ``travel_time`` values
+    are compared fairly.  *from_loc_id* itself is not included in the result.
+    """
+    dist: Dict[str, float] = {}
+    # heap entries: (total_minutes, loc_id)
+    heap: list = [(0.0, from_loc_id)]
+    while heap:
+        cur_min, cur_id = heapq.heappop(heap)
+        if cur_id in dist:
+            continue
+        if cur_id != from_loc_id:
+            if cur_min > max_minutes:
+                continue
+            dist[cur_id] = cur_min
+        for conn in locations.get(cur_id, {}).get("connections", []):
+            if conn.get("closed"):
+                continue
+            nxt = conn["to"]
+            if nxt in dist:
+                continue
+            edge_min = float(conn.get("travel_time", 12)) * MINUTES_PER_TURN
+            nxt_min = cur_min + edge_min
+            if nxt_min <= max_minutes:
+                heapq.heappush(heap, (nxt_min, nxt))
+    return dist
+
+
 def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Optional[List[str]]:
     """Return the content list from the most recent observation of *obs_type* at *loc_id*.
 
@@ -1017,6 +1058,7 @@ def _write_location_observations(
         if (aid != agent_id
                 and ag.get("location_id") == loc_id
                 and ag.get("is_alive", True)
+                and not ag.get("has_left_zone")
                 and ag.get("archetype") == "stalker_agent"):
             stalker_names.append(ag.get("name", aid))
     for tid, tr in state.get("traders", {}).items():
@@ -3313,25 +3355,25 @@ def _bot_gather_resources(
         return [{"event_type": "exploration_started",
                  "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
-    # G3 — BFS search for the best fresh (not confirmed-empty) anomaly location within
-    # skill-based radius.  Uses the same formula as _bot_pursue_goal (Phase 2b) so that
-    # Phase-1 stalkers are not limited to just their immediate neighbors.
-    _max_gather_search_hops = 4 + int(agent.get("skill_stalker", 1))  # mirrors Phase-2b radius
-    reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_gather_search_hops)
+    # G3 — Dijkstra search for the best fresh (not confirmed-empty) anomaly location within
+    # skill-based radius expressed in travel-minutes.  Uses the same formula as
+    # _bot_pursue_goal (Phase 2b) so Phase-1 stalkers are not limited to immediate neighbours.
+    _max_gather_search_min = (4 + int(agent.get("skill_stalker", 1))) * _ANOMALY_SEARCH_MINUTES_PER_HOP
+    reachable = _dijkstra_reachable_locations(loc_id, locations, max_minutes=_max_gather_search_min)
 
-    def _gather_candidate_score(lid: str, dist: int) -> float:
+    def _gather_candidate_score(lid: str, travel_min: float) -> float:
         _agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
         _loc_risk = locations.get(lid, {}).get("anomaly_activity", 0) / 10.0
         _risk_penalty = abs(_loc_risk - _agent_risk) * _ANOMALY_RISK_MISMATCH_PENALTY
-        return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY - _risk_penalty + rng.random() * _ANOMALY_SCORE_NOISE
+        return _score_location(locations.get(lid, {}), "artifacts") - travel_min * _ANOMALY_DISTANCE_PENALTY_PER_MIN - _risk_penalty + rng.random() * _ANOMALY_SCORE_NOISE
 
     fresh_gather_candidates = [
-        (lid, dist) for lid, dist in reachable.items()
+        (lid, travel_min) for lid, travel_min in reachable.items()
         if locations.get(lid, {}).get("anomaly_activity", 0) > 0
         and lid not in confirmed_empty
     ]
     if fresh_gather_candidates:
-        best_lid, best_dist = max(fresh_gather_candidates, key=lambda t: _gather_candidate_score(*t))
+        best_lid, best_travel_min = max(fresh_gather_candidates, key=lambda t: _gather_candidate_score(*t))
         best_nb_name = locations.get(best_lid, {}).get("name", best_lid)
         _add_memory(
             agent, world_turn, state, "decision",
@@ -3339,8 +3381,8 @@ def _bot_gather_resources(
             {"action_kind": "move_for_resources", "destination": best_lid,
              "destination_name": best_nb_name,
              "anomaly_activity": locations.get(best_lid, {}).get("anomaly_activity", 0),
-             "distance_hops": best_dist},
-            summary=f"Я решил идти к непроверенной аномальной зоне «{best_nb_name}» ({best_dist} хода), потому что там можно найти артефакты",
+             "travel_minutes": round(best_travel_min)},
+            summary=f"Я решил идти к непроверенной аномальной зоне «{best_nb_name}» (~{round(best_travel_min)} мин), потому что там можно найти артефакты",
         )
         return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
@@ -3408,23 +3450,23 @@ def _bot_pursue_goal(
                      "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
         # Current location confirmed empty or no anomaly activity here.
-        # BFS radius is skill-based: 4 + skill_stalker hops (e.g. 5 for level-1 stalker).
-        _max_anomaly_search_hops = 4 + int(agent.get("skill_stalker", 1))
-        reachable = _bfs_reachable_locations(loc_id, locations, max_hops=_max_anomaly_search_hops)
+        # Dijkstra radius is skill-based: (4 + skill_stalker) × default hop minutes.
+        _max_anomaly_search_min = (4 + int(agent.get("skill_stalker", 1))) * _ANOMALY_SEARCH_MINUTES_PER_HOP
+        reachable = _dijkstra_reachable_locations(loc_id, locations, max_minutes=_max_anomaly_search_min)
 
-        def _anomaly_candidate_score(lid: str, dist: int) -> float:
+        def _anomaly_candidate_score(lid: str, travel_min: float) -> float:
             _agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
             _loc_risk = locations.get(lid, {}).get("anomaly_activity", 0) / 10.0
             _risk_penalty = abs(_loc_risk - _agent_risk) * _ANOMALY_RISK_MISMATCH_PENALTY
-            return _score_location(locations.get(lid, {}), "artifacts") - dist * _ANOMALY_DISTANCE_PENALTY - _risk_penalty + rng.random() * _ANOMALY_SCORE_NOISE
+            return _score_location(locations.get(lid, {}), "artifacts") - travel_min * _ANOMALY_DISTANCE_PENALTY_PER_MIN - _risk_penalty + rng.random() * _ANOMALY_SCORE_NOISE
 
         fresh_candidates = [
-            (lid, dist) for lid, dist in reachable.items()
+            (lid, travel_min) for lid, travel_min in reachable.items()
             if locations.get(lid, {}).get("anomaly_activity", 0) > 0
             and lid not in confirmed_empty
         ]
         if fresh_candidates:
-            best_lid, best_dist = max(fresh_candidates, key=lambda t: _anomaly_candidate_score(*t))
+            best_lid, best_travel_min = max(fresh_candidates, key=lambda t: _anomaly_candidate_score(*t))
             best_name = locations.get(best_lid, {}).get("name", best_lid)
             _add_memory(
                 agent, world_turn, state, "decision",
@@ -3432,8 +3474,8 @@ def _bot_pursue_goal(
                 {"action_kind": "move_for_anomaly", "destination": best_lid,
                  "destination_name": best_name,
                  "anomaly_activity": locations.get(best_lid, {}).get("anomaly_activity", 0),
-                 "distance_hops": best_dist},
-                summary=f"Я решил идти в непроверенную аномальную зону «{best_name}» ({best_dist} хода) для сбора артефактов",
+                 "travel_minutes": round(best_travel_min)},
+                summary=f"Я решил идти в непроверенную аномальную зону «{best_name}» (~{round(best_travel_min)} мин) для сбора артефактов",
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
@@ -3453,18 +3495,18 @@ def _bot_pursue_goal(
 
         # Not at an anomaly location — go to the best known one to wait.
         all_anomaly_candidates = [
-            (lid, dist) for lid, dist in reachable.items()
+            (lid, travel_min) for lid, travel_min in reachable.items()
             if locations.get(lid, {}).get("anomaly_activity", 0) > 0
         ]
         if all_anomaly_candidates:
-            best_lid, best_dist = max(all_anomaly_candidates, key=lambda t: _anomaly_candidate_score(*t))
+            best_lid, best_travel_min = max(all_anomaly_candidates, key=lambda t: _anomaly_candidate_score(*t))
             best_name = locations.get(best_lid, {}).get("name", best_lid)
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"Все аномальные зоны изучены — иду в «{best_name}» ждать",
                 {"action_kind": "move_for_anomaly", "destination": best_lid,
                  "destination_name": best_name,
-                 "distance_hops": best_dist},
+                 "travel_minutes": round(best_travel_min)},
                 summary=f"Я решил идти в «{best_name}» ждать пополнения артефактов, потому что все известные аномальные зоны уже пусты",
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)

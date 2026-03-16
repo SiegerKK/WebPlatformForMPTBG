@@ -5456,3 +5456,200 @@ class TestKillStalkerGoal:
             {"loc_id": "A", "global_goal": "kill_stalker", "kill_target_id": "agent_target"}, state
         )
         assert result3.valid
+
+
+class TestDepartedStalkerNotObserved:
+    """Regression test: has_left_zone agents must NOT appear in location observations."""
+
+    def _make_agent(self, agent_id: str, loc_id: str, has_left: bool = False) -> dict:
+        return {
+            "id": agent_id,
+            "archetype": "stalker_agent",
+            "name": f"Сталкер_{agent_id}",
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 500,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot"},
+            "is_alive": True,
+            "action_used": False,
+            "has_left_zone": has_left,
+            "memory": [],
+            "global_goal": "get_rich",
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 5000,
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "scheduled_action": None,
+            "action_queue": [],
+        }
+
+    def _state(self) -> dict:
+        return {
+            "locations": {
+                "A": {
+                    "name": "Локация А", "terrain_type": "plain",
+                    "anomaly_activity": 0, "items": [], "agents": [],
+                    "connections": [], "exit_zone": False,
+                },
+            },
+            "agents": {},
+            "mutants": {},
+            "traders": {},
+            "world_turn": 5,
+            "emission_active": False,
+            "emission_ends_turn": 0,
+        }
+
+    def test_departed_stalker_invisible_to_observers(self):
+        """Agent that has_left_zone=True must not appear in another agent's observations."""
+        from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
+        state = self._state()
+        observer = self._make_agent("observer", "A")
+        departed = self._make_agent("departed", "A", has_left=True)
+        state["agents"]["observer"] = observer
+        state["agents"]["departed"] = departed
+
+        _write_location_observations("observer", observer, "A", state, 5)
+
+        stalker_obs = [
+            m for m in observer["memory"]
+            if m.get("effects", {}).get("observed") == "stalkers"
+        ]
+        assert not stalker_obs, (
+            "Departed stalker should NOT appear in location observations, "
+            f"but got: {stalker_obs}"
+        )
+
+    def test_alive_stalker_still_visible(self):
+        """A normal alive (non-departed) stalker still shows up in observations."""
+        from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
+        state = self._state()
+        observer = self._make_agent("observer", "A")
+        present = self._make_agent("present", "A", has_left=False)
+        state["agents"]["observer"] = observer
+        state["agents"]["present"] = present
+
+        _write_location_observations("observer", observer, "A", state, 5)
+
+        stalker_obs = [
+            m for m in observer["memory"]
+            if m.get("effects", {}).get("observed") == "stalkers"
+        ]
+        assert stalker_obs, "A normal alive stalker should appear in observations"
+        assert "Сталкер_present" in stalker_obs[0]["effects"]["names"]
+
+
+class TestDijkstraReachableLocations:
+    """Tests for the new _dijkstra_reachable_locations helper."""
+
+    def _locs(self) -> dict:
+        # A --(12 min)--> B --(30 min)--> C
+        # (all open)
+        return {
+            "A": {"connections": [{"to": "B", "travel_time": 12, "closed": False}]},
+            "B": {"connections": [{"to": "A", "travel_time": 12, "closed": False},
+                                   {"to": "C", "travel_time": 30, "closed": False}]},
+            "C": {"connections": [{"to": "B", "travel_time": 30, "closed": False}]},
+        }
+
+    def test_reaches_within_radius(self):
+        from app.games.zone_stalkers.rules.tick_rules import _dijkstra_reachable_locations
+        result = _dijkstra_reachable_locations("A", self._locs(), max_minutes=60)
+        assert "B" in result
+        assert result["B"] == pytest.approx(12.0)
+        assert "C" in result
+        assert result["C"] == pytest.approx(42.0)
+
+    def test_does_not_exceed_max_minutes(self):
+        from app.games.zone_stalkers.rules.tick_rules import _dijkstra_reachable_locations
+        result = _dijkstra_reachable_locations("A", self._locs(), max_minutes=20)
+        assert "B" in result
+        assert "C" not in result  # 12+30=42 > 20
+
+    def test_skips_closed_connections(self):
+        from app.games.zone_stalkers.rules.tick_rules import _dijkstra_reachable_locations
+        locs = self._locs()
+        locs["A"]["connections"][0]["closed"] = True
+        result = _dijkstra_reachable_locations("A", locs, max_minutes=60)
+        assert not result  # A's only connection is closed
+
+    def test_anomaly_search_uses_travel_minutes(self):
+        """_bot_pursue_goal get_rich branch stores travel_minutes not distance_hops."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        # A (no anomaly) --(12 min)--> B (anomaly=5)
+        state = {
+            "locations": {
+                "A": {
+                    "name": "A", "terrain_type": "plain",
+                    "anomaly_activity": 0, "items": [], "agents": [],
+                    "connections": [{"to": "B", "travel_time": 12, "closed": False}],
+                    "exit_zone": False,
+                },
+                "B": {
+                    "name": "B", "terrain_type": "plain",
+                    "anomaly_activity": 5, "items": [], "agents": [],
+                    "connections": [{"to": "A", "travel_time": 12, "closed": False}],
+                    "exit_zone": False,
+                },
+            },
+            "agents": {},
+            "mutants": {},
+            "traders": {},
+            "world_turn": 1,
+            "emission_active": False,
+            "emission_ends_turn": 0,
+        }
+        agent = {
+            "id": "agent_a",
+            "archetype": "stalker_agent",
+            "name": "Тестер",
+            "location_id": "A",
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 5000,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot"},
+            "is_alive": True,
+            "action_used": False,
+            "has_left_zone": False,
+            "memory": [],
+            "global_goal": "get_rich",
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 1,  # already over threshold
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "scheduled_action": None,
+            "action_queue": [],
+            "skill_stalker": 1,
+            "skill_combat": 1, "skill_trade": 1, "skill_medicine": 1,
+            "skill_social": 1, "skill_survival": 1,
+            "experience": 0, "reputation": 0,
+        }
+        state["agents"]["agent_a"] = agent
+        _bot_pursue_goal("agent_a", agent, "get_rich",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        anomaly_decisions = [
+            d for d in decisions
+            if d.get("effects", {}).get("action_kind") == "move_for_anomaly"
+        ]
+        assert anomaly_decisions, "Should have a move_for_anomaly decision"
+        fx = anomaly_decisions[0]["effects"]
+        assert "travel_minutes" in fx, (
+            "Decision should contain travel_minutes, not distance_hops"
+        )
+        assert "distance_hops" not in fx, (
+            "Old distance_hops key should no longer appear"
+        )
+        assert fx["travel_minutes"] == 12, (
+            f"Travel to B (12 min edge) should be 12 minutes, got {fx['travel_minutes']}"
+        )
