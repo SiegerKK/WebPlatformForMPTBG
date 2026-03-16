@@ -357,6 +357,10 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 // memory is stripped from the state_blob to save bandwidth and
                 // loaded separately; merge it back in before exporting so the
                 // JSON contains the full agent state.
+                // fetchedMemory is null only while the initial fetch is still
+                // in-flight (or when contextId is absent). In that case fall back
+                // to agent.memory (always [] after stripping) so the file is still
+                // valid JSON — the caller can retry after the UI finishes loading.
                 const exportData = { ...agent, memory: fetchedMemory ?? agent.memory ?? [] };
                 const json = JSON.stringify(exportData, null, 2);
                 const blob = new Blob([json], { type: 'application/json' });

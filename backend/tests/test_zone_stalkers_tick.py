@@ -3171,6 +3171,62 @@ class TestPickupOnArrival:
             f"Should not write again after not_found was already recorded; got {new_obs}"
         )
 
+    def test_no_spurious_item_not_found_after_emergency_buy_at_trader(self):
+        """Regression: after an emergency seek_item (food/drink/medical) to a trader,
+        subsequent calls to _maybe_record_item_not_found must NOT write
+        item_not_found_here — the old seek_item had emergency=True, meaning the
+        agent travelled there to *buy*, not to pick up from the ground.
+
+        Scenario that was broken:
+          Turn T   → agent writes seek_item(food, destination=A, emergency=True)
+          Turn T+1 → arrives, emergency path buys food (writes trade_decision)
+          Turn T+2 → consumes food, hunger back > 30 but < 70; Need-5 food path
+                     calls _maybe_record_item_not_found; old seek_item found in
+                     memory → spurious item_not_found_here written.
+        """
+        from app.games.zone_stalkers.rules.tick_rules import _maybe_record_item_not_found
+        from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = []
+
+        # Old emergency seek_item in memory (agent travelled to this trader earlier)
+        agent["memory"] = [
+            {
+                "type": "decision", "world_turn": 1,
+                "label": "Иду к торговцу за едой (экстренно)",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "food",
+                    "destination": "A",
+                    "emergency": True,
+                },
+            },
+            # Simulated trade_decision from the buy on arrival (no destination/item_category)
+            {
+                "type": "decision", "world_turn": 5,
+                "label": "Решил купить «Буханка хлеба»",
+                "summary": "...",
+                "effects": {"action_kind": "trade_decision", "item_type": "bread"},
+            },
+        ]
+        loc = state["locations"]["A"]
+
+        _maybe_record_item_not_found(
+            agent, 6, state, "A", loc, FOOD_ITEM_TYPES, "food"
+        )
+
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            "item_not_found_here must NOT be written after an emergency seek_item "
+            f"(trader visit for buying); got: {not_found}"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────
 # _bot_sell_on_arrival: commit to selling artifacts at the trader

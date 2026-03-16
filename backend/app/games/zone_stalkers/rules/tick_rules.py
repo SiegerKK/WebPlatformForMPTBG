@@ -795,9 +795,9 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
 def _turn_to_time_label(world_turn: int) -> str:
     """Convert a *world_turn* counter to a human-readable in-game date/time label.
 
-    Mirrors the frontend ``turnToTime()`` function in AgentProfileModal.tsx.
-    ``MINUTES_PER_TURN`` is the single source of truth — update it there to
-    rescale the entire system.
+    Uses ``MINUTES_PER_TURN`` (defined at the top of this module) as the scale
+    factor.  The frontend ``turnToTime()`` function in AgentProfileModal.tsx
+    uses the same formula — keep them in sync when changing the scale factor.
 
     Example: world_turn=90, MINUTES_PER_TURN=1 → "День 1 · 01:30"
     """
@@ -1848,6 +1848,11 @@ def _maybe_record_item_not_found(
             continue
         ak = effects.get("action_kind")
         if ak == "seek_item":
+            if effects.get("emergency"):
+                # Emergency seek_item decisions always target a trader for buying,
+                # never for ground pickup.  "No item on ground" at a trader is
+                # expected and must not be recorded as a dead end.
+                return
             found_seek = True
             break
         elif ak == "buy_item":
@@ -1910,6 +1915,12 @@ def _maybe_record_item_picked_up(
             continue
         ak = effects.get("action_kind")
         if ak == "seek_item":
+            if effects.get("emergency"):
+                # Emergency seek_item decisions always target a trader for buying.
+                # If the agent happened to pick up an item on the ground there, do
+                # not write item_picked_up_here — that would blacklist the trader
+                # for future purchases of the same category.
+                return
             found_seek = True
             break
         elif ak == "buy_item":
