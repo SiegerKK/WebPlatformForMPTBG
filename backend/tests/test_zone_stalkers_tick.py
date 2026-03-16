@@ -4710,6 +4710,51 @@ class TestUnravelZoneMysteryGoal:
             f"Fresh intel (obs_turn=6 > resolved_turn=5) should be accepted; got {result_loc}"
         )
 
+    def test_intel_from_stalker_includes_obs_timestamp(self):
+        """intel_from_stalker summary must include the date/time the informant saw the item,
+        and effects must carry obs_world_turn for downstream use."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # obs_turn = 1*60 + 30 = 90 → Day 1, 01:30
+        obs_turn = 90
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, obs_turn, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, obs_turn + 1
+        )
+        intel_mems = [m for m in agent["memory"]
+                      if m.get("effects", {}).get("action_kind") == "intel_from_stalker"]
+        assert intel_mems, "Should have written intel_from_stalker entry"
+        entry = intel_mems[0]
+        # obs_world_turn must be stored in effects
+        assert entry["effects"].get("obs_world_turn") == obs_turn, (
+            f"Expected obs_world_turn={obs_turn}; got {entry['effects'].get('obs_world_turn')}"
+        )
+        # Summary must contain the time label: obs_turn=90 → Day 1 · 01:30
+        summary = entry.get("summary", "")
+        assert "День 1" in summary, f"Summary should contain 'День 1'; got: {summary!r}"
+        assert "01:30" in summary, f"Summary should contain '01:30'; got: {summary!r}"
+
     def test_set_goal_via_world_command(self):
         """debug_spawn_stalker should accept 'unravel_zone_mystery' as global_goal."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone

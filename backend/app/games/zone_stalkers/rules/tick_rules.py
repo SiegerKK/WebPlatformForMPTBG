@@ -792,6 +792,22 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
                 {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce})
 
 
+def _turn_to_time_label(world_turn: int) -> str:
+    """Convert a *world_turn* counter to a human-readable in-game date/time label.
+
+    Mirrors the frontend ``turnToTime()`` function in AgentProfileModal.tsx.
+    ``MINUTES_PER_TURN`` is the single source of truth — update it there to
+    rescale the entire system.
+
+    Example: world_turn=90, MINUTES_PER_TURN=1 → "День 1 · 01:30"
+    """
+    total_minutes = world_turn * MINUTES_PER_TURN
+    day = 1 + total_minutes // (24 * 60)
+    hour = (total_minutes // 60) % 24
+    minute = total_minutes % 60
+    return f"День {day} · {hour:02d}:{minute:02d}"
+
+
 def _add_memory(
     agent: Dict[str, Any],
     world_turn: int,
@@ -2084,6 +2100,10 @@ def _bot_ask_colocated_stalkers_about_item(
             if obs_turn <= resolved_turns.get(obs_loc, -1):
                 continue
 
+            # Compute in-game date/time of the informant's observation so the
+            # asking agent remembers *when* the intel was gathered.
+            _obs_time_label = _turn_to_time_label(obs_turn)
+
             obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
             current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
             matched_types = sorted(obs_types.intersection(item_types))
@@ -2092,7 +2112,8 @@ def _bot_ask_colocated_stalkers_about_item(
                 f"💬 Разведданные от {other_name}",
                 (
                     f"{other_name} рассказал, что видел {item_category_name} "
-                    f"в «{obs_loc_name}» (в {current_loc_name})."
+                    f"в «{obs_loc_name}» (в {current_loc_name}). "
+                    f"Видел {_obs_time_label}."
                 ),
                 {
                     "action_kind": "intel_from_stalker",
@@ -2101,6 +2122,7 @@ def _bot_ask_colocated_stalkers_about_item(
                     "item_types": matched_types,
                     "source_agent_id": other_id,
                     "source_agent_name": other_name,
+                    "obs_world_turn": obs_turn,
                 },
             )
             seen_locs_this_stalker.add(obs_loc)
