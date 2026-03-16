@@ -34,12 +34,12 @@ _DEBUG_CACHE_TTL: float = 5.0  # seconds between DB refreshes
 _tick_last: Dict[str, float] = {}
 
 # Minimum real-time gap (seconds) between consecutive ticks at each named speed.
-# "x100" has no throttle — it runs at the background-loop rate.
+# 1 tick == 1 game-minute, so "realtime" maps game-time 1:1 to real time.
 # Keys must match AUTO_TICK_VALID_SPEEDS in app.core.commands.pipeline.
 _TICK_INTERVALS: Dict[str, float] = {
-    "realtime": 1.0,   # ≈ 1 game-minute per real second
-    "x10":      0.1,   # 10× faster than realtime
-    "x100":     0.0,   # as fast as possible (limited by loop cadence)
+    "realtime": 60.0,  # 1 tick/min — 1 game-minute per real minute (true 1:1)
+    "x10":       6.0,  # 10× realtime — 1 tick per 6 real seconds
+    "x100":      0.6,  # 100× realtime — 1 tick per 0.6 real seconds
 }
 
 

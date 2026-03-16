@@ -1036,7 +1036,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 style={{ ...s.toolBtn, color: activeSpeed === 'realtime' ? '#fca5a5' : '#86efac', borderColor: activeSpeed === 'realtime' ? '#ef4444' : '#22c55e' }}
                 onClick={() => handleSetSpeed('realtime')}
                 disabled={ticking}
-                title={activeSpeed === 'realtime' ? 'Остановить (синхр. со всеми)' : 'Реальное время: 1 ход/сек (синхр. со всеми)'}
+                title={activeSpeed === 'realtime' ? 'Остановить (синхр. со всеми)' : 'Реальное время: 1 ход/мин — 1 игровая минута = 1 реальная минута (синхр. со всеми)'}
               >
                 {activeSpeed === 'realtime' ? '⏸ Реал.' : '▶ Реал.'}
               </button>
@@ -1044,7 +1044,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 style={{ ...s.toolBtn, color: activeSpeed === 'x10' ? '#fca5a5' : '#fde68a', borderColor: activeSpeed === 'x10' ? '#ef4444' : '#f59e0b' }}
                 onClick={() => handleSetSpeed('x10')}
                 disabled={ticking}
-                title={activeSpeed === 'x10' ? 'Остановить (синхр. со всеми)' : 'Ускорить ×10: 10 ходов/сек (синхр. со всеми)'}
+                title={activeSpeed === 'x10' ? 'Остановить (синхр. со всеми)' : '×10: 1 ход каждые 6 секунд (синхр. со всеми)'}
               >
                 {activeSpeed === 'x10' ? '⏸ ×10' : '⏩ ×10'}
               </button>
@@ -1052,7 +1052,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 style={{ ...s.toolBtn, color: activeSpeed === 'x100' ? '#fca5a5' : '#c4b5fd', borderColor: activeSpeed === 'x100' ? '#ef4444' : '#8b5cf6' }}
                 onClick={() => handleSetSpeed('x100')}
                 disabled={ticking}
-                title={activeSpeed === 'x100' ? 'Остановить (синхр. со всеми)' : 'Максимальная скорость ×100 (синхр. со всеми)'}
+                title={activeSpeed === 'x100' ? 'Остановить (синхр. со всеми)' : '×100: 1 ход каждые 0.6 секунды (синхр. со всеми)'}
               >
                 {activeSpeed === 'x100' ? '⏸ ×100' : '⏩⏩ ×100'}
               </button>
