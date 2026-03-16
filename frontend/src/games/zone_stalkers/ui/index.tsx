@@ -2037,33 +2037,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         {allAgents.map((agent) => (
           <div key={agent.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              {agent.has_left_zone ? (
-                <div style={{
-                  background: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: 8,
-                  padding: '6px 10px',
-                  opacity: 0.7,
-                  display: 'flex',
-                  gap: 8,
-                  alignItems: 'center',
-                }}>
-                  <span style={{ fontSize: '0.85rem' }}>🚪</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ color: '#94a3b8', fontSize: '0.8rem', fontWeight: 600 }}>{agent.name}</div>
-                    <div style={{ color: '#475569', fontSize: '0.68rem' }}>Покинул Зону</div>
-                  </div>
-                </div>
-              ) : (
-                <AgentRow
-                  agent={agent as unknown as AgentForProfile}
-                  locationName={locName(agent.location_id)}
-                  locations={zoneState.locations}
-                  isCurrentPlayer={agent.id === myAgentId}
-                  contextId={context?.id}
-                  sendCommand={sendCommand}
-                />
-              )}
+              <AgentRow
+                agent={agent as unknown as AgentForProfile}
+                locationName={agent.has_left_zone ? '🚪 Покинул Зону' : locName(agent.location_id)}
+                locations={zoneState.locations}
+                isCurrentPlayer={agent.id === myAgentId}
+                contextId={context?.id}
+                sendCommand={sendCommand}
+              />
             </div>
             <button
               style={{

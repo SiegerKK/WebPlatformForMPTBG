@@ -1403,6 +1403,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                     {aliveAgents > 0 && <Badge bg="#334155" color="#94a3b8">👥 {aliveAgents}</Badge>}
                     {aliveMutantsOnCard > 0 && <Badge bg="#7f1d1d" color="#fca5a5">☣️ {aliveMutantsOnCard}</Badge>}
                     {traderCount > 0 && <Badge bg="#1e293b" color="#94a3b8">🏪 {traderCount}</Badge>}
+                    {loc.exit_zone && <Badge bg="#0f4c75" color="#22d3ee">🚪 Выход</Badge>}
                     {loc.artifacts.length > 0 && (
                       <Badge bg="#312e81" color="#a5b4fc">💎 {loc.artifacts.length}</Badge>
                     )}

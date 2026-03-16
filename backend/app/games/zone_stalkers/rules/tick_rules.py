@@ -127,6 +127,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         for agent_id, agent in state.get("agents", {}).items():
             if not agent.get("is_alive", True):
                 continue
+            if agent.get("has_left_zone"):  # departed agents need no hunger/thirst/sleep degradation
+                continue
             agent["hunger"] = min(100, agent.get("hunger", 0) + 3)
             agent["thirst"] = min(100, agent.get("thirst", 0) + 5)
             agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + 4)
@@ -330,6 +332,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
+        if agent.get("has_left_zone"):  # departed agents are no longer at any location
+            continue
         if agent.get("archetype") != "stalker_agent":
             continue
         loc_id = agent.get("location_id")
@@ -355,7 +359,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 
     # 5. Reset action_used for next turn
     for agent in state.get("agents", {}).values():
-        if agent.get("is_alive", True):
+        if agent.get("is_alive", True) and not agent.get("has_left_zone"):
             agent["action_used"] = False
 
     # Check game-over (max_turns=0 means unlimited)
