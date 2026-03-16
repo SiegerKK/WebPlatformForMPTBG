@@ -49,6 +49,25 @@ _EMISSION_DANGEROUS_TERRAIN: frozenset = frozenset({
     "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
 })
 
+# Human-readable Russian names for terrain types (used in memory summaries).
+_TERRAIN_NAME_RU: Dict[str, str] = {
+    "plain": "Равнина",
+    "hills": "Холмы",
+    "swamp": "Болото",
+    "field_camp": "Полевой лагерь",
+    "slag_heaps": "Шлаковые отвалы",
+    "bridge": "Мост",
+    "industrial": "Промзона",
+    "buildings": "Постройки",
+    "military_buildings": "Военные объекты",
+    "hamlet": "Хутор",
+    "farm": "Ферма",
+    "dungeon": "Подземелье",
+    "tunnel": "Тоннель",
+    "x_lab": "Лаборатория «Икс»",
+    "scientific_bunker": "Научный бункер",
+}
+
 # Anomaly search parameters for the get_rich NPC goal path.
 # Search radius is skill-based: 4 + agent["skill_stalker"] hops (e.g. 5 for level-1 stalker).
 _ANOMALY_DISTANCE_PENALTY = 5.0        # Score reduction per hop of distance
@@ -217,7 +236,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     "💀 Смерть",
                     {"action_kind": "death", "cause": "emission",
                      "location_id": _em_agent.get("location_id"), "terrain": _em_terrain},
-                    summary=f"Погиб от выброса в локации «{_em_loc_name}» (тип местности: {_em_terrain})",
+                    summary=f"Погиб от выброса в локации «{_em_loc_name}» (местность: {_TERRAIN_NAME_RU.get(_em_terrain, _em_terrain)})",
                 )
                 events.append({
                     "event_type": "agent_died",
@@ -520,7 +539,7 @@ def _process_scheduled_action(
                     12,
                 )
                 # Override the None set above — agent is still travelling.
-                agent["scheduled_action"] = {
+                _next_sched: Dict[str, Any] = {
                     "type": "travel",
                     "turns_remaining": hop_time,
                     "turns_total": hop_time,
@@ -529,6 +548,13 @@ def _process_scheduled_action(
                     "remaining_route": remaining_route[1:],
                     "started_turn": world_turn,
                 }
+                # Carry over the emergency_flee flag so that each hop of an
+                # emission-flee journey is never interrupted by the emission
+                # warning — otherwise the agent would cancel and restart the
+                # flee on every hop, creating an infinite loop.
+                if sched.get("emergency_flee"):
+                    _next_sched["emergency_flee"] = True
+                agent["scheduled_action"] = _next_sched
                 events.append({
                     "event_type": "travel_hop_completed",
                     "payload": {
@@ -2399,13 +2425,16 @@ def _run_bot_action_inner(
         # ── BFS to find the NEAREST safe (non-dangerous terrain) location ─────
         # Treat all nodes as traversable; skip only closed connections.
         # Pick the safe location with the fewest hops; break ties by smallest ID.
-        _bfs_queue: collections.deque = collections.deque([(loc_id, 0)])
+        # Also track cumulative travel_time (in minutes) for each path so the
+        # summary can report actual travel duration instead of a hop count.
+        _bfs_queue: collections.deque = collections.deque([(loc_id, 0, 0)])  # (id, hops, minutes)
         _bfs_seen: set = {loc_id}
         _safe_hops: Optional[int] = None
         _safe_candidates: List[str] = []
+        _safe_minutes: Dict[str, int] = {}  # loc_id → total travel minutes for that path
 
         while _bfs_queue:
-            _cur_id, _hops = _bfs_queue.popleft()
+            _cur_id, _hops, _cur_minutes = _bfs_queue.popleft()
             _next_hops = _hops + 1
             # Once we have candidates at level k, don't expand beyond level k
             if _safe_hops is not None and _next_hops > _safe_hops:
@@ -2417,23 +2446,30 @@ def _run_bot_action_inner(
                 if _nxt in _bfs_seen:
                     continue
                 _bfs_seen.add(_nxt)
+                _conn_minutes = _conn.get("travel_time", 12) * MINUTES_PER_TURN
+                _nxt_minutes = _cur_minutes + _conn_minutes
                 _nxt_terrain = locations.get(_nxt, {}).get("terrain_type", "")
                 if _nxt_terrain not in _EMISSION_DANGEROUS_TERRAIN:
                     # Safe location found
                     if _safe_hops is None or _next_hops < _safe_hops:
                         _safe_hops = _next_hops
                         _safe_candidates = [_nxt]
+                        _safe_minutes[_nxt] = _nxt_minutes
                     elif _next_hops == _safe_hops:
                         _safe_candidates.append(_nxt)
+                        _safe_minutes[_nxt] = _nxt_minutes
                 else:
                     # Still dangerous — only add to queue if within current best distance
                     if _safe_hops is None or _next_hops <= _safe_hops:
-                        _bfs_queue.append((_nxt, _next_hops))
+                        _bfs_queue.append((_nxt, _next_hops, _nxt_minutes))
 
         if _safe_candidates:
             # Pick deterministically: smallest ID among ties at minimum hop distance
             target = min(_safe_candidates)
             hops = _safe_hops
+            minutes_to_shelter = _safe_minutes.get(target, hops * 12)
+            _shelter_name = locations.get(target, {}).get("name", target)
+            _emission_reason = "идёт выброс" if _emission_active else "скоро будет выброс"
             agent["current_goal"] = "flee_emission"
             _add_memory(
                 agent, world_turn, state, "decision",
@@ -2441,10 +2477,11 @@ def _run_bot_action_inner(
                 {
                     "action_kind": "flee_emission",
                     "target_id": target,
-                    "target_name": locations.get(target, {}).get("name", target),
+                    "target_name": _shelter_name,
                     "hops_to_shelter": hops,
+                    "minutes_to_shelter": minutes_to_shelter,
                 },
-                summary=f"Я решил бежать к укрытию «{locations.get(target, {}).get('name', target)}» ({hops} хода), потому что {'идёт выброс' if _emission_active else 'скоро будет выброс'}",
+                summary=f"Я решил бежать к укрытию «{_shelter_name}» (~{minutes_to_shelter} мин), потому что {_emission_reason}",
             )
             return _bot_schedule_travel(agent_id, agent, target, state, world_turn, emergency_flee=True)
         else:

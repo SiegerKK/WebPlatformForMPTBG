@@ -4134,7 +4134,12 @@ class TestTravelEmissionInterrupt:
     # ── Mid-hop cases ────────────────────────────────────────────────────────
 
     def test_mid_hop_travel_interrupted_by_emission_warning(self):
-        """Mid-hop travel is cancelled when emission_imminent is in memory."""
+        """Mid-hop travel is cancelled and replaced by flee_emission when emission_imminent is in memory.
+
+        The original (non-emergency) travel is interrupted; the bot immediately
+        schedules a new emergency flee travel (emergency_flee=True) on the same tick
+        because the agent is on dangerous terrain.
+        """
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         state = self._make_travel_state(hop_turns=5)
         agent = next(iter(state["agents"].values()))
@@ -4143,9 +4148,17 @@ class TestTravelEmissionInterrupt:
         new_state, _ = tick_zone_map(state)
         new_agent = next(iter(new_state["agents"].values()))
 
+        # The bot must have written a travel_interrupted entry (original travel cancelled)
+        interrupted = [
+            m for m in new_agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+        ]
+        assert interrupted, "travel_interrupted memory should be written when emission fires"
+
+        # The bot should immediately reschedule a flee_emission travel on the same tick
         sched = new_agent.get("scheduled_action")
-        assert sched is None or sched.get("type") != "travel", (
-            "Mid-hop travel should be cancelled when emission_imminent is in memory"
+        assert sched is not None and sched.get("emergency_flee") is True, (
+            "After interrupt on dangerous terrain, bot should schedule an emergency flee travel"
         )
 
     def test_mid_hop_travel_interrupted_memory_written(self):
@@ -4180,7 +4193,11 @@ class TestTravelEmissionInterrupt:
         assert sched["turns_remaining"] == 3, "turns_remaining should decrement"
 
     def test_mid_hop_travel_interrupted_by_active_emission(self):
-        """Mid-hop travel is cancelled when emission_active=True."""
+        """Mid-hop travel is cancelled and replaced by flee_emission when emission_active=True.
+
+        Same as the emission_warning case: after the interrupt the bot immediately
+        schedules an emergency flee travel because the agent is on dangerous terrain.
+        """
         from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         state = self._make_travel_state(hop_turns=5)
         state["emission_active"] = True
@@ -4190,8 +4207,9 @@ class TestTravelEmissionInterrupt:
         new_agent = next(iter(new_state["agents"].values()))
 
         sched = new_agent.get("scheduled_action")
-        assert sched is None or sched.get("type") != "travel", (
-            "Mid-hop travel should be cancelled when emission is active"
+        assert sched is not None and sched.get("emergency_flee") is True, (
+            "After interrupt on dangerous terrain during active emission, "
+            "bot should schedule an emergency flee travel"
         )
 
     # ── Post-hop cases (hop completes, remaining_route non-empty) ────────────
