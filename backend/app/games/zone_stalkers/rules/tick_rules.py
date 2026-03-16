@@ -1576,6 +1576,7 @@ _SEEK_CATEGORY_TO_TYPES: Dict[str, "frozenset[str]"] = {
     "medical": HEAL_ITEM_TYPES,
     "food": FOOD_ITEM_TYPES,
     "drink": DRINK_ITEM_TYPES,
+    "secret_document": SECRET_DOCUMENT_ITEM_TYPES,
 }
 
 
@@ -1624,6 +1625,7 @@ def _bot_pickup_on_arrival(
             if not item_types:
                 return []
         pickup_events = _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        loc = state.get("locations", {}).get(loc_id, {})
         if not pickup_events:
             # Item not on the ground.  If this is not a trader location, record
             # the dead end immediately so that any interrupt (emergency, higher-
@@ -1632,10 +1634,15 @@ def _bot_pickup_on_arrival(
             # the agent came to *buy*, not pick up, so "not found on ground" is
             # expected and must not blacklist the trader.
             if _find_trader_at_location(loc_id, state) is None:
-                loc = state.get("locations", {}).get(loc_id, {})
                 _maybe_record_item_not_found(
                     agent, world_turn, state, loc_id, loc, item_types, category
                 )
+        else:
+            # Item found and picked up — record a success observation so the agent
+            # won't plan a second trip back here for the same item category.
+            _maybe_record_item_picked_up(
+                agent, world_turn, state, loc_id, loc, item_types, category
+            )
         return pickup_events
     return []
 
@@ -1730,14 +1737,22 @@ def _item_not_found_locations(
     agent: Dict[str, Any],
     item_types: "frozenset[str]",
 ) -> "set[str]":
-    """Return loc_ids where the agent previously looked for items of the given types
-    but arrived and found nothing (``item_not_found_here`` observation).
+    """Return loc_ids where the agent has already resolved a seek_item trip.
+
+    A location is blocked when the agent either:
+    * arrived at a ``seek_item`` destination and the item was not there
+      (``item_not_found_here`` observation), **or**
+    * arrived at a ``seek_item`` destination and successfully picked the item
+      up (``item_picked_up_here`` observation).
+
+    Both cases mean the agent has "used up" that lead and should look elsewhere.
 
     An entry is superseded — and the block lifted — when a *newer* ``observed:items``
-    memory for those item types exists at the same location (e.g. a fresh item spawn).
+    memory for those item types exists at the same location (e.g. a fresh item spawn
+    or new intel from another stalker).
     """
     last_item_obs_turn: Dict[str, int] = {}   # loc_id → most recent observed-items turn
-    last_not_found_turn: Dict[str, int] = {}  # loc_id → most recent item_not_found_here turn
+    last_resolved_turn: Dict[str, int] = {}   # loc_id → most recent resolved-search turn
 
     for mem in agent.get("memory", []):
         if mem.get("type") != "observation":
@@ -1748,10 +1763,10 @@ def _item_not_found_locations(
         if not loc_id:
             continue
 
-        if effects.get("action_kind") == "item_not_found_here":
+        if effects.get("action_kind") in ("item_not_found_here", "item_picked_up_here"):
             mem_types = frozenset(effects.get("item_types", []))
             if item_types.intersection(mem_types):
-                last_not_found_turn[loc_id] = max(last_not_found_turn.get(loc_id, 0), turn)
+                last_resolved_turn[loc_id] = max(last_resolved_turn.get(loc_id, 0), turn)
 
         elif effects.get("observed") == "items":
             obs_types = set(effects.get("item_types", []))
@@ -1759,11 +1774,11 @@ def _item_not_found_locations(
                 last_item_obs_turn[loc_id] = max(last_item_obs_turn.get(loc_id, 0), turn)
 
     result: set = set()
-    for loc_id, nf_turn in last_not_found_turn.items():
-        # Only block if the not_found observation is newer than (or same turn as) the
+    for loc_id, resolved_turn in last_resolved_turn.items():
+        # Only block if the resolved observation is newer than (or same turn as) the
         # most recent item observation at that location.
         obs_turn = last_item_obs_turn.get(loc_id, 0)
-        if nf_turn >= obs_turn:
+        if resolved_turn >= obs_turn:
             result.add(loc_id)
     return result
 
@@ -1832,6 +1847,71 @@ def _maybe_record_item_not_found(
     )
 
 
+def _maybe_record_item_picked_up(
+    agent: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    loc_id: str,
+    loc: Dict[str, Any],
+    item_types: "frozenset[str]",
+    item_category: str,
+) -> None:
+    """Write an ``item_picked_up_here`` observation when the agent arrived at *loc_id*
+    specifically to retrieve an item of *item_category* and successfully picked one up.
+
+    The observation marks this location as "already resolved" for items of these types
+    so that ``_find_item_memory_location`` (via ``_item_not_found_locations``) does not
+    send the agent back to the same spot on the next search cycle.
+
+    The check: the agent must have a prior ``seek_item`` decision memory that named
+    *loc_id* as the destination for *item_category*.  If no such decision exists, the
+    visit is incidental and no observation is written.
+    Duplicate entries for the same location and item category within the same turn are
+    suppressed.
+    """
+    # Only record if the agent explicitly decided to travel here for this item.
+    found_seek = False
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "decision":
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("destination") != loc_id or effects.get("item_category") != item_category:
+            continue
+        ak = effects.get("action_kind")
+        if ak == "seek_item":
+            found_seek = True
+            break
+        elif ak == "buy_item":
+            return
+    if not found_seek:
+        return
+
+    # Suppress duplicates: don't write the same entry twice in the same turn.
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("world_turn") != world_turn:
+            break
+        effects = mem.get("effects", {})
+        if (
+            effects.get("action_kind") == "item_picked_up_here"
+            and effects.get("location_id") == loc_id
+            and frozenset(effects.get("item_types", [])).intersection(item_types)
+        ):
+            return  # already recorded this turn
+
+    loc_name = loc.get("name", loc_id)
+    _add_memory(
+        agent, world_turn, state, "observation",
+        f"✅ Нашёл {item_category} в «{loc_name}»",
+        f"Пришёл в «{loc_name}» за {item_category} и нашёл нужный предмет.",
+        {
+            "action_kind": "item_picked_up_here",
+            "source": "seek_item_arrival",
+            "location_id": loc_id,
+            "item_types": sorted(item_types),
+        },
+    )
+
+
 def _find_item_memory_location(
     agent: Dict[str, Any],
     item_types: "frozenset[str]",
@@ -1842,8 +1922,10 @@ def _find_item_memory_location(
     Returns the ``loc_id`` of the most recently remembered location where
     one of the requested item types was seen, or ``None`` if no such memory
     exists.  Locations that are unreachable (all paths blocked by closed
-    connections) or that the agent has previously visited and found empty
-    (recorded via ``_maybe_record_item_not_found``) are excluded.
+    connections) or that the agent has already resolved a search at
+    (``item_not_found_here`` or ``item_picked_up_here`` observation recorded
+    via ``_maybe_record_item_not_found`` / ``_maybe_record_item_picked_up``) are
+    excluded.
 
     Relies purely on the agent's memory — no omniscient ground-truth check.
     """

@@ -2385,6 +2385,64 @@ class TestItemNotFoundLoop:
             f"Should not write not_found without a seek_item decision; got {not_found}"
         )
 
+    def test_item_picked_up_here_blocks_location(self):
+        """_item_not_found_locations returns a blocked location when it has an
+        item_picked_up_here entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" in result, f"B should be blocked by item_picked_up_here; got {result}"
+
+    def test_newer_item_obs_lifts_picked_up_block(self):
+        """A newer observed:items entry supersedes an item_picked_up_here block."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # Fresh spawn observed on turn 2
+            {"world_turn": 2, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" not in result, f"B should be unblocked after newer obs; got {result}"
+
+    def test_find_item_memory_excludes_picked_up_location(self):
+        """_find_item_memory_location excludes a location that has item_picked_up_here."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, f"B should be excluded after item_picked_up_here; got {result}"
+
 
 # ─────────────────────────────────────────────────────────────────
 # _find_item_memory_location skips unreachable locations
@@ -2593,6 +2651,105 @@ class TestPickupBlocksResearch:
         assert result == "B", (
             f"Newer observed:items should lift the pickup block on B; got {result}"
         )
+
+    def test_seek_item_arrival_pickup_writes_item_picked_up_here(self):
+        """When the agent arrives at a seek_item destination and picks up the item,
+        item_picked_up_here is written so the location is blocked for re-search."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+
+        state = _make_minimal_state({"A": {}, "B": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        # Simulate NPC having decided to travel to A for a weapon
+        agent["memory"] = [{
+            "type": "decision", "world_turn": 0,
+            "label": "Иду за оружием", "summary": "...",
+            "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                        "destination": "A"},
+            "reason": "test",
+        }]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result, "Should have returned pickup events"
+        picked_up = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(picked_up) == 1, (
+            f"Expected 1 item_picked_up_here, got {len(picked_up)}"
+        )
+        assert picked_up[0]["effects"].get("source") == "seek_item_arrival"
+
+    def test_seek_item_arrival_pickup_blocks_find_item_memory_location(self):
+        """After a seek_item arrival pickup, _find_item_memory_location excludes that location."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival, _find_item_memory_location
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="B",
+        )
+        agent = self._make_agent_at("B", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["B"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+            # A second weapon remains so _bot_pickup_item_from_ground does NOT write item_not_found_here
+            {"id": "wpn2", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+        ]
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"type": "decision", "world_turn": 0,
+             "label": "Иду за оружием", "summary": "...",
+             "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                         "destination": "B"},
+             "reason": "test"},
+        ]
+        agent_id = next(iter(state["agents"]))
+        _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        # Even though one weapon remains at B, item_picked_up_here should block B
+        agent["location_id"] = "A"
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, (
+            f"B should be blocked by item_picked_up_here even when items remain; got {result}"
+        )
+
+    def test_seek_item_arrival_no_picked_up_here_without_seek_decision(self):
+        """If the most recent decision is NOT seek_item, no item_picked_up_here is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        # Most recent decision is a wander — not a seek_item
+        agent["memory"] = [{
+            "type": "decision", "world_turn": 0,
+            "label": "Иду куда-нибудь", "summary": "...",
+            "effects": {"action_kind": "wander", "destination": "A"},
+            "reason": "test",
+        }]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result == [], "_bot_pickup_on_arrival returns [] when latest decision is not seek_item"
+        picked_up = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+        ]
+        assert len(picked_up) == 0, "Should not write item_picked_up_here without seek_item decision"
 
 
 # ─────────────────────────────────────────────────────────────────
