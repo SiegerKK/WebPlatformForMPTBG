@@ -323,6 +323,49 @@ class TestTickRules:
         assert any(m["type"] == "action" for m in state["agents"]["agent_p0"]["memory"])
 
 
+class TestDebugSetTime:
+    """debug_set_time must update world_turn so NPC memory timestamps are correct."""
+
+    def _r(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("debug_set_time", payload, state, "player1")
+
+    def test_world_turn_updated_on_set_time(self):
+        """After debug_set_time the world_turn must equal (day-1)*1440 + hour*60 + minute."""
+        state = _make_world()
+        state, events = self._r({"day": 2, "hour": 3, "minute": 15}, state)
+
+        expected_turn = (2 - 1) * 24 * 60 + 3 * 60 + 15  # 1440 + 180 + 15 = 1635
+        assert state["world_turn"] == expected_turn, (
+            f"Expected world_turn={expected_turn}, got {state['world_turn']}"
+        )
+        # Event payload must also carry the new world_turn
+        time_event = next((e for e in events if e["event_type"] == "debug_time_set"), None)
+        assert time_event is not None
+        assert time_event["payload"]["world_turn"] == expected_turn
+
+    def test_world_day_hour_minute_unchanged_when_omitted(self):
+        """Fields not in payload must not change; world_turn must reflect the surviving values."""
+        state = _make_world()
+        state["world_day"] = 5
+        state["world_hour"] = 10
+        state["world_minute"] = 30
+        # Only override the hour
+        state, _ = self._r({"hour": 22}, state)
+
+        assert state["world_day"] == 5
+        assert state["world_hour"] == 22
+        assert state["world_minute"] == 30
+        expected_turn = (5 - 1) * 24 * 60 + 22 * 60 + 30  # 5760 + 1320 + 30 = 7110
+        assert state["world_turn"] == expected_turn
+
+    def test_world_turn_day1_midnight(self):
+        """Day 1, hour 0, minute 0 → world_turn = 0."""
+        state = _make_world()
+        state, _ = self._r({"day": 1, "hour": 0, "minute": 0}, state)
+        assert state["world_turn"] == 0
+
+
 class TestEventRules:
     """Zone event context rules."""
 

@@ -481,12 +481,23 @@ def resolve_world_command(
             state["world_hour"] = max(0, min(23, int(payload["hour"])))
         if "minute" in payload:
             state["world_minute"] = max(0, min(59, int(payload["minute"])))
+        # Keep world_turn in sync with the new time so that NPC memory
+        # timestamps (written via _turn_to_time_label(world_turn)) match
+        # the displayed clock.  Formula mirrors tick_rules._turn_to_time_label
+        # with MINUTES_PER_TURN = 1 (1 turn = 1 in-game minute).
+        new_turn = (
+            (state.get("world_day", 1) - 1) * 24 * 60
+            + state.get("world_hour", 0) * 60
+            + state.get("world_minute", 0)
+        )
+        state["world_turn"] = new_turn
         events.append({
             "event_type": "debug_time_set",
             "payload": {
                 "world_day": state["world_day"],
                 "world_hour": state["world_hour"],
                 "world_minute": state.get("world_minute", 0),
+                "world_turn": new_turn,
             },
         })
         return state, events
