@@ -354,7 +354,11 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               style={s.closeBtn}
               title="Экспорт в JSON"
               onClick={() => {
-                const json = JSON.stringify(agent, null, 2);
+                // memory is stripped from the state_blob to save bandwidth and
+                // loaded separately; merge it back in before exporting so the
+                // JSON contains the full agent state.
+                const exportData = { ...agent, memory: fetchedMemory ?? agent.memory ?? [] };
+                const json = JSON.stringify(exportData, null, 2);
                 const blob = new Blob([json], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
