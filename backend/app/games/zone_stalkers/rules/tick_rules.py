@@ -2204,6 +2204,177 @@ def _bot_ask_colocated_stalkers_about_item(
     return first_loc
 
 
+def _bot_ask_colocated_stalkers_about_agent(
+    agent_id: str,
+    agent: Dict[str, Any],
+    target_agent_id: str,
+    target_agent_name: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> Optional[str]:
+    """Ask co-located stalker agents whether they have seen a specific agent.
+
+    Scans the ``observed="stalkers"`` observations in every co-located alive
+    stalker's memory.  For each unique (source_agent, location) pair whose
+    ``names`` list contained *target_agent_name*, writes an
+    ``intel_from_stalker`` + ``observed="agent_location"`` entry to the caller's
+    memory.
+
+    Returns the ``loc_id`` of the first new piece of intel written, or ``None``
+    if nothing new was found.  Already-exhausted locations (recorded via
+    ``hunt_area_exhausted``) are filtered out.
+    """
+    loc_id = agent.get("location_id", "")
+    agents = state.get("agents", {})
+
+    # Build set of (source_agent_id, loc_id) pairs already known this turn.
+    already_known: set = set()
+    for mem in agent.get("memory", []):
+        if mem.get("world_turn") != world_turn:
+            continue
+        fx = mem.get("effects", {})
+        if fx.get("action_kind") == "intel_from_stalker" and fx.get("observed") == "agent_location":
+            already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+
+    # Collect exhausted intel locations (base locations whose full neighbourhood
+    # has already been searched and target was not found there).
+    exhausted_locs: set = set()
+    for mem in agent.get("memory", []):
+        fx = mem.get("effects", {})
+        if (fx.get("action_kind") == "hunt_area_exhausted"
+                and fx.get("target_id") == target_agent_id):
+            exhausted_locs.add(fx.get("location_id"))
+
+    first_loc: Optional[str] = None
+
+    for other_id, other in agents.items():
+        if other_id == agent_id:
+            continue
+        if not other.get("is_alive", True):
+            continue
+        if other.get("location_id") != loc_id:
+            continue
+        if other.get("archetype") != "stalker_agent":
+            continue
+
+        other_name = other.get("name", other_id)
+        seen_locs_this_stalker: set = set()
+
+        for mem in reversed(other.get("memory", [])):
+            if mem.get("type") != "observation":
+                continue
+            fx = mem.get("effects", {})
+            if fx.get("observed") != "stalkers":
+                continue
+            obs_loc = fx.get("location_id")
+            if not obs_loc:
+                continue
+            names_seen = fx.get("names", [])
+            if target_agent_name not in names_seen:
+                continue
+            if obs_loc in exhausted_locs:
+                continue
+            if (other_id, obs_loc) in already_known:
+                continue
+            if obs_loc in seen_locs_this_stalker:
+                continue
+
+            obs_turn = mem.get("world_turn", 0)
+            _obs_time_label = _turn_to_time_label(obs_turn)
+            obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
+            current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"💬 Разведданные от {other_name}",
+                {
+                    "action_kind": "intel_from_stalker",
+                    "observed": "agent_location",
+                    "location_id": obs_loc,
+                    "target_agent_id": target_agent_id,
+                    "target_agent_name": target_agent_name,
+                    "source_agent_id": other_id,
+                    "source_agent_name": other_name,
+                    "obs_world_turn": obs_turn,
+                },
+                summary=(
+                    f"{other_name} рассказал, что видел «{target_agent_name}» "
+                    f"в «{obs_loc_name}» (в {current_loc_name}). "
+                    f"Видел {_obs_time_label}."
+                ),
+            )
+            seen_locs_this_stalker.add(obs_loc)
+            already_known.add((other_id, obs_loc))
+            if first_loc is None:
+                first_loc = obs_loc
+
+    return first_loc
+
+
+def _find_hunt_intel_location(
+    agent: Dict[str, Any],
+    target_agent_id: str,
+    state: Dict[str, Any],
+) -> Optional[str]:
+    """Return the most recent non-exhausted intel location for a hunt target.
+
+    Scans memory for ``intel_from_stalker`` + ``observed="agent_location"``
+    entries that reference *target_agent_id*.  Skips locations that have been
+    recorded as ``hunt_area_exhausted`` for this target.  Returns the most
+    recent (last written) matching loc_id, or ``None``.
+    """
+    exhausted_locs: set = set()
+    for mem in agent.get("memory", []):
+        fx = mem.get("effects", {})
+        if (fx.get("action_kind") == "hunt_area_exhausted"
+                and fx.get("target_id") == target_agent_id):
+            exhausted_locs.add(fx.get("location_id"))
+
+    best_loc: Optional[str] = None
+    best_turn: int = -1
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        fx = mem.get("effects", {})
+        if (fx.get("action_kind") != "intel_from_stalker"
+                or fx.get("observed") != "agent_location"):
+            continue
+        if fx.get("target_agent_id") != target_agent_id:
+            continue
+        obs_loc = fx.get("location_id")
+        if not obs_loc or obs_loc in exhausted_locs:
+            continue
+        t = mem.get("world_turn", 0)
+        if t > best_turn:
+            best_turn = t
+            best_loc = obs_loc
+
+    return best_loc
+
+
+def _get_searched_locations_for_target(
+    agent: Dict[str, Any],
+    target_agent_id: str,
+    since_turn: int = 0,
+) -> set:
+    """Return the set of location_ids recorded as searched for *target_agent_id*.
+
+    Only entries at ``world_turn >= since_turn`` are considered, allowing the
+    caller to limit the scope to the current search cycle.
+    """
+    searched: set = set()
+    for mem in agent.get("memory", []):
+        if mem.get("world_turn", 0) < since_turn:
+            continue
+        fx = mem.get("effects", {})
+        if (fx.get("action_kind") == "hunt_location_searched"
+                and fx.get("target_id") == target_agent_id):
+            loc = fx.get("location_id")
+            if loc:
+                searched.add(loc)
+    return searched
+
+
 def _find_upgrade_target(
     item_types: "frozenset[str]",
     current_item_type: "str | None",
@@ -2432,6 +2603,21 @@ def _check_global_goal_completion(
                 "🔍 Цель достигнута: тайна раскрыта!",
                 {"action_kind": "goal_achieved", "goal": "unravel_zone_mystery"},
                 summary="Я нашёл секретный документ и раскрыл тайну Зоны. Пора покидать!",
+            )
+    elif global_goal == "kill_stalker":
+        target_id = agent.get("kill_target_id")
+        if target_id and any(
+            m.get("effects", {}).get("action_kind") == "hunt_target_killed"
+            and m.get("effects", {}).get("target_id") == target_id
+            for m in agent.get("memory", [])
+        ):
+            agent["global_goal_achieved"] = True
+            target_name = state.get("agents", {}).get(target_id, {}).get("name", target_id)
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"⚔️ Цель достигнута: «{target_name}» устранён!",
+                {"action_kind": "goal_achieved", "goal": "kill_stalker", "target_id": target_id},
+                summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
             )
 
 
@@ -3400,6 +3586,200 @@ def _bot_pursue_goal(
                 "❓ Брожу в поисках секретных документов",
                 {"action_kind": "wander", "destination": conn["to"]},
                 summary=f"Я решил случайно двигаться в «{conn_name}» в поисках секретных документов",
+            )
+            return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
+
+        agent["action_used"] = True
+        return []
+
+    if global_goal == "kill_stalker":
+        # ── Устранить сталкера: найти цель и ликвидировать ───────────────────
+        # Behaviour:
+        #  Step 1 — If the target is at the current location: kill (stub).
+        #  Step 2 — If agent has fresh intel about target location: travel there
+        #           and search the base location + its direct neighbours one by
+        #           one.  Mark the area as exhausted once all neighbours are done.
+        #  Step 3 — Ask co-located stalkers if they have seen the target.
+        #  Step 4 — No intel: go to nearest trader, wait for a co-located stalker.
+
+        target_id = agent.get("kill_target_id")
+        if not target_id:
+            # No target set — nothing to do.
+            agent["action_used"] = True
+            return []
+
+        target = state.get("agents", {}).get(target_id, {})
+        target_name = target.get("name", target_id) if target else target_id
+
+        # Step 1: target is here right now — kill (stub).
+        if target and target.get("location_id") == loc_id and target.get("is_alive", True):
+            loc_name = loc.get("name", loc_id)
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"⚔️ Цель обнаружена в «{loc_name}»! Устраняю «{target_name}»…",
+                {
+                    "action_kind": "hunt_target_killed",
+                    "target_id": target_id,
+                    "target_name": target_name,
+                    "location_id": loc_id,
+                },
+                summary=(
+                    f"Я нашёл свою цель — «{target_name}» — в «{loc_name}». "
+                    f"Задание выполнено (устранение)."
+                ),
+            )
+            agent["action_used"] = True
+            return [{"event_type": "hunt_target_killed",
+                     "payload": {"hunter_id": agent_id, "target_id": target_id,
+                                 "location_id": loc_id}}]
+
+        # Step 2: work through intel about where the target was last seen.
+        intel_loc = _find_hunt_intel_location(agent, target_id, state)
+        if intel_loc:
+            intel_loc_name = locations.get(intel_loc, {}).get("name", intel_loc)
+
+            # Determine which locations belong to this search area:
+            # the intel location itself + its direct open neighbours.
+            intel_loc_obj = locations.get(intel_loc, {})
+            area_locs = {intel_loc} | {
+                c["to"] for c in intel_loc_obj.get("connections", [])
+                if not c.get("closed")
+            }
+
+            # Find the world_turn of the intel entry so we only count searches
+            # performed *after* receiving this specific intel.
+            intel_turn = 0
+            for mem in reversed(agent.get("memory", [])):
+                fx = mem.get("effects", {})
+                if (fx.get("action_kind") == "intel_from_stalker"
+                        and fx.get("observed") == "agent_location"
+                        and fx.get("location_id") == intel_loc
+                        and fx.get("target_agent_id") == target_id):
+                    intel_turn = mem.get("world_turn", 0)
+                    break
+
+            searched = _get_searched_locations_for_target(agent, target_id, since_turn=intel_turn)
+            unsearched = area_locs - searched
+
+            if loc_id in unsearched:
+                # Mark current location as searched this tick.
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"🔍 Осмотрел «{loc.get('name', loc_id)}» — цели нет",
+                    {
+                        "action_kind": "hunt_location_searched",
+                        "target_id": target_id,
+                        "location_id": loc_id,
+                    },
+                    summary=(
+                        f"Я обыскал «{loc.get('name', loc_id)}» в поисках "
+                        f"«{target_name}», но не нашёл."
+                    ),
+                )
+                agent["action_used"] = True
+                return []
+
+            # Travel to the next unsearched location in the area.
+            remaining = area_locs - (searched | {loc_id})
+            if remaining:
+                next_loc = sorted(remaining)[0]  # deterministic
+                next_loc_name = locations.get(next_loc, {}).get("name", next_loc)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"🗺️ Иду в «{next_loc_name}» — искать «{target_name}»",
+                    {
+                        "action_kind": "hunt_search",
+                        "target_id": target_id,
+                        "destination": next_loc,
+                    },
+                    summary=(
+                        f"Я решил обыскать «{next_loc_name}» в рамках поиска "
+                        f"«{target_name}» по последней наводке."
+                    ),
+                )
+                return _bot_schedule_travel(agent_id, agent, next_loc, state, world_turn)
+
+            # All area locations searched — mark area as exhausted and seek new intel.
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"❌ Окрестности «{intel_loc_name}» обысканы — цели нет",
+                {
+                    "action_kind": "hunt_area_exhausted",
+                    "target_id": target_id,
+                    "location_id": intel_loc,
+                },
+                summary=(
+                    f"Я обыскал «{intel_loc_name}» и все соседние локации в поисках "
+                    f"«{target_name}», но не нашёл. Нужна новая информация."
+                ),
+            )
+            # Fall through to Step 3/4 to get fresh intel.
+
+        # Step 3: Ask co-located stalkers whether they've seen the target.
+        new_intel_loc = _bot_ask_colocated_stalkers_about_agent(
+            agent_id, agent, target_id, target_name, state, world_turn
+        )
+        if new_intel_loc:
+            new_intel_loc_name = locations.get(new_intel_loc, {}).get("name", new_intel_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🗺️ Иду в «{new_intel_loc_name}» (по наводке) — искать «{target_name}»",
+                {
+                    "action_kind": "hunt_search",
+                    "target_id": target_id,
+                    "destination": new_intel_loc,
+                },
+                summary=(
+                    f"Я получил наводку о «{target_name}» и иду в «{new_intel_loc_name}»."
+                ),
+            )
+            return _bot_schedule_travel(agent_id, agent, new_intel_loc, state, world_turn)
+
+        # Step 4: No intel — go to nearest trader and wait for a co-located stalker.
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+        if trader_loc is not None:
+            if trader_loc != loc_id:
+                trader_loc_name = locations.get(trader_loc, {}).get("name", trader_loc)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"🏪 Иду к торговцу в «{trader_loc_name}» — узнать о «{target_name}»",
+                    {"action_kind": "hunt_wait_at_trader", "destination": trader_loc},
+                    summary=(
+                        f"Я решил идти к торговцу в «{trader_loc_name}» в поисках "
+                        f"информации о «{target_name}»."
+                    ),
+                )
+                return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+            else:
+                # Already at trader — idle and wait. Anti-spam guard.
+                _last_hunt_decision = None
+                for _sm in reversed(agent.get("memory", [])):
+                    if _sm.get("type") == "decision":
+                        _last_hunt_decision = _sm.get("effects", {}).get("action_kind")
+                        break
+                if _last_hunt_decision != "hunt_wait_at_trader":
+                    trader_loc_name = locations.get(trader_loc, {}).get("name", trader_loc)
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        f"⏳ Жду у торговца в «{trader_loc_name}» — ищу информацию о «{target_name}»",
+                        {"action_kind": "hunt_wait_at_trader", "location_id": trader_loc},
+                        summary=(
+                            f"Я жду у торговца в «{trader_loc_name}» в надежде узнать "
+                            f"что-нибудь о «{target_name}»."
+                        ),
+                    )
+                agent["action_used"] = True
+                return []
+
+        # No trader — wander randomly.
+        if connections:
+            conn = rng.choice(connections)
+            conn_name = locations.get(conn["to"], {}).get("name", conn["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"❓ Ищу «{target_name}»",
+                {"action_kind": "hunt_search", "target_id": target_id, "destination": conn["to"]},
+                summary=f"Я иду в «{conn_name}» в поисках «{target_name}».",
             )
             return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
 

@@ -54,6 +54,7 @@ _VALID_TERRAIN_TYPES = frozenset([
 _VALID_GLOBAL_GOALS = frozenset([
     "get_rich",
     "unravel_zone_mystery",
+    "kill_stalker",
 ])
 
 
@@ -309,6 +310,7 @@ def resolve_world_command(
         name = str(payload.get("name", "")).strip() or f"Сталкер #{n}"
         rng = _random.Random(new_agent_id)
         global_goal = str(payload.get("global_goal", "")).strip() or None
+        kill_target_id = str(payload.get("kill_target_id", "")).strip() or None
         agent = _make_stalker_agent(
             agent_id=new_agent_id,
             name=name,
@@ -317,6 +319,7 @@ def resolve_world_command(
             participant_id=None,
             rng=rng,
             global_goal=global_goal,
+            kill_target_id=kill_target_id,
         )
         state.setdefault("agents", {})[new_agent_id] = agent
         state["locations"][loc_id]["agents"].append(new_agent_id)
@@ -1326,6 +1329,12 @@ def _validate_debug_spawn_stalker(
     global_goal = payload.get("global_goal")
     if global_goal is not None and global_goal not in _VALID_GLOBAL_GOALS:
         return RuleCheckResult(valid=False, error=f"Invalid global_goal '{global_goal}'; must be one of {sorted(_VALID_GLOBAL_GOALS)}")
+    if global_goal == "kill_stalker":
+        kill_target_id = str(payload.get("kill_target_id", "")).strip()
+        if not kill_target_id:
+            return RuleCheckResult(valid=False, error="kill_target_id is required when global_goal='kill_stalker'")
+        if kill_target_id not in state.get("agents", {}):
+            return RuleCheckResult(valid=False, error=f"kill_target_id '{kill_target_id}' not found in agents")
     return RuleCheckResult(valid=True)
 
 

@@ -54,6 +54,7 @@ export interface AgentForProfile {
   risk_tolerance?: number;
   reputation?: number;
   has_left_zone?: boolean;
+  kill_target_id?: string | null;
   memory?: Array<{
     world_turn: number;
     world_day?: number;
@@ -488,6 +489,11 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 {agent.current_goal && (
                    <span style={s.subgoal}> → {currentGoalLabel(agent.current_goal)}</span>
                 )}
+              </div>
+            )}
+            {agent.global_goal === 'kill_stalker' && agent.kill_target_id && (
+              <div style={{ color: '#f87171', fontSize: '0.75rem', marginTop: 2 }}>
+                🎯 Цель устранения: <strong>{agent.kill_target_id}</strong>
               </div>
             )}
             {/* ── Material threshold editor ── */}
@@ -1431,9 +1437,11 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
 
 export interface AgentCreateProps {
   onClose: () => void;
-  onSave: (name: string, faction: string, globalGoal: string, isTrader: boolean) => Promise<void>;
+  onSave: (name: string, faction: string, globalGoal: string, isTrader: boolean, killTargetId?: string) => Promise<void>;
   /** When true, the modal opens with the Trader checkbox pre-checked. */
   defaultIsTrader?: boolean;
+  /** Optional list of agents to populate the kill-target selector. */
+  agents?: Record<string, { id: string; name: string; is_alive?: boolean }>;
 }
 
 const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
@@ -1446,21 +1454,24 @@ const FACTION_OPTIONS: Array<{ value: string; label: string }> = [
 const GLOBAL_GOAL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'get_rich',              label: 'Разбогатеть'       },
   { value: 'unravel_zone_mystery',  label: 'Разгадать тайну Зоны' },
+  { value: 'kill_stalker',          label: 'Устранить сталкера' },
 ];
 
-export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: AgentCreateProps) {
-  const [name,       setName]       = useState('');
-  const [faction,    setFaction]    = useState('loner');
-  const [globalGoal, setGlobalGoal] = useState('get_rich');
-  const [isTrader,   setIsTrader]   = useState(defaultIsTrader);
-  const [saving,     setSaving]     = useState(false);
-  const [err,        setErr]        = useState<string | null>(null);
+export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false, agents }: AgentCreateProps) {
+  const [name,          setName]          = useState('');
+  const [faction,       setFaction]       = useState('loner');
+  const [globalGoal,    setGlobalGoal]    = useState('get_rich');
+  const [isTrader,      setIsTrader]      = useState(defaultIsTrader);
+  const [killTargetId,  setKillTargetId]  = useState('');
+  const [saving,        setSaving]        = useState(false);
+  const [err,           setErr]           = useState<string | null>(null);
 
   const handleSubmit = async () => {
     setSaving(true);
     setErr(null);
     try {
-      await onSave(name.trim(), faction, globalGoal, isTrader);
+      await onSave(name.trim(), faction, globalGoal, isTrader,
+                   globalGoal === 'kill_stalker' ? killTargetId.trim() : undefined);
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Ошибка создания');
       setSaving(false);
@@ -1535,6 +1546,34 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false }: A
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
+          </div>
+        )}
+
+        {/* Kill target — shown only when globalGoal === 'kill_stalker' */}
+        {!isTrader && globalGoal === 'kill_stalker' && (
+          <div style={s.section}>
+            <div style={s.sectionLabel}>Цель устранения</div>
+            {agents && Object.keys(agents).length > 0 ? (
+              <select
+                style={cs.input}
+                value={killTargetId}
+                onChange={(e) => setKillTargetId(e.target.value)}
+              >
+                <option value="">— выбрать сталкера —</option>
+                {Object.values(agents).map((ag) => (
+                  <option key={ag.id} value={ag.id}>
+                    {ag.name}{ag.is_alive === false ? ' †' : ''} ({ag.id})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                style={cs.input}
+                value={killTargetId}
+                onChange={(e) => setKillTargetId(e.target.value)}
+                placeholder="ID сталкера-цели (напр. agent_0)"
+              />
+            )}
           </div>
         )}
 

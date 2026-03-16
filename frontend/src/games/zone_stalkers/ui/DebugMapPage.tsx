@@ -1441,8 +1441,8 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             zoneState={zoneState}
             onClose={() => setSelectedLocId(null)}
             onEdit={() => setEditingLocId(selectedLocId!)}
-            onSpawnStalker={async (name, faction, globalGoal) => {
-              await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name, faction, global_goal: globalGoal });
+            onSpawnStalker={async (name, faction, globalGoal, killTargetId) => {
+              await sendCommand('debug_spawn_stalker', { loc_id: selectedLocId!, name, faction, global_goal: globalGoal, kill_target_id: killTargetId ?? null });
             }}
             onSpawnTrader={async (name) => {
               await sendCommand('debug_spawn_trader', { loc_id: selectedLocId!, name });

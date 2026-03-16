@@ -233,6 +233,7 @@ def _make_stalker_agent(
     participant_id,
     rng: random.Random,
     global_goal: str | None = None,
+    kill_target_id: str | None = None,
 ) -> Dict[str, Any]:
     faction = rng.choice(["loner", "loner", "loner", "military", "duty", "freedom"])
     weapon = rng.choice([None, "pistol", "pistol", "ak74"])
@@ -319,6 +320,8 @@ def _make_stalker_agent(
         "wealth_goal_target": rng.randint(GET_RICH_COMPLETION_MIN, GET_RICH_COMPLETION_MAX),
         "global_goal_achieved": False,
         "has_left_zone": False,
+        # kill_stalker goal: id of the target agent (None for other goals)
+        "kill_target_id": kill_target_id if chosen_global_goal == "kill_stalker" else None,
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one

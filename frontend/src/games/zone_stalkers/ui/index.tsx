@@ -140,6 +140,7 @@ interface StalkerAgent {
   global_goal_achieved?: boolean;
   has_left_zone?: boolean;
   wealth_goal_target?: number;
+  kill_target_id?: string | null;
 }
 
 interface ZoneMapState {

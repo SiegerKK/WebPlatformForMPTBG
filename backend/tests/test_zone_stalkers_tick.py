@@ -5187,3 +5187,272 @@ class TestUnravelZoneMysteryGoal:
         assert action_kinds.intersection({"seek_item", "wander", "wait_at_trader"}), (
             f"Agent with docs should actively search for more, got: {action_kinds}"
         )
+
+
+class TestKillStalkerGoal:
+    """Tests for the kill_stalker global goal bot behaviour."""
+
+    def _make_hunter(self, loc_id: str, target_id: str) -> dict:
+        """Return a bot agent pursuing the kill_stalker goal."""
+        return {
+            "id": "agent_hunter",
+            "archetype": "stalker_agent",
+            "name": "Охотник",
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 5000,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot", "participant_id": None},
+            "is_alive": True,
+            "action_used": False,
+            "reputation": 0,
+            "experience": 0,
+            "skill_combat": 1, "skill_stalker": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "skill_survival_xp": 0.0,
+            "global_goal": "kill_stalker",
+            "kill_target_id": target_id,
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 1,
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "has_left_zone": False,
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+        }
+
+    def _make_target(self, loc_id: str) -> dict:
+        """Return a simple target agent."""
+        return {
+            "id": "agent_target",
+            "archetype": "stalker_agent",
+            "name": "Цель",
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 200,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot", "participant_id": None},
+            "is_alive": True,
+            "action_used": False,
+            "reputation": 0,
+            "experience": 0,
+            "skill_combat": 1, "skill_stalker": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "skill_survival_xp": 0.0,
+            "global_goal": "get_rich",
+            "kill_target_id": None,
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 5000,
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "has_left_zone": False,
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+        }
+
+    def _minimal_state(self) -> dict:
+        """Two-location state: A-trader, B-plain, connected."""
+        return {
+            "locations": {
+                "A": {
+                    "name": "Базовый лагерь",
+                    "terrain_type": "field_camp",
+                    "anomaly_activity": 0,
+                    "items": [],
+                    "agents": [],
+                    "connections": [{"to": "B", "type": "road", "travel_time": 30, "closed": False}],
+                    "exit_zone": False,
+                },
+                "B": {
+                    "name": "Промзона",
+                    "terrain_type": "industrial",
+                    "anomaly_activity": 0,
+                    "items": [],
+                    "agents": [],
+                    "connections": [{"to": "A", "type": "road", "travel_time": 30, "closed": False}],
+                    "exit_zone": False,
+                },
+            },
+            "agents": {},
+            "mutants": {},
+            "traders": {
+                "trader_0": {
+                    "id": "trader_0",
+                    "archetype": "trader_npc",
+                    "name": "Торговец",
+                    "location_id": "A",
+                    "inventory": [],
+                    "money": 5000,
+                    "memory": [],
+                },
+            },
+            "world_turn": 10,
+            "emission_active": False,
+            "emission_ends_turn": 0,
+        }
+
+    def test_kill_target_at_same_location(self):
+        """Hunter at same location as target should write hunt_target_killed."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        events = _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "B", state["locations"]["B"], state, 10, random.Random(0)
+        )
+        assert hunter["action_used"]
+        kill_obs = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "hunt_target_killed"
+        ]
+        assert kill_obs, "Should have written hunt_target_killed observation"
+        assert kill_obs[0]["effects"]["target_id"] == "agent_target"
+        assert any(e["event_type"] == "hunt_target_killed" for e in events)
+
+    def test_hunter_asks_colocated_stalker_about_target(self):
+        """Hunter with no intel, at same location as an informed stalker, gets the target location."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        # Hunter is at A, target is at B, informant is also at A and has a stalker obs at B.
+        hunter = self._make_hunter("A", "agent_target")
+        target = self._make_target("B")
+        informant = self._make_target("A")
+        informant["id"] = "agent_informant"
+        informant["name"] = "Информатор"
+        # Informant has observed the target at B.
+        informant["memory"] = [{
+            "world_turn": 8,
+            "type": "observation",
+            "title": "Вижу сталкеров",
+            "effects": {"observed": "stalkers", "location_id": "B", "names": ["Цель"]},
+            "summary": "Видел Цель в Промзоне",
+        }]
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        state["agents"]["agent_informant"] = informant
+        _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "A", state["locations"]["A"], state, 10, random.Random(0)
+        )
+        intel_obs = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "intel_from_stalker"
+            and m.get("effects", {}).get("observed") == "agent_location"
+        ]
+        assert intel_obs, "Should have written agent_location intel from informant"
+        assert intel_obs[0]["effects"]["location_id"] == "B"
+
+    def test_hunter_goes_to_trader_when_no_intel(self):
+        """Hunter with no intel and no co-located informants should travel to nearest trader."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("A")  # target is at A, but hunter has no intel
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        events = _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "B", state["locations"]["B"], state, 10, random.Random(0)
+        )
+        # Should decide to travel to trader (at A)
+        decisions = [m for m in hunter["memory"] if m.get("type") == "decision"]
+        assert decisions, "Should have written a decision"
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "hunt_wait_at_trader" in action_kinds, (
+            f"Should head to trader when no intel; got: {action_kinds}"
+        )
+
+    def test_hunter_waits_at_trader_antispan(self):
+        """Hunter already at trader should wait and not spam hunt_wait_at_trader decisions."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        hunter = self._make_hunter("A", "agent_target")
+        # Pre-seed an existing wait_at_trader decision to test anti-spam.
+        hunter["memory"] = [{
+            "world_turn": 9, "type": "decision",
+            "title": "Жду у торговца",
+            "effects": {"action_kind": "hunt_wait_at_trader", "location_id": "A"},
+            "summary": "",
+        }]
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "A", state["locations"]["A"], state, 10, random.Random(0)
+        )
+        assert hunter["action_used"]
+        new_decisions = [
+            m for m in hunter["memory"]
+            if m.get("type") == "decision"
+            and m.get("world_turn") == 10
+        ]
+        # Anti-spam: should NOT write a second hunt_wait_at_trader this turn.
+        assert not new_decisions, (
+            f"Anti-spam violated — should not re-write wait_at_trader; got: {new_decisions}"
+        )
+
+    def test_check_goal_completion_on_kill(self):
+        """_check_global_goal_completion sets global_goal_achieved when kill recorded."""
+        from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
+        state = self._minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        # Pre-seed a hunt_target_killed memory entry.
+        hunter["memory"] = [{
+            "world_turn": 9, "type": "observation",
+            "title": "⚔️ Цель устранена",
+            "effects": {"action_kind": "hunt_target_killed",
+                        "target_id": "agent_target", "location_id": "B"},
+            "summary": "",
+        }]
+        _check_global_goal_completion("agent_hunter", hunter, state, 10)
+        assert hunter.get("global_goal_achieved"), "Goal should be achieved after kill"
+        goal_obs = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "goal_achieved"
+        ]
+        assert goal_obs, "Should write goal_achieved observation"
+        assert goal_obs[0]["effects"]["goal"] == "kill_stalker"
+
+    def test_validate_debug_spawn_stalker_kill_stalker(self):
+        """Validation rejects kill_stalker without kill_target_id."""
+        from app.games.zone_stalkers.rules.world_rules import _validate_debug_spawn_stalker
+        state = self._minimal_state()
+        state["agents"]["agent_target"] = self._make_target("B")
+        # Missing kill_target_id
+        result = _validate_debug_spawn_stalker(
+            {"loc_id": "A", "global_goal": "kill_stalker"}, state
+        )
+        assert not result.valid
+        assert "kill_target_id" in result.error.lower()
+        # Non-existent kill_target_id
+        result2 = _validate_debug_spawn_stalker(
+            {"loc_id": "A", "global_goal": "kill_stalker", "kill_target_id": "agent_ghost"}, state
+        )
+        assert not result2.valid
+        assert "not found" in result2.error.lower()
+        # Valid
+        result3 = _validate_debug_spawn_stalker(
+            {"loc_id": "A", "global_goal": "kill_stalker", "kill_target_id": "agent_target"}, state
+        )
+        assert result3.valid
