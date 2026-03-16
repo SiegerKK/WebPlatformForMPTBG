@@ -102,8 +102,8 @@ interface MemoryEntry {
   world_minute: number;
   type: string;
   title: string;
-  summary: string;
-  effects: Record<string, number>;
+  summary?: string;
+  effects: Record<string, unknown>;
 }
 
 interface StalkerAgent {
@@ -1233,7 +1233,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                             <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                           </div>
                           <div style={styles.memoryTitle}>{m.title}</div>
-                          <div style={styles.memorySummary}>{m.summary}</div>
+                          {m.effects?.['причина'] && (
+                            <div style={styles.memorySummary}>{String(m.effects['причина'])}</div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1944,12 +1946,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                           <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                         </div>
                         <div style={styles.memoryTitle}>{m.title}</div>
-                        <div style={styles.memorySummary}>{m.summary}</div>
-                        {Object.keys(m.effects).filter(k => m.effects[k] !== 0).length > 0 && (
+                        {m.effects?.['причина'] && (
+                          <div style={styles.memorySummary}>{String(m.effects['причина'])}</div>
+                        )}
+                        {Object.keys(m.effects).filter(k => k !== 'причина' && k !== 'action_kind' && m.effects[k] !== 0).length > 0 && (
                           <div style={styles.memoryEffects}>
-                            {Object.entries(m.effects).filter(([, v]) => v !== 0).map(([k, v]) => (
-                              <span key={k} style={{ ...styles.effectChip, color: v > 0 ? '#86efac' : '#fca5a5' }}>
-                                {k}: {v > 0 ? '+' : ''}{v}
+                            {Object.entries(m.effects).filter(([k, v]) => k !== 'причина' && k !== 'action_kind' && v !== 0).map(([k, v]) => (
+                              <span key={k} style={{ ...styles.effectChip, color: typeof v === 'number' && v < 0 ? '#fca5a5' : '#86efac' }}>
+                                {k}: {typeof v === 'number' && v > 0 ? '+' : ''}{typeof v === 'object' ? JSON.stringify(v) : String(v)}
                               </span>
                             ))}
                           </div>

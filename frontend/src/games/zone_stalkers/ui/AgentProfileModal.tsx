@@ -60,7 +60,7 @@ export interface AgentForProfile {
     world_minute?: number;
     type: string;
     title: string;
-    summary: string;
+    summary?: string;
     effects?: Record<string, unknown>;
   }>;
 }
@@ -641,23 +641,23 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>
-                    {m.type === 'decision' ? (
-                      <>
-                        {m.effects?.['почему'] && (
-                          <div style={s.memorySummary}>
-                            <span style={s.memoryFieldLabel}>Почему: </span>
-                            {String(m.effects['почему'])}
-                          </div>
-                        )}
-                        {m.summary && (
-                          <div style={s.memorySummary}>
-                            <span style={s.memoryFieldLabel}>Зачем: </span>
-                            {m.summary}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <div style={s.memorySummary}>{m.summary}</div>
+                    {m.effects?.['причина'] && (
+                      <div style={s.memorySummary}>
+                        <span style={s.memoryFieldLabel}>Причина: </span>
+                        {String(m.effects['причина'])}
+                      </div>
+                    )}
+                    {m.effects && Object.keys(m.effects).filter(k => k !== 'причина' && k !== 'action_kind').length > 0 && (
+                      <div style={{ ...s.memorySummary, display: 'flex', flexWrap: 'wrap', gap: '0.25rem 0.6rem' }}>
+                        {Object.entries(m.effects)
+                          .filter(([k]) => k !== 'причина' && k !== 'action_kind')
+                          .map(([k, v]) => (
+                            <span key={k}>
+                              <span style={s.memoryFieldLabel}>{k}: </span>
+                              {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                            </span>
+                          ))}
+                      </div>
                     )}
                   </div>
                 );
