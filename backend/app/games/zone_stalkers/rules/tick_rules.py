@@ -121,6 +121,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     "💀 Смерть",
                     {"action_kind": "death", "cause": "starvation_or_thirst",
                      "hunger": _hunger, "thirst": _thirst},
+                    summary=f"Погиб от {_death_cause_str} — голод {_hunger}%, жажда {_thirst}%",
                 )
                 events.append({
                     "event_type": "agent_died",
@@ -163,6 +164,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     {"action_kind": "emission_imminent",
                      "turns_until": _warn_offset,
                      "emission_scheduled_turn": _emission_scheduled},
+                    summary=f"Скоро будет выброс — примерно через {_warn_offset} ходов",
                 )
             events.append({
                 "event_type": "emission_warning",
@@ -215,6 +217,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     "💀 Смерть",
                     {"action_kind": "death", "cause": "emission",
                      "location_id": _em_agent.get("location_id"), "terrain": _em_terrain},
+                    summary=f"Погиб от выброса в локации «{_em_loc_name}» (тип местности: {_em_terrain})",
                 )
                 events.append({
                     "event_type": "agent_died",
@@ -232,6 +235,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 _em_agent, world_turn, state, "observation",
                 "⚡ Начался выброс!",
                 {"action_kind": "emission_started"},
+                summary="Начался выброс — все на открытой местности в опасности",
             )
 
         events.append({
@@ -268,6 +272,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 _em_agent, world_turn, state, "observation",
                 "✅ Выброс закончился",
                 {"action_kind": "emission_ended"},
+                summary="Выброс закончился — аномальные зоны обновились, возможно появились артефакты",
             )
 
         events.append({
@@ -398,8 +403,8 @@ def _process_scheduled_action(
                         agent, world_turn, state, "decision",
                         "⚡ Прерываю исследование из-за выброса",
                         {"action_kind": "exploration_interrupted", "reason": "emission_warning",
-                         "location_id": agent.get("location_id"),
-                         "причина": "выброс во время исследования аномалии"},
+                         "location_id": agent.get("location_id")},
+                        summary=f"Я решил прервать исследование локации «{_int_loc_name}», потому что идёт выброс",
                     )
                 else:  # travel
                     _cancelled = sched.get("final_target_id", sched.get("target_id"))
@@ -408,8 +413,8 @@ def _process_scheduled_action(
                         "⚡ Прерываю движение из-за выброса",
                         {"action_kind": "travel_interrupted", "reason": "emission_warning",
                          "location_id": agent.get("location_id"),
-                         "cancelled_target": _cancelled,
-                         "причина": "выброс во время движения"},
+                         "cancelled_target": _cancelled},
+                        summary=f"Я решил прервать движение к цели, потому что идёт выброс",
                     )
                 # Do NOT set action_used — let the bot decision loop run this same tick
                 # so the agent can immediately choose to flee or shelter.
@@ -458,8 +463,8 @@ def _process_scheduled_action(
                         agent, world_turn, state, "decision",
                         "⚡ Прерываю движение из-за выброса",
                         {"action_kind": "travel_interrupted", "reason": "emission_warning",
-                         "stopped_at": destination, "cancelled_target": final_target,
-                         "причина": "выброс — остановка на промежуточной точке маршрута"},
+                         "stopped_at": destination, "cancelled_target": final_target},
+                        summary=f"Я решил остановиться в «{_dest_name_em}» и не продолжать движение к «{_final_name_em}», потому что идёт выброс",
                     )
                     _write_location_observations(agent_id, agent, destination, state, world_turn)
                     return events
@@ -483,8 +488,8 @@ def _process_scheduled_action(
                             agent, world_turn, state, "decision",
                             "Смена маршрута из-за недоступности перехода",
                             {"action_kind": "route_changed", "rerouted_at": destination,
-                             "final_target": final_target, "new_next_hop": next_hop,
-                             "причина": "переход из следующей точки маршрута заблокирован"},
+                             "final_target": final_target, "new_next_hop": next_hop},
+                            summary=f"Я решил сменить маршрут к «{final_name_rr}» через другой путь, потому что переход из «{dest_name_rr}» заблокирован",
                         )
                     else:
                         # Final target is completely unreachable — cancel travel.
@@ -494,8 +499,8 @@ def _process_scheduled_action(
                             agent, world_turn, state, "decision",
                             "Смена решения из-за недоступности цели",
                             {"action_kind": "goal_cancelled", "cancelled_target": final_target,
-                             "blocked_at": destination,
-                             "причина": "цель стала полностью недоступна"},
+                             "blocked_at": destination},
+                            summary=f"Я решил отменить движение к «{final_name}», потому что цель полностью недоступна из «{dest_name_hop}»",
                         )
                         events.append({
                             "event_type": "travel_aborted",
@@ -543,6 +548,7 @@ def _process_scheduled_action(
                     f"Проход через «{dest_name}»",
                     {"action_kind": "travel_hop", "to_loc": destination,
                      "final_target": final_target, "damage_taken": total_dmg},
+                    summary=f"Прошёл через «{dest_name}» по пути к «{final_name}»" + (f", получил {total_dmg} урона от аномалий" if total_dmg > 0 else ""),
                 )
                 # Write observations for what's visible at this intermediate hop
                 _write_location_observations(agent_id, agent, destination, state, world_turn)
@@ -560,7 +566,8 @@ def _process_scheduled_action(
                 })
                 _add_memory(agent, world_turn, state, "action",
                             f"Прибыл в «{state['locations'][destination].get('name', destination)}»",
-                            {"action_kind": "travel_arrived", "to_loc": destination, "damage_taken": total_dmg})
+                            {"action_kind": "travel_arrived", "to_loc": destination, "damage_taken": total_dmg},
+                            summary=f"Прибыл в «{state['locations'][destination].get('name', destination)}»" + (f", получил {total_dmg} урона от аномалий" if total_dmg > 0 else ""))
                 # Write observations for what's visible at the final destination
                 _write_location_observations(agent_id, agent, destination, state, world_turn)
             if agent["hp"] <= 0:
@@ -570,6 +577,7 @@ def _process_scheduled_action(
                     agent, world_turn, state, "observation",
                     "💀 Смерть",
                     {"action_kind": "death", "cause": "travel_anomaly", "location_id": destination},
+                    summary=f"Погиб от урона аномалии при путешествии в локацию «{_travel_loc_name}»",
                 )
                 events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "travel_anomaly"}})
 
@@ -657,6 +665,7 @@ def _resolve_exploration(
                 "artifact_value": art.get("value", 0),
                 "location_id": loc_id,
             },
+            summary=f"Подобрал артефакт «{art_name}» в локации «{loc_name}»",
         )
         # ── Survival skill XP gain ────────────────────────────────────────────
         art_value = art.get("value", 0)
@@ -692,6 +701,7 @@ def _resolve_exploration(
             agent, world_turn, state, "observation",
             f"Аномалия в «{loc_name}» не дала артефакт",
             {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
+            summary=f"Исследовал аномалию в «{loc_name}», но артефакт не найден",
         )
 
     # Always record that an exploration action was performed (satisfies memory tests
@@ -700,6 +710,7 @@ def _resolve_exploration(
         agent, world_turn, state, "action",
         f"Исследовал «{loc_name}»",
         {"action_kind": "explore", "location_id": loc_id, "artifacts_found": len(found_artifacts)},
+        summary=f"Исследовал локацию «{loc_name}»" + (f", нашёл {len(found_artifacts)} артефакт(ов)" if found_artifacts else ", ничего не нашёл"),
     )
 
     # ── Possible anomaly encounter during exploration ────────────────────────
@@ -724,6 +735,7 @@ def _resolve_exploration(
                 "💀 Смерть",
                 {"action_kind": "death", "cause": "anomaly_exploration",
                  "location_id": loc_id, "anomaly_type": anomaly_type},
+                summary=f"Погиб от аномалии «{anomaly_type}» при исследовании «{loc.get('name', loc_id)}»",
             )
             events.append({
                 "event_type": "agent_died",
@@ -768,7 +780,8 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     agent["sleepiness"] = 0
     _add_memory(agent, world_turn, state, "action",
                 f"Поспал {hours} ч.",
-                {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce})
+                {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce},
+                summary=f"Поспал {hours} часов: восстановлено {hp_regen} HP, снято {rad_reduce} радиации")
 
 
 def _turn_to_time_label(world_turn: int) -> str:
@@ -795,36 +808,39 @@ def _add_memory(
     title: str,
     *call_args: Any,
     reason: str = "",
+    summary: str = "",
 ) -> None:
     """Append a memory entry to an agent.
 
     Supports two calling conventions for backward compatibility:
 
-    New-style (6 positional args):
-        _add_memory(agent, world_turn, state, memory_type, title, effects_dict)
+    New-style (6 positional args + optional summary= kwarg):
+        _add_memory(agent, world_turn, state, memory_type, title, effects_dict, summary="...")
     Legacy-style (7 positional args):
         _add_memory(agent, world_turn, state, memory_type, title, summary_str, effects_dict)
 
-    The cause/reason should be passed in effects as effects["причина"] by callers.
+    The summary= keyword argument (preferred) is a plain Russian-language sentence
+    describing what happened.  It is stored as memory_entry["summary"] and displayed
+    in the frontend instead of the raw effects dict.
     The legacy reason= keyword is accepted for backward compat but deprecated.
-    When a non-empty summary is present (legacy call), it is stored in the memory
-    entry so that existing code reading entry.get("summary") continues to work.
+    summary= (preferred) is a plain Russian-language sentence stored in memory_entry["summary"].
     """
     if len(call_args) == 2 and isinstance(call_args[0], str):
         # Legacy call: (summary_str, effects_dict)
-        summary: str = call_args[0]
+        _legacy_summary: str = call_args[0]
         effects: Dict[str, Any] = call_args[1] if isinstance(call_args[1], dict) else {}
+        # summary= kwarg takes precedence over legacy positional summary
+        if not summary:
+            summary = _legacy_summary
     elif len(call_args) == 1:
         # New-style call: (effects_dict,)
-        summary = ""
         effects = call_args[0] if isinstance(call_args[0], dict) else {}
     else:
-        summary = ""
         effects = {}
 
-    # Legacy reason= kwarg (deprecated; use effects["причина"] instead)
-    if reason and memory_type == "decision" and "причина" not in effects:
-        effects = {**effects, "причина": reason}
+    # Legacy reason= kwarg (deprecated; use summary= instead)
+    if reason and memory_type == "decision" and "reason" not in effects:
+        effects = {**effects, "reason": reason}
 
     memory_entry: Dict[str, Any] = {
         "world_turn": world_turn,
@@ -973,6 +989,7 @@ def _write_location_observations(
             agent, world_turn, state, "observation",
             f"Вижу персонажей в «{loc_name}»",
             {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
+            summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
         )
 
     # ── Mutants at this location ──────────────────────────────────────────────
@@ -986,6 +1003,7 @@ def _write_location_observations(
             agent, world_turn, state, "observation",
             f"Вижу мутантов в «{loc_name}»",
             {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
+            summary=f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}",
         )
 
     # NOTE: Artifacts are NOT recorded as a location observation on arrival.
@@ -999,6 +1017,7 @@ def _write_location_observations(
             agent, world_turn, state, "observation",
             f"Вижу предметы в «{loc_name}»",
             {"observed": "items", "location_id": loc_id, "item_types": item_types},
+            summary=f"В локации «{loc_name}» на земле: {', '.join(item_types)}",
         )
 
 
@@ -1236,6 +1255,7 @@ def _bot_sell_to_trader(
         f"Продал {len(sold_items)} артефактов на {sell_price_total} денег",
         {"action_kind": "trade_sell", "money_gained": sell_price_total,
          "items_sold": [i["type"] for i in sold_items], "trader_id": trader["id"]},
+        summary=f"Продал {item_names} торговцу {trader_name} в «{loc_name}» за {sell_price_total} денег",
     )
 
     # ── Trader memory ─────────────────────────────────────────────
@@ -1483,14 +1503,16 @@ def _bot_buy_from_trader(
                 "score": round(score, 3),
                 "price": buy_price,
                 "runners_up": runners_up,
-                "причина": purchase_reason,
+                "reason": purchase_reason,
             },
+            summary=f"Я решил купить «{item_name}» за {buy_price} денег, потому что {purchase_reason}",
         )
         # Action memory: record the completed purchase
         _add_memory(
             agent, world_turn, state, "action",
             f"Купил «{item_name}» у торговца",
             {"action_kind": "trade_buy", "item_type": item_type, "price": buy_price},
+            summary=f"Купил «{item_name}» у торговца {trader_name} за {buy_price} денег",
         )
         # Trader memory: record the sale from the trader's perspective
         agent_name = agent.get("name", agent_id)
@@ -1537,6 +1559,7 @@ def _bot_consume(
         agent, world_turn, state, "action",
         f"Использовал «{item_name}»",
         {"action_kind": action_kind, "item_type": item["type"]},
+        summary=f"Использовал «{item_name}»",
     )
     return [{
         "event_type": "item_consumed",
@@ -1575,6 +1598,7 @@ def _bot_equip_from_inventory(
         agent, world_turn, state, "action",
         f"Экипировал «{item_name}»",
         {"action_kind": "equip", "item_type": item["type"], "slot": slot},
+        summary=f"Экипировал «{item_name}» в слот {slot}",
     )
     return [{"event_type": "item_equipped",
              "payload": {"agent_id": agent_id, "item_type": item["type"], "slot": slot}}]
@@ -1741,6 +1765,7 @@ def _bot_pickup_item_from_ground(
         agent, world_turn, state, "action",
         f"Поднял «{item_name}» с земли",
         {"action_kind": "pickup_ground", "item_type": item["type"], "location_id": loc_id},
+        summary=f"Поднял «{item_name}» с земли в локации «{loc_name}»",
     )
     # If no more items of the requested types remain AND the caller has not asked to
     # suppress this note, record it so the agent won't plan another trip here.
@@ -1755,6 +1780,7 @@ def _bot_pickup_item_from_ground(
                 "location_id": loc_id,
                 "item_types": sorted(item_types),
             },
+            summary=f"Предметы нужных типов в «{loc_name}» закончились",
         )
     return [{"event_type": "item_picked_up",
              "payload": {"agent_id": agent_id, "item_type": item["type"],
@@ -1874,6 +1900,7 @@ def _maybe_record_item_not_found(
             "location_id": loc_id,
             "item_types": sorted(item_types),
         },
+        summary=f"Искомый предмет исчез из «{loc_name}» — кто-то забрал раньше меня",
     )
 
 
@@ -1944,6 +1971,7 @@ def _maybe_record_item_picked_up(
             "location_id": loc_id,
             "item_types": sorted(item_types),
         },
+        summary=f"Нашёл и забрал {item_category} в «{loc_name}»",
     )
 
 
@@ -2114,11 +2142,6 @@ def _bot_ask_colocated_stalkers_about_item(
             _add_memory(
                 agent, world_turn, state, "observation",
                 f"💬 Разведданные от {other_name}",
-                (
-                    f"{other_name} рассказал, что видел {item_category_name} "
-                    f"в «{obs_loc_name}» (в {current_loc_name}). "
-                    f"Видел {_obs_time_label}."
-                ),
                 {
                     "action_kind": "intel_from_stalker",
                     "observed": "items",
@@ -2128,6 +2151,11 @@ def _bot_ask_colocated_stalkers_about_item(
                     "source_agent_name": other_name,
                     "obs_world_turn": obs_turn,
                 },
+                summary=(
+                    f"{other_name} рассказал, что видел {item_category_name} "
+                    f"в «{obs_loc_name}» (в {current_loc_name}). "
+                    f"Видел {_obs_time_label}."
+                ),
             )
             seen_locs_this_stalker.add(obs_loc)
             already_known.add((other_id, obs_loc))  # prevent cross-stalker duplicates
@@ -2258,8 +2286,8 @@ def _bot_try_upgrade_equipment(
                     "old_item_risk_tolerance": current_rt,
                     "new_item_risk_tolerance": upgrade_rt,
                     "price": buy_price,
-                    "причина": f"текущий предмет в слоте «{slot}» можно улучшить",
                 },
+                summary=f"Я решил обновить снаряжение в слоте {slot}: заменить «{current_name}» на «{upgrade_name}» за {buy_price} денег, потому что текущее можно улучшить",
             )
             # Buy the upgrade — _bot_buy_from_trader will also write "decision" + "action" memories
             bought = _bot_buy_from_trader(agent_id, agent, frozenset({upgrade_key}), state, world_turn,
@@ -2289,8 +2317,8 @@ def _bot_try_upgrade_equipment(
                     "old_item": current_type,
                     "new_item": upgrade_key,
                     "destination": trader_loc,
-                    "причина": f"нужен апгрейд в слоте «{slot}», торговец не здесь",
                 },
+                summary=f"Я решил идти к торговцу в «{trader_loc_name}» за апгрейдом {slot}: «{current_name}» → «{upgrade_name}»",
             )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
@@ -2415,8 +2443,8 @@ def _run_bot_action_inner(
                     "target_id": target,
                     "target_name": locations.get(target, {}).get("name", target),
                     "hops_to_shelter": hops,
-                    "причина": "активный выброс" if _emission_active else "скоро будет выброс",
                 },
+                summary=f"Я решил бежать к укрытию «{locations.get(target, {}).get('name', target)}» ({hops} хода), потому что {'идёт выброс' if _emission_active else 'скоро будет выброс'}",
             )
             return _bot_schedule_travel(agent_id, agent, target, state, world_turn, emergency_flee=True)
         else:
@@ -2435,8 +2463,8 @@ def _run_bot_action_inner(
                         "action_kind": "trapped_on_dangerous_terrain",
                         "current_location": agent.get("location_id"),
                         "current_terrain": loc.get("terrain_type", "unknown"),
-                        "причина": "активный выброс" if _emission_active else "скоро будет выброс",
                     },
+                    summary=f"Нет пути к укрытию — застрял на опасной местности, {'идёт выброс' if _emission_active else 'скоро будет выброс'}",
                 )
             return []
 
@@ -2462,8 +2490,8 @@ def _run_bot_action_inner(
                     "action_kind": "wait_in_shelter",
                     "current_location": agent.get("location_id"),
                     "current_terrain": loc.get("terrain_type", "unknown"),
-                    "причина": "идёт выброс" if _emission_active else "скоро начнётся выброс",
                 },
+                summary=f"Я решил оставаться в укрытии и ждать, потому что {'идёт выброс' if _emission_active else 'скоро начнётся выброс'}",
             )
         return []
 
@@ -2498,8 +2526,8 @@ def _run_bot_action_inner(
                 "Иду к торговцу за аптечкой (экстренно)",
                 {"action_kind": "seek_item", "item_category": "medical",
                  "destination": trader_loc, "emergency": True,
-                 "hp": agent.get("hp", 0),
-                 "причина": f"HP {agent.get('hp', 0)}% — нужна аптечка срочно"},
+                 "hp": agent.get("hp", 0)},
+                summary=f"Я решил идти к торговцу в «{trader_loc_name}» за аптечкой, потому что HP {agent.get('hp', 0)}% — критически мало",
             )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
         # No trader reachable (or can't afford) — flee to low-anomaly neighbor
@@ -2532,8 +2560,8 @@ def _run_bot_action_inner(
                 "Иду к торговцу за едой (экстренно)",
                 {"action_kind": "seek_item", "item_category": "food",
                  "destination": trader_loc, "emergency": True,
-                 "hunger": agent.get("hunger", 0),
-                 "причина": f"голод {agent.get('hunger', 0)}% — нужна еда срочно"},
+                 "hunger": agent.get("hunger", 0)},
+                summary=f"Я решил идти к торговцу в «{trader_loc_name}» за едой, потому что голод {agent.get('hunger', 0)}% — срочно нужна еда",
             )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
@@ -2556,8 +2584,8 @@ def _run_bot_action_inner(
                 "Иду к торговцу за водой (экстренно)",
                 {"action_kind": "seek_item", "item_category": "drink",
                  "destination": trader_loc, "emergency": True,
-                 "thirst": agent.get("thirst", 0),
-                 "причина": f"жажда {agent.get('thirst', 0)}% — нужна вода срочно"},
+                 "thirst": agent.get("thirst", 0)},
+                summary=f"Я решил идти к торговцу в «{trader_loc_name}» за водой, потому что жажда {agent.get('thirst', 0)}% — срочно нужна вода",
             )
             return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
@@ -2604,8 +2632,8 @@ def _run_bot_action_inner(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Ищу оружие по памяти",
-                {"action_kind": "seek_item", "item_category": "weapon", "destination": mem_loc,
-                 "причина": "нет оружия в снаряжении, но помню где видел"},
+                {"action_kind": "seek_item", "item_category": "weapon", "destination": mem_loc},
+                summary=f"Я решил идти искать оружие в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}», потому что нет оружия и помню, где видел",
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         # d) buy from trader or travel to one (only when wealth >= threshold)
@@ -2621,8 +2649,8 @@ def _run_bot_action_inner(
                 _add_memory(
                     agent, world_turn, state, "decision",
                     "Иду к торговцу за оружием",
-                    {"action_kind": "buy_item", "item_category": "weapon", "destination": trader_loc,
-                     "причина": "нет оружия в снаряжении, иду к торговцу"},
+                    {"action_kind": "buy_item", "item_category": "weapon", "destination": trader_loc},
+                    summary=f"Я решил идти к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}» за оружием, потому что нет оружия в снаряжении",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
@@ -2641,8 +2669,8 @@ def _run_bot_action_inner(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Ищу броню по памяти",
-                {"action_kind": "seek_item", "item_category": "armor", "destination": mem_loc,
-                 "причина": "нет брони в снаряжении, но помню где видел"},
+                {"action_kind": "seek_item", "item_category": "armor", "destination": mem_loc},
+                summary=f"Я решил идти искать броню в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}», потому что нет брони и помню, где видел",
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         # d) buy from trader or travel to one (only when wealth >= threshold)
@@ -2658,8 +2686,8 @@ def _run_bot_action_inner(
                 _add_memory(
                     agent, world_turn, state, "decision",
                     "Иду к торговцу за бронёй",
-                    {"action_kind": "buy_item", "item_category": "armor", "destination": trader_loc,
-                     "причина": "нет брони в снаряжении, иду к торговцу"},
+                    {"action_kind": "buy_item", "item_category": "armor", "destination": trader_loc},
+                    summary=f"Я решил идти к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}» за бронёй, потому что нет брони в снаряжении",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
@@ -2683,8 +2711,8 @@ def _run_bot_action_inner(
                         agent, world_turn, state, "decision",
                         "Ищу патроны по памяти",
                         {"action_kind": "seek_item", "item_category": "ammo",
-                         "ammo_type": _required_ammo, "destination": mem_loc,
-                         "причина": "нет патронов для оружия, но помню где видел"},
+                         "ammo_type": _required_ammo, "destination": mem_loc},
+                        summary=f"Я решил идти искать патроны «{_required_ammo}» в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}», потому что нет боеприпасов и помню, где видел",
                     )
                     return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
                 # d) buy from trader or travel to one (only when wealth >= threshold)
@@ -2701,8 +2729,8 @@ def _run_bot_action_inner(
                             agent, world_turn, state, "decision",
                             "Иду к торговцу за патронами",
                             {"action_kind": "buy_item", "item_category": "ammo",
-                             "ammo_type": _required_ammo, "destination": trader_loc,
-                             "причина": "нет патронов для оружия, иду к торговцу"},
+                             "ammo_type": _required_ammo, "destination": trader_loc},
+                            summary=f"Я решил идти к торговцу в «{state.get('locations', {}).get(trader_loc, {}).get('name', trader_loc)}» за патронами «{_required_ammo}», потому что нет боеприпасов",
                         )
                         return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
 
@@ -2719,8 +2747,8 @@ def _run_bot_action_inner(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Иду за аптечкой по памяти",
-                {"action_kind": "seek_item", "item_category": "medical", "destination": mem_loc,
-                 "причина": "в инвентаре нет медикаментов"},
+                {"action_kind": "seek_item", "item_category": "medical", "destination": mem_loc},
+                summary=f"Я решил идти за медикаментами в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}», потому что нет медикаментов в инвентаре",
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         # Only buy locally — don't travel just for medicine stockpile
@@ -2744,8 +2772,8 @@ def _run_bot_action_inner(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Иду за едой по памяти",
-                {"action_kind": "seek_item", "item_category": "food", "destination": mem_loc,
-                 "причина": "в инвентаре нет еды"},
+                {"action_kind": "seek_item", "item_category": "food", "destination": mem_loc},
+                summary=f"Я решил идти за едой в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}», потому что нет еды в инвентаре",
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         trader_loc = _find_nearest_trader_location(loc_id, state)
@@ -2768,8 +2796,8 @@ def _run_bot_action_inner(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Иду за водой по памяти",
-                {"action_kind": "seek_item", "item_category": "drink", "destination": mem_loc,
-                 "причина": "в инвентаре нет воды"},
+                {"action_kind": "seek_item", "item_category": "drink", "destination": mem_loc},
+                summary=f"Я решил идти за водой в «{state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}», потому что нет воды в инвентаре",
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
         trader_loc = _find_nearest_trader_location(loc_id, state)
@@ -2786,8 +2814,8 @@ def _run_bot_action_inner(
             agent, world_turn, state, "decision",
             "Ложусь спать",
             {"action_kind": "sleep_decision",
-             "sleepiness": agent.get("sleepiness", 0), "hours": _sleep_hours,
-             "причина": f"сонливость достигла {agent.get('sleepiness', 0)}%"},
+             "sleepiness": agent.get("sleepiness", 0), "hours": _sleep_hours},
+            summary=f"Я решил поспать {_sleep_hours} часов, потому что сонливость достигла {agent.get('sleepiness', 0)}%",
         )
         agent["scheduled_action"] = {
             "type": "sleep",
@@ -2828,8 +2856,8 @@ def _run_bot_action_inner(
                         agent, world_turn, state, "decision",
                         "Планирую продать артефакты",
                         {"action_kind": "plan_sell",
-                         "artifact_types": [a.get("type") for a in artifacts_held],
-                         "причина": "несу несколько артефактов — выбираю что продать"},
+                         "artifact_types": [a.get("type") for a in artifacts_held]},
+                        summary=f"Я решил продать артефакты ({len(artifacts_held)} шт.), потому что несу несколько и нужно выбрать что продать",
                     )
 
                 # Step 5 — record the nearest trader found via BFS
@@ -2838,8 +2866,8 @@ def _run_bot_action_inner(
                     f"Ближайший торговец: {trader_name}",
                     {"action_kind": "nearest_trader_found",
                      "trader_location": trader_loc, "trader_name": trader_name,
-                     "artifacts_count": len(artifacts_held),
-                     "причина": "ищу ближайшего торговца для продажи артефактов"},
+                     "artifacts_count": len(artifacts_held)},
+                    summary=f"Нашёл ближайшего торговца — {trader_name} в «{trader_loc_name}» — для продажи {len(artifacts_held)} артефактов",
                 )
 
                 # Step 6 — commit to navigating toward the trader
@@ -2847,8 +2875,8 @@ def _run_bot_action_inner(
                     agent, world_turn, state, "decision",
                     f"Иду к торговцу {trader_name}",
                     {"action_kind": "sell_at_trader", "destination": trader_loc,
-                     "artifacts_count": len(artifacts_held),
-                     "причина": "есть артефакты для продажи, торговец не здесь"},
+                     "artifacts_count": len(artifacts_held)},
+                    summary=f"Я решил идти к торговцу {trader_name} в «{trader_loc_name}» продавать {len(artifacts_held)} артефактов",
                 )
 
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
@@ -2900,8 +2928,8 @@ def _bot_gather_resources(
             agent, world_turn, state, "decision",
             "Исследую аномальную зону",
             {"action_kind": "explore_decision", "location_id": loc_id,
-             "anomaly_activity": loc.get("anomaly_activity", 0),
-             "причина": "текущая локация имеет аномальную активность — ищу артефакты"},
+             "anomaly_activity": loc.get("anomaly_activity", 0)},
+            summary=f"Я решил исследовать аномальную зону «{loc.get('name', loc_id)}» (аномальность {loc.get('anomaly_activity', 0)}) для поиска артефактов",
         )
         agent["scheduled_action"] = {
             "type": "explore_anomaly_location",
@@ -2940,8 +2968,8 @@ def _bot_gather_resources(
             {"action_kind": "move_for_resources", "destination": best_lid,
              "destination_name": best_nb_name,
              "anomaly_activity": locations.get(best_lid, {}).get("anomaly_activity", 0),
-             "distance_hops": best_dist,
-             "причина": "ближайшая непроверенная аномальная зона в радиусе поиска"},
+             "distance_hops": best_dist},
+            summary=f"Я решил идти к непроверенной аномальной зоне «{best_nb_name}» ({best_dist} хода), потому что там можно найти артефакты",
         )
         return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
@@ -2950,8 +2978,8 @@ def _bot_gather_resources(
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую текущую локацию",
-            {"action_kind": "explore_decision", "location_id": loc_id,
-             "причина": "нет аномальных соседей для перемещения — исследую текущую локацию"},
+            {"action_kind": "explore_decision", "location_id": loc_id},
+            summary=f"Я решил исследовать текущую локацию «{loc.get('name', loc_id)}», потому что нет подходящих аномальных соседей",
         )
         agent["scheduled_action"] = {
             "type": "explore_anomaly_location",
@@ -2996,8 +3024,8 @@ def _bot_pursue_goal(
                 agent, world_turn, state, "decision",
                 f"Исследую «{loc_name}»",
                 {"action_kind": "explore_decision", "location_id": loc_id,
-                 "anomaly_activity": loc.get("anomaly_activity", 0),
-                 "причина": "цель get_rich требует поиска артефактов в аномальных зонах"},
+                 "anomaly_activity": loc.get("anomaly_activity", 0)},
+                summary=f"Я решил исследовать «{loc_name}» в поисках артефактов, потому что стремлюсь разбогатеть",
             )
             agent["scheduled_action"] = {
                 "type": "explore_anomaly_location", "turns_remaining": EXPLORE_DURATION_TURNS,
@@ -3033,8 +3061,8 @@ def _bot_pursue_goal(
                 {"action_kind": "move_for_anomaly", "destination": best_lid,
                  "destination_name": best_name,
                  "anomaly_activity": locations.get(best_lid, {}).get("anomaly_activity", 0),
-                 "distance_hops": best_dist,
-                 "причина": "ищу аномальные зоны для сбора артефактов в радиусе поиска"},
+                 "distance_hops": best_dist},
+                summary=f"Я решил идти в непроверенную аномальную зону «{best_name}» ({best_dist} хода) для сбора артефактов",
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
@@ -3046,8 +3074,8 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "Жду пополнения артефактов на месте",
-                {"action_kind": "wait_for_artifacts", "location_id": loc_id,
-                 "причина": "все известные аномальные зоны в радиусе поиска уже исследованы"},
+                {"action_kind": "wait_for_artifacts", "location_id": loc_id},
+                summary=f"Я решил остаться и ждать пополнения артефактов в «{loc.get('name', loc_id)}», потому что все известные аномальные зоны уже исследованы",
             )
             agent["action_used"] = True
             return []
@@ -3065,8 +3093,8 @@ def _bot_pursue_goal(
                 f"Все аномальные зоны изучены — иду в «{best_name}» ждать",
                 {"action_kind": "move_for_anomaly", "destination": best_lid,
                  "destination_name": best_name,
-                 "distance_hops": best_dist,
-                 "причина": "все аномальные зоны в радиусе пусты — иду ждать выброс"},
+                 "distance_hops": best_dist},
+                summary=f"Я решил идти в «{best_name}» ждать пополнения артефактов, потому что все известные аномальные зоны уже пусты",
             )
             return _bot_schedule_travel(agent_id, agent, best_lid, state, world_turn)
 
@@ -3079,8 +3107,8 @@ def _bot_pursue_goal(
                 agent, world_turn, state, "decision",
                 "Иду в зону с высокой аномальностью",
                 {"action_kind": "move_for_anomaly", "destination": best["to"],
-                 "destination_name": best_name,
-                 "причина": "аномальных зон в радиусе нет — иду к ближайшей по активности"},
+                 "destination_name": best_name},
+                summary=f"Я решил идти в «{best_name}» — ближайшую доступную зону с высокой аномальностью",
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
 
@@ -3103,8 +3131,8 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"🗺️ Иду за секретными документами в «{mem_loc_name}»",
-                {"action_kind": "seek_item", "item_category": "secret_document", "destination": mem_loc,
-                 "причина": "помню где видел секретные документы — иду туда"},
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": mem_loc},
+                summary=f"Я решил идти за секретными документами в «{mem_loc_name}», потому что помню, что видел их там",
             )
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
 
@@ -3117,8 +3145,8 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"🗺️ Иду за секретными документами (по наводке) в «{intel_loc_name}»",
-                {"action_kind": "seek_item", "item_category": "secret_document", "destination": intel_loc,
-                 "причина": "получил разведданные о секретных документах от другого сталкера"},
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": intel_loc},
+                summary=f"Я решил идти за секретными документами в «{intel_loc_name}» по наводке от другого сталкера",
             )
             return _bot_schedule_travel(agent_id, agent, intel_loc, state, world_turn)
 
@@ -3138,8 +3166,8 @@ def _bot_pursue_goal(
                 _add_memory(
                     agent, world_turn, state, "decision",
                     f"🏪 Иду к торговцу в «{trader_loc_name}» в поисках информации",
-                    {"action_kind": "wait_at_trader", "destination": trader_loc,
-                     "причина": "нет сведений о секретных документах — иду к торговцу ждать других сталкеров"},
+                    {"action_kind": "wait_at_trader", "destination": trader_loc},
+                    summary=f"Я решил идти к торговцу в «{trader_loc_name}» в поисках информации о секретных документах",
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
             else:
@@ -3155,8 +3183,8 @@ def _bot_pursue_goal(
                     _add_memory(
                         agent, world_turn, state, "decision",
                         f"⏳ Жду у торговца в «{trader_loc_name}» — ищу сталкера с информацией",
-                        {"action_kind": "wait_at_trader", "location_id": trader_loc,
-                         "причина": "нахожусь у торговца и жду сталкера с информацией о документах"},
+                        {"action_kind": "wait_at_trader", "location_id": trader_loc},
+                        summary=f"Я решил ждать у торговца в «{trader_loc_name}» — жду сталкера с информацией о секретных документах",
                     )
                 agent["action_used"] = True
                 return []
@@ -3173,8 +3201,8 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 f"🔍 Ищу секретные документы в «{conn_name}»",
-                {"action_kind": "seek_item", "item_category": "secret_document", "destination": conn["to"],
-                 "причина": "нет сведений о секретных документах и нет торговца — иду в подходящую зону"},
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": conn["to"]},
+                summary=f"Я решил идти искать секретные документы в «{conn_name}», потому что нет торговца и нет наводок",
             )
             return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
 
@@ -3185,8 +3213,8 @@ def _bot_pursue_goal(
             _add_memory(
                 agent, world_turn, state, "decision",
                 "❓ Брожу в поисках секретных документов",
-                {"action_kind": "wander", "destination": conn["to"],
-                 "причина": "нет сведений о секретных документах — брожу в поисках"},
+                {"action_kind": "wander", "destination": conn["to"]},
+                summary=f"Я решил случайно двигаться в «{conn_name}» в поисках секретных документов",
             )
             return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
 
@@ -3200,8 +3228,8 @@ def _bot_pursue_goal(
         _add_memory(
             agent, world_turn, state, "decision",
             "Блуждаю",
-            {"action_kind": "wander", "destination": conn["to"],
-             "причина": "нет активной задачи или доступных целей"},
+            {"action_kind": "wander", "destination": conn["to"]},
+            summary=f"Я решил двигаться в «{conn_name}», потому что нет активных задач",
         )
         return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
     _fallback_confirmed_empty = _confirmed_empty_locations(agent)
@@ -3209,8 +3237,8 @@ def _bot_pursue_goal(
         _add_memory(
             agent, world_turn, state, "decision",
             "Исследую текущую локацию",
-            {"action_kind": "explore_decision", "location_id": loc_id,
-             "причина": "нет активной задачи — исследую текущую локацию"},
+            {"action_kind": "explore_decision", "location_id": loc_id},
+            summary=f"Я решил исследовать текущую локацию «{loc.get('name', loc_id)}», потому что нет активных задач",
         )
         agent["scheduled_action"] = {
             "type": "explore_anomaly_location", "turns_remaining": EXPLORE_DURATION_TURNS, "turns_total": EXPLORE_DURATION_TURNS,
