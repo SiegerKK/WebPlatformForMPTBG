@@ -1624,7 +1624,18 @@ def _bot_pickup_on_arrival(
             item_types = _SEEK_CATEGORY_TO_TYPES.get(category)  # type: ignore[assignment]
             if not item_types:
                 return []
-        pickup_events = _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        # If the seek was already resolved on a prior tick (item was picked up or
+        # confirmed absent), don't re-trigger the arrival logic.  Without this
+        # guard, the most-recent-decision is still the old seek_item entry on tick
+        # T+1 and beyond, causing spurious "item_not_found_here" writes.
+        if loc_id in _item_not_found_locations(agent, item_types):
+            return []
+        # suppress_not_found=True: the caller writes item_picked_up_here on success,
+        # so the "📭 Предметы закончились" note from _bot_pickup_item_from_ground
+        # would be a misleading duplicate.  The blocking is handled by item_picked_up_here.
+        pickup_events = _bot_pickup_item_from_ground(
+            agent_id, agent, item_types, state, world_turn, suppress_not_found=True
+        )
         loc = state.get("locations", {}).get(loc_id, {})
         if not pickup_events:
             # Item not on the ground.  If this is not a trader location, record
@@ -1685,6 +1696,8 @@ def _bot_pickup_item_from_ground(
     item_types: "frozenset[str]",
     state: Dict[str, Any],
     world_turn: int,
+    *,
+    suppress_not_found: bool = False,
 ) -> List[Dict[str, Any]]:
     """Pick up a matching item from the ground at the agent's current location.
 
@@ -1692,9 +1705,13 @@ def _bot_pickup_item_from_ground(
     inventory.  Returns a non-empty event list on success.
 
     After a successful pickup, if no items of ``item_types`` remain on the ground
-    at this location, an ``item_not_found_here`` observation is written so that
-    the agent does not return looking for more of those items until a fresh
-    ``observed:items`` entry supersedes the block.
+    at this location and *suppress_not_found* is False, an ``item_not_found_here``
+    observation is written so that the agent does not return looking for more of
+    those items until a fresh ``observed:items`` entry supersedes the block.
+
+    Pass ``suppress_not_found=True`` when the caller (e.g. ``_bot_pickup_on_arrival``)
+    will itself write the appropriate resolution record (``item_picked_up_here``), to
+    avoid writing a misleading "items exhausted" note alongside the success record.
     """
     loc_id = agent.get("location_id")
     loc = state.get("locations", {}).get(loc_id, {})
@@ -1713,10 +1730,10 @@ def _bot_pickup_item_from_ground(
         f"Нашёл «{item_name}» на земле в «{loc_name}» и подобрал.",
         {"action_kind": "pickup_ground", "item_type": item["type"], "location_id": loc_id},
     )
-    # If no more items of the requested types remain, record that so the agent
-    # won't plan another trip here for the same item category.
+    # If no more items of the requested types remain AND the caller has not asked to
+    # suppress this note, record it so the agent won't plan another trip here.
     remaining = loc.get("items", [])
-    if not any(i.get("type") in item_types for i in remaining):
+    if not suppress_not_found and not any(i.get("type") in item_types for i in remaining):
         _add_memory(
             agent, world_turn, state, "observation",
             f"📭 Предметы закончились в «{loc_name}»",
@@ -1798,8 +1815,12 @@ def _maybe_record_item_not_found(
     The check: the agent must have a prior ``seek_item`` decision memory that named
     *loc_id* as the destination for *item_category*.  If no such decision exists, the
     visit is incidental and no observation is written.
-    Duplicate entries for the same location and item category within the same turn are
-    suppressed.
+
+    Suppression: if the location is already in ``_item_not_found_locations`` (blocked by
+    any prior ``item_not_found_here`` or ``item_picked_up_here`` not yet superseded by a
+    fresher item observation), no additional entry is written.  This prevents the
+    ``_bot_pursue_goal`` fallback from writing a spurious arrival note on the tick after
+    a successful ``_bot_pickup_on_arrival`` already resolved the seek.
     """
     # Only record if the agent explicitly decided to travel here for this item.
     found_seek = False
@@ -1821,17 +1842,11 @@ def _maybe_record_item_not_found(
     if not found_seek:
         return
 
-    # Suppress duplicates: don't write the same not_found entry twice in the same turn.
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("world_turn") != world_turn:
-            break
-        effects = mem.get("effects", {})
-        if (
-            effects.get("action_kind") == "item_not_found_here"
-            and effects.get("location_id") == loc_id
-            and frozenset(effects.get("item_types", [])).intersection(item_types)
-        ):
-            return  # already recorded this turn
+    # Suppress if already resolved (not_found or picked_up) and not superseded
+    # by a fresh item observation.  This handles both same-turn and cross-turn
+    # duplicates, and prevents writing "item missing" after a prior successful pickup.
+    if loc_id in _item_not_found_locations(agent, item_types):
+        return
 
     loc_name = loc.get("name", loc_id)
     _add_memory(
@@ -1980,6 +1995,12 @@ def _bot_ask_colocated_stalkers_about_item(
     co-located stalker processed first), or ``None`` if nothing new was found.
 
     Deduplication: pairs already recorded during the current turn are skipped.
+
+    Staleness filter: if the asking agent has already resolved a search at the
+    reported location (``item_not_found_here`` or ``item_picked_up_here``) at a
+    world_turn >= the other stalker's observation world_turn, the intel is
+    considered stale (the agent already acted on it or newer state supersedes it)
+    and is silently ignored.
     """
     loc_id = agent.get("location_id", "")
     agents = state.get("agents", {})
@@ -1993,6 +2014,23 @@ def _bot_ask_colocated_stalkers_about_item(
         fx = mem.get("effects", {})
         if fx.get("action_kind") == "intel_from_stalker":
             already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+
+    # Precompute the most recent "resolved" turn per location for the asking agent.
+    # Intel whose observation turn is <= the resolved turn is stale and should be skipped.
+    resolved_turns: Dict[str, int] = {}
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        fx = mem.get("effects", {})
+        if fx.get("action_kind") not in ("item_not_found_here", "item_picked_up_here"):
+            continue
+        mem_types = frozenset(fx.get("item_types", []))
+        if not item_types.intersection(mem_types):
+            continue
+        r_loc = fx.get("location_id")
+        if r_loc:
+            r_turn = mem.get("world_turn", 0)
+            resolved_turns[r_loc] = max(resolved_turns.get(r_loc, 0), r_turn)
 
     first_loc: Optional[str] = None
 
@@ -2037,6 +2075,13 @@ def _bot_ask_colocated_stalkers_about_item(
             # recent one — older observations for the same location are redundant
             # and will be skipped by the `seen_locs_this_stalker` guard below.
             if obs_loc in seen_locs_this_stalker:
+                continue
+
+            # Skip stale intel: if the asking agent already resolved this location
+            # (found or not-found) at a turn >= the other stalker's observation turn,
+            # the intel predates our knowledge and is no longer actionable.
+            obs_turn = mem.get("world_turn", 0)
+            if obs_turn <= resolved_turns.get(obs_loc, -1):
                 continue
 
             obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)

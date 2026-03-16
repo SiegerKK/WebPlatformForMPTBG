@@ -2333,11 +2333,9 @@ class TestItemNotFoundLoop:
         )
 
     def test_no_observation_when_item_found(self):
-        """When the weapon IS on the ground and is picked up as the last item,
-        a pickup-induced item_not_found_here observation IS written (prevents re-visit).
-        The arrival-based observation from _maybe_record_item_not_found is NOT written
-        because _bot_pickup_item_from_ground returns early on success, never reaching
-        the _maybe_record_item_not_found call."""
+        """When the weapon IS on the ground and is picked up via a seek_item arrival,
+        only item_picked_up_here is written (not item_not_found_here).  The suppressed
+        'pickup' note was misleading: the item WAS found, not absent."""
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state = self._agent_with_seek_weapon_memory("A")
         info = ITEM_TYPES["pistol"]
@@ -2351,15 +2349,19 @@ class TestItemNotFoundLoop:
             m for m in agent["memory"]
             if m.get("effects", {}).get("action_kind") == "item_not_found_here"
         ]
-        # The new behavior: pickup of the last item writes item_not_found_here so
-        # the agent won't plan another trip here for the same category.
-        assert len(not_found) == 1, (
-            f"Expected 1 item_not_found_here written by pickup; got {len(not_found)}"
+        picked_up = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+        ]
+        # With suppress_not_found=True in _bot_pickup_on_arrival, no "📭 Предметы закончились"
+        assert len(not_found) == 0, (
+            f"Expected 0 item_not_found_here on success; got {len(not_found)}: {not_found}"
         )
-        # Verify it is the pickup-kind, not the arrival-kind.
-        assert not_found[0]["effects"].get("source") == "pickup", (
-            f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
+        # Instead, item_picked_up_here should be written exactly once
+        assert len(picked_up) == 1, (
+            f"Expected 1 item_picked_up_here; got {len(picked_up)}: {picked_up}"
         )
+        assert picked_up[0]["effects"].get("source") == "seek_item_arrival"
 
     def test_no_observation_without_seek_intent(self):
         """Without a prior seek_item decision for this location, arriving at an empty location
@@ -3084,6 +3086,89 @@ class TestPickupOnArrival:
         ]
         assert len(not_found) == 0, (
             "item_not_found_here must NOT be written at a trader location"
+        )
+
+    def test_no_retrigger_after_successful_pickup(self):
+        """On the tick AFTER a successful seek_item arrival pickup, _bot_pickup_on_arrival
+        must return [] immediately (location already blocked by item_picked_up_here).
+        This prevents a spurious 'item_not_found_here' source=arrival on tick T+1."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        # No items left on the ground (pickup happened on a prior tick)
+        state["locations"]["A"]["items"] = []
+        # Simulate: agent had a seek_item decision + picked up the item (wrote item_picked_up_here)
+        agent["memory"] = [
+            {
+                "type": "decision", "world_turn": 0,
+                "label": "Иду за оружием", "summary": "...",
+                "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                            "destination": "A"},
+                "reason": "test",
+            },
+            {
+                "type": "observation", "world_turn": 1,
+                "label": "✅ Нашёл weapon в «A»", "summary": "...",
+                "effects": {
+                    "action_kind": "item_picked_up_here",
+                    "source": "seek_item_arrival",
+                    "location_id": "A",
+                    "item_types": sorted(WEAPON_ITEM_TYPES),
+                },
+            },
+        ]
+        agent_id = next(iter(state["agents"]))
+        # Simulate tick T+1: no items on ground, but seek_item is still the latest decision
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=2)
+        assert result == [], "Should return [] when seek is already resolved"
+        # No extra observations should be written
+        new_obs = [
+            m for m in agent["memory"]
+            if m.get("type") == "observation" and m.get("world_turn") == 2
+        ]
+        assert len(new_obs) == 0, (
+            f"Should not write any new observations on retrigger tick; got {new_obs}"
+        )
+
+    def test_no_retrigger_after_not_found(self):
+        """On tick T+1 after a seek_item that found nothing, _bot_pickup_on_arrival
+        should also return [] immediately (already blocked by item_not_found_here)."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = []
+        agent["memory"] = [
+            {
+                "type": "decision", "world_turn": 0,
+                "label": "Иду за оружием", "summary": "...",
+                "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                            "destination": "A"},
+                "reason": "test",
+            },
+            {
+                "type": "observation", "world_turn": 1,
+                "label": "⚠️ Предмет исчез", "summary": "...",
+                "effects": {
+                    "action_kind": "item_not_found_here",
+                    "source": "arrival",
+                    "location_id": "A",
+                    "item_types": sorted(WEAPON_ITEM_TYPES),
+                },
+            },
+        ]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=2)
+        assert result == [], "Should return [] when already recorded as not_found"
+        new_obs = [
+            m for m in agent["memory"]
+            if m.get("type") == "observation" and m.get("world_turn") == 2
+        ]
+        assert len(new_obs) == 0, (
+            f"Should not write again after not_found was already recorded; got {new_obs}"
         )
 
 
@@ -4476,6 +4561,153 @@ class TestUnravelZoneMysteryGoal:
         }
         assert intel_locs == {"B", "C"}, (
             f"Should receive intel from both stalkers about B and C, got: {intel_locs}"
+        )
+
+    def test_ask_stalker_skips_stale_intel_after_not_found(self):
+        """Intel about a location that the asker already visited and found empty
+        (item_not_found_here) at a turn >= the other stalker's obs turn is skipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # Agent already resolved location B as not_found on turn 5
+        agent["memory"].append({
+            "type": "observation", "world_turn": 5,
+            "label": "⚠️ Предмет исчез", "summary": "...",
+            "effects": {
+                "action_kind": "item_not_found_here",
+                "source": "arrival",
+                "location_id": "B",
+                "item_types": [doc_type],
+            },
+        })
+
+        # Informant saw the doc at B on turn 3 (BEFORE the asker resolved it on turn 5)
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 3, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 6
+        )
+        assert result_loc is None, (
+            f"Stale intel (obs_turn=3 <= resolved_turn=5) should be skipped; got {result_loc}"
+        )
+        intel_mems = [m for m in agent["memory"]
+                      if m.get("effects", {}).get("action_kind") == "intel_from_stalker"]
+        assert len(intel_mems) == 0, (
+            f"Should not write stale intel entry; got {intel_mems}"
+        )
+
+    def test_ask_stalker_skips_stale_intel_after_picked_up(self):
+        """Intel about a location that the asker already resolved via item_picked_up_here
+        at a turn >= the stalker's obs turn is also skipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # Agent already picked up from B on turn 7
+        agent["memory"].append({
+            "type": "observation", "world_turn": 7,
+            "label": "✅ Нашёл", "summary": "...",
+            "effects": {
+                "action_kind": "item_picked_up_here",
+                "source": "seek_item_arrival",
+                "location_id": "B",
+                "item_types": [doc_type],
+            },
+        })
+
+        # Informant saw the doc at B on turn 4 (BEFORE the asker picked it up on turn 7)
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 4, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 8
+        )
+        assert result_loc is None, (
+            f"Stale intel (obs_turn=4 <= resolved_turn=7) should be skipped; got {result_loc}"
+        )
+
+    def test_ask_stalker_keeps_fresh_intel_after_resolution(self):
+        """If a stalker's obs_turn is strictly NEWER than the asker's resolved_turn,
+        the intel is fresh (could be a re-spawn) and must NOT be skipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # Agent resolved B on turn 5 (not_found)
+        agent["memory"].append({
+            "type": "observation", "world_turn": 5,
+            "label": "⚠️ Предмет исчез", "summary": "...",
+            "effects": {
+                "action_kind": "item_not_found_here",
+                "source": "arrival",
+                "location_id": "B",
+                "item_types": [doc_type],
+            },
+        })
+
+        # Informant saw a NEW doc at B on turn 6 (AFTER the not_found)
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 6, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 7
+        )
+        # obs_turn=6 > resolved_turn=5 → fresh intel, should NOT be skipped
+        assert result_loc == "B", (
+            f"Fresh intel (obs_turn=6 > resolved_turn=5) should be accepted; got {result_loc}"
         )
 
     def test_set_goal_via_world_command(self):
