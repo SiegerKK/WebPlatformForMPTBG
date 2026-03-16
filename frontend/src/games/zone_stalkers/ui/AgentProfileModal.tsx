@@ -53,6 +53,7 @@ export interface AgentForProfile {
   material_threshold?: number;
   risk_tolerance?: number;
   reputation?: number;
+  has_left_zone?: boolean;
   memory?: Array<{
     world_turn: number;
     world_day?: number;

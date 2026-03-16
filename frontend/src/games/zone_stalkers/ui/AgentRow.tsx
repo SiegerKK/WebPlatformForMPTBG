@@ -70,7 +70,7 @@ export default function AgentRow({
       >
         {/* ── Name ── */}
         <span style={{
-          color: agent.is_alive ? '#e2e8f0' : '#475569',
+          color: agent.has_left_zone ? '#60a5fa' : agent.is_alive ? '#e2e8f0' : '#475569',
           fontWeight: 700,
           fontSize: '0.9rem',
           minWidth: 120,
@@ -82,6 +82,9 @@ export default function AgentRow({
           {agent.name}
           {!agent.is_alive && (
             <span style={{ color: '#ef4444', fontSize: '0.7rem', marginLeft: 6 }}>†</span>
+          )}
+          {agent.has_left_zone && (
+            <span style={{ fontSize: '0.75rem', marginLeft: 6 }}>🚪</span>
           )}
         </span>
 
