@@ -16,7 +16,7 @@ from typing import List, Dict, Any
 from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 from app.games.zone_stalkers.balance.mutants import MUTANT_TYPES
-from app.games.zone_stalkers.balance.items import ITEM_TYPES
+from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
 from app.games.zone_stalkers.generators.fixed_zone_map import FIXED_ZONE_LOCATIONS
 
 # Valid terrain types (kept for reference / external callers)
@@ -94,6 +94,29 @@ def generate_zone(
                 "weight": item_info["weight"],
                 "value": item_info["value"],
             })
+
+    # 4b. Place secret documents in restricted/dangerous Zone locations.
+    # Exactly 2 documents are placed across locations whose terrain suggests
+    # hidden knowledge (labs, bunkers, dungeons, military sites).
+    _SECRET_DOC_TERRAIN = frozenset({"dungeon", "x_lab", "scientific_bunker", "military_buildings"})
+    secret_doc_locs = [
+        lid for lid, l in locations.items()
+        if l.get("terrain_type", "") in _SECRET_DOC_TERRAIN
+    ]
+    if not secret_doc_locs:
+        secret_doc_locs = list(locations.keys())  # fallback: use any location
+    secret_doc_types = sorted(SECRET_DOCUMENT_ITEM_TYPES)
+    for i in range(min(2, len(secret_doc_locs))):
+        doc_type = rng.choice(secret_doc_types)
+        doc_info = ITEM_TYPES[doc_type]
+        spawn_lid = secret_doc_locs[i % len(secret_doc_locs)]
+        locations[spawn_lid]["items"].append({
+            "id": _make_id("item", rng),
+            "type": doc_type,
+            "name": doc_info["name"],
+            "weight": doc_info["weight"],
+            "value": doc_info["value"],
+        })
 
     # 5. Create agent states
     agents: Dict[str, Any] = {}
@@ -241,7 +264,7 @@ def _make_stalker_agent(
 
     # Choose global goal for the agent.
     chosen_global_goal = global_goal if global_goal else rng.choice(
-        ["get_rich"]
+        ["get_rich", "get_rich", "unravel_zone_mystery"]
     )
     # All agents start with the same modest wealth buffer before pursuing their
     # global goal.  material_threshold is strictly in [MATERIAL_THRESHOLD_MIN, MATERIAL_THRESHOLD_MAX].

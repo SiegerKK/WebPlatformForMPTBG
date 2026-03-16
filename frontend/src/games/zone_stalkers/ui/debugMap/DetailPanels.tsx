@@ -8,7 +8,7 @@ import type { ZoneLocation, ZoneMapState, LocationConn } from './types';
 import { TERRAIN_TYPE_LABELS, REGION_COLOR_PALETTE } from './constants';
 import { s } from './styles';
 import { Badge, Section, DetailRow, EmptyRow } from './UIKit';
-import { SpawnMutantModal, SpawnArtifactModal } from './Modals';
+import { SpawnMutantModal, SpawnArtifactModal, SpawnItemModal } from './Modals';
 
 // ─── LocationDetailPanel ──────────────────────────────────────────────────────
 
@@ -23,6 +23,7 @@ export function LocationDetailPanel({
   onSpawnTrader,
   onSpawnMutant,
   onSpawnArtifact,
+  onSpawnItem,
   onDeleteConnection,
   onUpdateConnectionWeight,
   onToggleConnectionClosed,
@@ -45,6 +46,7 @@ export function LocationDetailPanel({
   onSpawnTrader: (name: string) => Promise<void>;
   onSpawnMutant: (mutantType: string) => Promise<void>;
   onSpawnArtifact: (artifactType: string) => Promise<void>;
+  onSpawnItem: (itemType: string) => Promise<void>;
   onDeleteConnection: (toId: string) => void;
   onUpdateConnectionWeight: (toId: string, travelTime: number) => void;
   onToggleConnectionClosed: (toId: string) => void;
@@ -55,7 +57,7 @@ export function LocationDetailPanel({
   /** Called when the user wants to delete this location entirely. */
   onDeleteLoc?: () => void;
 }) {
-  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | null>(null);
+  const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | 'item' | null>(null);
 
   // Build a unified person list from loc.agents — IDs may belong to agents OR traders.
   type PersonEntry = {
@@ -320,6 +322,9 @@ export function LocationDetailPanel({
           <button style={{ ...s.spawnBtn, color: '#a5b4fc' }} onClick={() => setShowSpawnModal('artifact')}>
             💎 Артефакт
           </button>
+          <button style={{ ...s.spawnBtn, color: '#86efac' }} onClick={() => setShowSpawnModal('item')}>
+            📦 Предмет
+          </button>
         </div>
       </Section>
 
@@ -358,6 +363,12 @@ export function LocationDetailPanel({
         <SpawnArtifactModal
           onClose={() => setShowSpawnModal(null)}
           onSave={async (artifactType) => { await onSpawnArtifact(artifactType); setShowSpawnModal(null); }}
+        />
+      )}
+      {showSpawnModal === 'item' && (
+        <SpawnItemModal
+          onClose={() => setShowSpawnModal(null)}
+          onSave={async (itemType) => { await onSpawnItem(itemType); setShowSpawnModal(null); }}
         />
       )}
     </div>

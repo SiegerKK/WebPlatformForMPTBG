@@ -661,8 +661,9 @@ class TestNewAgentFields:
 
     def test_global_goal_present(self):
         agent = self._agent()
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         assert "global_goal" in agent
-        assert agent["global_goal"] == "get_rich"
+        assert agent["global_goal"] in _VALID_GLOBAL_GOALS
 
     def test_risk_tolerance_present(self):
         agent = self._agent()
@@ -1255,8 +1256,8 @@ class TestEquipmentUpgrade:
         new_state, _ = self._r("debug_add_item", {"agent_id": "agent_p0", "item_type": "medkit"}, state)
         item_id = new_state["agents"]["agent_p0"]["inventory"][-1]["id"]
         final_state, events = self._r("debug_remove_item", {"agent_id": "agent_p0", "item_id": item_id}, new_state)
-        inv_types = {i["type"] for i in final_state["agents"]["agent_p0"]["inventory"]}
-        assert "medkit" not in inv_types
+        inv_ids = {i["id"] for i in final_state["agents"]["agent_p0"]["inventory"]}
+        assert item_id not in inv_ids
         ev = next(e for e in events if e["event_type"] == "debug_item_removed")
         assert ev["payload"]["removed"] is True
 
@@ -1874,6 +1875,55 @@ class TestDebugLocationCommands:
             result = self._v("debug_spawn_artifact", {"loc_id": loc_id, "artifact_type": art_type}, state)
             assert result.valid, f"Expected valid for artifact_type={art_type}"
 
+    # ── debug_spawn_item_on_location ─────────────────────────────────────────
+
+    def test_spawn_item_on_location_valid(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": "bandage"}, state)
+        assert result.valid
+
+    def test_spawn_item_on_location_adds_to_ground(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        before = len(state["locations"][loc_id]["items"])
+        new_state, events = self._r(
+            "debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": "medkit"}, state
+        )
+        after = len(new_state["locations"][loc_id]["items"])
+        assert after == before + 1
+        item = new_state["locations"][loc_id]["items"][-1]
+        assert item["type"] == "medkit"
+        assert item["value"] > 0
+        assert item["id"].startswith("item_debug_")
+        assert any(e["event_type"] == "debug_item_spawned_on_location" for e in events)
+
+    def test_spawn_item_on_location_invalid_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": "nuclear_bomb"}, state)
+        assert not result.valid
+
+    def test_spawn_item_on_location_missing_item_type(self):
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id}, state)
+        assert not result.valid
+
+    def test_spawn_item_on_location_invalid_loc(self):
+        state = self._state()
+        result = self._v("debug_spawn_item_on_location", {"loc_id": "nonexistent", "item_type": "bandage"}, state)
+        assert not result.valid
+
+    def test_spawn_secret_document_on_location(self):
+        """Secret document items can be placed on locations via debug command."""
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._state()
+        loc_id = next(iter(state["locations"]))
+        for doc_type in sorted(SECRET_DOCUMENT_ITEM_TYPES):
+            result = self._v("debug_spawn_item_on_location", {"loc_id": loc_id, "item_type": doc_type}, state)
+            assert result.valid, f"Expected valid for secret document type={doc_type}"
+
     # ── debug_delete_agent ───────────────────────────────────────────────────
 
     def test_delete_agent_valid(self):
@@ -2111,14 +2161,16 @@ class TestUnifiedStalkerModel:
     # ── global_goal present for all agents ────────────────────────────────────
 
     def test_player_agent_has_global_goal(self):
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         state = self._state()
         agent = state["agents"]["agent_p0"]
-        assert agent["global_goal"] == "get_rich"
+        assert agent["global_goal"] in _VALID_GLOBAL_GOALS
 
     def test_npc_agent_has_global_goal(self):
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         state = self._state()
         agent = state["agents"]["agent_ai_0"]
-        assert agent["global_goal"] == "get_rich"
+        assert agent["global_goal"] in _VALID_GLOBAL_GOALS
 
     def test_all_agents_have_material_threshold(self):
         state = self._state()

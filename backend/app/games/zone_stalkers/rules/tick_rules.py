@@ -792,6 +792,22 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
                 {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce})
 
 
+def _turn_to_time_label(world_turn: int) -> str:
+    """Convert a *world_turn* counter to a human-readable in-game date/time label.
+
+    Uses ``MINUTES_PER_TURN`` (defined at the top of this module) as the scale
+    factor.  The frontend ``turnToTime()`` function in AgentProfileModal.tsx
+    uses the same formula — keep them in sync when changing the scale factor.
+
+    Example: world_turn=90, MINUTES_PER_TURN=1 → "День 1 · 01:30"
+    """
+    total_minutes = world_turn * MINUTES_PER_TURN
+    day = 1 + total_minutes // (24 * 60)
+    hour = (total_minutes // 60) % 24
+    minute = total_minutes % 60
+    return f"День {day} · {hour:02d}:{minute:02d}"
+
+
 def _add_memory(
     agent: Dict[str, Any],
     world_turn: int,
@@ -997,6 +1013,7 @@ def _write_location_observations(
 from app.games.zone_stalkers.balance.items import (
     HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES,
     WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_ITEM_TYPES, AMMO_FOR_WEAPON,
+    SECRET_DOCUMENT_ITEM_TYPES,
 )
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 
@@ -1575,6 +1592,7 @@ _SEEK_CATEGORY_TO_TYPES: Dict[str, "frozenset[str]"] = {
     "medical": HEAL_ITEM_TYPES,
     "food": FOOD_ITEM_TYPES,
     "drink": DRINK_ITEM_TYPES,
+    "secret_document": SECRET_DOCUMENT_ITEM_TYPES,
 }
 
 
@@ -1622,7 +1640,19 @@ def _bot_pickup_on_arrival(
             item_types = _SEEK_CATEGORY_TO_TYPES.get(category)  # type: ignore[assignment]
             if not item_types:
                 return []
-        pickup_events = _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn)
+        # If the seek was already resolved on a prior tick (item was picked up or
+        # confirmed absent), don't re-trigger the arrival logic.  Without this
+        # guard, the most-recent-decision is still the old seek_item entry on tick
+        # T+1 and beyond, causing spurious "item_not_found_here" writes.
+        if loc_id in _item_not_found_locations(agent, item_types):
+            return []
+        # suppress_not_found=True: the caller writes item_picked_up_here on success,
+        # so the "📭 Предметы закончились" note from _bot_pickup_item_from_ground
+        # would be a misleading duplicate.  The blocking is handled by item_picked_up_here.
+        pickup_events = _bot_pickup_item_from_ground(
+            agent_id, agent, item_types, state, world_turn, suppress_not_found=True
+        )
+        loc = state.get("locations", {}).get(loc_id, {})
         if not pickup_events:
             # Item not on the ground.  If this is not a trader location, record
             # the dead end immediately so that any interrupt (emergency, higher-
@@ -1631,10 +1661,15 @@ def _bot_pickup_on_arrival(
             # the agent came to *buy*, not pick up, so "not found on ground" is
             # expected and must not blacklist the trader.
             if _find_trader_at_location(loc_id, state) is None:
-                loc = state.get("locations", {}).get(loc_id, {})
                 _maybe_record_item_not_found(
                     agent, world_turn, state, loc_id, loc, item_types, category
                 )
+        else:
+            # Item found and picked up — record a success observation so the agent
+            # won't plan a second trip back here for the same item category.
+            _maybe_record_item_picked_up(
+                agent, world_turn, state, loc_id, loc, item_types, category
+            )
         return pickup_events
     return []
 
@@ -1677,6 +1712,8 @@ def _bot_pickup_item_from_ground(
     item_types: "frozenset[str]",
     state: Dict[str, Any],
     world_turn: int,
+    *,
+    suppress_not_found: bool = False,
 ) -> List[Dict[str, Any]]:
     """Pick up a matching item from the ground at the agent's current location.
 
@@ -1684,9 +1721,13 @@ def _bot_pickup_item_from_ground(
     inventory.  Returns a non-empty event list on success.
 
     After a successful pickup, if no items of ``item_types`` remain on the ground
-    at this location, an ``item_not_found_here`` observation is written so that
-    the agent does not return looking for more of those items until a fresh
-    ``observed:items`` entry supersedes the block.
+    at this location and *suppress_not_found* is False, an ``item_not_found_here``
+    observation is written so that the agent does not return looking for more of
+    those items until a fresh ``observed:items`` entry supersedes the block.
+
+    Pass ``suppress_not_found=True`` when the caller (e.g. ``_bot_pickup_on_arrival``)
+    will itself write the appropriate resolution record (``item_picked_up_here``), to
+    avoid writing a misleading "items exhausted" note alongside the success record.
     """
     loc_id = agent.get("location_id")
     loc = state.get("locations", {}).get(loc_id, {})
@@ -1705,10 +1746,10 @@ def _bot_pickup_item_from_ground(
         f"Нашёл «{item_name}» на земле в «{loc_name}» и подобрал.",
         {"action_kind": "pickup_ground", "item_type": item["type"], "location_id": loc_id},
     )
-    # If no more items of the requested types remain, record that so the agent
-    # won't plan another trip here for the same item category.
+    # If no more items of the requested types remain AND the caller has not asked to
+    # suppress this note, record it so the agent won't plan another trip here.
     remaining = loc.get("items", [])
-    if not any(i.get("type") in item_types for i in remaining):
+    if not suppress_not_found and not any(i.get("type") in item_types for i in remaining):
         _add_memory(
             agent, world_turn, state, "observation",
             f"📭 Предметы закончились в «{loc_name}»",
@@ -1729,14 +1770,22 @@ def _item_not_found_locations(
     agent: Dict[str, Any],
     item_types: "frozenset[str]",
 ) -> "set[str]":
-    """Return loc_ids where the agent previously looked for items of the given types
-    but arrived and found nothing (``item_not_found_here`` observation).
+    """Return loc_ids where the agent has already resolved a seek_item trip.
+
+    A location is blocked when the agent either:
+    * arrived at a ``seek_item`` destination and the item was not there
+      (``item_not_found_here`` observation), **or**
+    * arrived at a ``seek_item`` destination and successfully picked the item
+      up (``item_picked_up_here`` observation).
+
+    Both cases mean the agent has "used up" that lead and should look elsewhere.
 
     An entry is superseded — and the block lifted — when a *newer* ``observed:items``
-    memory for those item types exists at the same location (e.g. a fresh item spawn).
+    memory for those item types exists at the same location (e.g. a fresh item spawn
+    or new intel from another stalker).
     """
     last_item_obs_turn: Dict[str, int] = {}   # loc_id → most recent observed-items turn
-    last_not_found_turn: Dict[str, int] = {}  # loc_id → most recent item_not_found_here turn
+    last_resolved_turn: Dict[str, int] = {}   # loc_id → most recent resolved-search turn
 
     for mem in agent.get("memory", []):
         if mem.get("type") != "observation":
@@ -1747,10 +1796,10 @@ def _item_not_found_locations(
         if not loc_id:
             continue
 
-        if effects.get("action_kind") == "item_not_found_here":
+        if effects.get("action_kind") in ("item_not_found_here", "item_picked_up_here"):
             mem_types = frozenset(effects.get("item_types", []))
             if item_types.intersection(mem_types):
-                last_not_found_turn[loc_id] = max(last_not_found_turn.get(loc_id, 0), turn)
+                last_resolved_turn[loc_id] = max(last_resolved_turn.get(loc_id, 0), turn)
 
         elif effects.get("observed") == "items":
             obs_types = set(effects.get("item_types", []))
@@ -1758,11 +1807,11 @@ def _item_not_found_locations(
                 last_item_obs_turn[loc_id] = max(last_item_obs_turn.get(loc_id, 0), turn)
 
     result: set = set()
-    for loc_id, nf_turn in last_not_found_turn.items():
-        # Only block if the not_found observation is newer than (or same turn as) the
+    for loc_id, resolved_turn in last_resolved_turn.items():
+        # Only block if the resolved observation is newer than (or same turn as) the
         # most recent item observation at that location.
         obs_turn = last_item_obs_turn.get(loc_id, 0)
-        if nf_turn >= obs_turn:
+        if resolved_turn >= obs_turn:
             result.add(loc_id)
     return result
 
@@ -1782,6 +1831,77 @@ def _maybe_record_item_not_found(
     The check: the agent must have a prior ``seek_item`` decision memory that named
     *loc_id* as the destination for *item_category*.  If no such decision exists, the
     visit is incidental and no observation is written.
+
+    Suppression: if the location is already in ``_item_not_found_locations`` (blocked by
+    any prior ``item_not_found_here`` or ``item_picked_up_here`` not yet superseded by a
+    fresher item observation), no additional entry is written.  This prevents the
+    ``_bot_pursue_goal`` fallback from writing a spurious arrival note on the tick after
+    a successful ``_bot_pickup_on_arrival`` already resolved the seek.
+    """
+    # Only record if the agent explicitly decided to travel here for this item.
+    found_seek = False
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") != "decision":
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("destination") != loc_id or effects.get("item_category") != item_category:
+            continue
+        ak = effects.get("action_kind")
+        if ak == "seek_item":
+            if effects.get("emergency"):
+                # Emergency seek_item decisions always target a trader for buying,
+                # never for ground pickup.  "No item on ground" at a trader is
+                # expected and must not be recorded as a dead end.
+                return
+            found_seek = True
+            break
+        elif ak == "buy_item":
+            # The most recent relevant decision was to travel here for purchasing,
+            # not for picking up from the ground.  "No ground items" is expected
+            # at a trader location, so do not record a dead-end observation.
+            return
+    if not found_seek:
+        return
+
+    # Suppress if already resolved (not_found or picked_up) and not superseded
+    # by a fresh item observation.  This handles both same-turn and cross-turn
+    # duplicates, and prevents writing "item missing" after a prior successful pickup.
+    if loc_id in _item_not_found_locations(agent, item_types):
+        return
+
+    loc_name = loc.get("name", loc_id)
+    _add_memory(
+        agent, world_turn, state, "observation",
+        f"⚠️ Предмет исчез из «{loc_name}»",
+        f"Пришёл в «{loc_name}» за {item_category}, но предмет уже забрали.",
+        {
+            "action_kind": "item_not_found_here",
+            "source": "arrival",
+            "location_id": loc_id,
+            "item_types": sorted(item_types),
+        },
+    )
+
+
+def _maybe_record_item_picked_up(
+    agent: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    loc_id: str,
+    loc: Dict[str, Any],
+    item_types: "frozenset[str]",
+    item_category: str,
+) -> None:
+    """Write an ``item_picked_up_here`` observation when the agent arrived at *loc_id*
+    specifically to retrieve an item of *item_category* and successfully picked one up.
+
+    The observation marks this location as "already resolved" for items of these types
+    so that ``_find_item_memory_location`` (via ``_item_not_found_locations``) does not
+    send the agent back to the same spot on the next search cycle.
+
+    The check: the agent must have a prior ``seek_item`` decision memory that named
+    *loc_id* as the destination for *item_category*.  If no such decision exists, the
+    visit is incidental and no observation is written.
     Duplicate entries for the same location and item category within the same turn are
     suppressed.
     """
@@ -1795,23 +1915,26 @@ def _maybe_record_item_not_found(
             continue
         ak = effects.get("action_kind")
         if ak == "seek_item":
+            if effects.get("emergency"):
+                # Emergency seek_item decisions always target a trader for buying.
+                # If the agent happened to pick up an item on the ground there, do
+                # not write item_picked_up_here — that would blacklist the trader
+                # for future purchases of the same category.
+                return
             found_seek = True
             break
         elif ak == "buy_item":
-            # The most recent relevant decision was to travel here for purchasing,
-            # not for picking up from the ground.  "No ground items" is expected
-            # at a trader location, so do not record a dead-end observation.
             return
     if not found_seek:
         return
 
-    # Suppress duplicates: don't write the same not_found entry twice in the same turn.
+    # Suppress duplicates: don't write the same entry twice in the same turn.
     for mem in reversed(agent.get("memory", [])):
         if mem.get("world_turn") != world_turn:
             break
         effects = mem.get("effects", {})
         if (
-            effects.get("action_kind") == "item_not_found_here"
+            effects.get("action_kind") == "item_picked_up_here"
             and effects.get("location_id") == loc_id
             and frozenset(effects.get("item_types", [])).intersection(item_types)
         ):
@@ -1820,11 +1943,11 @@ def _maybe_record_item_not_found(
     loc_name = loc.get("name", loc_id)
     _add_memory(
         agent, world_turn, state, "observation",
-        f"⚠️ Предмет исчез из «{loc_name}»",
-        f"Пришёл в «{loc_name}» за {item_category}, но предмет уже забрали.",
+        f"✅ Нашёл {item_category} в «{loc_name}»",
+        f"Пришёл в «{loc_name}» за {item_category} и нашёл нужный предмет.",
         {
-            "action_kind": "item_not_found_here",
-            "source": "arrival",
+            "action_kind": "item_picked_up_here",
+            "source": "seek_item_arrival",
             "location_id": loc_id,
             "item_types": sorted(item_types),
         },
@@ -1841,8 +1964,10 @@ def _find_item_memory_location(
     Returns the ``loc_id`` of the most recently remembered location where
     one of the requested item types was seen, or ``None`` if no such memory
     exists.  Locations that are unreachable (all paths blocked by closed
-    connections) or that the agent has previously visited and found empty
-    (recorded via ``_maybe_record_item_not_found``) are excluded.
+    connections) or that the agent has already resolved a search at
+    (``item_not_found_here`` or ``item_picked_up_here`` observation recorded
+    via ``_maybe_record_item_not_found`` / ``_maybe_record_item_picked_up``) are
+    excluded.
 
     Relies purely on the agent's memory — no omniscient ground-truth check.
     """
@@ -1876,6 +2001,147 @@ def _find_item_memory_location(
             continue
         return loc_id
     return None
+
+
+def _bot_ask_colocated_stalkers_about_item(
+    agent_id: str,
+    agent: Dict[str, Any],
+    item_types: "frozenset[str]",
+    item_category_name: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> Optional[str]:
+    """Ask co-located stalker agents about the location of items of the given types.
+
+    Scans ALL memories of EVERY co-located alive stalker.  For each unique
+    (source_agent, location) pair not already known, writes one
+    ``intel_from_stalker`` observation to *agent*'s memory so that a subsequent
+    call to ``_find_item_memory_location`` can use it.
+
+    Returns the ``loc_id`` of the first new piece of intel written (oldest
+    co-located stalker processed first), or ``None`` if nothing new was found.
+
+    Deduplication: pairs already recorded during the current turn are skipped.
+
+    Staleness filter: if the asking agent has already resolved a search at the
+    reported location (``item_not_found_here`` or ``item_picked_up_here``) at a
+    world_turn >= the other stalker's observation world_turn, the intel is
+    considered stale (the agent already acted on it or newer state supersedes it)
+    and is silently ignored.
+    """
+    loc_id = agent.get("location_id", "")
+    agents = state.get("agents", {})
+
+    # Build a set of (source_agent_id, loc_id) pairs the asking agent already
+    # knows this turn so we don't write duplicate entries.
+    already_known: set = set()
+    for mem in agent.get("memory", []):
+        if mem.get("world_turn") != world_turn:
+            continue
+        fx = mem.get("effects", {})
+        if fx.get("action_kind") == "intel_from_stalker":
+            already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+
+    # Precompute the most recent "resolved" turn per location for the asking agent.
+    # Intel whose observation turn is <= the resolved turn is stale and should be skipped.
+    resolved_turns: Dict[str, int] = {}
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        fx = mem.get("effects", {})
+        if fx.get("action_kind") not in ("item_not_found_here", "item_picked_up_here"):
+            continue
+        mem_types = frozenset(fx.get("item_types", []))
+        if not item_types.intersection(mem_types):
+            continue
+        r_loc = fx.get("location_id")
+        if r_loc:
+            r_turn = mem.get("world_turn", 0)
+            resolved_turns[r_loc] = max(resolved_turns.get(r_loc, 0), r_turn)
+
+    first_loc: Optional[str] = None
+
+    for other_id, other in agents.items():
+        if other_id == agent_id:
+            continue
+        if not other.get("is_alive", True):
+            continue
+        if other.get("location_id") != loc_id:
+            continue
+        if other.get("archetype") != "stalker_agent":
+            continue
+
+        other_name = other.get("name", other_id)
+
+        # Track which locations we've already recorded for *this stalker* in
+        # this call to avoid writing multiple entries for the same location from
+        # one stalker (keep only the newest observation per location).
+        seen_locs_this_stalker: set = set()
+
+        # Scan the other agent's memory (newest first) for items observations.
+        for mem in reversed(other.get("memory", [])):
+            if mem.get("type") != "observation":
+                continue
+            fx = mem.get("effects", {})
+            if fx.get("observed") != "items":
+                continue
+            obs_loc = fx.get("location_id")
+            if not obs_loc:
+                continue
+            obs_types = frozenset(fx.get("item_types", []))
+            if not obs_types.intersection(item_types):
+                continue
+
+            # Skip if already known from this turn (don't re-write).
+            if (other_id, obs_loc) in already_known:
+                continue  # keep scanning — other locations may still be new
+
+            # Skip if we already wrote an entry for this (stalker, location)
+            # in this call.  Because the loop iterates newest-first, the first
+            # observation we encounter for a given location is always the most
+            # recent one — older observations for the same location are redundant
+            # and will be skipped by the `seen_locs_this_stalker` guard below.
+            if obs_loc in seen_locs_this_stalker:
+                continue
+
+            # Skip stale intel: if the asking agent already resolved this location
+            # (found or not-found) at a turn >= the other stalker's observation turn,
+            # the intel predates our knowledge and is no longer actionable.
+            obs_turn = mem.get("world_turn", 0)
+            if obs_turn <= resolved_turns.get(obs_loc, -1):
+                continue
+
+            # Compute in-game date/time of the informant's observation so the
+            # asking agent remembers *when* the intel was gathered.
+            _obs_time_label = _turn_to_time_label(obs_turn)
+
+            obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
+            current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+            matched_types = sorted(obs_types.intersection(item_types))
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"💬 Разведданные от {other_name}",
+                (
+                    f"{other_name} рассказал, что видел {item_category_name} "
+                    f"в «{obs_loc_name}» (в {current_loc_name}). "
+                    f"Видел {_obs_time_label}."
+                ),
+                {
+                    "action_kind": "intel_from_stalker",
+                    "observed": "items",
+                    "location_id": obs_loc,
+                    "item_types": matched_types,
+                    "source_agent_id": other_id,
+                    "source_agent_name": other_name,
+                    "obs_world_turn": obs_turn,
+                },
+            )
+            seen_locs_this_stalker.add(obs_loc)
+            already_known.add((other_id, obs_loc))  # prevent cross-stalker duplicates
+            if first_loc is None:
+                first_loc = obs_loc
+
+    return first_loc
 
 
 def _find_upgrade_target(
@@ -2788,6 +3054,121 @@ def _bot_pursue_goal(
                 reason="аномальных зон в радиусе нет — иду к ближайшей по активности",
             )
             return _bot_schedule_travel(agent_id, agent, best["to"], state, world_turn)
+
+    if global_goal == "unravel_zone_mystery":
+        # ── Разгадать тайну Зоны: найти секретные документы ──────────────────
+        # Even if the agent already carries some documents it keeps searching for
+        # more — there is no "done" state.  The fact that it has docs is visible
+        # in inventory; no separate idle decision is needed.
+
+        # Step 1: Pick up secret documents if they're on the ground right here.
+        pickup_evs = _bot_pickup_item_from_ground(agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES, state, world_turn)
+        if pickup_evs:
+            return pickup_evs
+
+        # Step 2: Check memory for a known location of secret documents.
+        _maybe_record_item_not_found(agent, world_turn, state, loc_id, loc, SECRET_DOCUMENT_ITEM_TYPES, "secret_document")
+        mem_loc = _find_item_memory_location(agent, SECRET_DOCUMENT_ITEM_TYPES, state)
+        if mem_loc:
+            mem_loc_name = locations.get(mem_loc, {}).get("name", mem_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🗺️ Иду за секретными документами в «{mem_loc_name}»",
+                f"Помню, что видел секретные документы в «{mem_loc_name}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": mem_loc},
+                reason="помню где видел секретные документы — иду туда",
+            )
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+
+        # Step 3: Ask co-located stalkers about secret documents.
+        intel_loc = _bot_ask_colocated_stalkers_about_item(
+            agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, world_turn
+        )
+        if intel_loc:
+            intel_loc_name = locations.get(intel_loc, {}).get("name", intel_loc)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🗺️ Иду за секретными документами (по наводке) в «{intel_loc_name}»",
+                f"Узнал от сталкера, что секретные документы есть в «{intel_loc_name}». Иду туда.",
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": intel_loc},
+                reason="получил разведданные о секретных документах от другого сталкера",
+            )
+            return _bot_schedule_travel(agent_id, agent, intel_loc, state, world_turn)
+
+        # Step 4: No leads, no co-located stalkers to ask.
+        # Strategy: go to the nearest trader and wait there for a non-trader
+        # stalker to appear; when one shows up, Step 4 will handle asking them.
+        # This avoids spamming the decision log with meaningless wander entries.
+        _SECRET_DOC_TERRAIN = frozenset({"dungeon", "x_lab", "scientific_bunker", "military_buildings"})
+
+        trader_loc = _find_nearest_trader_location(loc_id, state)
+
+        # Case A: there's a trader somewhere — go to it (or wait there).
+        if trader_loc is not None:
+            if trader_loc != loc_id:
+                # Not yet at trader — travel there.
+                trader_loc_name = locations.get(trader_loc, {}).get("name", trader_loc)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    f"🏪 Иду к торговцу в «{trader_loc_name}» в поисках информации",
+                    f"Не знаю, где искать секретные документы. Иду к торговцу в «{trader_loc_name}», чтобы расспросить других сталкеров там.",
+                    {"action_kind": "wait_at_trader", "destination": trader_loc},
+                    reason="нет сведений о секретных документах — иду к торговцу ждать других сталкеров",
+                )
+                return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
+            else:
+                # Already at trader — idle and wait for a non-trader stalker to appear.
+                # Use anti-spam: only write the decision once (while still waiting).
+                _last_unravel_decision = None
+                for _sm in reversed(agent.get("memory", [])):
+                    if _sm.get("type") == "decision":
+                        _last_unravel_decision = _sm.get("effects", {}).get("action_kind")
+                        break
+                if _last_unravel_decision != "wait_at_trader":
+                    trader_loc_name = locations.get(trader_loc, {}).get("name", trader_loc)
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        f"⏳ Жду у торговца в «{trader_loc_name}» — ищу сталкера с информацией",
+                        f"Нахожусь у торговца в «{trader_loc_name}». Жду, пока появится другой сталкер, которого можно расспросить о секретных документах.",
+                        {"action_kind": "wait_at_trader", "location_id": trader_loc},
+                        reason="нахожусь у торговца и жду сталкера с информацией о документах",
+                    )
+                agent["action_used"] = True
+                return []
+
+        # Case B: no trader reachable — prefer locations with interesting terrain
+        # (dungeons, labs) where documents are most likely to be found.
+        interesting_connections = [
+            c for c in connections
+            if locations.get(c["to"], {}).get("terrain_type", "") in _SECRET_DOC_TERRAIN
+        ]
+        if interesting_connections:
+            conn = rng.choice(interesting_connections)
+            conn_name = locations.get(conn["to"], {}).get("name", conn["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🔍 Ищу секретные документы в «{conn_name}»",
+                f"Не знаю где искать секретные документы и нет доступных торговцев. Иду в «{conn_name}» — это подходящее место.",
+                {"action_kind": "seek_item", "item_category": "secret_document", "destination": conn["to"]},
+                reason="нет сведений о секретных документах и нет торговца — иду в подходящую зону",
+            )
+            return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
+
+        # No leads, no trader, no interesting terrain — wander randomly.
+        if connections:
+            conn = rng.choice(connections)
+            conn_name = locations.get(conn["to"], {}).get("name", conn["to"])
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "❓ Брожу в поисках секретных документов",
+                f"Не знаю где искать секретные документы, нет торговца и нет подходящих мест рядом. Иду в «{conn_name}» наугад.",
+                {"action_kind": "wander", "destination": conn["to"]},
+                reason="нет сведений о секретных документах — брожу в поисках",
+            )
+            return _bot_schedule_travel(agent_id, agent, conn["to"], state, world_turn)
+
+        agent["action_used"] = True
+        return []
 
     # Fallback: wander
     if connections and rng.random() < 0.60:

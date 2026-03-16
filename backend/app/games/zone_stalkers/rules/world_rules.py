@@ -21,10 +21,12 @@ Supported commands:
 - debug_spawn_mutant(loc_id, mutant_type) — spawn a mutant at a location in debug mode (meta)
 - debug_spawn_trader(loc_id, name?) — spawn a trader NPC at a location in debug mode (meta)
 - debug_spawn_artifact(loc_id, artifact_type?) — spawn an artifact at a location in debug mode (meta)
+- debug_spawn_item_on_location(loc_id, item_type) — place a loose item on the ground at a location in debug mode (meta)
 - debug_delete_all_npcs() — remove all bot-controlled stalker NPCs (meta)
 - debug_delete_all_mutants() — remove all mutants (meta)
 - debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
 - debug_delete_all_traders() — remove all traders (meta)
+- debug_delete_all_items() — remove all loose items from location grounds and all agent inventories (meta)
 - debug_delete_agent(agent_id) — remove any single agent/mutant/trader by id (meta)
 - debug_set_time(day?, hour?, minute?) — override current world time (meta)
 - debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
@@ -51,6 +53,7 @@ _VALID_TERRAIN_TYPES = frozenset([
 
 _VALID_GLOBAL_GOALS = frozenset([
     "get_rich",
+    "unravel_zone_mystery",
 ])
 
 
@@ -90,8 +93,12 @@ def validate_world_command(
     if command_type == "debug_spawn_artifact":
         return _validate_debug_spawn_artifact(payload, state)
 
+    if command_type == "debug_spawn_item_on_location":
+        return _validate_debug_spawn_item_on_location(payload, state)
+
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
+                        "debug_delete_all_items",
                         "debug_set_time", "debug_advance_turns",
                         "debug_trigger_emission", "debug_import_full_map"):
         return RuleCheckResult(valid=True)
@@ -396,6 +403,27 @@ def resolve_world_command(
                        "payload": {"artifact_id": art_id, "artifact_type": artifact_type, "loc_id": loc_id}})
         return state, events
 
+    # ── debug_spawn_item_on_location: place a loose item on the ground ────────
+    if command_type == "debug_spawn_item_on_location":
+        import random as _random
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
+        loc_id = payload["loc_id"]
+        item_type = str(payload["item_type"]).strip()
+        item_info = _ITEM_TYPES[item_type]
+        rng = _random.Random(str(state.get("world_turn", 1)) + loc_id + item_type)
+        item_id = f"item_debug_{loc_id}_{rng.randint(1000, 9999)}"
+        item = {
+            "id": item_id,
+            "type": item_type,
+            "name": item_info["name"],
+            "weight": item_info.get("weight", 0),
+            "value": item_info.get("value", 0),
+        }
+        state["locations"][loc_id]["items"].append(item)
+        events.append({"event_type": "debug_item_spawned_on_location",
+                       "payload": {"item_id": item_id, "item_type": item_type, "loc_id": loc_id}})
+        return state, events
+
     # ── debug_delete_all_npcs ─────────────────────────────────────────────────
     if command_type == "debug_delete_all_npcs":
         removed = []
@@ -447,6 +475,22 @@ def resolve_world_command(
         events.append({"event_type": "debug_traders_deleted", "payload": {"removed": removed}})
         return state, events
 
+    # ── debug_delete_all_items ────────────────────────────────────────────────
+    if command_type == "debug_delete_all_items":
+        ground_count = 0
+        for loc in state.get("locations", {}).values():
+            ground_count += len(loc.get("items", []))
+            loc["items"] = []
+        inv_count = 0
+        for agent in state.get("agents", {}).values():
+            inv_count += len(agent.get("inventory", []))
+            agent["inventory"] = []
+        events.append({
+            "event_type": "debug_items_deleted",
+            "payload": {"ground_count": ground_count, "inventory_count": inv_count},
+        })
+        return state, events
+
     # ── debug_set_time ────────────────────────────────────────────────────────
     if command_type == "debug_set_time":
         if "day" in payload:
@@ -455,12 +499,23 @@ def resolve_world_command(
             state["world_hour"] = max(0, min(23, int(payload["hour"])))
         if "minute" in payload:
             state["world_minute"] = max(0, min(59, int(payload["minute"])))
+        # Keep world_turn in sync with the new time so that NPC memory
+        # timestamps (written via _turn_to_time_label(world_turn)) match
+        # the displayed clock.  Formula mirrors tick_rules._turn_to_time_label
+        # with MINUTES_PER_TURN = 1 (1 turn = 1 in-game minute).
+        new_turn = (
+            (state.get("world_day", 1) - 1) * 24 * 60
+            + state.get("world_hour", 0) * 60
+            + state.get("world_minute", 0)
+        )
+        state["world_turn"] = new_turn
         events.append({
             "event_type": "debug_time_set",
             "payload": {
                 "world_day": state["world_day"],
                 "world_hour": state["world_hour"],
                 "world_minute": state.get("world_minute", 0),
+                "world_turn": new_turn,
             },
         })
         return state, events
@@ -1314,6 +1369,27 @@ def _validate_debug_spawn_artifact(
         return RuleCheckResult(
             valid=False,
             error=f"Invalid artifact_type '{artifact_type}'; must be one of {sorted(ARTIFACT_TYPES.keys())}"
+        )
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_spawn_item_on_location(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    item_type = payload.get("item_type")
+    if not item_type:
+        return RuleCheckResult(valid=False, error="item_type is required")
+    if item_type not in _ITEM_TYPES:
+        return RuleCheckResult(
+            valid=False,
+            error=f"Unknown item_type '{item_type}'; must be one of {sorted(_ITEM_TYPES.keys())}"
         )
     return RuleCheckResult(valid=True)
 

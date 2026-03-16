@@ -323,6 +323,114 @@ class TestTickRules:
         assert any(m["type"] == "action" for m in state["agents"]["agent_p0"]["memory"])
 
 
+class TestDebugSetTime:
+    """debug_set_time must update world_turn so NPC memory timestamps are correct."""
+
+    def _r(self, payload, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("debug_set_time", payload, state, "player1")
+
+    def test_world_turn_updated_on_set_time(self):
+        """After debug_set_time the world_turn must equal (day-1)*1440 + hour*60 + minute."""
+        state = _make_world()
+        state, events = self._r({"day": 2, "hour": 3, "minute": 15}, state)
+
+        expected_turn = (2 - 1) * 24 * 60 + 3 * 60 + 15  # 1440 + 180 + 15 = 1635
+        assert state["world_turn"] == expected_turn, (
+            f"Expected world_turn={expected_turn}, got {state['world_turn']}"
+        )
+        # Event payload must also carry the new world_turn
+        time_event = next((e for e in events if e["event_type"] == "debug_time_set"), None)
+        assert time_event is not None
+        assert time_event["payload"]["world_turn"] == expected_turn
+
+    def test_world_day_hour_minute_unchanged_when_omitted(self):
+        """Fields not in payload must not change; world_turn must reflect the surviving values."""
+        state = _make_world()
+        state["world_day"] = 5
+        state["world_hour"] = 10
+        state["world_minute"] = 30
+        # Only override the hour
+        state, _ = self._r({"hour": 22}, state)
+
+        assert state["world_day"] == 5
+        assert state["world_hour"] == 22
+        assert state["world_minute"] == 30
+        expected_turn = (5 - 1) * 24 * 60 + 22 * 60 + 30  # 5760 + 1320 + 30 = 7110
+        assert state["world_turn"] == expected_turn
+
+    def test_world_turn_day1_midnight(self):
+        """Day 1, hour 0, minute 0 → world_turn = 0."""
+        state = _make_world()
+        state, _ = self._r({"day": 1, "hour": 0, "minute": 0}, state)
+        assert state["world_turn"] == 0
+
+
+class TestDebugDeleteAllItems:
+    """debug_delete_all_items must clear items from location grounds and agent inventories."""
+
+    def _r(self, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("debug_delete_all_items", {}, state, "player1")
+
+    def test_clears_ground_items(self):
+        state = _make_world()
+        # Plant items on every location
+        for loc in state["locations"].values():
+            loc["items"] = [
+                {"id": "item_001", "type": "medkit", "name": "Аптечка", "weight": 1, "value": 500},
+                {"id": "item_002", "type": "bandage", "name": "Бинт", "weight": 0.2, "value": 100},
+            ]
+        state, events = self._r(state)
+        for loc in state["locations"].values():
+            assert loc.get("items", []) == [], "Ground items must be cleared"
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        assert ev["payload"]["ground_count"] > 0
+
+    def test_clears_agent_inventories(self):
+        state = _make_world()
+        for agent in state["agents"].values():
+            agent["inventory"] = [
+                {"id": "inv_001", "type": "medkit", "name": "Аптечка", "weight": 1, "value": 500},
+            ]
+        state, events = self._r(state)
+        for agent in state["agents"].values():
+            assert agent.get("inventory", []) == [], "Agent inventory must be cleared"
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        assert ev["payload"]["inventory_count"] > 0
+
+    def test_event_payload_counts(self):
+        state = _make_world()
+        # Count initial items to set a baseline, then add more
+        initial_ground = sum(len(loc.get("items", [])) for loc in state["locations"].values())
+        initial_inv = sum(len(a.get("inventory", [])) for a in state["agents"].values())
+        locs = list(state["locations"].values())
+        locs[0]["items"].append({"id": "g_extra", "type": "medkit", "name": "X", "weight": 1, "value": 1})
+        agents = list(state["agents"].values())
+        agents[0].setdefault("inventory", []).extend([
+            {"id": "a1", "type": "medkit", "name": "X", "weight": 1, "value": 1},
+            {"id": "a2", "type": "bandage", "name": "Y", "weight": 0.2, "value": 1},
+        ])
+        state, events = self._r(state)
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        assert ev["payload"]["ground_count"] == initial_ground + 1
+        assert ev["payload"]["inventory_count"] == initial_inv + 2
+
+    def test_empty_world_no_error(self):
+        """Command must succeed; counts equal the actual number of items in the world."""
+        state = _make_world()
+        state, events = self._r(state)
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        # counts must be non-negative integers (generator may place items on ground)
+        assert ev["payload"]["ground_count"] >= 0
+        assert ev["payload"]["inventory_count"] >= 0
+        # After the command all locations and inventories must be empty
+        for loc in state["locations"].values():
+            assert loc.get("items", []) == []
+        for agent in state["agents"].values():
+            assert agent.get("inventory", []) == []
+
+
 class TestEventRules:
     """Zone event context rules."""
 
@@ -2037,16 +2145,18 @@ class TestConfirmedEmptyBlocking:
         )
 
     def test_generator_always_uses_get_rich(self):
-        """zone_generator should always generate 'get_rich' as the only global goal."""
+        """zone_generator should generate valid global goals for all agents."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
         goals_found = set()
         for seed in range(50):
             state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=5, num_mutants=0, num_traders=0)
             for ag in state["agents"].values():
                 goals_found.add(ag.get("global_goal"))
-        assert goals_found == {"get_rich"}, (
-            f"Generator should only create agents with goal 'get_rich'; found goals: {goals_found}"
+        assert goals_found.issubset(_VALID_GLOBAL_GOALS), (
+            f"Generator created agents with invalid global goals: {goals_found - _VALID_GLOBAL_GOALS}"
         )
+        assert "get_rich" in goals_found, "Generator should still produce some 'get_rich' agents"
 
     def test_confirmed_empty_cleared_by_emission_memory(self):
         """An explore_confirmed_empty entry older than the agent's emission_ended memory
@@ -2331,11 +2441,9 @@ class TestItemNotFoundLoop:
         )
 
     def test_no_observation_when_item_found(self):
-        """When the weapon IS on the ground and is picked up as the last item,
-        a pickup-induced item_not_found_here observation IS written (prevents re-visit).
-        The arrival-based observation from _maybe_record_item_not_found is NOT written
-        because _bot_pickup_item_from_ground returns early on success, never reaching
-        the _maybe_record_item_not_found call."""
+        """When the weapon IS on the ground and is picked up via a seek_item arrival,
+        only item_picked_up_here is written (not item_not_found_here).  The suppressed
+        'pickup' note was misleading: the item WAS found, not absent."""
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
         state = self._agent_with_seek_weapon_memory("A")
         info = ITEM_TYPES["pistol"]
@@ -2349,15 +2457,19 @@ class TestItemNotFoundLoop:
             m for m in agent["memory"]
             if m.get("effects", {}).get("action_kind") == "item_not_found_here"
         ]
-        # The new behavior: pickup of the last item writes item_not_found_here so
-        # the agent won't plan another trip here for the same category.
-        assert len(not_found) == 1, (
-            f"Expected 1 item_not_found_here written by pickup; got {len(not_found)}"
+        picked_up = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+        ]
+        # With suppress_not_found=True in _bot_pickup_on_arrival, no "📭 Предметы закончились"
+        assert len(not_found) == 0, (
+            f"Expected 0 item_not_found_here on success; got {len(not_found)}: {not_found}"
         )
-        # Verify it is the pickup-kind, not the arrival-kind.
-        assert not_found[0]["effects"].get("source") == "pickup", (
-            f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
+        # Instead, item_picked_up_here should be written exactly once
+        assert len(picked_up) == 1, (
+            f"Expected 1 item_picked_up_here; got {len(picked_up)}: {picked_up}"
         )
+        assert picked_up[0]["effects"].get("source") == "seek_item_arrival"
 
     def test_no_observation_without_seek_intent(self):
         """Without a prior seek_item decision for this location, arriving at an empty location
@@ -2382,6 +2494,64 @@ class TestItemNotFoundLoop:
         assert len(not_found) == 0, (
             f"Should not write not_found without a seek_item decision; got {not_found}"
         )
+
+    def test_item_picked_up_here_blocks_location(self):
+        """_item_not_found_locations returns a blocked location when it has an
+        item_picked_up_here entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" in result, f"B should be blocked by item_picked_up_here; got {result}"
+
+    def test_newer_item_obs_lifts_picked_up_block(self):
+        """A newer observed:items entry supersedes an item_picked_up_here block."""
+        from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        agent = {"memory": [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            # Fresh spawn observed on turn 2
+            {"world_turn": 2, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]}
+        result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
+        assert "B" not in result, f"B should be unblocked after newer obs; got {result}"
+
+    def test_find_item_memory_excludes_picked_up_location(self):
+        """_find_item_memory_location excludes a location that has item_picked_up_here."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="A",
+        )
+        agent = next(iter(state["agents"].values()))
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"world_turn": 1, "type": "observation",
+             "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+        ]
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, f"B should be excluded after item_picked_up_here; got {result}"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -2591,6 +2761,105 @@ class TestPickupBlocksResearch:
         assert result == "B", (
             f"Newer observed:items should lift the pickup block on B; got {result}"
         )
+
+    def test_seek_item_arrival_pickup_writes_item_picked_up_here(self):
+        """When the agent arrives at a seek_item destination and picks up the item,
+        item_picked_up_here is written so the location is blocked for re-search."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+
+        state = _make_minimal_state({"A": {}, "B": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        # Simulate NPC having decided to travel to A for a weapon
+        agent["memory"] = [{
+            "type": "decision", "world_turn": 0,
+            "label": "Иду за оружием", "summary": "...",
+            "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                        "destination": "A"},
+            "reason": "test",
+        }]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result, "Should have returned pickup events"
+        picked_up = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+            and m.get("effects", {}).get("location_id") == "A"
+        ]
+        assert len(picked_up) == 1, (
+            f"Expected 1 item_picked_up_here, got {len(picked_up)}"
+        )
+        assert picked_up[0]["effects"].get("source") == "seek_item_arrival"
+
+    def test_seek_item_arrival_pickup_blocks_find_item_memory_location(self):
+        """After a seek_item arrival pickup, _find_item_memory_location excludes that location."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival, _find_item_memory_location
+
+        state = _make_minimal_state(
+            {"A": {"connections": [{"to": "B", "travel_time": 1}]}, "B": {}},
+            agent_loc_id="B",
+        )
+        agent = self._make_agent_at("B", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["B"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+            # A second weapon remains so _bot_pickup_item_from_ground does NOT write item_not_found_here
+            {"id": "wpn2", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]},
+        ]
+        agent["memory"] = [
+            {"world_turn": 0, "type": "observation",
+             "effects": {"observed": "items", "location_id": "B",
+                         "item_types": sorted(WEAPON_ITEM_TYPES)}},
+            {"type": "decision", "world_turn": 0,
+             "label": "Иду за оружием", "summary": "...",
+             "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                         "destination": "B"},
+             "reason": "test"},
+        ]
+        agent_id = next(iter(state["agents"]))
+        _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        # Even though one weapon remains at B, item_picked_up_here should block B
+        agent["location_id"] = "A"
+        result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        assert result is None, (
+            f"B should be blocked by item_picked_up_here even when items remain; got {result}"
+        )
+
+    def test_seek_item_arrival_no_picked_up_here_without_seek_decision(self):
+        """If the most recent decision is NOT seek_item, no item_picked_up_here is written."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, WEAPON_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = self._make_agent_at("A", state)
+        info = ITEM_TYPES["pistol"]
+        state["locations"]["A"]["items"] = [
+            {"id": "wpn1", "type": "pistol", "name": info["name"],
+             "weight": info["weight"], "value": info["value"]}
+        ]
+        # Most recent decision is a wander — not a seek_item
+        agent["memory"] = [{
+            "type": "decision", "world_turn": 0,
+            "label": "Иду куда-нибудь", "summary": "...",
+            "effects": {"action_kind": "wander", "destination": "A"},
+            "reason": "test",
+        }]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
+        assert result == [], "_bot_pickup_on_arrival returns [] when latest decision is not seek_item"
+        picked_up = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+        ]
+        assert len(picked_up) == 0, "Should not write item_picked_up_here without seek_item decision"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -2925,6 +3194,145 @@ class TestPickupOnArrival:
         ]
         assert len(not_found) == 0, (
             "item_not_found_here must NOT be written at a trader location"
+        )
+
+    def test_no_retrigger_after_successful_pickup(self):
+        """On the tick AFTER a successful seek_item arrival pickup, _bot_pickup_on_arrival
+        must return [] immediately (location already blocked by item_picked_up_here).
+        This prevents a spurious 'item_not_found_here' source=arrival on tick T+1."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        # No items left on the ground (pickup happened on a prior tick)
+        state["locations"]["A"]["items"] = []
+        # Simulate: agent had a seek_item decision + picked up the item (wrote item_picked_up_here)
+        agent["memory"] = [
+            {
+                "type": "decision", "world_turn": 0,
+                "label": "Иду за оружием", "summary": "...",
+                "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                            "destination": "A"},
+                "reason": "test",
+            },
+            {
+                "type": "observation", "world_turn": 1,
+                "label": "✅ Нашёл weapon в «A»", "summary": "...",
+                "effects": {
+                    "action_kind": "item_picked_up_here",
+                    "source": "seek_item_arrival",
+                    "location_id": "A",
+                    "item_types": sorted(WEAPON_ITEM_TYPES),
+                },
+            },
+        ]
+        agent_id = next(iter(state["agents"]))
+        # Simulate tick T+1: no items on ground, but seek_item is still the latest decision
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=2)
+        assert result == [], "Should return [] when seek is already resolved"
+        # No extra observations should be written
+        new_obs = [
+            m for m in agent["memory"]
+            if m.get("type") == "observation" and m.get("world_turn") == 2
+        ]
+        assert len(new_obs) == 0, (
+            f"Should not write any new observations on retrigger tick; got {new_obs}"
+        )
+
+    def test_no_retrigger_after_not_found(self):
+        """On tick T+1 after a seek_item that found nothing, _bot_pickup_on_arrival
+        should also return [] immediately (already blocked by item_not_found_here)."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pickup_on_arrival
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = []
+        agent["memory"] = [
+            {
+                "type": "decision", "world_turn": 0,
+                "label": "Иду за оружием", "summary": "...",
+                "effects": {"action_kind": "seek_item", "item_category": "weapon",
+                            "destination": "A"},
+                "reason": "test",
+            },
+            {
+                "type": "observation", "world_turn": 1,
+                "label": "⚠️ Предмет исчез", "summary": "...",
+                "effects": {
+                    "action_kind": "item_not_found_here",
+                    "source": "arrival",
+                    "location_id": "A",
+                    "item_types": sorted(WEAPON_ITEM_TYPES),
+                },
+            },
+        ]
+        agent_id = next(iter(state["agents"]))
+        result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=2)
+        assert result == [], "Should return [] when already recorded as not_found"
+        new_obs = [
+            m for m in agent["memory"]
+            if m.get("type") == "observation" and m.get("world_turn") == 2
+        ]
+        assert len(new_obs) == 0, (
+            f"Should not write again after not_found was already recorded; got {new_obs}"
+        )
+
+    def test_no_spurious_item_not_found_after_emergency_buy_at_trader(self):
+        """Regression: after an emergency seek_item (food/drink/medical) to a trader,
+        subsequent calls to _maybe_record_item_not_found must NOT write
+        item_not_found_here — the old seek_item had emergency=True, meaning the
+        agent travelled there to *buy*, not to pick up from the ground.
+
+        Scenario that was broken:
+          Turn T   → agent writes seek_item(food, destination=A, emergency=True)
+          Turn T+1 → arrives, emergency path buys food (writes trade_decision)
+          Turn T+2 → consumes food, hunger back > 30 but < 70; Need-5 food path
+                     calls _maybe_record_item_not_found; old seek_item found in
+                     memory → spurious item_not_found_here written.
+        """
+        from app.games.zone_stalkers.rules.tick_rules import _maybe_record_item_not_found
+        from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES
+
+        state = _make_minimal_state({"A": {}}, agent_loc_id="A")
+        agent = next(iter(state["agents"].values()))
+        state["locations"]["A"]["items"] = []
+
+        # Old emergency seek_item in memory (agent travelled to this trader earlier)
+        agent["memory"] = [
+            {
+                "type": "decision", "world_turn": 1,
+                "label": "Иду к торговцу за едой (экстренно)",
+                "summary": "...",
+                "effects": {
+                    "action_kind": "seek_item",
+                    "item_category": "food",
+                    "destination": "A",
+                    "emergency": True,
+                },
+            },
+            # Simulated trade_decision from the buy on arrival (no destination/item_category)
+            {
+                "type": "decision", "world_turn": 5,
+                "label": "Решил купить «Буханка хлеба»",
+                "summary": "...",
+                "effects": {"action_kind": "trade_decision", "item_type": "bread"},
+            },
+        ]
+        loc = state["locations"]["A"]
+
+        _maybe_record_item_not_found(
+            agent, 6, state, "A", loc, FOOD_ITEM_TYPES, "food"
+        )
+
+        not_found = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+        ]
+        assert len(not_found) == 0, (
+            "item_not_found_here must NOT be written after an emergency seek_item "
+            f"(trader visit for buying); got: {not_found}"
         )
 
 
@@ -3946,4 +4354,743 @@ class TestFleeEmissionSelfInterrupt:
         # The travel should have been interrupted (unless it completed, which it can't at 4 ticks)
         assert interrupted or (sched is None), (
             "Normal travel without emergency_flee should be interrupted by emission warning"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New mechanic: secret documents + unravel_zone_mystery goal
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSecretDocumentItems:
+    """Verify new secret_document item category is correctly defined."""
+
+    def test_secret_document_types_in_item_catalogue(self):
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        assert len(SECRET_DOCUMENT_ITEM_TYPES) >= 3, "At least 3 secret document types expected"
+        for key in SECRET_DOCUMENT_ITEM_TYPES:
+            assert key in ITEM_TYPES
+            assert ITEM_TYPES[key]["type"] == "secret_document"
+
+    def test_secret_document_fields(self):
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        for key in SECRET_DOCUMENT_ITEM_TYPES:
+            info = ITEM_TYPES[key]
+            assert "name" in info
+            assert "weight" in info
+            assert "value" in info
+            assert info["value"] > 0
+
+    def test_generator_places_secret_documents(self):
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        found = [
+            item
+            for loc in state["locations"].values()
+            for item in loc.get("items", [])
+            if item.get("type") in SECRET_DOCUMENT_ITEM_TYPES
+        ]
+        assert len(found) >= 1, "Generator should place at least one secret document in the zone"
+
+
+class TestUnravelZoneMysteryGoal:
+    """Tests for the unravel_zone_mystery global goal bot behaviour."""
+
+    def _make_mystery_agent(self, loc_id: str, state: dict, rng_seed: int = 0) -> dict:
+        """Return a bot agent that is ready to pursue unravel_zone_mystery."""
+        import random
+        rng = random.Random(rng_seed)
+        return {
+            "id": "agent_ai_m",
+            "archetype": "stalker_agent",
+            "name": "Агент-Исследователь",
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 5000,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot", "participant_id": None},
+            "is_alive": True,
+            "action_used": False,
+            "reputation": 0,
+            "experience": 0,
+            "skill_combat": 1, "skill_stalker": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "skill_survival_xp": 0.0,
+            "global_goal": "unravel_zone_mystery",
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 1,  # already over threshold → goal pursuit phase
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+        }
+
+    def _make_mystery_agent_equipped(self, loc_id: str, state: dict) -> dict:
+        """Return an agent with weapon, armor, and ammo so equipment-purchase logic is skipped."""
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+        agent = self._make_mystery_agent(loc_id, state)
+        agent["equipment"] = {
+            "weapon": {"id": "w1", "type": "pistol",
+                       **{k: ITEM_TYPES["pistol"][k] for k in ("name", "weight", "value")}},
+            "armor":  {"id": "a1", "type": "leather_jacket",
+                       **{k: ITEM_TYPES["leather_jacket"][k] for k in ("name", "weight", "value")}},
+            "detector": None,
+        }
+        ammo_info = ITEM_TYPES["ammo_9mm"]
+        agent["inventory"] = [
+            {"id": "ammo1", "type": "ammo_9mm",
+             **{k: ammo_info[k] for k in ("name", "weight", "value")}},
+        ]
+        return agent
+
+    def _minimal_state(self, loc_id: str = "A") -> dict:
+        """Minimal two-location state for testing."""
+        return {
+            "locations": {
+                "A": {
+                    "name": "Лаборатория X-18",
+                    "terrain_type": "x_lab",
+                    "anomaly_activity": 0,
+                    "items": [],
+                    "artifacts": [],
+                    "agents": ["agent_ai_m"],
+                    "connections": [{"to": "B", "type": "normal"}],
+                },
+                "B": {
+                    "name": "Равнина",
+                    "terrain_type": "plain",
+                    "anomaly_activity": 0,
+                    "items": [],
+                    "artifacts": [],
+                    "agents": [],
+                    "connections": [{"to": "A", "type": "normal"}],
+                },
+            },
+            "agents": {},
+            "traders": {},
+            "mutants": {},
+            "world_turn": 1,
+            "emission_active": False,
+        }
+
+    def test_unravel_zone_mystery_is_valid_global_goal(self):
+        from app.games.zone_stalkers.rules.world_rules import _VALID_GLOBAL_GOALS
+        assert "unravel_zone_mystery" in _VALID_GLOBAL_GOALS
+
+    def test_bot_with_no_memory_wanders(self):
+        """Bot with unravel_zone_mystery and no doc intel should wander."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+        ]
+        assert decisions, "Bot should record a decision"
+        # Should wander or seek item
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert action_kinds.intersection(
+            {"wander", "seek_item"}
+        ), f"Expected wander or seek_item, got: {action_kinds}"
+
+    def test_bot_goes_to_known_doc_location(self):
+        """Bot should travel to a remembered secret document location."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        # Give agent a memory of seeing a secret document in location B
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        _add_memory(
+            agent, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        # Agent should decide to seek_item for destination B
+        seek_decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m["effects"].get("action_kind") == "seek_item"
+            and m["effects"].get("destination") == "B"
+            and m["effects"].get("item_category") == "secret_document"
+        ]
+        assert seek_decisions, "Bot with doc memory should seek_item to known location"
+
+    def test_bot_picks_up_doc_from_ground(self):
+        """Bot at a location with a secret document on the ground should pick it up."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action_inner
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        doc_info = ITEM_TYPES[doc_type]
+        state = self._minimal_state("A")
+        state["locations"]["A"]["items"].append({
+            "id": "doc_test_001",
+            "type": doc_type,
+            "name": doc_info["name"],
+            "weight": doc_info["weight"],
+            "value": doc_info["value"],
+        })
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        _run_bot_action_inner("agent_ai_m", agent, state, 1)
+        inv_types = {i["type"] for i in agent.get("inventory", [])}
+        assert doc_type in inv_types, "Bot should pick up secret document from ground"
+
+    def test_bot_gets_intel_from_colocated_stalker(self):
+        """Bot should receive intel from a co-located stalker who saw secret documents."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        # Create a co-located stalker who has memory of a secret document in B
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 1
+        )
+        assert result_loc == "B", "Should receive intel about location B from co-located stalker"
+        # Asking agent should have an intel_from_stalker observation in memory
+        intel_mems = [
+            m for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        ]
+        assert intel_mems, "Agent should have intel_from_stalker memory entry"
+        assert intel_mems[0]["effects"]["location_id"] == "B"
+        assert intel_mems[0]["effects"]["source_agent_name"] == "Информатор"
+
+    def test_intel_deduplication_same_turn(self):
+        """Asking twice in the same turn from the same stalker should not write duplicate entries."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 1
+        )
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 1
+        )
+        intel_mems = [
+            m for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        ]
+        assert len(intel_mems) == 1, "Should not write duplicate intel from same stalker in same turn"
+
+    def test_ask_stalker_returns_all_intel(self):
+        """When a stalker has observations about multiple locations, all should be written."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        # Add a third location C
+        state["locations"]["C"] = {
+            "name": "Лаборатория X-18 Сектор 2",
+            "terrain_type": "x_lab",
+            "anomaly_activity": 0,
+            "items": [], "artifacts": [],
+            "agents": [],
+            "connections": [{"to": "A", "type": "normal"}],
+        }
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        # Informant has seen docs in BOTH B and C
+        _add_memory(
+            informant, 1, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        _add_memory(
+            informant, 2, state, "observation",
+            "Вижу предметы в «Лаборатория»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "C", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 3
+        )
+        # Should receive intel from BOTH locations
+        intel_mems = [
+            m for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        ]
+        intel_locs = {m["effects"]["location_id"] for m in intel_mems}
+        assert intel_locs == {"B", "C"}, (
+            f"Should receive intel about both B and C, got: {intel_locs}"
+        )
+        # Return value should be the first loc found
+        assert result_loc in {"B", "C"}, f"Return value should be B or C, got: {result_loc}"
+
+    def test_ask_stalker_all_locations_from_multiple_stalkers(self):
+        """Intel from multiple co-located stalkers should all be collected."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        state["locations"]["C"] = {
+            "name": "Бункер",
+            "terrain_type": "scientific_bunker",
+            "anomaly_activity": 0,
+            "items": [], "artifacts": [],
+            "agents": [],
+            "connections": [{"to": "A", "type": "normal"}],
+        }
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+
+        # Stalker 1 knows about location B
+        stalker1 = {
+            "id": "stalker_1", "archetype": "stalker_agent", "name": "Сталкер Один",
+            "location_id": "A", "is_alive": True, "memory": [],
+        }
+        _add_memory(stalker1, 1, state, "observation", "Вижу предметы",
+                    f"На земле: {doc_type}.",
+                    {"observed": "items", "location_id": "B", "item_types": [doc_type]})
+        state["agents"]["stalker_1"] = stalker1
+
+        # Stalker 2 knows about location C
+        stalker2 = {
+            "id": "stalker_2", "archetype": "stalker_agent", "name": "Сталкер Два",
+            "location_id": "A", "is_alive": True, "memory": [],
+        }
+        _add_memory(stalker2, 1, state, "observation", "Вижу предметы",
+                    f"На земле: {doc_type}.",
+                    {"observed": "items", "location_id": "C", "item_types": [doc_type]})
+        state["agents"]["stalker_2"] = stalker2
+
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 2
+        )
+        intel_locs = {
+            m["effects"]["location_id"] for m in agent["memory"]
+            if m["effects"].get("action_kind") == "intel_from_stalker"
+        }
+        assert intel_locs == {"B", "C"}, (
+            f"Should receive intel from both stalkers about B and C, got: {intel_locs}"
+        )
+
+    def test_ask_stalker_skips_stale_intel_after_not_found(self):
+        """Intel about a location that the asker already visited and found empty
+        (item_not_found_here) at a turn >= the other stalker's obs turn is skipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # Agent already resolved location B as not_found on turn 5
+        agent["memory"].append({
+            "type": "observation", "world_turn": 5,
+            "label": "⚠️ Предмет исчез", "summary": "...",
+            "effects": {
+                "action_kind": "item_not_found_here",
+                "source": "arrival",
+                "location_id": "B",
+                "item_types": [doc_type],
+            },
+        })
+
+        # Informant saw the doc at B on turn 3 (BEFORE the asker resolved it on turn 5)
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 3, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 6
+        )
+        assert result_loc is None, (
+            f"Stale intel (obs_turn=3 <= resolved_turn=5) should be skipped; got {result_loc}"
+        )
+        intel_mems = [m for m in agent["memory"]
+                      if m.get("effects", {}).get("action_kind") == "intel_from_stalker"]
+        assert len(intel_mems) == 0, (
+            f"Should not write stale intel entry; got {intel_mems}"
+        )
+
+    def test_ask_stalker_skips_stale_intel_after_picked_up(self):
+        """Intel about a location that the asker already resolved via item_picked_up_here
+        at a turn >= the stalker's obs turn is also skipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # Agent already picked up from B on turn 7
+        agent["memory"].append({
+            "type": "observation", "world_turn": 7,
+            "label": "✅ Нашёл", "summary": "...",
+            "effects": {
+                "action_kind": "item_picked_up_here",
+                "source": "seek_item_arrival",
+                "location_id": "B",
+                "item_types": [doc_type],
+            },
+        })
+
+        # Informant saw the doc at B on turn 4 (BEFORE the asker picked it up on turn 7)
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 4, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 8
+        )
+        assert result_loc is None, (
+            f"Stale intel (obs_turn=4 <= resolved_turn=7) should be skipped; got {result_loc}"
+        )
+
+    def test_ask_stalker_keeps_fresh_intel_after_resolution(self):
+        """If a stalker's obs_turn is strictly NEWER than the asker's resolved_turn,
+        the intel is fresh (could be a re-spawn) and must NOT be skipped."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # Agent resolved B on turn 5 (not_found)
+        agent["memory"].append({
+            "type": "observation", "world_turn": 5,
+            "label": "⚠️ Предмет исчез", "summary": "...",
+            "effects": {
+                "action_kind": "item_not_found_here",
+                "source": "arrival",
+                "location_id": "B",
+                "item_types": [doc_type],
+            },
+        })
+
+        # Informant saw a NEW doc at B on turn 6 (AFTER the not_found)
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 6, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        result_loc = _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, 7
+        )
+        # obs_turn=6 > resolved_turn=5 → fresh intel, should NOT be skipped
+        assert result_loc == "B", (
+            f"Fresh intel (obs_turn=6 > resolved_turn=5) should be accepted; got {result_loc}"
+        )
+
+    def test_intel_from_stalker_includes_obs_timestamp(self):
+        """intel_from_stalker summary must include the date/time the informant saw the item,
+        and effects must carry obs_world_turn for downstream use."""
+        from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_item, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        # obs_turn = 1*60 + 30 = 90 → Day 1, 01:30
+        obs_turn = 90
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, obs_turn, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+
+        _bot_ask_colocated_stalkers_about_item(
+            "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
+            "секретные документы", state, obs_turn + 1
+        )
+        intel_mems = [m for m in agent["memory"]
+                      if m.get("effects", {}).get("action_kind") == "intel_from_stalker"]
+        assert intel_mems, "Should have written intel_from_stalker entry"
+        entry = intel_mems[0]
+        # obs_world_turn must be stored in effects
+        assert entry["effects"].get("obs_world_turn") == obs_turn, (
+            f"Expected obs_world_turn={obs_turn}; got {entry['effects'].get('obs_world_turn')}"
+        )
+        # Summary must contain the time label: obs_turn=90 → Day 1 · 01:30
+        summary = entry.get("summary", "")
+        assert "День 1" in summary, f"Summary should contain 'День 1'; got: {summary!r}"
+        assert "01:30" in summary, f"Summary should contain '01:30'; got: {summary!r}"
+
+    def test_set_goal_via_world_command(self):
+        """debug_spawn_stalker should accept 'unravel_zone_mystery' as global_goal."""
+        from app.games.zone_stalkers.generators.zone_generator import generate_zone
+        from app.games.zone_stalkers.rules.world_rules import validate_world_command, resolve_world_command
+        state = generate_zone(seed=1, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+        loc_id = next(iter(state["locations"]))
+        payload = {"loc_id": loc_id, "global_goal": "unravel_zone_mystery", "name": "Тест"}
+        result = validate_world_command("debug_spawn_stalker", payload, state, "any_user")
+        assert result.valid, f"Validation failed: {result.error}"
+        new_state, _ = resolve_world_command("debug_spawn_stalker", payload, state, "any_user")
+        new_agent_ids = set(new_state["agents"]) - set(state["agents"])
+        assert new_agent_ids, "Should have spawned a new agent"
+        new_agent = new_state["agents"][next(iter(new_agent_ids))]
+        assert new_agent["global_goal"] == "unravel_zone_mystery"
+
+    def test_bot_travels_to_trader_when_no_leads(self):
+        """With no doc intel and a reachable trader, the bot should head to the trader."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state("A")
+        # Add a trader location C reachable from B
+        state["locations"]["B"]["connections"].append({"to": "C", "type": "normal"})
+        state["locations"]["C"] = {
+            "name": "Торговая база",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "items": [], "artifacts": [],
+            "agents": ["trader_t1"],
+            "connections": [{"to": "B", "type": "normal"}],
+        }
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "C",
+            "is_alive": True,
+        }
+        # Place agent at B (plain terrain, no interesting terrain connections back to x_lab)
+        agent = self._make_mystery_agent("B", state)
+        agent["location_id"] = "B"
+        state["locations"]["B"]["agents"] = ["agent_ai_m"]
+        state["locations"]["A"]["agents"] = []
+        state["agents"]["agent_ai_m"] = agent
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "B", state["locations"]["B"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        assert decisions, "Bot should record a decision"
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "wait_at_trader" in action_kinds, (
+            f"Bot with trader reachable should head to trader, got: {action_kinds}"
+        )
+
+    def test_bot_waits_at_trader_without_stalkers(self):
+        """When at trader location with no other stalkers, bot should idle (wait_at_trader)."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state("A")
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["agent_ai_m", "trader_t1"]
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        assert decisions, "Bot should record a decision"
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "wait_at_trader" in action_kinds, (
+            f"Bot at trader with no other stalkers should wait, got: {action_kinds}"
+        )
+        assert agent.get("action_used"), "Bot should have consumed its action while waiting"
+
+    def test_bot_wait_at_trader_no_spam(self):
+        """Waiting at trader should not write repeated decision entries on consecutive ticks."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state("A")
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["agent_ai_m", "trader_t1"]
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        # Simulate two consecutive ticks
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        agent["action_used"] = False
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 2, random.Random(0))
+        wait_decisions = [
+            m for m in agent["memory"]
+            if m.get("type") == "decision"
+            and m["effects"].get("action_kind") == "wait_at_trader"
+        ]
+        assert len(wait_decisions) == 1, (
+            f"wait_at_trader decision should not be written more than once, got: {len(wait_decisions)}"
+        )
+
+    def test_bot_asks_stalker_at_trader_location(self):
+        """When at trader and a non-trader stalker appears, bot should ask them about docs."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal, _add_memory
+        from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+        state = self._minimal_state("A")
+        state["traders"]["trader_t1"] = {
+            "id": "trader_t1",
+            "name": "Торговец",
+            "location_id": "A",
+            "is_alive": True,
+        }
+        state["locations"]["A"]["agents"] = ["agent_ai_m", "trader_t1", "agent_informant"]
+        agent = self._make_mystery_agent("A", state)
+        state["agents"]["agent_ai_m"] = agent
+        # Add an informant who has seen a secret document in B
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        informant = {
+            "id": "agent_informant",
+            "archetype": "stalker_agent",
+            "name": "Информатор",
+            "location_id": "A",
+            "is_alive": True,
+            "memory": [],
+        }
+        _add_memory(
+            informant, 0, state, "observation",
+            "Вижу предметы в «Равнина»",
+            f"На земле: {doc_type}.",
+            {"observed": "items", "location_id": "B", "item_types": [doc_type]},
+        )
+        state["agents"]["agent_informant"] = informant
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        # Bot should have asked the informant and decided to travel to B
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "seek_item" in action_kinds, (
+            f"Bot at trader with informed stalker should seek_item, got: {action_kinds}"
+        )
+        seek_decision = next(
+            d for d in decisions if d["effects"].get("action_kind") == "seek_item"
+        )
+        assert seek_decision["effects"].get("destination") == "B"
+
+    def test_bot_continues_seeking_with_docs(self):
+        """Agent that already has docs should continue searching for more, not idle."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES, SECRET_DOCUMENT_ITEM_TYPES
+        doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
+        doc_info = ITEM_TYPES[doc_type]
+        state = self._minimal_state("A")
+        agent = self._make_mystery_agent("A", state)
+        agent["inventory"] = [{"id": "doc_001", "type": doc_type, "name": doc_info["name"],
+                                "weight": doc_info["weight"], "value": doc_info["value"]}]
+        state["agents"]["agent_ai_m"] = agent
+        _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
+                         "A", state["locations"]["A"], state, 1, random.Random(0))
+        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        # Agent with docs should still write a decision (seek_item, wander, wait_at_trader)
+        assert decisions, "Agent with docs should still take an action and write a decision"
+        # Must NOT idle with goal_unravel_has_docs any more
+        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        assert "goal_unravel_has_docs" not in action_kinds, (
+            f"Agent should not idle with goal_unravel_has_docs, got: {action_kinds}"
+        )
+        # Should be doing something active (seek, wander, wait at trader)
+        assert action_kinds.intersection({"seek_item", "wander", "wait_at_trader"}), (
+            f"Agent with docs should actively search for more, got: {action_kinds}"
         )
