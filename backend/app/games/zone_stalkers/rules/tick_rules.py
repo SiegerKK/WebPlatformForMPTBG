@@ -2404,6 +2404,23 @@ def _run_bot_action_inner(
                 reason=reason,
             )
             return _bot_schedule_travel(agent_id, agent, target, state, world_turn, emergency_flee=True)
+        else:
+            # Trapped on dangerous terrain — no safe neighbour to flee to.
+            # Log once so the agent's memory reflects the grim situation.
+            _last_trapped_kind = None
+            for _sm in reversed(agent.get("memory", [])):
+                if _sm.get("type") == "decision":
+                    _last_trapped_kind = _sm.get("effects", {}).get("action_kind")
+                    break
+            if _last_trapped_kind != "trapped_on_dangerous_terrain":
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "☠️ Нет пути к укрытию",
+                    "Нахожусь на опасной местности во время выброса, но поблизости нет безопасного укрытия.",
+                    {"action_kind": "trapped_on_dangerous_terrain"},
+                    reason="выброс, опасная местность, нет выхода",
+                )
+            return []
 
     # ── EMISSION SHELTER: Stay put when emission is active or imminent ────────
     # Second-highest priority (after fleeing dangerous terrain, before any pending
@@ -2412,7 +2429,7 @@ def _run_bot_action_inner(
     # risks arriving on dangerous terrain when the emission fires.  The agent
     # simply waits until it sees an ``emission_ended`` observation.
     # Emission is an "urgent trigger" that overrides all pending arrival tasks.
-    if _emission_active or _emission_warned:
+    if (_emission_active or _emission_warned) and not _on_dangerous_terrain:
         # Only write the decision memory once; avoid flooding the log.
         _last_decision_kind = None
         for _sm in reversed(agent.get("memory", [])):

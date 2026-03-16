@@ -3722,6 +3722,81 @@ class TestEmissionShelterBehavior:
             "Bot should have scheduled a travel action to flee"
         )
 
+    def test_bot_trapped_on_dangerous_terrain_no_safe_neighbour(self):
+        """Agent on dangerous terrain with no safe neighbour should write
+        trapped_on_dangerous_terrain decision and NOT write wait_in_shelter."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        # Both D1 (hills) and D2 (plain) are in _EMISSION_DANGEROUS_TERRAIN,
+        # so there is no safe escape route from D1.
+        state = _make_minimal_state(
+            {
+                "D1": {"connections": [{"to": "D2", "travel_time": 1}]},
+                "D2": {"connections": [{"to": "D1", "travel_time": 1}]},
+            },
+            agent_loc_id="D1",
+        )
+        state["locations"]["D1"]["terrain_type"] = "hills"
+        state["locations"]["D2"]["terrain_type"] = "plain"  # also dangerous
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        events = _run_bot_action(agent_id, agent, state, world_turn=2)
+
+        # Should return empty (agent stays put, nothing to do)
+        assert events == [], "Trapped agent should return no events"
+        # Must NOT claim it is in a safe shelter
+        shelter_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        assert not shelter_decisions, (
+            "Trapped agent on dangerous terrain must NOT write wait_in_shelter"
+        )
+        # Must log the trapped situation
+        trapped_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "trapped_on_dangerous_terrain"
+        ]
+        assert trapped_decisions, (
+            "Trapped agent should write trapped_on_dangerous_terrain decision"
+        )
+
+    def test_bot_trapped_decision_written_only_once(self):
+        """Repeated calls while trapped should not spam trapped_on_dangerous_terrain memories."""
+        from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
+        # Both locations are in _EMISSION_DANGEROUS_TERRAIN → agent is trapped
+        state = _make_minimal_state(
+            {
+                "D1": {"connections": [{"to": "D2", "travel_time": 1}]},
+                "D2": {"connections": [{"to": "D1", "travel_time": 1}]},
+            },
+            agent_loc_id="D1",
+        )
+        state["locations"]["D1"]["terrain_type"] = "hills"
+        state["locations"]["D2"]["terrain_type"] = "plain"  # also dangerous
+        state["emission_active"] = False
+        state["emission_scheduled_turn"] = 200
+
+        agent = next(iter(state["agents"].values()))
+        self._inject_emission_imminent(agent, world_turn=1)
+
+        agent_id = next(iter(state["agents"]))
+        _run_bot_action(agent_id, agent, state, world_turn=2)
+        _run_bot_action(agent_id, agent, state, world_turn=3)
+        _run_bot_action(agent_id, agent, state, world_turn=4)
+
+        trapped_decisions = [
+            m for m in agent["memory"]
+            if m.get("effects", {}).get("action_kind") == "trapped_on_dangerous_terrain"
+        ]
+        assert len(trapped_decisions) == 1, (
+            f"Expected exactly 1 trapped_on_dangerous_terrain memory, got {len(trapped_decisions)}"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────
 # debug_trigger_emission via world_rules
