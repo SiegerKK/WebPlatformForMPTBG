@@ -26,6 +26,7 @@ Supported commands:
 - debug_delete_all_mutants() — remove all mutants (meta)
 - debug_delete_all_artifacts() — remove all artifacts from all locations (meta)
 - debug_delete_all_traders() — remove all traders (meta)
+- debug_delete_all_items() — remove all loose items from location grounds and all agent inventories (meta)
 - debug_delete_agent(agent_id) — remove any single agent/mutant/trader by id (meta)
 - debug_set_time(day?, hour?, minute?) — override current world time (meta)
 - debug_advance_turns(max_n?, stop_on_decision?) — advance up to max_n turns, optionally stopping when any bot makes a new decision (meta)
@@ -97,6 +98,7 @@ def validate_world_command(
 
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
+                        "debug_delete_all_items",
                         "debug_set_time", "debug_advance_turns",
                         "debug_trigger_emission", "debug_import_full_map"):
         return RuleCheckResult(valid=True)
@@ -471,6 +473,22 @@ def resolve_world_command(
                     loc["agents"].remove(tid)
         state["traders"] = {}
         events.append({"event_type": "debug_traders_deleted", "payload": {"removed": removed}})
+        return state, events
+
+    # ── debug_delete_all_items ────────────────────────────────────────────────
+    if command_type == "debug_delete_all_items":
+        ground_count = 0
+        for loc in state.get("locations", {}).values():
+            ground_count += len(loc.get("items", []))
+            loc["items"] = []
+        inv_count = 0
+        for agent in state.get("agents", {}).values():
+            inv_count += len(agent.get("inventory", []))
+            agent["inventory"] = []
+        events.append({
+            "event_type": "debug_items_deleted",
+            "payload": {"ground_count": ground_count, "inventory_count": inv_count},
+        })
         return state, events
 
     # ── debug_set_time ────────────────────────────────────────────────────────

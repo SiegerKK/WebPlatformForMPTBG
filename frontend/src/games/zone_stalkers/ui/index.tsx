@@ -2100,6 +2100,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             >
               🗑 Удалить артефакты
             </button>
+            <button
+              style={styles.btnWarning}
+              onClick={() => sendCommand('debug_delete_all_items', {})}
+              disabled={actionLoading}
+              title="Удалить все предметы с земли и из инвентарей агентов"
+            >
+              🗑 Удалить предметы
+            </button>
           </div>
         </div>
 

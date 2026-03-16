@@ -366,6 +366,71 @@ class TestDebugSetTime:
         assert state["world_turn"] == 0
 
 
+class TestDebugDeleteAllItems:
+    """debug_delete_all_items must clear items from location grounds and agent inventories."""
+
+    def _r(self, state):
+        from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+        return resolve_world_command("debug_delete_all_items", {}, state, "player1")
+
+    def test_clears_ground_items(self):
+        state = _make_world()
+        # Plant items on every location
+        for loc in state["locations"].values():
+            loc["items"] = [
+                {"id": "item_001", "type": "medkit", "name": "Аптечка", "weight": 1, "value": 500},
+                {"id": "item_002", "type": "bandage", "name": "Бинт", "weight": 0.2, "value": 100},
+            ]
+        state, events = self._r(state)
+        for loc in state["locations"].values():
+            assert loc.get("items", []) == [], "Ground items must be cleared"
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        assert ev["payload"]["ground_count"] > 0
+
+    def test_clears_agent_inventories(self):
+        state = _make_world()
+        for agent in state["agents"].values():
+            agent["inventory"] = [
+                {"id": "inv_001", "type": "medkit", "name": "Аптечка", "weight": 1, "value": 500},
+            ]
+        state, events = self._r(state)
+        for agent in state["agents"].values():
+            assert agent.get("inventory", []) == [], "Agent inventory must be cleared"
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        assert ev["payload"]["inventory_count"] > 0
+
+    def test_event_payload_counts(self):
+        state = _make_world()
+        # Count initial items to set a baseline, then add more
+        initial_ground = sum(len(loc.get("items", [])) for loc in state["locations"].values())
+        initial_inv = sum(len(a.get("inventory", [])) for a in state["agents"].values())
+        locs = list(state["locations"].values())
+        locs[0]["items"].append({"id": "g_extra", "type": "medkit", "name": "X", "weight": 1, "value": 1})
+        agents = list(state["agents"].values())
+        agents[0].setdefault("inventory", []).extend([
+            {"id": "a1", "type": "medkit", "name": "X", "weight": 1, "value": 1},
+            {"id": "a2", "type": "bandage", "name": "Y", "weight": 0.2, "value": 1},
+        ])
+        state, events = self._r(state)
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        assert ev["payload"]["ground_count"] == initial_ground + 1
+        assert ev["payload"]["inventory_count"] == initial_inv + 2
+
+    def test_empty_world_no_error(self):
+        """Command must succeed; counts equal the actual number of items in the world."""
+        state = _make_world()
+        state, events = self._r(state)
+        ev = next(e for e in events if e["event_type"] == "debug_items_deleted")
+        # counts must be non-negative integers (generator may place items on ground)
+        assert ev["payload"]["ground_count"] >= 0
+        assert ev["payload"]["inventory_count"] >= 0
+        # After the command all locations and inventories must be empty
+        for loc in state["locations"].values():
+            assert loc.get("items", []) == []
+        for agent in state["agents"].values():
+            assert agent.get("inventory", []) == []
+
+
 class TestEventRules:
     """Zone event context rules."""
 
