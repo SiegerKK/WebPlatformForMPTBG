@@ -26,31 +26,31 @@ ITEM_TYPES: dict = {
     "bandage": {
         "name": "Бинт", "type": "medical",
         "weight": 0.1, "value": 50, "risk_tolerance": 0.1,
-        "effects": {"hp": 15},
+        "heal_value": 30, "effects": {"hp": 15},
         "description": "Перевязочный материал. Восстанавливает 15 HP.",
     },
     "medkit": {
         "name": "Аптечка", "type": "medical",
         "weight": 0.5, "value": 200, "risk_tolerance": 0.2,
-        "effects": {"hp": 50},
+        "heal_value": 60, "effects": {"hp": 50},
         "description": "Стандартная полевая аптечка. Восстанавливает 50 HP.",
     },
     "army_medkit": {
         "name": "Военная аптечка", "type": "medical",
         "weight": 0.6, "value": 450, "risk_tolerance": 0.4,
-        "effects": {"hp": 80},
+        "heal_value": 80, "effects": {"hp": 80},
         "description": "Военная аптечка высшего класса. Восстанавливает 80 HP.",
     },
     "stimpack": {
         "name": "Стимпак", "type": "medical",
         "weight": 0.3, "value": 350, "risk_tolerance": 0.7,
-        "effects": {"hp": 50, "hunger": 10},
+        "heal_value": 50, "effects": {"hp": 50, "hunger": 10},
         "description": "Боевой стимулятор. Восстанавливает 50 HP, немного повышает голод.",
     },
     "morphine": {
         "name": "Морфин", "type": "medical",
         "weight": 0.15, "value": 300, "risk_tolerance": 0.5,
-        "effects": {"hp": 25, "sleepiness": -20},
+        "heal_value": 25, "effects": {"hp": 25, "sleepiness": -20},
         "description": "Обезболивающее. Восстанавливает 25 HP, снижает усталость на 20.",
     },
     "antirad": {
@@ -69,31 +69,31 @@ ITEM_TYPES: dict = {
     "pistol": {
         "name": "Пистолет ПМ", "type": "weapon",
         "weight": 0.7, "value": 500, "risk_tolerance": 0.15,
-        "damage": 15, "range": 2, "ammo_type": "9x18",
+        "damage": 15, "accuracy": 0.55, "range": 2, "ammo_type": "9x18",
         "description": "Пистолет Макарова. Компактное личное оружие.",
     },
     "shotgun": {
         "name": "Обрез ТОЗ-34", "type": "weapon",
         "weight": 3.0, "value": 800, "risk_tolerance": 0.25,
-        "damage": 40, "range": 1, "ammo_type": "12gauge",
+        "damage": 35, "accuracy": 0.45, "range": 1, "ammo_type": "12gauge",
         "description": "Двустволка ближнего боя. Высокий урон, малая дальность.",
     },
     "ak74": {
         "name": "АК-74", "type": "weapon",
         "weight": 3.5, "value": 1500, "risk_tolerance": 0.5,
-        "damage": 25, "range": 3, "ammo_type": "5.45x39",
+        "damage": 25, "accuracy": 0.65, "range": 3, "ammo_type": "5.45x39",
         "description": "Автомат Калашникова. Надёжное оружие среднего боя.",
     },
     "pkm": {
         "name": "ПКМ (пулемёт)", "type": "weapon",
         "weight": 7.5, "value": 3500, "risk_tolerance": 0.9,
-        "damage": 35, "range": 3, "ammo_type": "7.62x54R",
+        "damage": 35, "accuracy": 0.60, "range": 3, "ammo_type": "7.62x54R",
         "description": "Ручной пулемёт Калашникова. Высокий DPS, тяжёлый.",
     },
     "svu_svd": {
         "name": "СВД (снайперская)", "type": "weapon",
         "weight": 4.2, "value": 4500, "risk_tolerance": 0.7,
-        "damage": 50, "range": 5, "ammo_type": "7.62x54R",
+        "damage": 50, "accuracy": 0.75, "range": 5, "ammo_type": "7.62x54R",
         "description": "Снайперская винтовка. Максимальная дальность и урон.",
     },
     # ── Armor ─────────────────────────────────────────────────────────────────

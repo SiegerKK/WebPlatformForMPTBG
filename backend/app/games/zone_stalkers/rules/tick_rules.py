@@ -317,6 +317,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             },
         })
 
+    # 2c. Initialize combat_interactions dict if missing
+    if "combat_interactions" not in state:
+        state["combat_interactions"] = {}
+
+    # 2d. Process all active combat interactions BEFORE normal bot decisions
+    _combat_events = _process_all_combat_interactions(state, world_turn)
+    events.extend(_combat_events)
+
     # 3. AI bot agent decisions (bots without a scheduled action)
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
@@ -328,6 +336,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         if agent.get("scheduled_action"):
             continue
         if agent.get("action_used"):
+            continue
+        # Skip bot decisions for agents in active combat (not fled)
+        if _agent_in_active_combat(agent_id, state):
             continue
         bot_evs = _run_bot_action(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
@@ -903,6 +914,436 @@ def _add_memory(
         agent["memory"] = mem[-MAX_AGENT_MEMORY:]
 
 
+# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─
+# Combat Interaction System
+# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─
+
+def _agent_in_active_combat(agent_id: str, state: Dict[str, Any]) -> bool:
+    """Return True if agent is non-fled participant in active combat."""
+    for ci in state.get("combat_interactions", {}).values():
+        if ci.get("ended", False):
+            continue
+        parts = ci.get("participants", {})
+        if agent_id in parts and not parts[agent_id].get("fled", False):
+            return True
+    return False
+
+
+def _get_combat_heal_item(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return first healing item in inventory, or None."""
+    for item in agent.get("inventory", []):
+        item_type = item.get("type", "")
+        item_info = ITEM_TYPES.get(item_type, {})
+        if item_info.get("type") == "medical" and item_info.get("effects", {}).get("hp", 0) > 0:
+            return item
+    return None
+
+
+def _agent_has_weapon_and_ammo(agent: Dict[str, Any]) -> bool:
+    """Return True if agent has an equipped weapon AND matching ammo."""
+    weapon = agent.get("equipment", {}).get("weapon")
+    if not weapon:
+        return False
+    weapon_type = weapon.get("type")
+    required_ammo = AMMO_FOR_WEAPON.get(weapon_type)
+    if required_ammo is None:
+        return True
+    return any(i.get("type") == required_ammo for i in agent.get("inventory", []))
+
+
+def _choose_combat_action(
+    agent: Dict[str, Any],
+    participant: Dict[str, Any],
+    rng: "random.Random",
+) -> str:
+    """Choose a combat action: flee/shoot/heal."""
+    _FLEE = "убежать"
+    _SHOOT = "стрелять"
+    _HEAL = "лечиться"
+    hp = agent.get("hp", 100)
+    max_hp = agent.get("max_hp", 100)
+    motive = participant.get("motive", "выжить")
+    risk = float(agent.get("risk_tolerance", 0.5))
+    hp_ratio = hp / max(max_hp, 1)
+    has_weapon_ammo = _agent_has_weapon_and_ammo(agent)
+    heal_item = _get_combat_heal_item(agent)
+    if not has_weapon_ammo:
+        if heal_item and hp_ratio < 0.8:
+            return _HEAL
+        return _FLEE
+    if hp_ratio <= 0.25:
+        if motive in ("выжить", "нажиться"):
+            return _FLEE
+        if heal_item:
+            return _HEAL
+        return _FLEE
+    if hp_ratio <= 0.30:
+        if heal_item and rng.random() < 0.6:
+            return _HEAL
+        if motive == "победить" and risk >= 0.7:
+            return _SHOOT
+        return _FLEE
+    if motive == "победить":
+        weights = {
+            _SHOOT: 0.6 + risk * 0.3,
+            _HEAL: 0.1 if heal_item and hp_ratio < 0.7 else 0.0,
+            _FLEE: max(0.0, 0.2 - risk * 0.15),
+        }
+    elif motive == "нажиться":
+        weights = {
+            _SHOOT: 0.3 + risk * 0.2,
+            _HEAL: 0.2 if heal_item and hp_ratio < 0.8 else 0.0,
+            _FLEE: 0.3 + (1.0 - risk) * 0.2,
+        }
+    else:
+        weights = {
+            _SHOOT: 0.15 + risk * 0.15,
+            _HEAL: 0.35 if heal_item and hp_ratio < 0.9 else 0.0,
+            _FLEE: 0.4 + (1.0 - risk) * 0.1,
+        }
+    total = sum(weights.values())
+    if total <= 0:
+        return _FLEE
+    roll = rng.random() * total
+    cumulative = 0.0
+    for action, w in weights.items():
+        cumulative += w
+        if roll <= cumulative:
+            return action
+    return _SHOOT
+
+
+def _combat_flee(
+    agent_id: str,
+    agent: Dict[str, Any],
+    participant: Dict[str, Any],
+    combat: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Execute flee action for a combat participant."""
+    events: List[Dict[str, Any]] = []
+    loc_id = agent.get("location_id")
+    loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+    cid = combat["id"]
+    _add_memory(
+        agent, world_turn, state, "decision",
+        f"🏃 Бегу с поля боя",
+        {"action_kind": "combat_flee", "combat_id": cid, "location_id": loc_id},
+        summary=f"Я решил бежать с поля боя из «{loc_name}»",
+    )
+    participant["fled"] = True
+    prev_loc_id = None
+    for mem in reversed(agent.get("memory", [])):
+        fx = mem.get("effects", {})
+        if fx.get("action_kind") == "travel_arrived":
+            arr_loc = fx.get("to_loc")
+            if arr_loc and arr_loc != loc_id:
+                prev_loc_id = arr_loc
+                break
+    if not prev_loc_id:
+        connections = state.get("locations", {}).get(loc_id, {}).get("connections", [])
+        open_conns = [c for c in connections if not c.get("closed")]
+        if open_conns:
+            rng_flee = random.Random(agent_id + str(world_turn) + "flee")
+            prev_loc_id = rng_flee.choice(open_conns)["to"]
+    if prev_loc_id and prev_loc_id in state.get("locations", {}):
+        connections = state.get("locations", {}).get(loc_id, {}).get("connections", [])
+        travel_time = next(
+            (c.get("travel_time", 12) for c in connections if c["to"] == prev_loc_id),
+            12,
+        )
+        flee_time = max(1, travel_time // 2)
+        participant["fled_to"] = prev_loc_id
+        agent["scheduled_action"] = {
+            "type": "travel",
+            "turns_remaining": flee_time,
+            "turns_total": flee_time,
+            "target_id": prev_loc_id,
+            "final_target_id": prev_loc_id,
+            "remaining_route": [],
+            "started_turn": world_turn,
+            "combat_flee": True,
+        }
+        events.append({
+            "event_type": "combat_fled",
+            "payload": {"agent_id": agent_id, "combat_id": cid,
+                        "from": loc_id, "to": prev_loc_id},
+        })
+    agent["action_used"] = True
+    return events
+
+
+def _combat_shoot(
+    agent_id: str,
+    agent: Dict[str, Any],
+    participant: Dict[str, Any],
+    combat: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+    rng: "random.Random",
+) -> List[Dict[str, Any]]:
+    """Execute shoot action for a combat participant."""
+    events: List[Dict[str, Any]] = []
+    agents = state.get("agents", {})
+    cid = combat["id"]
+    loc_id = agent.get("location_id")
+    living_enemies = []
+    for eid in participant.get("enemies", []):
+        ep = combat.get("participants", {}).get(eid, {})
+        ea = agents.get(eid, {})
+        if (ea.get("is_alive", True)
+                and not ep.get("fled", False)
+                and ea.get("location_id") == loc_id):
+            living_enemies.append(eid)
+    if not living_enemies:
+        return _combat_flee(agent_id, agent, participant, combat, state, world_turn)
+    target_id = rng.choice(living_enemies)
+    target = agents.get(target_id, {})
+    target_name = target.get("name", target_id)
+    weapon = agent.get("equipment", {}).get("weapon") or {}
+    w_type = weapon.get("type", "")
+    w_info = ITEM_TYPES.get(w_type, {})
+    accuracy = float(weapon.get("accuracy", w_info.get("accuracy", 0.6)))
+    base_damage = int(weapon.get("damage", w_info.get("damage", 15)))
+    hit = rng.random() < accuracy
+    damage_dealt = 0
+    if hit:
+        damage_dealt = base_damage
+        target_armor = target.get("equipment", {}).get("armor") or {}
+        if target_armor:
+            t_armor_type = target_armor.get("type", "")
+            t_armor_info = ITEM_TYPES.get(t_armor_type, {})
+            armor_def = target_armor.get("defense", t_armor_info.get("defense", 0))
+            damage_dealt = max(1, damage_dealt - armor_def // 3)
+        target["hp"] = max(0, target.get("hp", 100) - damage_dealt)
+    atk_name = agent.get("name", agent_id)
+    _add_memory(
+        agent, world_turn, state, "decision",
+        f"🔫 Стреляю в «{target_name}»",
+        {"action_kind": "combat_shoot", "observed": "combat_shoot",
+         "combat_id": cid, "target": target_id, "target_name": target_name,
+         "hit": hit, "damage": damage_dealt},
+        summary=f"Я выстрелил в «{target_name}»" + (f" и попал, нанес {damage_dealt} урона" if hit else " и промахнулся"),
+    )
+    events.append({
+        "event_type": "combat_shoot",
+        "payload": {"agent_id": agent_id, "target_id": target_id,
+                    "hit": hit, "damage": damage_dealt, "combat_id": cid},
+    })
+    if hit and damage_dealt > 0:
+        _add_memory(
+            target, world_turn, state, "observation",
+            f"💥 Получил ранение от «{atk_name}»",
+            {"observed": "combat_wounded", "combat_id": cid,
+             "attacker_id": agent_id, "attacker_name": atk_name,
+             "damage": damage_dealt},
+            summary=f"Получил {damage_dealt} урона от «{atk_name}» в бою",
+        )
+        events.append({
+            "event_type": "combat_wounded",
+            "payload": {"agent_id": target_id, "by": agent_id,
+                        "damage": damage_dealt, "hp_remaining": target.get("hp", 0),
+                        "combat_id": cid},
+        })
+        if target.get("hp", 0) <= 0:
+            target["is_alive"] = False
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"💀 Убил «{target_name}»",
+                {"observed": "combat_kill", "combat_id": cid,
+                 "target_id": target_id, "target_name": target_name},
+                summary=f"Я убил «{target_name}» в бою",
+            )
+            _add_memory(
+                target, world_turn, state, "observation",
+                "💀 Убит в бою",
+                {"observed": "combat_killed", "combat_id": cid,
+                 "killer_id": agent_id, "killer_name": atk_name},
+                summary=f"Я был убит «{atk_name}» в бою",
+            )
+            events.append({
+                "event_type": "agent_died",
+                "payload": {"agent_id": target_id, "cause": "combat",
+                            "killer_id": agent_id, "combat_id": cid},
+            })
+    agent["action_used"] = True
+    return events
+
+
+def _combat_heal_action(
+    agent_id: str,
+    agent: Dict[str, Any],
+    participant: Dict[str, Any],
+    combat: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Execute heal action for a combat participant."""
+    events: List[Dict[str, Any]] = []
+    cid = combat["id"]
+    heal_item = _get_combat_heal_item(agent)
+    if not heal_item:
+        return _combat_flee(agent_id, agent, participant, combat, state, world_turn)
+    item_type = heal_item.get("type", "")
+    item_info = ITEM_TYPES.get(item_type, {})
+    heal_amount = item_info.get("heal_value",
+        item_info.get("effects", {}).get("hp", 30))
+    old_hp = agent.get("hp", 100)
+    max_hp = agent.get("max_hp", 100)
+    actual_restore = min(heal_amount, max_hp - old_hp)
+    agent["hp"] = min(max_hp, old_hp + heal_amount)
+    inv = agent.get("inventory", [])
+    item_id = heal_item.get("id")
+    removed = False
+    new_inv = []
+    for it in inv:
+        if not removed and (it.get("id") == item_id or (not item_id and it.get("type") == item_type)):
+            removed = True
+        else:
+            new_inv.append(it)
+    if removed:
+        agent["inventory"] = new_inv
+    item_name = heal_item.get("name", item_type)
+    _add_memory(
+        agent, world_turn, state, "decision",
+        f"💊 Использовал «{item_name}», восстановил {actual_restore} HP",
+        {"observed": "combat_heal", "action_kind": "combat_heal",
+         "combat_id": cid, "item_type": item_type, "hp_restored": actual_restore},
+        summary=f"Использовал «{item_name}» в бою, восстановил {actual_restore} HP (текущее: {agent["hp"]})",
+    )
+    events.append({
+        "event_type": "combat_heal",
+        "payload": {"agent_id": agent_id, "item_type": item_type,
+                    "hp_restored": actual_restore, "combat_id": cid},
+    })
+    agent["action_used"] = True
+    return events
+
+
+def _process_all_combat_interactions(
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Process all active combat interactions for this tick."""
+    events: List[Dict[str, Any]] = []
+    agents = state.get("agents", {})
+    _FLEE = "убежать"
+    _SHOOT = "стрелять"
+    for cid, combat in list(state.get("combat_interactions", {}).items()):
+        if combat.get("ended", False):
+            continue
+        loc_id = combat.get("location_id")
+        loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+        participants = combat.get("participants", {})
+        # Step 1: Check for new participants who should join
+        existing_enemy_set: set = set()
+        for pid, pdata in participants.items():
+            existing_enemy_set.update(pdata.get("enemies", []))
+        for aid, agent in list(agents.items()):
+            if not agent.get("is_alive", True):
+                continue
+            if agent.get("has_left_zone"):
+                continue
+            if aid in participants:
+                continue
+            if agent.get("location_id") != loc_id:
+                continue
+            kt = agent.get("kill_target_id")
+            should_join = False
+            join_enemies = []
+            join_motive = "выжить"
+            if kt and kt in participants:
+                should_join = True
+                join_enemies = [kt]
+                join_motive = "победить"
+            elif aid in existing_enemy_set:
+                should_join = True
+                join_enemies = [
+                    pid for pid, pdata in participants.items()
+                    if aid in pdata.get("enemies", [])
+                ]
+                join_motive = "выжить"
+            if should_join:
+                participants[aid] = {
+                    "motive": join_motive,
+                    "enemies": join_enemies,
+                    "friends": [],
+                    "fled": False,
+                    "fled_to": None,
+                }
+                for je in join_enemies:
+                    if je in participants:
+                        if aid not in participants[je]["enemies"]:
+                            participants[je]["enemies"].append(aid)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "⚔️ Вступаю в боевое взаимодействие",
+                    {"action_kind": "combat_joined", "combat_id": cid, "motive": join_motive,
+                     "enemies": join_enemies, "location_id": loc_id},
+                    summary=f"Я вступил в боевое взаимодействие в «{loc_name}» с мотивом «{join_motive}»",
+                )
+        # Step 2: Each non-fled living participant takes an action
+        for aid, participant in list(participants.items()):
+            if participant.get("fled", False):
+                continue
+            agent = agents.get(aid)
+            if not agent or not agent.get("is_alive", True):
+                continue
+            if agent.get("action_used"):
+                continue
+            rng = random.Random(aid + str(world_turn) + "combat")
+            action = _choose_combat_action(agent, participant, rng)
+            if action == _FLEE:
+                evs = _combat_flee(aid, agent, participant, combat, state, world_turn)
+            elif action == _SHOOT:
+                evs = _combat_shoot(aid, agent, participant, combat, state, world_turn, rng)
+            else:
+                evs = _combat_heal_action(aid, agent, participant, combat, state, world_turn)
+            events.extend(evs)
+        # Step 3: Check if combat should end
+        combat_should_end = True
+        for aid, participant in participants.items():
+            if participant.get("fled", False):
+                continue
+            agent = agents.get(aid)
+            if not agent or not agent.get("is_alive", True):
+                continue
+            for eid in participant.get("enemies", []):
+                ep = participants.get(eid, {})
+                ea = agents.get(eid, {})
+                if (ea and ea.get("is_alive", True)
+                        and not ep.get("fled", False)
+                        and ea.get("location_id") == loc_id):
+                    combat_should_end = False
+                    break
+            if not combat_should_end:
+                break
+        if combat_should_end:
+            combat["ended"] = True
+            combat["ended_turn"] = world_turn
+            for aid, participant in participants.items():
+                agent = agents.get(aid)
+                if not agent:
+                    continue
+                survived = agent.get("is_alive", True)
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "⚔️ Боевое взаимодействие завершено",
+                    {"action_kind": "combat_ended", "combat_id": cid,
+                     "survived": survived, "location_id": loc_id},
+                    summary="Боевое взаимодействие завершилось",
+                )
+            events.append({
+                "event_type": "combat_ended",
+                "payload": {"combat_id": cid, "location_id": loc_id,
+                            "world_turn": world_turn},
+            })
+    return events
+
+
+
+
 def _score_location(loc: Dict[str, Any], goal_kind: str) -> float:
     """Score a location for a given goal kind.
 
@@ -1110,7 +1551,7 @@ def _write_location_observations(
 from app.games.zone_stalkers.balance.items import (
     HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES,
     WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_ITEM_TYPES, AMMO_FOR_WEAPON,
-    SECRET_DOCUMENT_ITEM_TYPES,
+    SECRET_DOCUMENT_ITEM_TYPES, ITEM_TYPES,
 )
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 
@@ -3653,27 +4094,89 @@ def _bot_pursue_goal(
         target = state.get("agents", {}).get(target_id, {})
         target_name = target.get("name", target_id) if target else target_id
 
-        # Step 1: target is here right now — kill (stub).
+        # Step 1: target is here right now — initiate combat interaction
         if target and target.get("location_id") == loc_id and target.get("is_alive", True):
             loc_name = loc.get("name", loc_id)
+            # Check if a combat interaction already exists at this location
+            existing_combat_id = None
+            for _cid, _ci in state.get("combat_interactions", {}).items():
+                if (_ci.get("location_id") == loc_id
+                        and not _ci.get("ended", False)
+                        and (agent_id in _ci.get("participants", {})
+                             or target_id in _ci.get("participants", {}))):
+                    existing_combat_id = _cid
+                    break
+            if existing_combat_id is None:
+                new_combat_id = f"combat_{loc_id}_{world_turn}"
+                state.setdefault("combat_interactions", {})[new_combat_id] = {
+                    "id": new_combat_id,
+                    "location_id": loc_id,
+                    "started_turn": world_turn,
+                    "ended": False,
+                    "ended_turn": None,
+                    "participants": {
+                        agent_id: {
+                            "motive": "победить",
+                            "enemies": [target_id],
+                            "friends": [],
+                            "fled": False,
+                            "fled_to": None,
+                        },
+                        target_id: {
+                            "motive": "выжить",
+                            "enemies": [agent_id],
+                            "friends": [],
+                            "fled": False,
+                            "fled_to": None,
+                        },
+                    },
+                }
+                cid = new_combat_id
+            else:
+                cid = existing_combat_id
+                _combat_obj = state["combat_interactions"][cid]
+                if agent_id not in _combat_obj["participants"]:
+                    _combat_obj["participants"][agent_id] = {
+                        "motive": "победить",
+                        "enemies": [target_id],
+                        "friends": [],
+                        "fled": False,
+                        "fled_to": None,
+                    }
+                if target_id not in _combat_obj["participants"]:
+                    _combat_obj["participants"][target_id] = {
+                        "motive": "выжить",
+                        "enemies": [agent_id],
+                        "friends": [],
+                        "fled": False,
+                        "fled_to": None,
+                    }
             _add_memory(
-                agent, world_turn, state, "observation",
-                f"⚔️ Цель обнаружена в «{loc_name}»! Устраняю «{target_name}»…",
+                agent, world_turn, state, "decision",
+                f"⚔️ Начинаю боевое взаимодействие с «{target_name}»",
                 {
-                    "action_kind": "hunt_target_killed",
+                    "action_kind": "combat_initiated",
+                    "combat_id": cid,
                     "target_id": target_id,
                     "target_name": target_name,
                     "location_id": loc_id,
                 },
-                summary=(
-                    f"Я нашёл свою цель — «{target_name}» — в «{loc_name}». "
-                    f"Задание выполнено (устранение)."
-                ),
+                summary=f"Я обнаружил цель — «{target_name}» — в «{loc_name}» и начал боевое взаимодействие.",
             )
+            _tgt_agent = state.get("agents", {}).get(target_id, {})
+            if _tgt_agent and _tgt_agent.get("controller", {}).get("kind") == "bot":
+                _add_memory(
+                    _tgt_agent, world_turn, state, "decision",
+                    f"⚔️ Вступаю в боевое взаимодействие",
+                    {"action_kind": "combat_joined", "combat_id": cid, "motive": "выжить",
+                     "enemies": [agent_id], "location_id": loc_id},
+                    summary=f"Я вступил в боевое взаимодействие в «{loc_name}» с мотивом «выжить»",
+                )
             agent["action_used"] = True
-            return [{"event_type": "hunt_target_killed",
-                     "payload": {"hunter_id": agent_id, "target_id": target_id,
-                                 "location_id": loc_id}}]
+            return [{"event_type": "combat_initiated",
+                     "payload": {"initiator_id": agent_id, "target_id": target_id,
+                                 "combat_id": cid, "location_id": loc_id}}]
+
 
         # Step 2: work through intel about where the target was last seen.
         intel_loc = _find_hunt_intel_location(agent, target_id, state)

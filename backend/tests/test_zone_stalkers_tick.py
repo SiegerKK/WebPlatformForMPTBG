@@ -5302,10 +5302,11 @@ class TestKillStalkerGoal:
         }
 
     def test_kill_target_at_same_location(self):
-        """Hunter at same location as target should write hunt_target_killed."""
+        """Hunter at same location as target should initiate combat interaction."""
         import random
         from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
         state = self._minimal_state()
+        state["combat_interactions"] = {}
         hunter = self._make_hunter("B", "agent_target")
         target = self._make_target("B")
         state["agents"]["agent_hunter"] = hunter
@@ -5315,13 +5316,20 @@ class TestKillStalkerGoal:
             "B", state["locations"]["B"], state, 10, random.Random(0)
         )
         assert hunter["action_used"]
-        kill_obs = [
+        # New behavior: combat_initiated instead of hunt_target_killed
+        combat_decisions = [
             m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "hunt_target_killed"
+            if m.get("effects", {}).get("action_kind") == "combat_initiated"
         ]
-        assert kill_obs, "Should have written hunt_target_killed observation"
-        assert kill_obs[0]["effects"]["target_id"] == "agent_target"
-        assert any(e["event_type"] == "hunt_target_killed" for e in events)
+        assert combat_decisions, "Should have written combat_initiated decision"
+        assert combat_decisions[0]["effects"]["target_id"] == "agent_target"
+        assert any(e["event_type"] == "combat_initiated" for e in events)
+        # Combat interaction should be created in state
+        assert len(state["combat_interactions"]) == 1
+        cid = list(state["combat_interactions"].keys())[0]
+        ci = state["combat_interactions"][cid]
+        assert "agent_hunter" in ci["participants"]
+        assert "agent_target" in ci["participants"]
 
     def test_hunter_asks_colocated_stalker_about_target(self):
         """Hunter with no intel, at same location as an informed stalker, gets the target location."""
@@ -5652,4 +5660,351 @@ class TestDijkstraReachableLocations:
         )
         assert fx["travel_minutes"] == 12, (
             f"Travel to B (12 min edge) should be 12 minutes, got {fx['travel_minutes']}"
+        )
+
+
+class TestCombatInteraction:
+    """Tests for the Combat Interaction (Boevoe vzaimodeistvie) mechanic."""
+
+    def _make_minimal_state(self, hunter_loc="B", target_loc="B"):
+        """Create a minimal two-location state with a hunter and target."""
+        return {
+            "locations": {
+                "A": {
+                    "name": "Базовый лагер",
+                    "terrain_type": "field_camp",
+                    "anomaly_activity": 0,
+                    "items": [], "agents": [],
+                    "connections": [{"to": "B", "type": "road", "travel_time": 30, "closed": False}],
+                    "exit_zone": False,
+                },
+                "B": {
+                    "name": "Промзона",
+                    "terrain_type": "industrial",
+                    "anomaly_activity": 0,
+                    "items": [], "agents": [],
+                    "connections": [{"to": "A", "type": "road", "travel_time": 30, "closed": False}],
+                    "exit_zone": False,
+                },
+            },
+            "agents": {},
+            "mutants": {},
+            "traders": {},
+            "world_turn": 90,
+            "emission_active": False,
+            "emission_ends_turn": 0,
+            "combat_interactions": {},
+        }
+
+    def _make_hunter(self, loc_id, target_id):
+        return {
+            "id": "agent_hunter",
+            "archetype": "stalker_agent",
+            "name": "Охотник",
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 3000,
+            "inventory": [{"id": "ammo1", "type": "9x18", "name": "Патроны", "value": 60}],
+            "equipment": {
+                "weapon": {"id": "w1", "type": "pistol", "name": "Пистолет", "damage": 15, "accuracy": 0.55},
+                "armor": None,
+                "detector": None,
+            },
+            "faction": "loner",
+            "controller": {"kind": "bot"},
+            "is_alive": True,
+            "action_used": False,
+            "has_left_zone": False,
+            "global_goal": "kill_stalker",
+            "kill_target_id": target_id,
+            "current_goal": None,
+            "risk_tolerance": 0.9,
+            "material_threshold": 3000,
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+            "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "experience": 0, "reputation": 0,
+        }
+
+    def _make_target(self, loc_id):
+        return {
+            "id": "agent_target",
+            "archetype": "stalker_agent",
+            "name": "Цель",
+            "location_id": loc_id,
+            "hp": 80, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 500,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "bandit",
+            "controller": {"kind": "bot"},
+            "is_alive": True,
+            "action_used": False,
+            "has_left_zone": False,
+            "global_goal": "get_rich",
+            "kill_target_id": None,
+            "current_goal": None,
+            "risk_tolerance": 0.3,
+            "material_threshold": 3000,
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+            "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "experience": 0, "reputation": 0,
+        }
+
+    def test_combat_initiated_by_kill_stalker(self):
+        """kill_stalker agent at same location as target creates combat interaction."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        events = _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "B", state["locations"]["B"], state, 90, random.Random(0)
+        )
+        # Combat should be created
+        assert len(state["combat_interactions"]) == 1, "Combat interaction should be created"
+        cid = list(state["combat_interactions"].keys())[0]
+        ci = state["combat_interactions"][cid]
+        assert ci["location_id"] == "B"
+        assert "agent_hunter" in ci["participants"]
+        assert "agent_target" in ci["participants"]
+        assert ci["participants"]["agent_hunter"]["motive"] == "победить"
+        assert ci["participants"]["agent_target"]["motive"] == "выжить"
+        # Hunter memory should have combat_initiated decision
+        combat_mem = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "combat_initiated"
+        ]
+        assert combat_mem, "Hunter should have combat_initiated in memory"
+        assert combat_mem[0]["effects"]["target_id"] == "agent_target"
+        # Event should be emitted
+        assert any(e["event_type"] == "combat_initiated" for e in events)
+        assert hunter["action_used"]
+
+    def test_combat_participant_skips_normal_decisions(self):
+        """Participant in active combat doesn't take normal bot decisions."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        # Manually create a combat where hunter is non-fled participant
+        state["combat_interactions"]["combat_B_90"] = {
+            "id": "combat_B_90",
+            "location_id": "B",
+            "started_turn": 90,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_hunter": {
+                    "motive": "победить",
+                    "enemies": ["agent_target"],
+                    "friends": [],
+                    "fled": False,
+                    "fled_to": None,
+                },
+                "agent_target": {
+                    "motive": "выжить",
+                    "enemies": ["agent_hunter"],
+                    "friends": [],
+                    "fled": False,
+                    "fled_to": None,
+                },
+            },
+        }
+        new_state, events = tick_zone_map(state)
+        # Normal bot decisions (wander, seek_anomaly etc.) should NOT be written for hunter
+        hunter_after = new_state["agents"]["agent_hunter"]
+        normal_decisions = [
+            m for m in hunter_after.get("memory", [])
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") in (
+                "wander", "move_for_anomaly", "explore_decision",
+                "buy_item", "seek_item", "hunt_search"
+            )
+        ]
+        assert not normal_decisions, (
+            f"Combat participant should not take normal decisions; got: {normal_decisions}"
+        )
+
+    def test_combat_flee_returns_to_previous_location(self):
+        """Fled agent gets scheduled travel back to previous location at half travel time."""
+        from app.games.zone_stalkers.rules.tick_rules import _combat_flee
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        # Add travel history: hunter came from A
+        hunter["memory"] = [{
+            "world_turn": 88,
+            "type": "action",
+            "title": "Прибыл в B",
+            "effects": {"action_kind": "travel_arrived", "to_loc": "B"},
+            "summary": "Прибыл",
+        }, {
+            "world_turn": 80,
+            "type": "action",
+            "title": "Прибыл в A",
+            "effects": {"action_kind": "travel_arrived", "to_loc": "A"},
+            "summary": "Прибыл",
+        }]
+        state["agents"]["agent_hunter"] = hunter
+        combat = {
+            "id": "combat_B_90",
+            "location_id": "B",
+            "started_turn": 90,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_hunter": {
+                    "motive": "победить",
+                    "enemies": ["agent_target"],
+                    "friends": [], "fled": False, "fled_to": None,
+                }
+            }
+        }
+        participant = combat["participants"]["agent_hunter"]
+        events = _combat_flee("agent_hunter", hunter, participant, combat, state, 90)
+        assert participant["fled"] is True
+        # Should schedule travel to A (previous location)
+        sched = hunter.get("scheduled_action")
+        assert sched is not None, "Should have scheduled travel"
+        assert sched["type"] == "travel"
+        assert sched["target_id"] == "A"
+        # Travel time should be half of 30 = 15
+        assert sched["turns_remaining"] == 15, (
+            f"Flee travel time should be 15 (half of 30), got {sched['turns_remaining']}"
+        )
+        # Memory should have combat_flee decision
+        flee_mem = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "combat_flee"
+        ]
+        assert flee_mem, "Should have combat_flee in memory"
+        # Event should be emitted
+        assert any(e["event_type"] == "combat_fled" for e in events)
+
+    def test_combat_ends_when_no_enemies(self):
+        """Combat ends when no participant has any living non-fled enemy at location."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        # Give target very low HP so it may die
+        target["hp"] = 1
+        # Give hunter a weapon with 100% accuracy so it definitely hits
+        hunter["equipment"]["weapon"] = {
+            "id": "w1", "type": "pistol", "name": "Пистолет",
+            "damage": 50, "accuracy": 1.0
+        }
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        state["combat_interactions"]["combat_B_90"] = {
+            "id": "combat_B_90",
+            "location_id": "B",
+            "started_turn": 90,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_hunter": {
+                    "motive": "победить",
+                    "enemies": ["agent_target"],
+                    "friends": [], "fled": False, "fled_to": None,
+                },
+                "agent_target": {
+                    "motive": "выжить",
+                    "enemies": ["agent_hunter"],
+                    "friends": [], "fled": False, "fled_to": None,
+                },
+            }
+        }
+        new_state, events = tick_zone_map(state)
+        # Either target is dead OR fled, combat should end
+        ci = new_state["combat_interactions"]["combat_B_90"]
+        # The combat should eventually end (may take a tick if hunter misses)
+        # With accuracy=1.0 and damage=50 vs hp=1, target is dead after first shot
+        target_after = new_state["agents"]["agent_target"]
+        assert not target_after.get("is_alive", True) or ci.get("ended", False), (
+            "Target should be dead or combat should have ended"
+        )
+        if ci.get("ended", False):
+            assert ci["ended_turn"] is not None
+            assert any(e["event_type"] == "combat_ended" for e in events)
+
+    def test_combat_shoot_kills_enemy(self):
+        """Shoot action with high accuracy kills enemy and writes proper memory."""
+        from app.games.zone_stalkers.rules.tick_rules import _combat_shoot
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        target["hp"] = 10  # low HP so guaranteed to die
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        import random
+        # Use accuracy=1.0 via weapon override
+        hunter["equipment"]["weapon"] = {
+            "id": "w1", "type": "pistol", "name": "Пистолет",
+            "damage": 50, "accuracy": 1.0
+        }
+        combat = {
+            "id": "combat_B_90",
+            "location_id": "B",
+            "started_turn": 90,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_hunter": {
+                    "motive": "победить",
+                    "enemies": ["agent_target"],
+                    "friends": [], "fled": False, "fled_to": None,
+                },
+                "agent_target": {
+                    "motive": "выжить",
+                    "enemies": ["agent_hunter"],
+                    "friends": [], "fled": False, "fled_to": None,
+                },
+            }
+        }
+        participant = combat["participants"]["agent_hunter"]
+        rng = random.Random(42)
+        events = _combat_shoot("agent_hunter", hunter, participant, combat, state, 90, rng)
+        # Target should be dead (hp=10 - 50 = -40, capped to 0)
+        assert target["hp"] == 0
+        assert not target.get("is_alive", True), "Target should be dead"
+        # Hunter memory: combat_shoot decision + combat_kill observation
+        shoot_mem = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "combat_shoot"
+        ]
+        assert shoot_mem, "Should have combat_shoot in memory"
+        assert shoot_mem[0]["effects"]["hit"] is True
+        assert shoot_mem[0]["effects"]["damage"] == 50
+        kill_obs = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("observed") == "combat_kill"
+        ]
+        assert kill_obs, "Should have combat_kill observation"
+        # Target memory: combat_killed observation
+        killed_obs = [
+            m for m in target["memory"]
+            if m.get("effects", {}).get("observed") == "combat_killed"
+        ]
+        assert killed_obs, "Target should have combat_killed observation"
+        # Events should include agent_died
+        assert any(e["event_type"] == "agent_died" for e in events)
+        assert any(
+            e.get("payload", {}).get("cause") == "combat" for e in events
         )
