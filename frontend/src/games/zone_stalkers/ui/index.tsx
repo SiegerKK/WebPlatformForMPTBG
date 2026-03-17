@@ -76,6 +76,7 @@ interface ZoneLocation {
   artifacts: Array<{ id: string; type: string; name: string; value: number }>;
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];
+  exit_zone?: boolean;
 }
 
 interface AgentInventoryItem {
@@ -102,8 +103,8 @@ interface MemoryEntry {
   world_minute: number;
   type: string;
   title: string;
-  summary: string;
-  effects: Record<string, number>;
+  summary?: string;
+  effects: Record<string, unknown>;
 }
 
 interface StalkerAgent {
@@ -136,6 +137,10 @@ interface StalkerAgent {
   current_goal?: string | null;
   risk_tolerance?: number;
   reputation?: number;
+  global_goal_achieved?: boolean;
+  has_left_zone?: boolean;
+  wealth_goal_target?: number;
+  kill_target_id?: string | null;
 }
 
 interface ZoneMapState {
@@ -157,6 +162,7 @@ interface ZoneMapState {
   active_events: string[];
   game_over: boolean;
   auto_tick_enabled?: boolean;
+  auto_tick_speed?: string | null;
 }
 
 interface ZoneEventState {
@@ -514,6 +520,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         if (visibleAgent) loadAgentMemory(visibleAgent);
       } else if (msg.type === 'state_updated') {
         refresh();
+      } else if (msg.type === 'auto_tick_changed') {
+        // Directly patch auto-tick state — no HTTP round-trip needed.
+        // All connected clients (tabs, users) receive this and sync instantly.
+        setContext((prev) => {
+          if (!prev) return prev;
+          const blob = (prev.state_blob as Record<string, unknown>) ?? {};
+          return {
+            ...prev,
+            state_blob: {
+              ...blob,
+              auto_tick_enabled: msg.auto_tick_enabled as boolean,
+              auto_tick_speed: (msg.auto_tick_speed as string | null) ?? null,
+            },
+          };
+        });
       }
     }, [refresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
@@ -1217,7 +1238,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                             <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                           </div>
                           <div style={styles.memoryTitle}>{m.title}</div>
-                          <div style={styles.memorySummary}>{m.summary}</div>
+                          {!!m.summary && (
+                            <div style={styles.memorySummary}>{m.summary}</div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1928,15 +1951,8 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                           <span style={styles.memoryWhen}>Day {m.world_day} · {TIME_LABEL(m.world_hour, m.world_minute ?? 0)}</span>
                         </div>
                         <div style={styles.memoryTitle}>{m.title}</div>
-                        <div style={styles.memorySummary}>{m.summary}</div>
-                        {Object.keys(m.effects).filter(k => m.effects[k] !== 0).length > 0 && (
-                          <div style={styles.memoryEffects}>
-                            {Object.entries(m.effects).filter(([, v]) => v !== 0).map(([k, v]) => (
-                              <span key={k} style={{ ...styles.effectChip, color: v > 0 ? '#86efac' : '#fca5a5' }}>
-                                {k}: {v > 0 ? '+' : ''}{v}
-                              </span>
-                            ))}
-                          </div>
+                        {!!m.summary && (
+                          <div style={styles.memorySummary}>{m.summary}</div>
                         )}
                       </div>
                     ))}
@@ -2010,19 +2026,21 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const renderCharactersDebug = () => {
     if (!zoneState) return null;
     const allAgents = Object.values(zoneState.agents);
+    const inZone = allAgents.filter((a) => !a.has_left_zone);
+    const leftZone = allAgents.filter((a) => a.has_left_zone);
     const locName = (id: string) => zoneState.locations[id]?.name ?? id;
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: 4 }}>
-          {allAgents.length} сталкеров в Зоне
+          {inZone.length} сталкеров в Зоне{leftZone.length > 0 ? `, ${leftZone.length} покинули` : ''}
         </div>
         {allAgents.map((agent) => (
           <div key={agent.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <AgentRow
                 agent={agent as unknown as AgentForProfile}
-                locationName={locName(agent.location_id)}
+                locationName={agent.has_left_zone ? '🚪 Покинул Зону' : locName(agent.location_id)}
                 locations={zoneState.locations}
                 isCurrentPlayer={agent.id === myAgentId}
                 contextId={context?.id}

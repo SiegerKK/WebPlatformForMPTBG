@@ -14,7 +14,7 @@ Supported commands:
 - end_turn
 - take_control(agent_id)              — take over an AI-controlled stalker (meta, no action cost)
 - debug_update_map(positions, connections, regions?) — persist debug canvas layout (meta, no action cost)
-- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?) — edit location params in debug mode (meta)
+- debug_update_location(loc_id, name, terrain_type?, anomaly_activity?, dominant_anomaly_type?, region?, exit_zone?) — edit location params in debug mode (meta)
 - debug_create_location(name, position?) — add a new location in debug mode (meta)
 - debug_delete_location(loc_id) — remove a location and all its connections in debug mode (meta)
 - debug_spawn_stalker(loc_id, name?) — spawn an NPC stalker at a location in debug mode (meta)
@@ -54,6 +54,7 @@ _VALID_TERRAIN_TYPES = frozenset([
 _VALID_GLOBAL_GOALS = frozenset([
     "get_rich",
     "unravel_zone_mystery",
+    "kill_stalker",
 ])
 
 
@@ -242,6 +243,8 @@ def resolve_world_command(
         if "region" in payload:
             region_val = payload["region"]
             loc["region"] = region_val if region_val else None
+        if "exit_zone" in payload:
+            loc["exit_zone"] = bool(payload["exit_zone"])
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 
@@ -262,6 +265,7 @@ def resolve_world_command(
             "anomaly_activity": int(payload.get("anomaly_activity", 0)),
             "dominant_anomaly_type": payload.get("dominant_anomaly_type") or None,
             "region": region_val if region_val else None,
+            "exit_zone": bool(payload.get("exit_zone", False)),
             "connections": [],
             "artifacts": [],
             "agents": [],
@@ -306,6 +310,7 @@ def resolve_world_command(
         name = str(payload.get("name", "")).strip() or f"Сталкер #{n}"
         rng = _random.Random(new_agent_id)
         global_goal = str(payload.get("global_goal", "")).strip() or None
+        kill_target_id = str(payload.get("kill_target_id", "")).strip() or None
         agent = _make_stalker_agent(
             agent_id=new_agent_id,
             name=name,
@@ -314,6 +319,7 @@ def resolve_world_command(
             participant_id=None,
             rng=rng,
             global_goal=global_goal,
+            kill_target_id=kill_target_id,
         )
         state.setdefault("agents", {})[new_agent_id] = agent
         state["locations"][loc_id]["agents"].append(new_agent_id)
@@ -1323,6 +1329,12 @@ def _validate_debug_spawn_stalker(
     global_goal = payload.get("global_goal")
     if global_goal is not None and global_goal not in _VALID_GLOBAL_GOALS:
         return RuleCheckResult(valid=False, error=f"Invalid global_goal '{global_goal}'; must be one of {sorted(_VALID_GLOBAL_GOALS)}")
+    if global_goal == "kill_stalker":
+        kill_target_id = str(payload.get("kill_target_id", "")).strip()
+        if not kill_target_id:
+            return RuleCheckResult(valid=False, error="kill_target_id is required when global_goal='kill_stalker'")
+        if kill_target_id not in state.get("agents", {}):
+            return RuleCheckResult(valid=False, error=f"kill_target_id '{kill_target_id}' not found in agents")
     return RuleCheckResult(valid=True)
 
 

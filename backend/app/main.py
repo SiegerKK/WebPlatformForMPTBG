@@ -41,7 +41,7 @@ async def _background_ticker(interval_seconds: int) -> None:
 
 async def _debug_auto_ticker() -> None:
     """
-    Fast ticker (500 ms) for matches that have ``debug_auto_tick = True``
+    Fast ticker (100 ms) for matches that have ``debug_auto_tick = True``
     stored in their game state.
 
     Runs ``tick_debug_auto_matches`` in a thread pool via
@@ -52,7 +52,7 @@ async def _debug_auto_ticker() -> None:
     """
     from app.core.ticker.service import tick_debug_auto_matches
     while True:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
         try:
             result = await asyncio.to_thread(tick_debug_auto_matches)
             if result.get("ticked"):
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
         )
     # Debug auto-ticker always runs (checks per-match flag in Redis state).
     tasks.append(asyncio.create_task(_debug_auto_ticker()))
-    logger.info("Debug auto-ticker started (500 ms interval)")
+    logger.info("Debug auto-ticker started (100 ms interval)")
 
     yield
 

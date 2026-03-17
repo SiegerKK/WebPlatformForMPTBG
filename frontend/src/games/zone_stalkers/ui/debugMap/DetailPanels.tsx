@@ -42,7 +42,7 @@ export function LocationDetailPanel({
   zoneState: ZoneMapState;
   onClose: () => void;
   onEdit: () => void;
-  onSpawnStalker: (name: string, faction: string, globalGoal: string) => Promise<void>;
+  onSpawnStalker: (name: string, faction: string, globalGoal: string, killTargetId?: string) => Promise<void>;
   onSpawnTrader: (name: string) => Promise<void>;
   onSpawnMutant: (mutantType: string) => Promise<void>;
   onSpawnArtifact: (artifactType: string) => Promise<void>;
@@ -333,14 +333,15 @@ export function LocationDetailPanel({
       {showSpawnModal === 'stalker' && (
         <AgentCreateModal
           onClose={() => setShowSpawnModal(null)}
-          onSave={async (name, faction, globalGoal, isTrader) => {
+          onSave={async (name, faction, globalGoal, isTrader, killTargetId) => {
             if (isTrader) {
               await onSpawnTrader(name);
             } else {
-              await onSpawnStalker(name, faction, globalGoal);
+              await onSpawnStalker(name, faction, globalGoal, killTargetId);
             }
             setShowSpawnModal(null);
           }}
+          agents={zoneState.agents}
         />
       )}
       {showSpawnModal === 'trader' && (

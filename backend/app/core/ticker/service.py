@@ -24,16 +24,24 @@ _debug_ctx_cache: Dict[str, str] = {}
 _debug_ctx_cache_ts: float = 0.0
 _DEBUG_CACHE_TTL: float = 5.0  # seconds between DB refreshes
 
-# ── Slow-tick throttle ────────────────────────────────────────────────────────
-# In-memory map of context_id → monotonic timestamp of the last tick for
-# contexts running in slow mode (3 s/turn).  Not persisted — resets on
-# server restart (acceptable for a debug feature).
+# ── Per-speed tick throttle ───────────────────────────────────────────────────
+# In-memory map of context_id → monotonic timestamp of the last tick.
+# Not persisted — resets on server restart (acceptable for a debug feature).
 #
 # Thread-safety note: tick_debug_auto_matches() is invoked exclusively from
 # the single _debug_auto_ticker background task (via asyncio.to_thread), so
 # only one call runs at a time.  No locking is required.
-_slow_tick_last: Dict[str, float] = {}
-_SLOW_TICK_INTERVAL: float = 3.0  # seconds between ticks in slow mode
+_tick_last: Dict[str, float] = {}
+
+# Minimum real-time gap (seconds) between consecutive ticks at each named speed.
+# 1 tick == 1 game-minute, so "realtime" maps game-time 1:1 to real time.
+# Keys must match AUTO_TICK_VALID_SPEEDS in app.core.commands.pipeline.
+_TICK_INTERVALS: Dict[str, float] = {
+    "realtime": 60.0,  # 1 tick/min — 1 game-minute per real minute (true 1:1)
+    "x10":       6.0,  # 10× realtime — 1 tick per 6 real seconds
+    "x100":      0.6,  # 100× realtime — 1 tick per 0.6 real seconds
+    "x600":      0.1,  # 600× realtime — 1 tick per 0.1 real seconds
+}
 
 
 def tick_match(match_id_str: str, db: Session) -> dict:
@@ -128,7 +136,13 @@ def tick_debug_auto_matches() -> dict:
     ``set_auto_tick`` platform meta-command) or the legacy
     ``debug_auto_tick`` flag (Zone Stalkers backward compat).
 
-    Designed to be called from a fast background task (every ~500 ms) via
+    Tick cadence is controlled by ``auto_tick_speed`` in the context state:
+    * ``"realtime"`` — throttle to 1 tick/second
+    * ``"x10"``      — throttle to 1 tick/100 ms
+    * ``"x100"``     — no throttle (limited only by loop cadence)
+    Backward compat: ``auto_tick_slow_mode=True`` maps to ``"realtime"``.
+
+    Designed to be called from a fast background task (every ~100 ms) via
     ``asyncio.to_thread`` so that the asyncio event loop is not blocked.
 
     Opens and closes its own database session so that the SQLAlchemy session
@@ -154,12 +168,21 @@ def tick_debug_auto_matches() -> dict:
                         or get_context_flag(ctx_id, "debug_auto_tick", default=False)):
                     continue
 
-                # Slow-mode throttle: only tick if 3 s have elapsed since last tick.
-                if get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
+                # Determine the desired speed and apply throttle accordingly.
+                speed = get_context_flag(ctx_id, "auto_tick_speed", default=None)
+                if speed is None:
+                    # Backward compat: legacy slow_mode boolean
+                    if get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
+                        speed = "realtime"
+                    else:
+                        speed = "x100"
+
+                interval = _TICK_INTERVALS.get(speed, 0.0)
+                if interval > 0.0:
                     now = time.monotonic()
-                    if now - _slow_tick_last.get(ctx_id, 0.0) < _SLOW_TICK_INTERVAL:
+                    if now - _tick_last.get(ctx_id, 0.0) < interval:
                         continue
-                    _slow_tick_last[ctx_id] = now
+                    _tick_last[ctx_id] = now
 
                 result = tick_match(match_id, db)
                 if "error" not in result:
