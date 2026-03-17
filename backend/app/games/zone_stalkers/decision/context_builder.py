@@ -1,0 +1,296 @@
+"""context_builder — build AgentContext from raw world state.
+
+``build_agent_context`` is called **once per tick per agent** before any
+decision logic runs.  It must not mutate the state and must not make any
+gameplay decisions.
+
+Visibility model (Phase 1 MVP):
+    An agent "sees":
+    1. All other agents co-located at the same location.
+    2. All objects (items, traders) at the same location.
+    3. Agents / locations referenced in the agent's recent memory.
+    4. Intel transferred in dialogue (Phase 6+).
+    5. Signals from the group (Phase 7+).
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from .models.agent_context import AgentContext
+
+
+def build_agent_context(
+    agent_id: str,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+) -> AgentContext:
+    """Return a normalised ``AgentContext`` for the given agent.
+
+    Parameters
+    ----------
+    agent_id
+        The stable key of the agent in ``state["agents"]``.
+    agent
+        The agent dict (``state["agents"][agent_id]``).
+    state
+        The full world state dict (read-only semantics).
+
+    Returns
+    -------
+    AgentContext
+        Populated snapshot; never ``None``.
+    """
+    locations: dict[str, Any] = state.get("locations", {})
+    agents: dict[str, Any] = state.get("agents", {})
+    loc_id: str = agent.get("location_id", "")
+    loc: dict[str, Any] = locations.get(loc_id, {})
+
+    # ── World context ─────────────────────────────────────────────────────────
+    world_context: dict[str, Any] = {
+        "world_turn": state.get("world_turn", 0),
+        "world_day": state.get("world_day", 1),
+        "world_hour": state.get("world_hour", 6),
+        "world_minute": state.get("world_minute", 0),
+        "emission_active": state.get("emission_active", False),
+        "emission_scheduled_turn": state.get("emission_scheduled_turn"),
+        "emission_ends_turn": state.get("emission_ends_turn"),
+    }
+
+    # ── Visible entities (co-located agents) ─────────────────────────────────
+    visible_entities: list[dict[str, Any]] = []
+    for other_id, other in agents.items():
+        if other_id == agent_id:
+            continue
+        if not other.get("is_alive", True):
+            continue
+        if other.get("has_left_zone"):
+            continue
+        if other.get("location_id") == loc_id:
+            visible_entities.append({
+                "agent_id": other_id,
+                "name": other.get("name", other_id),
+                "archetype": other.get("archetype"),
+                "is_trader": other.get("archetype") == "trader_agent",
+                "global_goal": other.get("global_goal"),
+                "hp": other.get("hp", 100),
+                "is_alive": other.get("is_alive", True),
+            })
+
+    # ── Known entities (from memory) ─────────────────────────────────────────
+    known_entities: list[dict[str, Any]] = _entities_from_memory(agent, agents, agent_id)
+
+    # ── Known locations (visited or mentioned in memory) ──────────────────────
+    known_locations: list[dict[str, Any]] = _locations_from_memory(agent, locations)
+
+    # ── Known hazards (from memory) ───────────────────────────────────────────
+    known_hazards: list[dict[str, Any]] = _hazards_from_memory(agent)
+
+    # ── Known traders (co-located or from memory) ─────────────────────────────
+    known_traders: list[dict[str, Any]] = _traders_from_visible_and_memory(
+        visible_entities, agent, locations
+    )
+
+    # ── Known targets ─────────────────────────────────────────────────────────
+    known_targets: list[dict[str, Any]] = _targets_from_agent(agent, agents)
+
+    # ── Current commitment (active scheduled_action) ──────────────────────────
+    current_commitment: dict[str, Any] | None = agent.get("scheduled_action")
+
+    # ── Combat context ────────────────────────────────────────────────────────
+    combat_context: dict[str, Any] | None = _combat_context_for(agent_id, state)
+
+    # ── Social context (lazy — from state["relations"] if present) ───────────
+    social_context: dict[str, Any] | None = _social_context_for(agent_id, state)
+
+    # ── Group context (lazy — from state["groups"] if present) ───────────────
+    group_context: dict[str, Any] | None = _group_context_for(agent_id, state)
+
+    return AgentContext(
+        agent_id=agent_id,
+        self_state=agent,
+        location_state=loc,
+        world_context=world_context,
+        visible_entities=visible_entities,
+        known_entities=known_entities,
+        known_locations=known_locations,
+        known_hazards=known_hazards,
+        known_traders=known_traders,
+        known_targets=known_targets,
+        current_commitment=current_commitment,
+        combat_context=combat_context,
+        social_context=social_context,
+        group_context=group_context,
+    )
+
+
+# ── Private helpers ────────────────────────────────────────────────────────────
+
+def _entities_from_memory(
+    agent: dict[str, Any],
+    agents: dict[str, Any],
+    own_id: str,
+) -> list[dict[str, Any]]:
+    """Return a deduplicated list of agents mentioned in the NPC's memory.
+
+    Performance note: iterates memory once (O(M) where M ≤ MAX_AGENT_MEMORY=2000).
+    This is acceptable at Phase 1 but could be optimised in Phase 5+ with a
+    memory index keyed by observed agent_id.
+    """
+    seen_ids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for mem in agent.get("memory", []):
+        effects = mem.get("effects", {})
+        for key in ("target_agent_id", "subject", "agent_id"):
+            other_id = effects.get(key)
+            if (
+                other_id
+                and other_id != own_id
+                and other_id not in seen_ids
+                and other_id in agents
+            ):
+                seen_ids.add(other_id)
+                other = agents[other_id]
+                result.append({
+                    "agent_id": other_id,
+                    "name": other.get("name", other_id),
+                    "archetype": other.get("archetype"),
+                    "is_alive": other.get("is_alive", True),
+                    "last_known_location": effects.get("location_id") or effects.get("to_location"),
+                    "memory_turn": mem.get("world_turn", 0),
+                })
+    return result
+
+
+def _locations_from_memory(
+    agent: dict[str, Any],
+    locations: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return a deduplicated list of locations the NPC has in memory."""
+    seen_ids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for mem in agent.get("memory", []):
+        effects = mem.get("effects", {})
+        for key in ("location_id", "destination", "from_location", "to_location"):
+            loc_id = effects.get(key)
+            if loc_id and loc_id not in seen_ids and loc_id in locations:
+                seen_ids.add(loc_id)
+                loc = locations[loc_id]
+                result.append({
+                    "location_id": loc_id,
+                    "name": loc.get("name", loc_id),
+                    "terrain_type": loc.get("terrain_type"),
+                    "anomaly_activity": loc.get("anomaly_activity", 0),
+                    "has_trader": any(
+                        a.get("archetype") == "trader_agent" and a.get("location_id") == loc_id
+                        for a in locations.get(loc_id, {}).get("agents", [])
+                    ),
+                    "memory_turn": mem.get("world_turn", 0),
+                })
+    return result
+
+
+def _hazards_from_memory(agent: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return hazard observations recorded in the NPC's memory."""
+    hazards: list[dict[str, Any]] = []
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        kind = mem.get("effects", {}).get("action_kind", "")
+        if kind in (
+            "emission_imminent",
+            "emission_started",
+            "emission_ended",
+            "anomaly_detected",
+        ):
+            hazards.append({
+                "kind": kind,
+                "world_turn": mem.get("world_turn", 0),
+                "effects": mem.get("effects", {}),
+            })
+    return hazards
+
+
+def _traders_from_visible_and_memory(
+    visible: list[dict[str, Any]],
+    agent: dict[str, Any],
+    locations: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Collect known trader info from co-located agents and memory."""
+    traders: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # Co-located traders
+    for entity in visible:
+        if entity.get("is_trader"):
+            aid = entity["agent_id"]
+            seen.add(aid)
+            traders.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
+
+    # Traders remembered from memory
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") == "trader_visit":
+            trader_id = effects.get("trader_id")
+            if trader_id and trader_id not in seen:
+                seen.add(trader_id)
+                traders.append({
+                    "agent_id": trader_id,
+                    "name": effects.get("trader_name", trader_id),
+                    "location_id": effects.get("location_id"),
+                    "source": "memory",
+                    "memory_turn": mem.get("world_turn", 0),
+                })
+    return traders
+
+
+def _targets_from_agent(
+    agent: dict[str, Any],
+    agents: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return hunt/kill targets for the agent."""
+    targets: list[dict[str, Any]] = []
+    kill_target_id = agent.get("kill_target_id")
+    if kill_target_id and kill_target_id in agents:
+        target = agents[kill_target_id]
+        targets.append({
+            "agent_id": kill_target_id,
+            "name": target.get("name", kill_target_id),
+            "is_alive": target.get("is_alive", True),
+            "location_id": target.get("location_id"),
+        })
+    return targets
+
+
+def _combat_context_for(
+    agent_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the combat interaction for this agent, if active."""
+    combat_interactions = state.get("combat_interactions", {})
+    return combat_interactions.get(agent_id)
+
+
+def _social_context_for(
+    agent_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return relevant relation data for this agent (lazy, Phase 6+)."""
+    relations = state.get("relations", {})
+    agent_relations = relations.get(agent_id)
+    if not agent_relations:
+        return None
+    return {"relations": agent_relations}
+
+
+def _group_context_for(
+    agent_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the group this agent belongs to, if any (Phase 7+)."""
+    groups = state.get("groups", {})
+    for group_id, group in groups.items():
+        if agent_id in group.get("members", []):
+            return {"group_id": group_id, "group": group}
+    return None

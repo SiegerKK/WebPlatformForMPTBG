@@ -116,6 +116,12 @@ def validate_world_command(
     if command_type == "debug_preview_bot_decision":
         return _validate_debug_preview_bot_decision(payload, state)
 
+    if command_type == "debug_explain_agent_v2":
+        return _validate_debug_preview_bot_decision(payload, state)  # same validation
+
+    if command_type == "debug_toggle_v2_pipeline":
+        return RuleCheckResult(valid=True)  # no payload required
+
     if command_type == "debug_add_item":
         return _validate_debug_add_item(payload, state)
 
@@ -789,6 +795,30 @@ def resolve_world_command(
                 "decision": decision_desc,
                 "decision_tree": decision_tree,
             },
+        })
+        return state, events
+
+    # ── debug_explain_agent_v2 ─────────────────────────────────────────────────
+    if command_type == "debug_explain_agent_v2":
+        from app.games.zone_stalkers.decision.debug.explain_intent import explain_agent_decision
+        agent_id_to_explain = str(payload["agent_id"])
+        explanation = explain_agent_decision(agent_id_to_explain, state)
+        events.append({
+            "event_type": "agent_v2_explanation",
+            "payload": {
+                "agent_id": agent_id_to_explain,
+                "explanation": explanation,
+            },
+        })
+        return state, events
+
+    # ── debug_toggle_v2_pipeline ───────────────────────────────────────────────
+    if command_type == "debug_toggle_v2_pipeline":
+        enabled = not state.get("_v2_decision_pipeline", False)
+        state["_v2_decision_pipeline"] = enabled
+        events.append({
+            "event_type": "v2_pipeline_toggled",
+            "payload": {"enabled": enabled},
         })
         return state, events
 
