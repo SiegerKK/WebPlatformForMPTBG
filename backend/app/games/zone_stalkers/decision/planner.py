@@ -467,7 +467,11 @@ def _nearest_trader_location(
     ctx: AgentContext,
     state: dict[str, Any],
 ) -> Optional[str]:
-    """Return the location_id of the nearest known trader, or None."""
+    """Return the location_id of the nearest known trader, or None.
+
+    Note: delegates to the legacy tick_rules helper during the migration period.
+    Phase 5+ can promote this to a standalone utility in a shared module.
+    """
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
     agent_loc = ctx.self_state.get("location_id", "")
     return _find_nearest_trader_location(agent_loc, state)

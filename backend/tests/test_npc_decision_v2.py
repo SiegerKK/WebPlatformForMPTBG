@@ -283,8 +283,10 @@ class TestNeedScores:
         assert needs.reload_or_rearm == 0.0
 
     def test_get_rich_below_threshold(self):
+        from app.games.zone_stalkers.decision.needs import GET_RICH_WEIGHT
         needs = self._eval(money=0, material_threshold=3000)
-        assert needs.get_rich > 0.5
+        # With wealth=0: get_rich = (1.0 - 0) * GET_RICH_WEIGHT = GET_RICH_WEIGHT
+        assert abs(needs.get_rich - GET_RICH_WEIGHT) < 0.01
 
     def test_get_rich_at_threshold(self):
         needs = self._eval(money=3000, material_threshold=3000)

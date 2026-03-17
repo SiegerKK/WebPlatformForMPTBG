@@ -33,6 +33,9 @@ _SLEEP_HIGH = 75                     # sleepiness threshold from tick_rules
 _DESIRED_AMMO_RESERVE = 20           # target ammo count for full reload_or_rearm score
 
 _GET_RICH_WEIGHT = 0.70              # weight for the get_rich material drive formula
+
+# ── Public constants (importable for tests and other modules) ─────────────────
+GET_RICH_WEIGHT = _GET_RICH_WEIGHT   # public alias
 _GOAL_MIN_FLOOR = 0.10               # minimum goal drive score even when wealth < threshold
 
 
@@ -233,8 +236,8 @@ def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def _agent_wealth(agent: dict[str, Any]) -> int:
-    """Sum of money + inventory values + equipped item values."""
+def agent_wealth(agent: dict[str, Any]) -> int:
+    """Sum of money + inventory values + equipped item values (public API)."""
     money: int = agent.get("money", 0)
     inv_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
     eq_value = sum(
@@ -245,17 +248,29 @@ def _agent_wealth(agent: dict[str, Any]) -> int:
     return money + inv_value + eq_value
 
 
+# ── Private alias kept for internal use (needs only) ──────────────────────────
+_agent_wealth = agent_wealth
+
+
 def _is_emission_warned(agent: dict[str, Any], current_turn: int) -> bool:
-    """Check if the agent has a live (not yet superseded) emission_imminent memory."""
+    """Check if the agent has a live (not yet superseded) emission_imminent memory.
+
+    Scans from the most recent memory entry backward for speed — once both
+    relevant events are found the scan terminates early.
+    """
     last_ended_turn = 0
     last_imminent_turn = 0
-    for mem in agent.get("memory", []):
+    memory = agent.get("memory", [])
+    # Scan in reverse (most recent first) and stop once both are found
+    for mem in reversed(memory):
         if mem.get("type") != "observation":
             continue
         kind = mem.get("effects", {}).get("action_kind")
         turn = mem.get("world_turn", 0)
-        if kind == "emission_ended" and turn > last_ended_turn:
+        if kind == "emission_ended" and last_ended_turn == 0:
             last_ended_turn = turn
-        elif kind == "emission_imminent" and turn > last_imminent_turn:
+        elif kind == "emission_imminent" and last_imminent_turn == 0:
             last_imminent_turn = turn
+        if last_ended_turn > 0 and last_imminent_turn > 0:
+            break
     return last_imminent_turn > last_ended_turn

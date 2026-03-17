@@ -151,6 +151,13 @@ def _compute_attitude(rel: RelationState) -> str:
         ATTITUDE_SUSPICIOUS, ATTITUDE_HOSTILE, ATTITUDE_TARGET,
     )
     if rel.attitude == ATTITUDE_TARGET:
+        # ATTITUDE_TARGET is sticky: once set (e.g. via kill_stalker global goal),
+        # it is not overridden by the automated attitude recomputation.
+        # To clear it explicitly, set rel.attitude = ATTITUDE_NEUTRAL (or another
+        # value) before calling set_relation(), e.g.:
+        #   rel = get_relation(owner, other, state)
+        #   rel.attitude = ATTITUDE_NEUTRAL
+        #   set_relation(owner, other, rel, state)
         return ATTITUDE_TARGET  # sticky — only cleared explicitly
     score = rel.trust * 0.4 + rel.respect * 0.2 - rel.hostility * 0.4 + rel.shared_history_score * 0.2
     if score >= 0.6:

@@ -186,7 +186,7 @@ def _leader_score(
             + health_ratio*0.10 + commitment*0.20
     """
     from ..social.relations import get_relation
-    from ..needs import _agent_wealth
+    from ..needs import agent_wealth as _agent_wealth
 
     # Trust and respect: average of relations from group members toward this agent
     agents = state.get("agents", {})

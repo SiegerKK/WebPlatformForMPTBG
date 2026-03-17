@@ -128,7 +128,7 @@ def explain_agent_decision(
     loc = state.get("locations", {}).get(loc_id, {})
     scheduled = agent.get("scheduled_action")
 
-    from ..needs import _agent_wealth
+    from ..needs import agent_wealth as _agent_wealth
     wealth = _agent_wealth(agent)
 
     context_summary: dict[str, Any] = {

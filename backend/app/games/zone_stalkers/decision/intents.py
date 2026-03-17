@@ -3,6 +3,13 @@
 ``select_intent(ctx, needs, world_turn)`` returns the single Intent that the
 agent should pursue this tick (Intent invariant 11.1 from the refactor spec).
 
+Language note:
+    All ``reason`` strings in this module are written in **Russian**.
+    This is intentional — Zone Stalkers is a Russian-language game and all
+    in-game memory/decision text is in Russian.  The ``reason`` field is
+    displayed to players via the explain/debug interface and stored in
+    ``agent._v2_context``.
+
 Tie-break order (fixed priority — from the addendum §5.1):
     1.  survive_now
     2.  heal_self
