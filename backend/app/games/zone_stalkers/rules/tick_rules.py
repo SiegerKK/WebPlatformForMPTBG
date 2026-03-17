@@ -960,6 +960,9 @@ def _choose_combat_action(
     _FLEE = "убежать"
     _SHOOT = "стрелять"
     _HEAL = "лечиться"
+    # Participant with no enemies has nothing to fight — flee immediately.
+    if not participant.get("enemies"):
+        return _FLEE
     hp = agent.get("hp", 100)
     max_hp = agent.get("max_hp", 100)
     motive = participant.get("motive", "выжить")
@@ -1070,6 +1073,32 @@ def _combat_flee(
             "payload": {"agent_id": agent_id, "combat_id": cid,
                         "from": loc_id, "to": prev_loc_id},
         })
+        # Notify all other non-fled, alive participants who are still at this location.
+        to_loc_name = state.get("locations", {}).get(prev_loc_id, {}).get("name", prev_loc_id)
+        agent_name = agent.get("name", agent_id)
+        for _obs_id, _obs_pdata in combat.get("participants", {}).items():
+            if _obs_id == agent_id:
+                continue
+            if _obs_pdata.get("fled", False):
+                continue
+            _obs_agent = state.get("agents", {}).get(_obs_id)
+            if not _obs_agent or not _obs_agent.get("is_alive", True):
+                continue
+            if _obs_agent.get("location_id") != loc_id:
+                continue
+            _add_memory(
+                _obs_agent, world_turn, state, "observation",
+                f"🏃 «{agent_name}» отступил из боя",
+                {
+                    "action_kind": "retreat_observed",
+                    "subject": agent_id,
+                    "subject_name": agent_name,
+                    "from_location": loc_id,
+                    "to_location": prev_loc_id,
+                    "note": "Видел, как участник отступил",
+                },
+                summary=f"«{agent_name}» отступил с «{loc_name}» на «{to_loc_name}»",
+            )
     agent["action_used"] = True
     return events
 

@@ -6103,3 +6103,289 @@ class TestCombatInteraction:
         assert hunter_after.get("global_goal_achieved"), (
             "Hunter's kill_stalker goal should be achieved on tick after killing the target"
         )
+
+    # ── 7 MVP Scenario tests ──────────────────────────────────────────────────
+
+    def _make_agent(self, agent_id, loc_id, **overrides):
+        """Build a generic stalker agent for combat tests."""
+        base = {
+            "id": agent_id,
+            "archetype": "stalker_agent",
+            "name": agent_id,
+            "location_id": loc_id,
+            "hp": 100, "max_hp": 100, "radiation": 0,
+            "hunger": 10, "thirst": 10, "sleepiness": 10,
+            "money": 1000,
+            "inventory": [],
+            "equipment": {"weapon": None, "armor": None, "detector": None},
+            "faction": "loner",
+            "controller": {"kind": "bot"},
+            "is_alive": True,
+            "action_used": False,
+            "has_left_zone": False,
+            "global_goal": "get_rich",
+            "kill_target_id": None,
+            "current_goal": None,
+            "risk_tolerance": 0.5,
+            "material_threshold": 3000,
+            "wealth_goal_target": 100000,
+            "global_goal_achieved": False,
+            "scheduled_action": None,
+            "action_queue": [],
+            "memory": [],
+            "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
+            "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
+            "experience": 0, "reputation": 0,
+        }
+        base.update(overrides)
+        return base
+
+    def _weapon(self, w_type="pistol", damage=30, accuracy=1.0):
+        return {"id": "w_test", "type": w_type, "name": w_type, "damage": damage, "accuracy": accuracy}
+
+    def _ammo(self, ammo_type="ammo_9mm"):
+        return {"id": "ammo_test", "type": ammo_type, "name": "Патроны", "value": 50}
+
+    def _medkit(self):
+        return {"id": "medkit_test", "type": "medkit", "name": "Аптечка", "value": 200}
+
+    def _make_combat(self, loc_id, participants_spec, started_turn=90):
+        """Build a combat_interactions entry from {agent_id: {motive, enemies, fled}} spec."""
+        participants = {}
+        for aid, spec in participants_spec.items():
+            participants[aid] = {
+                "motive": spec.get("motive", "выжить"),
+                "enemies": spec.get("enemies", []),
+                "friends": spec.get("friends", []),
+                "fled": spec.get("fled", False),
+                "fled_to": None,
+            }
+        cid = f"combat_{loc_id}_{started_turn}"
+        return cid, {
+            "id": cid,
+            "location_id": loc_id,
+            "started_turn": started_turn,
+            "ended": False,
+            "ended_turn": None,
+            "participants": participants,
+        }
+
+    def test_scenario1_hunter_full_hp_shoots_on_first_tick(self):
+        """Scenario 1: Hunter (full HP, weapon+ammo, high risk, motive=победить) → shoots."""
+        from app.games.zone_stalkers.rules.tick_rules import _choose_combat_action
+        import random
+        agent = self._make_agent("A", "B",
+                                 hp=90, max_hp=100,
+                                 risk_tolerance=0.9,
+                                 equipment={"weapon": self._weapon(accuracy=1.0), "armor": None, "detector": None},
+                                 inventory=[self._ammo()])
+        participant = {"motive": "победить", "enemies": ["B"], "friends": [], "fled": False, "fled_to": None}
+        rng = random.Random(42)
+        action = _choose_combat_action(agent, participant, rng)
+        assert action == "стрелять", (
+            f"Hunter with full HP, high risk and motive 'победить' should shoot, got '{action}'"
+        )
+
+    def test_scenario2_hunter_critical_hp_heals_first(self):
+        """Scenario 2: Hunter low HP (20/100), medkit, weapon+ammo, motive=победить → heals."""
+        from app.games.zone_stalkers.rules.tick_rules import _choose_combat_action
+        import random
+        agent = self._make_agent("A", "B",
+                                 hp=20, max_hp=100,
+                                 risk_tolerance=0.5,
+                                 equipment={"weapon": self._weapon(), "armor": None, "detector": None},
+                                 inventory=[self._ammo(), self._medkit()])
+        participant = {"motive": "победить", "enemies": ["B"], "friends": [], "fled": False, "fled_to": None}
+        # hp_ratio = 0.2 ≤ 0.25 → heals (has medkit) when motive is победить
+        rng = random.Random(0)
+        action = _choose_combat_action(agent, participant, rng)
+        assert action == "лечиться", (
+            f"Hunter with critical HP and medkit should heal first, got '{action}'"
+        )
+
+    def test_scenario3_hunter_no_ammo_flees_and_target_gets_retreat_observed(self):
+        """Scenario 3: Hunter no ammo → flees; target receives retreat_observed memory."""
+        from app.games.zone_stalkers.rules.tick_rules import _combat_flee
+        state = self._make_minimal_state()
+        # Hunter at B (came from A)
+        hunter = self._make_agent("agent_hunter", "B",
+                                  hp=75, max_hp=100, risk_tolerance=0.3,
+                                  name="Охотник",
+                                  equipment={"weapon": self._weapon(), "armor": None, "detector": None},
+                                  inventory=[],  # NO ammo
+                                  memory=[{
+                                      "world_turn": 80,
+                                      "type": "action",
+                                      "title": "Прибыл",
+                                      "effects": {"action_kind": "travel_arrived", "to_loc": "A"},
+                                  }])
+        target = self._make_agent("agent_target", "B", name="Цель")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        cid, combat = self._make_combat("B", {
+            "agent_hunter": {"motive": "победить", "enemies": ["agent_target"]},
+            "agent_target": {"motive": "выжить", "enemies": ["agent_hunter"]},
+        })
+        state["combat_interactions"][cid] = combat
+        participant = combat["participants"]["agent_hunter"]
+        _combat_flee("agent_hunter", hunter, participant, combat, state, 90)
+        # Hunter must have fled
+        assert participant["fled"] is True
+        assert hunter.get("scheduled_action") is not None
+        # Target must have retreat_observed in memory
+        retreat_obs = [
+            m for m in target.get("memory", [])
+            if m.get("effects", {}).get("action_kind") == "retreat_observed"
+        ]
+        assert retreat_obs, "Target should have retreat_observed after hunter flees"
+        obs = retreat_obs[0]["effects"]
+        assert obs["subject"] == "agent_hunter"
+        assert obs["from_location"] == "B"
+        assert obs["to_location"] == "A"
+
+    def test_scenario4_neutral_bystander_no_enemies_flees(self):
+        """Scenario 4: Neutral bystander has no enemies → immediately flees from combat."""
+        from app.games.zone_stalkers.rules.tick_rules import _choose_combat_action
+        import random
+        agent = self._make_agent("C", "B",
+                                 hp=100, max_hp=100, risk_tolerance=0.2,
+                                 equipment={"weapon": self._weapon(), "armor": None, "detector": None},
+                                 inventory=[self._ammo()])
+        participant = {"motive": "выжить", "enemies": [], "friends": [], "fled": False, "fled_to": None}
+        rng = random.Random(7)
+        action = _choose_combat_action(agent, participant, rng)
+        assert action == "убежать", (
+            f"Neutral participant with no enemies should flee, got '{action}'"
+        )
+
+    def test_scenario5_active_enemy_present_agent_shoots_not_heals(self):
+        """Scenario 5: Agent with motive=победить and active enemy shoots, not heals wounded ally."""
+        from app.games.zone_stalkers.rules.tick_rules import _choose_combat_action
+        import random
+        # A is healthy (80/100), has weapon+ammo and medkit, motive=победить, risk=0.6
+        agent = self._make_agent("A", "B",
+                                 hp=80, max_hp=100, risk_tolerance=0.6,
+                                 equipment={"weapon": self._weapon(accuracy=1.0), "armor": None, "detector": None},
+                                 inventory=[self._ammo(), self._medkit()])
+        participant = {"motive": "победить", "enemies": ["C"], "friends": ["B"], "fled": False, "fled_to": None}
+        # With motive=победить, hp_ratio=0.8 (>0.30), risk=0.6:
+        # weights: shoot=0.6+0.6*0.3=0.78, heal=0.1 (hp<0.7? No, 0.8>=0.7 → 0), flee=max(0,0.2-0.09)=0.11
+        # So shoot should dominate heavily
+        shoot_count = sum(
+            1 for seed in range(20)
+            if _choose_combat_action(agent, participant, random.Random(seed)) == "стрелять"
+        )
+        assert shoot_count >= 16, (
+            f"Agent with active enemy and motive 'победить' should usually shoot; "
+            f"shot in {shoot_count}/20 trials"
+        )
+
+    def test_scenario6_no_ammo_no_medkit_flees_target_gets_retreat_observed(self):
+        """Scenario 6: Agent out of ammo, no medkit → flees; remaining participant gets retreat_observed."""
+        from app.games.zone_stalkers.rules.tick_rules import _combat_flee, _choose_combat_action
+        import random
+        state = self._make_minimal_state()
+        agent_a = self._make_agent("agent_a", "B",
+                                   hp=60, max_hp=100, risk_tolerance=0.9,
+                                   name="Стрелок",
+                                   equipment={"weapon": self._weapon(), "armor": None, "detector": None},
+                                   inventory=[],  # no ammo, no medkit
+                                   memory=[{
+                                       "world_turn": 85,
+                                       "type": "action",
+                                       "title": "Прибыл",
+                                       "effects": {"action_kind": "travel_arrived", "to_loc": "A"},
+                                   }])
+        agent_b = self._make_agent("agent_b", "B", name="Противник")
+        state["agents"]["agent_a"] = agent_a
+        state["agents"]["agent_b"] = agent_b
+        cid, combat = self._make_combat("B", {
+            "agent_a": {"motive": "победить", "enemies": ["agent_b"]},
+            "agent_b": {"motive": "выжить", "enemies": ["agent_a"]},
+        })
+        state["combat_interactions"][cid] = combat
+        # Verify _choose_combat_action returns flee (no ammo)
+        participant_a = combat["participants"]["agent_a"]
+        action = _choose_combat_action(agent_a, participant_a, random.Random(0))
+        assert action == "убежать", (
+            f"Agent with no ammo should flee regardless of motive, got '{action}'"
+        )
+        # Execute flee and check retreat_observed for agent_b
+        _combat_flee("agent_a", agent_a, participant_a, combat, state, 90)
+        retreat_obs = [
+            m for m in agent_b.get("memory", [])
+            if m.get("effects", {}).get("action_kind") == "retreat_observed"
+        ]
+        assert retreat_obs, "Remaining participant should receive retreat_observed"
+        obs = retreat_obs[0]["effects"]
+        assert obs["subject"] == "agent_a"
+        assert obs["from_location"] == "B"
+        assert obs["to_location"] == "A"
+
+    def test_scenario7_combat_ends_when_one_participant_flees_and_none_have_enemies(self):
+        """Scenario 7: A vs B vs C; B flees; A and C have no enemies → combat ends."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        # A is hunting B
+        agent_a = self._make_agent("agent_a", "B",
+                                   name="Охотник",
+                                   global_goal="kill_stalker", kill_target_id="agent_b",
+                                   material_threshold=0,
+                                   equipment={"weapon": self._weapon(damage=10, accuracy=0.0), "armor": None, "detector": None},
+                                   inventory=[self._ammo()])
+        # B is the target
+        agent_b = self._make_agent("agent_b", "B",
+                                   name="Цель",
+                                   equipment={"weapon": None, "armor": None, "detector": None},
+                                   inventory=[],
+                                   memory=[{
+                                       "world_turn": 80,
+                                       "type": "action",
+                                       "title": "Прибыл",
+                                       "effects": {"action_kind": "travel_arrived", "to_loc": "A"},
+                                   }])
+        # C is a neutral bystander — no enemies
+        agent_c = self._make_agent("agent_c", "B",
+                                   name="Прохожий",
+                                   equipment={"weapon": self._weapon(), "armor": None, "detector": None},
+                                   inventory=[self._ammo()],
+                                   memory=[{
+                                       "world_turn": 80,
+                                       "type": "action",
+                                       "title": "Прибыл",
+                                       "effects": {"action_kind": "travel_arrived", "to_loc": "A"},
+                                   }])
+        state["agents"]["agent_a"] = agent_a
+        state["agents"]["agent_b"] = agent_b
+        state["agents"]["agent_c"] = agent_c
+        # Pre-existing combat where A fights B, C is neutral bystander with no enemies
+        cid = "combat_B_90"
+        state["combat_interactions"][cid] = {
+            "id": cid,
+            "location_id": "B",
+            "started_turn": 89,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_a": {"motive": "победить", "enemies": ["agent_b"], "friends": [], "fled": False, "fled_to": None},
+                "agent_b": {"motive": "выжить", "enemies": ["agent_a"], "friends": [], "fled": False, "fled_to": None},
+                "agent_c": {"motive": "выжить", "enemies": [], "friends": [], "fled": False, "fled_to": None},
+            },
+        }
+        # Tick: B and C both have no path to shoot → B flees (no weapon), C flees (no enemies)
+        new_state, events = tick_zone_map(state)
+        ci = new_state["combat_interactions"][cid]
+        # B must have fled (no weapon → flee)
+        b_participant = ci["participants"]["agent_b"]
+        c_participant = ci["participants"]["agent_c"]
+        assert b_participant.get("fled"), "B (no weapon) should have fled"
+        assert c_participant.get("fled"), "C (no enemies) should have fled"
+        # After both flee, A has no remaining enemies at location → combat ends
+        assert ci.get("ended"), "Combat should end when remaining participants have no active enemies"
+        # A should observe B's retreat
+        a_retreat_obs = [
+            m for m in new_state["agents"]["agent_a"].get("memory", [])
+            if m.get("effects", {}).get("action_kind") == "retreat_observed"
+               and m.get("effects", {}).get("subject") == "agent_b"
+        ]
+        assert a_retreat_obs, "A should have retreat_observed memory for B's escape"
