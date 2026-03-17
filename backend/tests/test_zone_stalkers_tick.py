@@ -5387,11 +5387,12 @@ class TestKillStalkerGoal:
         )
 
     def test_hunter_waits_at_trader_antispan(self):
-        """Hunter already at trader should wait and not spam hunt_wait_at_trader decisions."""
+        """Hunter already at trader: if can buy intel, writes observation (no decision); if broke, no spam."""
         import random
         from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
         state = self._minimal_state()
         hunter = self._make_hunter("A", "agent_target")
+        hunter["money"] = 50  # Too broke to buy intel — forces idle/wait path
         # Pre-seed an existing wait_at_trader decision to test anti-spam.
         hunter["memory"] = [{
             "world_turn": 9, "type": "decision",
@@ -5479,6 +5480,198 @@ class TestKillStalkerGoal:
             {"loc_id": "A", "global_goal": "kill_stalker", "kill_target_id": "agent_target"}, state
         )
         assert result3.valid
+
+    def test_hunter_uses_retreat_observed_as_hunt_intel(self):
+        """_find_hunt_intel_location should return the to_location from a retreat_observed entry."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_hunt_intel_location
+        agent = {
+            "memory": [{
+                "world_turn": 8,
+                "type": "observation",
+                "title": "Видел отступление",
+                "effects": {
+                    "action_kind": "retreat_observed",
+                    "subject": "agent_target",
+                    "from_location": "A",
+                    "to_location": "B",
+                    "note": "Видел, как участник отступил",
+                },
+                "summary": "",
+            }]
+        }
+        result = _find_hunt_intel_location(agent, "agent_target", {})
+        assert result == "B", (
+            f"Expected 'B' from retreat_observed to_location, got {result!r}"
+        )
+
+    def test_retreat_observed_intel_respects_exhausted_locs(self):
+        """retreat_observed to_location should be skipped if that area was already exhausted."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_hunt_intel_location
+        agent = {
+            "memory": [
+                {
+                    "world_turn": 5,
+                    "type": "observation",
+                    "title": "Видел отступление",
+                    "effects": {
+                        "action_kind": "retreat_observed",
+                        "subject": "agent_target",
+                        "from_location": "A",
+                        "to_location": "B",
+                    },
+                    "summary": "",
+                },
+                {
+                    "world_turn": 7,
+                    "type": "observation",
+                    "title": "Район обыскан",
+                    "effects": {
+                        "action_kind": "hunt_area_exhausted",
+                        "target_id": "agent_target",
+                        "location_id": "B",
+                    },
+                    "summary": "",
+                },
+            ]
+        }
+        result = _find_hunt_intel_location(agent, "agent_target", {})
+        assert result is None, (
+            f"Exhausted retreat destination should not be returned; got {result!r}"
+        )
+
+    def test_find_hunt_intel_location_prefers_newest(self):
+        """_find_hunt_intel_location returns the location with the highest world_turn."""
+        from app.games.zone_stalkers.rules.tick_rules import _find_hunt_intel_location
+        agent = {
+            "memory": [
+                {
+                    "world_turn": 3,
+                    "type": "observation",
+                    "title": "Старая наводка",
+                    "effects": {
+                        "action_kind": "retreat_observed",
+                        "subject": "agent_target",
+                        "from_location": "X",
+                        "to_location": "B",
+                    },
+                    "summary": "",
+                },
+                {
+                    "world_turn": 9,
+                    "type": "observation",
+                    "title": "Новая наводка",
+                    "effects": {
+                        "action_kind": "intel_from_trader",
+                        "observed": "agent_location",
+                        "target_agent_id": "agent_target",
+                        "location_id": "C",
+                    },
+                    "summary": "",
+                },
+            ]
+        }
+        result = _find_hunt_intel_location(agent, "agent_target", {})
+        assert result == "C", (
+            f"Should prefer the newest intel (turn 9 → C); got {result!r}"
+        )
+
+    def test_hunter_buys_intel_from_trader(self):
+        """Hunter already at trader should buy intel about target location and write observation."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        hunter = self._make_hunter("A", "agent_target")
+        hunter["money"] = 1000
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "A", state["locations"]["A"], state, 10, random.Random(0)
+        )
+        assert hunter["action_used"]
+        # Should have written an intel_from_trader observation
+        intel_obs = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "intel_from_trader"
+            and m.get("effects", {}).get("target_agent_id") == "agent_target"
+        ]
+        assert intel_obs, "Should have written intel_from_trader observation"
+        assert intel_obs[0]["effects"]["location_id"] == "B", (
+            "Intel should point to target's actual location"
+        )
+        assert intel_obs[0]["effects"]["observed"] == "agent_location"
+        # Money should have been deducted
+        assert hunter["money"] == 800, f"Expected 800 after paying 200, got {hunter['money']}"
+        # Trader should have received the money
+        trader = state["traders"]["trader_0"]
+        assert trader["money"] == 5200, f"Expected trader 5200, got {trader['money']}"
+
+    def test_hunter_no_intel_purchased_if_broke(self):
+        """Hunter at trader with insufficient money should NOT buy intel and should idle."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        hunter = self._make_hunter("A", "agent_target")
+        hunter["money"] = 50  # Less than _HUNT_INTEL_PRICE (200)
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "A", state["locations"]["A"], state, 10, random.Random(0)
+        )
+        assert hunter["action_used"]
+        # Should NOT have written an intel_from_trader observation
+        intel_obs = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "intel_from_trader"
+        ]
+        assert not intel_obs, "Should NOT buy intel when broke"
+        # Money unchanged
+        assert hunter["money"] == 50
+        # Should write a hunt_wait_at_trader decision (falling back to idle)
+        wait_decisions = [
+            m for m in hunter["memory"]
+            if m.get("effects", {}).get("action_kind") == "hunt_wait_at_trader"
+        ]
+        assert wait_decisions, "Should write hunt_wait_at_trader when broke at trader"
+
+    def test_hunter_no_duplicate_intel_same_turn(self):
+        """Hunter should not buy trader intel twice on the same world_turn."""
+        import random
+        from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        state = self._minimal_state()
+        hunter = self._make_hunter("A", "agent_target")
+        hunter["money"] = 1000
+        # Pre-seed: intel already bought on turn 10
+        hunter["memory"] = [{
+            "world_turn": 10,
+            "type": "observation",
+            "title": "Купил информацию",
+            "effects": {
+                "action_kind": "intel_from_trader",
+                "observed": "agent_location",
+                "location_id": "B",
+                "target_agent_id": "agent_target",
+                "target_agent_name": "Цель",
+                "source_agent_id": "trader_0",
+                "source_agent_name": "Торговец",
+                "price_paid": 200,
+            },
+            "summary": "",
+        }]
+        target = self._make_target("B")
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        _bot_pursue_goal(
+            "agent_hunter", hunter, "kill_stalker",
+            "A", state["locations"]["A"], state, 10, random.Random(0)
+        )
+        # Money should NOT be deducted again
+        assert hunter["money"] == 1000, (
+            f"Should not deduct money twice for same-turn intel; got {hunter['money']}"
+        )
 
 
 class TestDepartedStalkerNotObserved:

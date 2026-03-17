@@ -91,6 +91,9 @@ _ITEM_SCORE_WEIGHT_RISK = 0.7        # Risk-tolerance match is the primary facto
 _ITEM_SCORE_WEIGHT_VALUE = 0.2       # Higher base value (better quality item) is preferred
 _ITEM_SCORE_WEIGHT_INV_WEIGHT = 0.1  # Lighter items are preferred
 
+# Price (in money units) that a hunter pays the trader for intel about a kill target's location.
+_HUNT_INTEL_PRICE = 200
+
 
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
@@ -2834,6 +2837,87 @@ def _bot_ask_colocated_stalkers_about_agent(
     return first_loc
 
 
+def _bot_buy_hunt_intel_from_trader(
+    agent_id: str,
+    agent: Dict[str, Any],
+    target_id: str,
+    target_name: str,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> bool:
+    """Buy location intel about a kill target from a trader at the current location.
+
+    The trader knows the current whereabouts of every alive stalker in the zone
+    (via their trade network).  The hunter pays ``_HUNT_INTEL_PRICE`` to receive
+    an ``intel_from_trader`` observation that ``_find_hunt_intel_location`` can
+    use to resume pursuit.
+
+    Returns ``True`` if intel was purchased; ``False`` if the purchase was not
+    possible (no trader, target dead/unknown, insufficient funds, or intel for
+    this target was already bought this turn).
+    """
+    loc_id = agent.get("location_id", "")
+    locations = state.get("locations", {})
+    loc_name = locations.get(loc_id, {}).get("name", loc_id)
+
+    # Only purchase once per world_turn for this target.
+    for mem in agent.get("memory", []):
+        if mem.get("world_turn") != world_turn:
+            continue
+        fx = mem.get("effects", {})
+        if (fx.get("action_kind") == "intel_from_trader"
+                and fx.get("target_agent_id") == target_id):
+            return False  # Already bought this turn
+
+    target = state.get("agents", {}).get(target_id)
+    if not target or not target.get("is_alive", True):
+        return False  # Target is dead or unknown
+
+    target_loc = target.get("location_id")
+    if not target_loc:
+        return False
+
+    traders = state.get("traders", {})
+    trader = next(
+        (t for t in traders.values()
+         if t.get("location_id") == loc_id and t.get("is_alive", True)),
+        None,
+    )
+    if trader is None:
+        return False
+
+    if agent.get("money", 0) < _HUNT_INTEL_PRICE:
+        return False
+
+    # Deduct money and credit trader
+    agent["money"] = agent.get("money", 0) - _HUNT_INTEL_PRICE
+    trader["money"] = trader.get("money", 0) + _HUNT_INTEL_PRICE
+
+    trader_name = trader.get("name", trader.get("id", "Торговец"))
+    target_loc_name = locations.get(target_loc, {}).get("name", target_loc)
+
+    _add_memory(
+        agent, world_turn, state, "observation",
+        f"💰 Купил информацию: «{target_name}» замечен в «{target_loc_name}»",
+        {
+            "action_kind": "intel_from_trader",
+            "observed": "agent_location",
+            "location_id": target_loc,
+            "target_agent_id": target_id,
+            "target_agent_name": target_name,
+            "source_agent_id": trader.get("id", ""),
+            "source_agent_name": trader_name,
+            "price_paid": _HUNT_INTEL_PRICE,
+        },
+        summary=(
+            f"Я купил у торговца «{trader_name}» информацию о местонахождении "
+            f"«{target_name}» за {_HUNT_INTEL_PRICE} руб. "
+            f"По данным торговца, цель сейчас в «{target_loc_name}»."
+        ),
+    )
+    return True
+
+
 def _find_hunt_intel_location(
     agent: Dict[str, Any],
     target_agent_id: str,
@@ -2841,10 +2925,14 @@ def _find_hunt_intel_location(
 ) -> Optional[str]:
     """Return the most recent non-exhausted intel location for a hunt target.
 
-    Scans memory for ``intel_from_stalker`` + ``observed="agent_location"``
-    entries that reference *target_agent_id*.  Skips locations that have been
-    recorded as ``hunt_area_exhausted`` for this target.  Returns the most
-    recent (last written) matching loc_id, or ``None``.
+    Scans memory for observations that indicate where the target was last seen:
+    - ``intel_from_stalker`` / ``intel_from_trader`` + ``observed="agent_location"``
+      entries referencing *target_agent_id*;
+    - ``retreat_observed`` entries where ``subject == target_agent_id`` —
+      the ``to_location`` field tells us where the target fled.
+
+    Locations recorded as ``hunt_area_exhausted`` for this target are skipped.
+    Returns the most recent (last written) matching loc_id, or ``None``.
     """
     exhausted_locs: set = set()
     for mem in agent.get("memory", []):
@@ -2859,18 +2947,33 @@ def _find_hunt_intel_location(
         if mem.get("type") != "observation":
             continue
         fx = mem.get("effects", {})
-        if (fx.get("action_kind") != "intel_from_stalker"
-                or fx.get("observed") != "agent_location"):
-            continue
-        if fx.get("target_agent_id") != target_agent_id:
-            continue
-        obs_loc = fx.get("location_id")
-        if not obs_loc or obs_loc in exhausted_locs:
-            continue
-        t = mem.get("world_turn", 0)
-        if t > best_turn:
-            best_turn = t
-            best_loc = obs_loc
+        action_kind = fx.get("action_kind")
+
+        # Source 1: stalker / trader location intel
+        if action_kind in ("intel_from_stalker", "intel_from_trader"):
+            if fx.get("observed") != "agent_location":
+                continue
+            if fx.get("target_agent_id") != target_agent_id:
+                continue
+            obs_loc = fx.get("location_id")
+            if not obs_loc or obs_loc in exhausted_locs:
+                continue
+            t = mem.get("world_turn", 0)
+            if t > best_turn:
+                best_turn = t
+                best_loc = obs_loc
+
+        # Source 2: retreat_observed — the target was seen fleeing to to_location
+        elif action_kind == "retreat_observed":
+            if fx.get("subject") != target_agent_id:
+                continue
+            retreat_dest = fx.get("to_location")
+            if not retreat_dest or retreat_dest in exhausted_locs:
+                continue
+            t = mem.get("world_turn", 0)
+            if t > best_turn:
+                best_turn = t
+                best_loc = retreat_dest
 
     return best_loc
 
@@ -4338,7 +4441,16 @@ def _bot_pursue_goal(
                 )
                 return _bot_schedule_travel(agent_id, agent, trader_loc, state, world_turn)
             else:
-                # Already at trader — idle and wait. Anti-spam guard.
+                # Already at trader — try to buy intel about the target, then idle.
+                bought = _bot_buy_hunt_intel_from_trader(
+                    agent_id, agent, target_id, target_name, state, world_turn
+                )
+                if bought:
+                    # Intel purchased — next tick the hunter will use it via Step 2.
+                    agent["action_used"] = True
+                    return []
+
+                # Could not buy (broke, target dead, already purchased this turn) — anti-spam idle.
                 _last_hunt_decision = None
                 for _sm in reversed(agent.get("memory", [])):
                     if _sm.get("type") == "decision":
