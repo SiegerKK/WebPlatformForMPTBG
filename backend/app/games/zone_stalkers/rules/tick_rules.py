@@ -1155,6 +1155,17 @@ def _combat_shoot(
                  "target_id": target_id, "target_name": target_name},
                 summary=f"Я убил «{target_name}» в бою",
             )
+            # If this kill completes the hunter's global kill_stalker goal, record it
+            # so that _check_global_goal_completion can detect completion on the same tick.
+            if agent.get("kill_target_id") == target_id:
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"🎯 Цель ликвидирована: «{target_name}» уничтожен",
+                    {"action_kind": "hunt_target_killed",
+                     "target_id": target_id, "target_name": target_name,
+                     "combat_id": cid},
+                    summary=f"Я выполнил охотничье задание — уничтожил «{target_name}» в бою",
+                )
             _add_memory(
                 target, world_turn, state, "observation",
                 "💀 Убит в бою",
@@ -3089,19 +3100,21 @@ def _check_global_goal_completion(
             )
     elif global_goal == "kill_stalker":
         target_id = agent.get("kill_target_id")
-        if target_id and any(
-            m.get("effects", {}).get("action_kind") == "hunt_target_killed"
-            and m.get("effects", {}).get("target_id") == target_id
-            for m in agent.get("memory", [])
-        ):
-            agent["global_goal_achieved"] = True
-            target_name = state.get("agents", {}).get(target_id, {}).get("name", target_id)
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"⚔️ Цель достигнута: «{target_name}» устранён!",
-                {"action_kind": "goal_achieved", "goal": "kill_stalker", "target_id": target_id},
-                summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
-            )
+        if target_id:
+            target_agent = state.get("agents", {}).get(target_id, {})
+            # Goal achieved when the target is confirmed dead in the current game state.
+            # Checking is_alive directly (rather than memory) ensures old fake kill-stub
+            # entries from previous save states do not falsely complete the goal.
+            target_is_dead = not target_agent.get("is_alive", True) if target_agent else False
+            if target_is_dead:
+                agent["global_goal_achieved"] = True
+                target_name = target_agent.get("name", target_id)
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"⚔️ Цель достигнута: «{target_name}» устранён!",
+                    {"action_kind": "goal_achieved", "goal": "kill_stalker", "target_id": target_id},
+                    summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
+                )
 
 
 def _bot_route_to_exit(
@@ -4078,7 +4091,7 @@ def _bot_pursue_goal(
     if global_goal == "kill_stalker":
         # ── Устранить сталкера: найти цель и ликвидировать ───────────────────
         # Behaviour:
-        #  Step 1 — If the target is at the current location: kill (stub).
+        #  Step 1 — If the target is at the current location: initiate combat interaction.
         #  Step 2 — If agent has fresh intel about target location: travel there
         #           and search the base location + its direct neighbours one by
         #           one.  Mark the area as exhausted once all neighbours are done.

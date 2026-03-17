@@ -5418,29 +5418,44 @@ class TestKillStalkerGoal:
         )
 
     def test_check_goal_completion_on_kill(self):
-        """_check_global_goal_completion sets global_goal_achieved when kill recorded."""
+        """_check_global_goal_completion sets global_goal_achieved when target is confirmed dead."""
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
         state = self._minimal_state()
         hunter = self._make_hunter("B", "agent_target")
         target = self._make_target("B")
+        # Mark target as actually dead (combat killed them)
+        target["is_alive"] = False
         state["agents"]["agent_hunter"] = hunter
         state["agents"]["agent_target"] = target
-        # Pre-seed a hunt_target_killed memory entry.
-        hunter["memory"] = [{
-            "world_turn": 9, "type": "observation",
-            "title": "⚔️ Цель устранена",
-            "effects": {"action_kind": "hunt_target_killed",
-                        "target_id": "agent_target", "location_id": "B"},
-            "summary": "",
-        }]
         _check_global_goal_completion("agent_hunter", hunter, state, 10)
-        assert hunter.get("global_goal_achieved"), "Goal should be achieved after kill"
+        assert hunter.get("global_goal_achieved"), "Goal should be achieved when target is dead"
         goal_obs = [
             m for m in hunter["memory"]
             if m.get("effects", {}).get("action_kind") == "goal_achieved"
         ]
         assert goal_obs, "Should write goal_achieved observation"
         assert goal_obs[0]["effects"]["goal"] == "kill_stalker"
+
+    def test_check_goal_completion_not_triggered_when_target_alive(self):
+        """_check_global_goal_completion does NOT set global_goal_achieved if target is still alive."""
+        from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
+        state = self._minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        # Target is alive — goal must NOT be completed even if old stub memory exists
+        hunter["memory"] = [{
+            "world_turn": 9, "type": "observation",
+            "title": "old stub",
+            "effects": {"action_kind": "hunt_target_killed",
+                        "target_id": "agent_target"},
+            "summary": "",
+        }]
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        _check_global_goal_completion("agent_hunter", hunter, state, 10)
+        assert not hunter.get("global_goal_achieved"), (
+            "Goal must NOT be achieved when target is still alive (guards against old fake kill stubs)"
+        )
 
     def test_validate_debug_spawn_stalker_kill_stalker(self):
         """Validation rejects kill_stalker without kill_target_id."""
@@ -6007,4 +6022,84 @@ class TestCombatInteraction:
         assert any(e["event_type"] == "agent_died" for e in events)
         assert any(
             e.get("payload", {}).get("cause") == "combat" for e in events
+        )
+
+    def test_combat_kill_writes_hunt_target_killed_when_goal_target(self):
+        """_combat_shoot writes hunt_target_killed when kill_target_id matches the slain agent."""
+        from app.games.zone_stalkers.rules.tick_rules import _combat_shoot
+        import random
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        # Explicitly set kill_target_id so we can verify the hunt_target_killed memory
+        hunter["kill_target_id"] = "agent_target"
+        target = self._make_target("B")
+        target["hp"] = 1  # guaranteed to die on hit
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        hunter["equipment"]["weapon"] = {
+            "id": "w1", "type": "pistol", "name": "Пистолет",
+            "damage": 50, "accuracy": 1.0,
+        }
+        combat = {
+            "id": "combat_B_90",
+            "location_id": "B",
+            "started_turn": 90,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_hunter": {"motive": "победить", "enemies": ["agent_target"],
+                                 "friends": [], "fled": False, "fled_to": None},
+                "agent_target": {"motive": "выжить", "enemies": ["agent_hunter"],
+                                 "friends": [], "fled": False, "fled_to": None},
+            },
+        }
+        _combat_shoot("agent_hunter", hunter, combat["participants"]["agent_hunter"],
+                      combat, state, 90, random.Random(0))
+        # hunt_target_killed entry must exist in hunter's memory
+        ktk = [m for m in hunter["memory"]
+               if m.get("effects", {}).get("action_kind") == "hunt_target_killed"]
+        assert ktk, "Should write hunt_target_killed when kill_target_id matches slain agent"
+        assert ktk[0]["effects"]["target_id"] == "agent_target"
+
+    def test_goal_completion_after_combat_kill(self):
+        """After combat kills the kill_target, hunter's goal is marked achieved on next tick."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        hunter = self._make_hunter("B", "agent_target")
+        target = self._make_target("B")
+        target["hp"] = 1  # dies on first hit
+        # Override weapon (accuracy=1.0) and add correct ammo type so hunter definitely shoots
+        hunter["equipment"]["weapon"] = {
+            "id": "w1", "type": "pistol", "name": "Пистолет",
+            "damage": 50, "accuracy": 1.0,
+        }
+        hunter["inventory"] = [{"id": "ammo1", "type": "ammo_9mm", "name": "Патроны", "value": 60}]
+        # Set wealth above threshold so hunter is in Phase 2 (goal pursuit)
+        hunter["material_threshold"] = 0
+        state["agents"]["agent_hunter"] = hunter
+        state["agents"]["agent_target"] = target
+        # Set up pre-existing combat so it is processed on this tick
+        state["combat_interactions"]["combat_B_90"] = {
+            "id": "combat_B_90",
+            "location_id": "B",
+            "started_turn": 89,
+            "ended": False,
+            "ended_turn": None,
+            "participants": {
+                "agent_hunter": {"motive": "победить", "enemies": ["agent_target"],
+                                 "friends": [], "fled": False, "fled_to": None},
+                "agent_target": {"motive": "выжить", "enemies": ["agent_hunter"],
+                                 "friends": [], "fled": False, "fled_to": None},
+            },
+        }
+        # Tick 1: combat processes, target dies, action_used=True for hunter
+        state1, _ = tick_zone_map(state)
+        target_after_tick1 = state1["agents"]["agent_target"]
+        assert not target_after_tick1.get("is_alive", True), "Target should be dead after tick 1"
+        # Tick 2: hunter's action_used is reset, _run_bot_action_inner runs,
+        #         _check_global_goal_completion detects target is dead
+        state2, _ = tick_zone_map(state1)
+        hunter_after = state2["agents"]["agent_hunter"]
+        assert hunter_after.get("global_goal_achieved"), (
+            "Hunter's kill_stalker goal should be achieved on tick after killing the target"
         )
