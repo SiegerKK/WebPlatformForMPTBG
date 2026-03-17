@@ -329,6 +329,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     events.extend(_combat_events)
 
     # 3. AI bot agent decisions (bots without a scheduled action)
+    #
+    # Shadow mode (Phase 1–4):
+    #   Before the legacy decision cascade runs, the new decision pipeline
+    #   (AgentContext → NeedScores → Intent → Plan) computes and stores its
+    #   output on the agent dict under ``_v2_context``.  This does NOT change
+    #   gameplay — the legacy _run_bot_action still makes the real decision.
+    #   Divergence between old and new can be tracked via explain_agent_decision.
+    _v2_pipeline_enabled = state.get("_v2_decision_pipeline", False)
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -343,6 +351,32 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         # Skip bot decisions for agents in active combat (not fled)
         if _agent_in_active_combat(agent_id, state):
             continue
+
+        # ── Shadow pipeline: compute v2 intent/needs before legacy decision ─
+        if _v2_pipeline_enabled:
+            try:
+                from app.games.zone_stalkers.decision.context_builder import build_agent_context
+                from app.games.zone_stalkers.decision.needs import evaluate_needs
+                from app.games.zone_stalkers.decision.intents import select_intent
+                from app.games.zone_stalkers.decision.planner import build_plan
+                from dataclasses import asdict
+                _ctx = build_agent_context(agent_id, agent, state)
+                _needs = evaluate_needs(_ctx, state)
+                _intent = select_intent(_ctx, _needs, world_turn)
+                _plan = build_plan(_ctx, _intent, state, world_turn)
+                # Store on agent for observability (not used for decision)
+                agent["_v2_context"] = {
+                    "need_scores": asdict(_needs),
+                    "intent_kind": _intent.kind,
+                    "intent_score": round(_intent.score, 3),
+                    "intent_reason": _intent.reason,
+                    "plan_intent": _plan.intent_kind if _plan else None,
+                    "plan_steps": len(_plan.steps) if _plan else 0,
+                    "plan_confidence": round(_plan.confidence, 2) if _plan else 0,
+                }
+            except Exception:
+                pass  # Shadow mode must never break the live game
+
         bot_evs = _run_bot_action(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
