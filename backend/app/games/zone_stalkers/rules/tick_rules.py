@@ -1221,7 +1221,7 @@ def _combat_heal_action(
         f"💊 Использовал «{item_name}», восстановил {actual_restore} HP",
         {"observed": "combat_heal", "action_kind": "combat_heal",
          "combat_id": cid, "item_type": item_type, "hp_restored": actual_restore},
-        summary=f"Использовал «{item_name}» в бою, восстановил {actual_restore} HP (текущее: {agent["hp"]})",
+        summary=f"Использовал «{item_name}» в бою, восстановил {actual_restore} HP (текущее: {agent.get('hp')})",
     )
     events.append({
         "event_type": "combat_heal",
