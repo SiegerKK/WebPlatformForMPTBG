@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .constants import EMISSION_DANGEROUS_TERRAIN
 from .models.agent_context import AgentContext
 from .models.need_scores import NeedScores
 
@@ -24,10 +25,6 @@ _HP_SURVIVE_NOW_UPPER = 30           # hp above this → survive_now = 0.0
 _HP_HEAL_SELF_THRESHOLD = 20         # hp at or below this → heal_self = 1.0
 _HP_HEAL_SELF_UPPER = 50             # hp above this → heal_self = 0.0
 
-_HUNGER_CRITICAL = 80                # original critical threshold from tick_rules
-_THIRST_CRITICAL = 80
-_HUNGER_EMERGENCY = 70               # maps to high urgency
-_THIRST_EMERGENCY = 70
 _SLEEP_HIGH = 75                     # sleepiness threshold from tick_rules
 
 _DESIRED_AMMO_RESERVE = 20           # target ammo count for full reload_or_rearm score
@@ -36,7 +33,6 @@ _GET_RICH_WEIGHT = 0.70              # weight for the get_rich material drive fo
 
 # ── Public constants (importable for tests and other modules) ─────────────────
 GET_RICH_WEIGHT = _GET_RICH_WEIGHT   # public alias
-_GOAL_MIN_FLOOR = 0.10               # minimum goal drive score even when wealth < threshold
 
 
 def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
@@ -150,24 +146,20 @@ def _score_reload_or_rearm(agent: dict[str, Any]) -> float:
         weapon_type = w.get("type")
     required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
     if required_ammo:
-        ammo_count = sum(
-            i.get("quantity", 1) for i in inventory if i.get("type") == required_ammo
-        )
-        has_ammo_score = min(1.0, ammo_count / _DESIRED_AMMO_RESERVE)
-        if has_ammo_score < 0.5:
-            return _clamp(1.0 - has_ammo_score)
+        # Each ammo item in inventory is a full box — check for PRESENCE, not quantity.
+        # (The game does not track individual bullet counts via the 'quantity' field.)
+        has_ammo = any(i.get("type") == required_ammo for i in inventory)
+        if not has_ammo:
+            return 0.6  # armed but out of ammo
     return 0.0
 
 
 def _score_avoid_emission(ctx: AgentContext) -> float:
     """High when emission is active/imminent and agent is on dangerous terrain."""
-    _EMISSION_DANGEROUS_TERRAIN = frozenset({
-        "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
-    })
     world_ctx = ctx.world_context
     emission_active: bool = world_ctx.get("emission_active", False)
     terrain: str = ctx.location_state.get("terrain_type", "")
-    on_dangerous = terrain in _EMISSION_DANGEROUS_TERRAIN
+    on_dangerous = terrain in EMISSION_DANGEROUS_TERRAIN
 
     if emission_active and on_dangerous:
         return 1.0
@@ -216,7 +208,11 @@ def _score_leave_zone(agent: dict[str, Any]) -> float:
 
 
 def _score_trade(agent: dict[str, Any], ctx: AgentContext) -> float:
-    """Drive to trade — sell artifacts or buy at a trader."""
+    """Drive to trade — sell artifacts or buy at a trader.
+
+    P3 fix: ctx.visible_entities now includes traders from state["traders"],
+    so trader_colocated correctly becomes True when a trader is co-located.
+    """
     from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
     artifact_types = frozenset(ARTIFACT_TYPES.keys())
     inventory = agent.get("inventory", [])

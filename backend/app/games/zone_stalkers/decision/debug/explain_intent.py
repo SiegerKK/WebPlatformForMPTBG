@@ -47,12 +47,6 @@ describes the full decision pipeline for a single bot agent:
             "is_complete": bool,
             "confidence": float,
         } | None,
-
-        "legacy_decision": {
-            "goal": str,
-            "action": str,
-            "reason": str,
-        } | None,
     }
 
 This module has NO side effects — it is safe to call at any time without
@@ -110,20 +104,7 @@ def explain_agent_decision(
     # ── 4. Build plan ─────────────────────────────────────────────────────────
     plan = build_plan(ctx, intent, state, world_turn)
 
-    # ── 5. Legacy decision tree (for shadow comparison) ───────────────────────
-    legacy_decision: dict[str, Any] | None = None
-    try:
-        from app.games.zone_stalkers.rules.tick_rules import _describe_bot_decision_tree
-        legacy_tree = _describe_bot_decision_tree(agent, [], state)
-        legacy_decision = {
-            "goal": legacy_tree.get("goal"),
-            "action": legacy_tree.get("chosen", {}).get("action"),
-            "reason": legacy_tree.get("chosen", {}).get("reason"),
-        }
-    except Exception:
-        pass
-
-    # ── 6. Assemble context summary ───────────────────────────────────────────
+    # ── 5. Assemble context summary ───────────────────────────────────────────
     loc_id = agent.get("location_id", "")
     loc = state.get("locations", {}).get(loc_id, {})
     scheduled = agent.get("scheduled_action")
@@ -150,7 +131,7 @@ def explain_agent_decision(
         "visible_agents": len(ctx.visible_entities),
     }
 
-    # ── 7. Plan summary ───────────────────────────────────────────────────────
+    # ── 6. Plan summary ───────────────────────────────────────────────────────
     plan_summary: dict[str, Any] | None = None
     if plan and plan.steps:
         cs = plan.current_step
@@ -181,7 +162,6 @@ def explain_agent_decision(
             "target_location_id": intent.target_location_id,
         },
         "active_plan": plan_summary,
-        "legacy_decision": legacy_decision,
     }
 
 

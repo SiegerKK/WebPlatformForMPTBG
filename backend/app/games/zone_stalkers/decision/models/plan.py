@@ -24,13 +24,7 @@ STEP_CONSUME_ITEM = "consume_item"
 STEP_EQUIP_ITEM = "equip_item"
 STEP_PICKUP_ITEM = "pickup_item"
 STEP_HEAL_SELF = "heal_self"
-STEP_HEAL_ALLY = "heal_ally"
 STEP_ASK_FOR_INTEL = "ask_for_intel"
-STEP_START_DIALOGUE = "start_dialogue"
-STEP_JOIN_COMBAT = "join_combat"
-STEP_RETREAT_FROM_COMBAT = "retreat_from_combat"
-STEP_FOLLOW_LEADER = "follow_leader"
-STEP_SHARE_SUPPLIES = "share_supplies"
 STEP_WAIT = "wait"
 
 # ── Legacy bridge kinds ────────────────────────────────────────────────────────

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from .constants import EMISSION_DANGEROUS_TERRAIN
 from .models.agent_context import AgentContext
 from .models.need_scores import NeedScores
 from .models.intent import (
@@ -66,7 +67,7 @@ from .models.intent import (
     INTENT_NEGOTIATE,
     INTENT_ASSIST_ALLY,
     INTENT_FORM_GROUP,
-    INTENT_FOLLOW_GROUP_PLAN,
+    INTENT_MAINTAIN_GROUP,
     INTENT_IDLE,
 )
 
@@ -83,6 +84,7 @@ _HARD_INTERRUPT_HEAL = 0.80
 #
 # The list is ordered by tie-break priority (highest first).
 # Each entry: (drive_attr, intent_kind, reason_template)
+# P5 fix: maintain_group → INTENT_MAINTAIN_GROUP (was erroneously INTENT_FOLLOW_GROUP_PLAN)
 _PRIORITY_MAP: list[tuple[str, str, str]] = [
     ("survive_now",        INTENT_ESCAPE_DANGER,      "HP критически низкий"),
     ("heal_self",          INTENT_HEAL_SELF,           "Нужно лечение"),
@@ -91,7 +93,7 @@ _PRIORITY_MAP: list[tuple[str, str, str]] = [
     ("eat",                INTENT_SEEK_FOOD,           "Критический голод"),
     ("sleep",              INTENT_REST,                "Сильная усталость"),
     ("reload_or_rearm",    INTENT_RESUPPLY,            "Не хватает снаряжения"),
-    ("maintain_group",     INTENT_FOLLOW_GROUP_PLAN,   "Нужды группы"),
+    ("maintain_group",     INTENT_MAINTAIN_GROUP,      "Нужды группы"),
     ("help_ally",          INTENT_ASSIST_ALLY,         "Союзник в опасности"),
     ("trade",              INTENT_SELL_ARTIFACTS,      "Продать артефакты"),
     ("get_rich",           INTENT_GET_RICH,            "Накопление богатства"),
@@ -128,20 +130,27 @@ def select_intent(
     global_goal: str = agent.get("global_goal", "get_rich")
     kill_target_id: Optional[str] = agent.get("kill_target_id")
 
-    # ── Special case: emission shelter ───────────────────────────────────────
-    # If emission is active/warned but agent is already on safe terrain,
-    # override flee with wait_in_shelter.
-    _EMISSION_DANGEROUS_TERRAIN = frozenset({
-        "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
-    })
+    # ── Special case: emission threat (always overrides equipment/resource needs) ──
+    # Emission is a life-threatening event — it must override reload_or_rearm (1.0)
+    # and any other survival needs.
     if needs.avoid_emission > _NEGLIGIBLE_THRESHOLD:
         terrain = ctx.location_state.get("terrain_type", "")
-        if terrain not in _EMISSION_DANGEROUS_TERRAIN:
+        if terrain not in EMISSION_DANGEROUS_TERRAIN:
+            # Safe terrain — shelter in place
             return _make_intent(
                 INTENT_WAIT_IN_SHELTER,
                 needs.avoid_emission,
                 source_goal=None,
                 reason="Нахожусь в укрытии — жду окончания выброса",
+                created_turn=world_turn,
+            )
+        else:
+            # Dangerous terrain — flee; target_location_id filled by planner
+            return _make_intent(
+                INTENT_FLEE_EMISSION,
+                needs.avoid_emission,
+                source_goal=None,
+                reason="Угроза выброса — нужно бежать в укрытие",
                 created_turn=world_turn,
             )
 

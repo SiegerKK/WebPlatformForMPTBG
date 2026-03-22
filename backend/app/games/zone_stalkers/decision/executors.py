@@ -111,11 +111,31 @@ def _exec_travel(
     world_turn: int,
 ) -> list[dict[str, Any]]:
     """Delegate to the existing _bot_schedule_travel helper."""
-    from app.games.zone_stalkers.rules.tick_rules import _bot_schedule_travel
+    from app.games.zone_stalkers.rules.tick_rules import _bot_schedule_travel, _add_memory
     target_id = step.payload.get("target_id")
     if not target_id:
         return []
-    return _bot_schedule_travel(agent_id, agent, target_id, state, world_turn)
+    reason = step.payload.get("reason", "")
+    emergency_flee = (reason == "flee_emission")
+
+    # Write goal-specific decision memory entries (v1 compat)
+    if reason == "flee_emission":
+        _write_once_decision(agent, world_turn, state,
+            "🚨 Бегу от выброса",
+            {"action_kind": "flee_emission", "destination": target_id},
+            f"Бегу в безопасное место: {target_id}")
+    elif reason in ("heal_self", "emergency_heal", "seek_medical", "buy_heal"):
+        _write_once_by_dest(agent, world_turn, state, "seek_item", "medical", target_id,
+                            emergency=True)
+    elif reason in ("seek_food", "emergency_food", "buy_food"):
+        _write_once_by_dest(agent, world_turn, state, "seek_item", "food", target_id,
+                            emergency=True)
+    elif reason in ("seek_drink", "emergency_drink", "buy_drink"):
+        _write_once_by_dest(agent, world_turn, state, "seek_item", "drink", target_id,
+                            emergency=True)
+
+    return _bot_schedule_travel(agent_id, agent, target_id, state, world_turn,
+                                emergency_flee=emergency_flee)
 
 
 def _exec_sleep(
@@ -277,7 +297,14 @@ def _exec_ask_for_intel(
     target_id = step.payload.get("target_id")
     if target_id:
         from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_agent
-        _bot_ask_colocated_stalkers_about_agent(agent_id, agent, target_id, state, world_turn)
+        # _bot_ask_colocated_stalkers_about_agent(agent_id, agent, target_agent_id,
+        #   target_agent_name, state, world_turn)
+        target = state.get("agents", {}).get(target_id, {})
+        target_name = target.get("name", target_id) if target else target_id
+        _bot_ask_colocated_stalkers_about_agent(
+            agent_id, agent, target_id, target_name, state, world_turn
+        )
+        agent["action_used"] = True
     return []
 
 
@@ -290,7 +317,19 @@ def _exec_wait(
     world_turn: int,
 ) -> list[dict[str, Any]]:
     """Mark action_used without doing anything."""
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
     agent["action_used"] = True
+    reason = step.payload.get("reason", "")
+    if reason == "wait_in_shelter":
+        _write_once_decision(agent, world_turn, state,
+            "🏠 Укрываюсь от выброса",
+            {"action_kind": "wait_in_shelter"},
+            "Нахожусь в укрытии — жду окончания выброса")
+    elif reason == "trapped_on_dangerous_terrain":
+        _write_once_decision(agent, world_turn, state,
+            "⚠️ Нет выхода: застрял на опасной местности",
+            {"action_kind": "trapped_on_dangerous_terrain"},
+            "Все соседние локации тоже опасны — укрыться негде")
     return []
 
 
@@ -319,3 +358,57 @@ def _exec_unknown(
     """Fallback executor for unrecognised step kinds."""
     agent["action_used"] = True
     return []
+
+
+# ── Memory-write helpers used by executors ────────────────────────────────────
+
+def _write_once_decision(
+    agent: dict[str, Any],
+    world_turn: int,
+    state: dict[str, Any],
+    title: str,
+    effects: dict[str, Any],
+    summary: str,
+) -> None:
+    """Write a decision memory entry but only if one with the same action_kind is not
+    already the most recent decision (anti-spam)."""
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+    action_kind = effects.get("action_kind")
+    for mem in reversed(agent.get("memory", [])):
+        if mem.get("type") == "decision":
+            if mem.get("effects", {}).get("action_kind") == action_kind:
+                return  # already last decision is the same kind
+            break  # last decision is different — safe to write
+    _add_memory(agent, world_turn, state, "decision", title, effects, summary=summary)
+
+
+def _write_once_by_dest(
+    agent: dict[str, Any],
+    world_turn: int,
+    state: dict[str, Any],
+    action_kind: str,
+    item_category: str,
+    destination: str,
+    emergency: bool = False,
+) -> None:
+    """Write a seek_item decision memory (anti-spam by destination + category)."""
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "decision":
+            continue
+        fx = mem.get("effects", {})
+        if (fx.get("action_kind") == action_kind
+                and fx.get("destination") == destination
+                and fx.get("item_category") == item_category):
+            return  # already recorded
+    effects: dict[str, Any] = {
+        "action_kind": action_kind,
+        "item_category": item_category,
+        "destination": destination,
+    }
+    if emergency:
+        effects["emergency"] = True
+    _add_memory(agent, world_turn, state, "decision",
+                f"🔍 Ищу {item_category} в {destination}",
+                effects,
+                summary=f"Отправляюсь искать предметы категории {item_category}")

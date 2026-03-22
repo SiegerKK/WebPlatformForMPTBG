@@ -84,7 +84,6 @@ def build_plan(
         if no concrete steps can be determined.
     """
     kind = intent.kind
-    agent = ctx.self_state
 
     builder_map = {
         INTENT_FLEE_EMISSION:       _plan_flee_emission,
@@ -127,7 +126,20 @@ def _plan_flee_emission(
         # Try to find nearest safe location from ctx if not set on intent
         target_loc = _nearest_safe_location(ctx, state)
     if not target_loc:
-        return None
+        # Trapped: all neighbours are dangerous — wait in place
+        step = PlanStep(
+            kind=STEP_WAIT,
+            payload={"reason": "trapped_on_dangerous_terrain"},
+            interruptible=False,
+            expected_duration_ticks=1,
+        )
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[step],
+            interruptible=False,
+            confidence=0.5,
+            created_turn=world_turn,
+        )
     step = PlanStep(
         kind=STEP_TRAVEL_TO_LOCATION,
         payload={"target_id": target_loc, "reason": "flee_emission"},
@@ -315,14 +327,28 @@ def _plan_sell_artifacts(
 def _plan_get_rich(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Optional[Plan]:
-    # Sell artifacts first if we have them and a trader is nearby
+    """Build a plan for the get_rich intent.
+
+    Priority:
+    1. Sell artifacts if we have them and know a trader.
+    2. Explore current location if it has anomaly activity and isn't confirmed empty.
+    3. Travel to the best reachable anomaly location.
+    4. Wait (no candidates).
+    """
     from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _confirmed_empty_locations,
+        _dijkstra_reachable_locations,
+        _score_location,
+    )
     artifact_types = frozenset(ARTIFACT_TYPES.keys())
-    inventory = ctx.self_state.get("inventory", [])
+    agent = ctx.self_state
+    inventory = agent.get("inventory", [])
     has_artifacts = any(i.get("type") in artifact_types for i in inventory)
     trader_loc = _nearest_trader_location(ctx, state)
-    agent_loc = ctx.self_state.get("location_id")
+    agent_loc = agent.get("location_id", "")
 
+    # 1. Sell artifacts
     if has_artifacts and trader_loc:
         if trader_loc == agent_loc:
             return Plan(
@@ -341,13 +367,54 @@ def _plan_get_rich(
             confidence=0.7, created_turn=world_turn,
         )
 
-    # Otherwise explore — delegate to legacy logic via a wrapper step
+    # 2. Explore current location if it has anomaly and isn't confirmed empty
+    confirmed_empty = _confirmed_empty_locations(agent)
+    loc = ctx.location_state
+    if loc.get("anomaly_activity", 0) > 0 and agent_loc not in confirmed_empty:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_EXPLORE_LOCATION,
+                {"target_id": agent_loc, "reason": "get_rich_explore_here"},
+                expected_duration_ticks=30,
+            )],
+            confidence=0.8, created_turn=world_turn,
+        )
+
+    # 3. Travel to the best reachable anomaly location
+    locations = state.get("locations", {})
+    reachable = _dijkstra_reachable_locations(agent_loc, locations, max_minutes=9999)
+    best_loc: Optional[str] = None
+    best_score: float = -1.0
+    for cand_id in reachable:
+        if cand_id == agent_loc:
+            continue
+        if cand_id in confirmed_empty:
+            continue
+        cand = locations.get(cand_id, {})
+        if cand.get("anomaly_activity", 0) <= 0:
+            continue
+        score = _score_location(cand, "get_rich")
+        if score > best_score:
+            best_score = score
+            best_loc = cand_id
+
+    if best_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": best_loc, "reason": "get_rich_travel_to_anomaly"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, best_loc, state),
+            )],
+            confidence=0.6, created_turn=world_turn,
+        )
+
+    # 4. No candidates — wait
     return Plan(
         intent_kind=intent.kind,
-        steps=[PlanStep(STEP_LEGACY_SCHEDULED_ACTION,
-                        {"reason": "get_rich_explore"},
-                        expected_duration_ticks=1)],
-        confidence=0.5, created_turn=world_turn,
+        steps=[PlanStep(STEP_WAIT, {"reason": "get_rich_no_candidates"})],
+        confidence=0.3, created_turn=world_turn,
     )
 
 
@@ -378,12 +445,96 @@ def _plan_hunt_target(
 def _plan_search_information(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Plan:
+    """Build a plan for the search_information intent (unravel_zone_mystery goal).
+
+    Priority:
+    1. Memory location with secret documents → travel there.
+    2. Ask co-located stalkers for intel → travel to reported location.
+    3. Go to nearest trader (wait for info / buy intel).
+    4. Go to dungeon or x_lab location.
+    5. Wait.
+    """
+    from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _find_item_memory_location,
+        _bot_ask_colocated_stalkers_about_item,
+        _find_nearest_trader_location,
+        _dijkstra_reachable_locations,
+    )
+    agent = ctx.self_state
+    agent_id = ctx.agent_id
+    agent_loc = agent.get("location_id", "")
+
+    # 1. Check memory for a location with secret documents
+    mem_loc = _find_item_memory_location(agent, SECRET_DOCUMENT_ITEM_TYPES, state)
+    if mem_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": mem_loc, "reason": "search_info_doc_loc"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+            )],
+            confidence=0.7, created_turn=world_turn,
+        )
+
+    # 2. Ask co-located stalkers for intel about secret documents
+    intel_loc = _bot_ask_colocated_stalkers_about_item(
+        agent_id, agent, SECRET_DOCUMENT_ITEM_TYPES,
+        "секретный документ", state, world_turn,
+    )
+    if intel_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": intel_loc, "reason": "search_info_intel_from_stalker"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, intel_loc, state),
+            )],
+            confidence=0.6, created_turn=world_turn,
+        )
+
+    # 3. Go to nearest trader (may provide intel or documents for purchase)
+    trader_loc = _find_nearest_trader_location(agent_loc, state)
+    if trader_loc and trader_loc != agent_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": trader_loc, "reason": "search_info_visit_trader"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+            )],
+            confidence=0.5, created_turn=world_turn,
+        )
+
+    # 4. Find dungeon or x_lab location — likely to have secret documents
+    locations = state.get("locations", {})
+    dungeon_types = {"dungeon", "x_lab"}
+    reachable = _dijkstra_reachable_locations(agent_loc, locations, max_minutes=9999)
+    dungeon_loc: Optional[str] = None
+    for cand_id in reachable:
+        if cand_id == agent_loc:
+            continue
+        if locations.get(cand_id, {}).get("terrain_type") in dungeon_types:
+            dungeon_loc = cand_id
+            break
+
+    if dungeon_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": dungeon_loc, "reason": "search_info_dungeon"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, dungeon_loc, state),
+            )],
+            confidence=0.4, created_turn=world_turn,
+        )
+
+    # 5. No leads — wait
     return Plan(
         intent_kind=intent.kind,
-        steps=[PlanStep(STEP_LEGACY_SCHEDULED_ACTION,
-                        {"reason": "search_information"},
-                        expected_duration_ticks=1)],
-        confidence=0.5, created_turn=world_turn,
+        steps=[PlanStep(STEP_WAIT, {"reason": "search_info_no_target"})],
+        confidence=0.2, created_turn=world_turn,
     )
 
 
@@ -407,6 +558,8 @@ def _plan_leave_zone(
 def _plan_upgrade_equipment(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Plan:
+    # TODO(Phase 5): implement real equipment upgrade planning when equipment
+    # upgrade mechanics are fully defined.  For now, fall back to legacy logic.
     return Plan(
         intent_kind=intent.kind,
         steps=[PlanStep(STEP_LEGACY_SCHEDULED_ACTION,
@@ -432,6 +585,7 @@ def _plan_explore(
 def _plan_follow_group(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Plan:
+    # TODO(Phase 7): implement group-following logic.
     return Plan(
         intent_kind=intent.kind,
         steps=[PlanStep(STEP_LEGACY_SCHEDULED_ACTION,
@@ -444,6 +598,7 @@ def _plan_follow_group(
 def _plan_assist_ally(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Plan:
+    # TODO(Phase 6): implement ally-assistance logic.
     return Plan(
         intent_kind=intent.kind,
         steps=[PlanStep(STEP_LEGACY_SCHEDULED_ACTION,
@@ -469,7 +624,7 @@ def _nearest_trader_location(
 ) -> Optional[str]:
     """Return the location_id of the nearest known trader, or None.
 
-    Note: delegates to the legacy tick_rules helper during the migration period.
+    Delegates to the tick_rules helper during the migration period.
     Phase 5+ can promote this to a standalone utility in a shared module.
     """
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
@@ -482,14 +637,14 @@ def _nearest_safe_location(
     state: dict[str, Any],
 ) -> Optional[str]:
     """Return the location_id of the nearest location safe from emission."""
-    _DANGEROUS = frozenset({"plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge"})
+    from .constants import EMISSION_DANGEROUS_TERRAIN
     loc_id = ctx.self_state.get("location_id", "")
     locations = state.get("locations", {})
     for conn in locations.get(loc_id, {}).get("connections", []):
         if conn.get("closed"):
             continue
         target = conn["to"]
-        if locations.get(target, {}).get("terrain_type", "") not in _DANGEROUS:
+        if locations.get(target, {}).get("terrain_type", "") not in EMISSION_DANGEROUS_TERRAIN:
             return target
     return None
 

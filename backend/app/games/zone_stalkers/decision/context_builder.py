@@ -42,6 +42,7 @@ def build_agent_context(
     """
     locations: dict[str, Any] = state.get("locations", {})
     agents: dict[str, Any] = state.get("agents", {})
+    traders: dict[str, Any] = state.get("traders", {})
     loc_id: str = agent.get("location_id", "")
     loc: dict[str, Any] = locations.get(loc_id, {})
 
@@ -56,7 +57,7 @@ def build_agent_context(
         "emission_ends_turn": state.get("emission_ends_turn"),
     }
 
-    # ── Visible entities (co-located agents) ─────────────────────────────────
+    # ── Visible entities (co-located agents + traders) ────────────────────────
     visible_entities: list[dict[str, Any]] = []
     for other_id, other in agents.items():
         if other_id == agent_id:
@@ -76,11 +77,26 @@ def build_agent_context(
                 "is_alive": other.get("is_alive", True),
             })
 
+    # P3 fix: also add traders from state["traders"] when co-located
+    for trader_id, trader in traders.items():
+        if not trader.get("is_alive", True):
+            continue
+        if trader.get("location_id") == loc_id:
+            visible_entities.append({
+                "agent_id": trader_id,
+                "name": trader.get("name", trader_id),
+                "archetype": "trader_agent",
+                "is_trader": True,
+                "global_goal": None,
+                "hp": trader.get("hp", 100),
+                "is_alive": True,
+            })
+
     # ── Known entities (from memory) ─────────────────────────────────────────
     known_entities: list[dict[str, Any]] = _entities_from_memory(agent, agents, agent_id)
 
     # ── Known locations (visited or mentioned in memory) ──────────────────────
-    known_locations: list[dict[str, Any]] = _locations_from_memory(agent, locations)
+    known_locations: list[dict[str, Any]] = _locations_from_memory(agent, locations, traders)
 
     # ── Known hazards (from memory) ───────────────────────────────────────────
     known_hazards: list[dict[str, Any]] = _hazards_from_memory(agent)
@@ -164,8 +180,19 @@ def _entities_from_memory(
 def _locations_from_memory(
     agent: dict[str, Any],
     locations: dict[str, Any],
+    traders: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return a deduplicated list of locations the NPC has in memory."""
+    """Return a deduplicated list of locations the NPC has in memory.
+
+    Parameters
+    ----------
+    traders
+        The ``state["traders"]`` dict (optional; used for ``has_trader`` check).
+        When provided, ``has_trader`` is ``True`` if any trader in this dict
+        has ``location_id == loc_id``.
+    """
+    if traders is None:
+        traders = {}
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
     for mem in agent.get("memory", []):
@@ -175,15 +202,19 @@ def _locations_from_memory(
             if loc_id and loc_id not in seen_ids and loc_id in locations:
                 seen_ids.add(loc_id)
                 loc = locations[loc_id]
+                # P4 fix: check traders dict — location["agents"] is a list of IDs (strings),
+                # so we cannot call .get() on those strings. Instead check state["traders"].
+                loc_agent_ids: list[str] = loc.get("agents", [])
+                has_trader = any(
+                    tid in traders
+                    for tid in loc_agent_ids
+                )
                 result.append({
                     "location_id": loc_id,
                     "name": loc.get("name", loc_id),
                     "terrain_type": loc.get("terrain_type"),
                     "anomaly_activity": loc.get("anomaly_activity", 0),
-                    "has_trader": any(
-                        a.get("archetype") == "trader_agent" and a.get("location_id") == loc_id
-                        for a in locations.get(loc_id, {}).get("agents", [])
-                    ),
+                    "has_trader": has_trader,
                     "memory_turn": mem.get("world_turn", 0),
                 })
     return result
