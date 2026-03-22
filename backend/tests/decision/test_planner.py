@@ -9,6 +9,8 @@ from app.games.zone_stalkers.decision.models.intent import (
     INTENT_GET_RICH,
     INTENT_HEAL_SELF,
     INTENT_LEAVE_ZONE,
+    INTENT_SEEK_FOOD,
+    INTENT_SEEK_WATER,
     INTENT_SELL_ARTIFACTS,
 )
 from app.games.zone_stalkers.decision.models.plan import (
@@ -137,3 +139,76 @@ class TestSellArtifactsPlan:
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SELL_ARTIFACTS)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+
+
+class TestSeekConsumablePlan:
+    """Tests for seek_water / seek_food plan builder, including opportunistic consumption."""
+
+    # ── seek_water ─────────────────────────────────────────────────────────────
+
+    def test_seek_water_has_water_consumes_immediately(self):
+        """seek_water + water in inventory → single STEP_CONSUME_ITEM (no travel)."""
+        agent = make_agent(thirst=80, inventory=[{"type": "water", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
+        assert len(plan.steps) == 1
+        assert plan.steps[0].kind == STEP_CONSUME_ITEM
+        assert plan.steps[0].payload["item_type"] == "water"
+
+    def test_seek_water_no_water_no_food_just_travels(self):
+        """seek_water + no water + no food → travel + buy (no prepend)."""
+        agent = make_agent(thirst=80, hunger=50)
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
+        assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+        assert plan.steps[0].payload["target_id"] == "loc_b"
+
+    def test_seek_water_no_water_has_food_hungry_eats_first(self):
+        """Bug fix: seek_water + no water + food in inventory + hunger ≥ 25 → eat food first."""
+        agent = make_agent(thirst=80, hunger=50, inventory=[{"type": "bread", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
+        # First step: eat the food; remaining: travel + buy water
+        assert plan.steps[0].kind == STEP_CONSUME_ITEM
+        assert plan.steps[0].payload["item_type"] == "bread"
+        assert plan.steps[0].payload["reason"] == "opportunistic_food"
+        assert plan.steps[1].kind == STEP_TRAVEL_TO_LOCATION
+        assert len(plan.steps) == 3
+
+    def test_seek_water_no_water_has_food_not_hungry_just_travels(self):
+        """seek_water + no water + food in inventory + hunger < 25 → no opportunistic eat."""
+        agent = make_agent(thirst=80, hunger=10, inventory=[{"type": "bread", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
+        assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+        assert len(plan.steps) == 2
+
+    # ── seek_food ──────────────────────────────────────────────────────────────
+
+    def test_seek_food_has_food_consumes_immediately(self):
+        """seek_food + food in inventory → single STEP_CONSUME_ITEM (no travel)."""
+        agent = make_agent(hunger=80, inventory=[{"type": "bread", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_FOOD)
+        assert len(plan.steps) == 1
+        assert plan.steps[0].kind == STEP_CONSUME_ITEM
+        assert plan.steps[0].payload["item_type"] == "bread"
+
+    def test_seek_food_no_food_has_water_thirsty_drinks_first(self):
+        """seek_food + no food + water in inventory + thirst ≥ 25 → drink water first."""
+        agent = make_agent(hunger=80, thirst=60, inventory=[{"type": "water", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_FOOD)
+        assert plan.steps[0].kind == STEP_CONSUME_ITEM
+        assert plan.steps[0].payload["item_type"] == "water"
+        assert plan.steps[0].payload["reason"] == "opportunistic_drink"
+        assert plan.steps[1].kind == STEP_TRAVEL_TO_LOCATION
+        assert len(plan.steps) == 3
+
+    def test_seek_food_no_food_has_water_not_thirsty_just_travels(self):
+        """seek_food + no food + water in inventory + thirst < 25 → no opportunistic drink."""
+        agent = make_agent(hunger=80, thirst=5, inventory=[{"type": "water", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_FOOD)
+        assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+        assert len(plan.steps) == 2
