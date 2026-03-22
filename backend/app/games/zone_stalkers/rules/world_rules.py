@@ -119,9 +119,6 @@ def validate_world_command(
     if command_type == "debug_explain_agent_v2":
         return _validate_debug_preview_bot_decision(payload, state)  # same validation
 
-    if command_type == "debug_toggle_v2_pipeline":
-        return RuleCheckResult(valid=True)  # no payload required
-
     if command_type == "debug_add_item":
         return _validate_debug_add_item(payload, state)
 
@@ -809,16 +806,6 @@ def resolve_world_command(
                 "agent_id": agent_id_to_explain,
                 "explanation": explanation,
             },
-        })
-        return state, events
-
-    # ── debug_toggle_v2_pipeline ───────────────────────────────────────────────
-    if command_type == "debug_toggle_v2_pipeline":
-        enabled = not state.get("_v2_decision_pipeline", False)
-        state["_v2_decision_pipeline"] = enabled
-        events.append({
-            "event_type": "v2_pipeline_toggled",
-            "payload": {"enabled": enabled},
         })
         return state, events
 

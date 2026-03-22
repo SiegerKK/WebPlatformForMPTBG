@@ -141,7 +141,7 @@ interface StalkerAgent {
   has_left_zone?: boolean;
   wealth_goal_target?: number;
   kill_target_id?: string | null;
-  /** Output of v2 decision pipeline shadow mode (requires _v2_decision_pipeline=true). */
+  /** Output of the v2 decision pipeline. Populated on every tick. */
   _v2_context?: {
     need_scores: Record<string, number>;
     intent_kind: string;
@@ -173,8 +173,6 @@ interface ZoneMapState {
   game_over: boolean;
   auto_tick_enabled?: boolean;
   auto_tick_speed?: string | null;
-  /** True when the v2 decision pipeline shadow mode is active. */
-  _v2_decision_pipeline?: boolean;
 }
 
 interface ZoneEventState {
@@ -544,19 +542,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               ...blob,
               auto_tick_enabled: msg.auto_tick_enabled as boolean,
               auto_tick_speed: (msg.auto_tick_speed as string | null) ?? null,
-            },
-          };
-        });
-      } else if (msg.type === 'v2_pipeline_toggled') {
-        // Patch v2 pipeline flag without a full state reload.
-        setContext((prev) => {
-          if (!prev) return prev;
-          const blob = (prev.state_blob as Record<string, unknown>) ?? {};
-          return {
-            ...prev,
-            state_blob: {
-              ...blob,
-              _v2_decision_pipeline: msg.enabled as boolean,
             },
           };
         });
@@ -2150,16 +2135,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               title="Удалить все предметы с земли и из инвентарей агентов"
             >
               🗑 Удалить предметы
-            </button>
-            <button
-              style={zoneState._v2_decision_pipeline ? styles.btnPrimary : styles.btnSecondary}
-              onClick={() => sendCommand('debug_toggle_v2_pipeline', {})}
-              disabled={actionLoading}
-              title={zoneState._v2_decision_pipeline
-                ? 'Теневой режим v2 включён — нажмите для отключения'
-                : 'Включить теневой режим v2 (NeedScores + Intent вычисляются параллельно с основной логикой)'}
-            >
-              🧠 Система решений v2: {zoneState._v2_decision_pipeline ? '✅ ВКЛ' : '⬜ ВЫКЛ'}
             </button>
           </div>
         </div>

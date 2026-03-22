@@ -13,6 +13,7 @@ import collections
 import heapq
 import copy
 import random
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -3339,7 +3340,6 @@ def _run_bot_decision_v2_inner(
     from app.games.zone_stalkers.decision.intents import select_intent
     from app.games.zone_stalkers.decision.planner import build_plan
     from app.games.zone_stalkers.decision.executors import execute_plan_step
-    from dataclasses import asdict
 
     # ── Commitment logic: handle scheduled arrivals first ─────────────────
     arrival_evs = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
