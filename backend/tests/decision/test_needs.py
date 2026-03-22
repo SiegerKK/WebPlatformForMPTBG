@@ -258,3 +258,83 @@ class TestTrade:
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         needs = _needs_for(agent=agent, state=state)
         assert needs.trade == 0.0
+
+
+# ── Fix 1: global_goal_achieved zeroes goal-driven drives ────────────────────
+
+class TestGlobalGoalAchievedZerosDrives:
+    def test_hunt_target_zeroed_when_goal_achieved(self):
+        """hunt_target must be 0.0 when global_goal_achieved=True (Fix 1)."""
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            money=3000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+            global_goal_achieved=True,
+        )
+        state = make_minimal_state(agent_id="bot1", agent=agent)
+        state["agents"]["target_1"] = make_agent(agent_id="target_1", location_id="loc_b")
+        needs = _needs_for(agent=agent, state=state)
+        assert needs.hunt_target == 0.0, (
+            f"hunt_target should be 0.0 after goal achieved, got {needs.hunt_target}"
+        )
+
+    def test_unravel_zeroed_when_goal_achieved(self):
+        """unravel_zone_mystery must be 0.0 when global_goal_achieved=True (Fix 1)."""
+        agent = make_agent(
+            global_goal="unravel_zone_mystery",
+            money=3000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+            global_goal_achieved=True,
+        )
+        needs = _needs_for(agent=agent)
+        assert needs.unravel_zone_mystery == 0.0, (
+            f"unravel_zone_mystery should be 0.0 after goal achieved, got {needs.unravel_zone_mystery}"
+        )
+
+    def test_leave_zone_boosted_when_goal_achieved_and_still_in_zone(self):
+        """leave_zone >= 0.8 when global_goal_achieved=True and has_left_zone=False (Fix 1)."""
+        agent = make_agent(
+            global_goal="get_rich",
+            money=9000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+            global_goal_achieved=True,
+        )
+        # has_left_zone defaults to False in make_agent
+        needs = _needs_for(agent=agent)
+        assert needs.leave_zone >= 0.8, (
+            f"leave_zone should be >= 0.8 after goal achieved (still in zone), got {needs.leave_zone}"
+        )
+
+
+# ── Fix 2: multiplicative suppression for risky drives under survival pressure ─
+
+class TestSurvivalPressureSuppression:
+    def test_get_rich_suppressed_when_survive_now_high(self):
+        """get_rich is suppressed when survive_now is high (Fix 2)."""
+        # HP=5 → survive_now=1.0 → _survival_pressure=1.0
+        # get_rich base=0.35 (half wealth) → after suppression: 0.35 * (1 - 1.0) = 0.0
+        agent = make_agent(
+            hp=5,
+            money=1500, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+        )
+        needs = _needs_for(agent=agent)
+        assert needs.get_rich == 0.0, (
+            f"get_rich should be 0.0 under max survival pressure, got {needs.get_rich}"
+        )
+
+    def test_get_rich_partially_suppressed_when_heal_self_moderate(self):
+        """get_rich is partially suppressed when heal_self is moderate (Fix 2)."""
+        # HP=35 → heal_self=0.5 → _survival_pressure = max(survive_now, 0.5*0.5) = max(0.0, 0.25) = 0.25
+        # wealth=0 → get_rich base = 0.70 → after: 0.70 * (1 - 0.25) = 0.525
+        agent = make_agent(
+            hp=35,
+            money=0, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+        )
+        needs = _needs_for(agent=agent)
+        assert needs.get_rich < 0.70, (
+            f"get_rich should be suppressed when heal_self is moderate, got {needs.get_rich}"
+        )
+        assert needs.get_rich > 0.0, "get_rich should not be fully suppressed at moderate HP"

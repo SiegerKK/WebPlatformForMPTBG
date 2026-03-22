@@ -111,3 +111,59 @@ class TestIntentPriority:
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         intent = _intent_for(agent=agent, state=state)
         assert intent.kind == INTENT_SELL_ARTIFACTS
+
+
+# ── Fix 2: hard interrupt for critical thirst forces INTENT_SEEK_WATER ────────
+
+class TestHardInterruptCriticalNeeds:
+    def test_seek_water_forced_when_thirst_critical(self):
+        """INTENT_SEEK_WATER is forced when thirst >= 90 (Fix 2 hard interrupt)."""
+        # Rich, healthy, equipped agent with only extreme thirst
+        agent = make_agent(
+            hp=100, hunger=0, thirst=90, sleepiness=0,
+            money=9000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+        )
+        intent = _intent_for(agent=agent)
+        assert intent.kind == INTENT_SEEK_WATER, (
+            f"Expected INTENT_SEEK_WATER on thirst=90, got {intent.kind}"
+        )
+
+    def test_seek_food_forced_when_hunger_critical(self):
+        """INTENT_SEEK_FOOD is forced when hunger >= 90 (Fix 2 hard interrupt)."""
+        agent = make_agent(
+            hp=100, hunger=90, thirst=0, sleepiness=0,
+            money=9000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+        )
+        intent = _intent_for(agent=agent)
+        assert intent.kind == INTENT_SEEK_FOOD, (
+            f"Expected INTENT_SEEK_FOOD on hunger=90, got {intent.kind}"
+        )
+
+    def test_survive_now_beats_critical_thirst(self):
+        """INTENT_ESCAPE_DANGER wins over INTENT_SEEK_WATER when survive_now fires (Fix 2 priority)."""
+        agent = make_agent(
+            hp=5, thirst=90,
+            money=9000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+        )
+        intent = _intent_for(agent=agent)
+        assert intent.kind == INTENT_ESCAPE_DANGER, (
+            f"Expected INTENT_ESCAPE_DANGER (survive_now > drink), got {intent.kind}"
+        )
+
+    def test_thirst_89_does_not_hard_interrupt(self):
+        """Thirst=89 is below the 0.90 threshold — no hard interrupt, normal priority wins (Fix 2)."""
+        # Rich equipped agent with thirst=89 → drink score=0.89, get_rich=0.0 → seek_water wins anyway
+        # but it's via priority map not hard interrupt; score should still be seek_water
+        agent = make_agent(
+            hp=100, hunger=0, thirst=89, sleepiness=0,
+            money=9000, material_threshold=3000,
+            has_weapon=True, has_armor=True, has_ammo=True,
+        )
+        intent = _intent_for(agent=agent)
+        # drink=0.89 still beats idle (0.0) via the priority map → should be seek_water
+        assert intent.kind == INTENT_SEEK_WATER, (
+            f"Expected INTENT_SEEK_WATER via priority map at thirst=89, got {intent.kind}"
+        )

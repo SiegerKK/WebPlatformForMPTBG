@@ -78,6 +78,7 @@ _NEGLIGIBLE_THRESHOLD = 0.05
 _HARD_INTERRUPT_SURVIVE_NOW = 0.70
 _HARD_INTERRUPT_EMISSION = 0.80
 _HARD_INTERRUPT_HEAL = 0.80
+_HARD_INTERRUPT_NEEDS = 0.90  # ≥ 90% hunger OR thirst OR sleepiness
 
 
 # ── Priority-ordered mapping: drive name → (intent_kind, reason_template) ─────
@@ -154,6 +155,40 @@ def select_intent(
                 created_turn=world_turn,
             )
 
+    # ── Hard interrupts for critical needs (survive > emission [handled above] > heal > drink > eat) ──
+    if needs.survive_now >= _HARD_INTERRUPT_SURVIVE_NOW:
+        return _make_intent(
+            INTENT_ESCAPE_DANGER,
+            needs.survive_now,
+            source_goal=None,
+            reason=f"HP критически низкий — срочное бегство (HP={agent.get('hp', '?')})",
+            created_turn=world_turn,
+        )
+    if needs.heal_self >= _HARD_INTERRUPT_HEAL:
+        return _make_intent(
+            INTENT_HEAL_SELF,
+            needs.heal_self,
+            source_goal=None,
+            reason=f"HP опасно низкий — срочное лечение (HP={agent.get('hp', '?')})",
+            created_turn=world_turn,
+        )
+    if needs.drink >= _HARD_INTERRUPT_NEEDS:
+        return _make_intent(
+            INTENT_SEEK_WATER,
+            needs.drink,
+            source_goal=None,
+            reason=f"Критическая жажда — срочный поиск воды (жажда {agent.get('thirst', 0)}%)",
+            created_turn=world_turn,
+        )
+    if needs.eat >= _HARD_INTERRUPT_NEEDS:
+        return _make_intent(
+            INTENT_SEEK_FOOD,
+            needs.eat,
+            source_goal=None,
+            reason=f"Критический голод — срочный поиск еды (голод {agent.get('hunger', 0)}%)",
+            created_turn=world_turn,
+        )
+
     # ── Walk the priority map ─────────────────────────────────────────────────
     best_intent: Optional[Intent] = None
     best_score: float = _NEGLIGIBLE_THRESHOLD  # anything below this is ignored
@@ -188,6 +223,10 @@ def is_hard_interrupt(needs: NeedScores) -> bool:
     if needs.avoid_emission >= _HARD_INTERRUPT_EMISSION:
         return True
     if needs.heal_self >= _HARD_INTERRUPT_HEAL:
+        return True
+    if needs.drink >= _HARD_INTERRUPT_NEEDS:
+        return True
+    if needs.eat >= _HARD_INTERRUPT_NEEDS:
         return True
     return False
 

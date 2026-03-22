@@ -80,6 +80,21 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
     unravel = _score_unravel(agent, global_goal, wealth_ratio)
     leave_zone = _score_leave_zone(agent)
 
+    # ── Multiplicative suppression: risky drives dampened by survival pressure ──
+    # (Fix 2) Apply before goal-achieved zeroing so zeroing is the final word.
+    _survival_pressure = max(survive_now, heal_self * 0.5)
+    if _survival_pressure > 0:
+        get_rich = get_rich * max(0.0, 1.0 - _survival_pressure)
+        hunt_target = hunt_target * max(0.0, 1.0 - _survival_pressure)
+        unravel = unravel * max(0.0, 1.0 - _survival_pressure)
+
+    # ── Completed goal: zero goal-driven drives, boost leave_zone (Fix 1) ────
+    if agent.get("global_goal_achieved"):
+        hunt_target = 0.0
+        unravel = 0.0
+        if not agent.get("has_left_zone"):
+            leave_zone = max(leave_zone, 0.8)
+
     # ── Economic ─────────────────────────────────────────────────────────────
     trade = _score_trade(agent, ctx)
 

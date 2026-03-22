@@ -342,10 +342,18 @@ def _exec_wait(
     agent["action_used"] = True
     reason = step.payload.get("reason", "")
     if reason == "wait_in_shelter":
-        _write_once_decision(agent, world_turn, state,
-            "🏠 Укрываюсь от выброса",
-            {"action_kind": "wait_in_shelter"},
-            "Нахожусь в укрытии — жду окончания выброса")
+        # Don't spam memory with repeated shelter wait entries (Fix 4):
+        # skip if any of the last 5 action-type entries already have this action_kind.
+        _recent_shelter = [
+            m for m in agent.get("memory", [])[-5:]
+            if m.get("type") == "action"
+            and m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+        ]
+        if not _recent_shelter:
+            _write_once_decision(agent, world_turn, state,
+                "🏠 Укрываюсь от выброса",
+                {"action_kind": "wait_in_shelter"},
+                "Нахожусь в укрытии — жду окончания выброса")
     elif reason == "trapped_on_dangerous_terrain":
         _write_once_decision(agent, world_turn, state,
             "⚠️ Нет выхода: застрял на опасной местности",

@@ -55,6 +55,26 @@ _INTENT_LABEL_RU: dict = {
     "idle":                 "Ожидание",
 }
 
+# ── Intent → current_goal mapping (Fix 3) ────────────────────────────────────
+# Maps intent.kind to the canonical agent current_goal string.
+# Used in _run_bot_decision_v2_inner to update current_goal BEFORE writing
+# the decision memory entry so that memory reflects the new goal.
+_INTENT_TO_GOAL: Dict[str, str] = {
+    "escape_danger":       "emergency_heal",
+    "heal_self":           "emergency_heal",
+    "flee_emission":       "emergency_shelter",
+    "seek_water":          "restore_needs",
+    "seek_food":           "restore_needs",
+    "rest":                "restore_needs",
+    "resupply":            "resupply",
+    "sell_artifacts":      "get_rich",
+    "get_rich":            "get_rich",
+    "hunt_target":         "kill_stalker",
+    "search_information":  "unravel_zone",
+    "leave_zone":          "leave_zone",
+    "idle":                "idle",
+}
+
 # Default risk_tolerance used when an agent or item does not specify one.
 DEFAULT_RISK_TOLERANCE = 0.5
 
@@ -3414,6 +3434,10 @@ def _run_bot_decision_v2_inner(
         "plan_step_0": plan.steps[0].kind if plan.steps else None,
     }
 
+    # Update current_goal from intent BEFORE writing the decision memory entry
+    # so that memory accurately reflects the agent's new goal. (Fix 3)
+    agent["current_goal"] = _INTENT_TO_GOAL.get(intent.kind, agent.get("current_goal", "idle"))
+
     # Write a decision memory entry when the intent kind changes.
     # We skip writing when intent is the same as the last decision entry to avoid
     # flooding the log with identical entries every tick.
@@ -3452,8 +3476,6 @@ def _run_bot_decision_v2_inner(
             ),
         )
 
-    # Update current_goal from intent
-    _update_current_goal_from_intent(agent, intent)
     return execute_plan_step(ctx, plan, state, world_turn)
 
 
