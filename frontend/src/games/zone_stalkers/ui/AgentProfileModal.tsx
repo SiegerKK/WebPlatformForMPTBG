@@ -66,10 +66,7 @@ export interface AgentForProfile {
     summary?: string;
     effects?: Record<string, unknown>;
   }>;
-  /**
-   * Output of the v2 decision pipeline shadow mode.
-   * Populated by the backend when ``state["_v2_decision_pipeline"] == True``.
-   */
+  /** Output of the v2 decision pipeline. Populated on every tick. */
   _v2_context?: {
     need_scores: Record<string, number>;
     intent_kind: string;
@@ -78,6 +75,8 @@ export interface AgentForProfile {
     plan_intent: string | null;
     plan_steps: number;
     plan_confidence: number;
+    /** Kind of the first plan step (e.g. "travel_to_location"). */
+    plan_step_0: string | null;
   };
 }
 
@@ -673,6 +672,13 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 const t = m.world_day !== undefined
                   ? { world_day: m.world_day, world_hour: m.world_hour ?? 0, world_minute: m.world_minute ?? 0 }
                   : turnToTime(m.world_turn);
+                const decisionIntentKind = m.type === 'decision' && m.effects?.intent_kind
+                  ? (m.effects.intent_kind as string)
+                  : null;
+                const decisionIntentMeta = decisionIntentKind ? (_INTENT_META[decisionIntentKind] ?? null) : null;
+                const decisionScore = m.type === 'decision' && typeof m.effects?.intent_score === 'number'
+                  ? m.effects.intent_score as number
+                  : null;
                 return (
                   <div key={i} style={{ ...s.memoryEntry, borderLeft: `3px solid ${color}` }}>
                     <div style={s.memoryMeta}>
@@ -684,6 +690,14 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>
+                    {decisionIntentMeta && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                        <span style={{ fontSize: '0.78rem' }}>{decisionIntentMeta.icon} {decisionIntentMeta.label}</span>
+                        {decisionScore !== null && (
+                          <span style={{ fontSize: '0.72rem', color: '#64748b' }}>· {Math.round(decisionScore * 100)}%</span>
+                        )}
+                      </div>
+                    )}
                     {!!m.summary && (
                       <div style={s.memorySummary}>{m.summary}</div>
                     )}
@@ -1128,6 +1142,21 @@ const _INTENT_META: Record<string, { icon: string; label: string }> = {
   maintain_group:       { icon: '🔗', label: 'Сохранить группу' },
   idle:                 { icon: '💤', label: 'Ожидание' },
 };
+/** Human-readable Russian labels for plan step kinds. */
+const _STEP_LABEL_RU: Record<string, string> = {
+  travel_to_location:        'Путешествие',
+  sleep_for_hours:           'Сон',
+  explore_location:          'Исследование',
+  trade_buy_item:            'Покупка',
+  trade_sell_item:           'Продажа',
+  consume_item:              'Употребление предмета',
+  equip_item:                'Экипировка',
+  pickup_item:               'Подбор предмета',
+  heal_self:                 'Лечение',
+  ask_for_intel:             'Запрос информации',
+  wait:                      'Ожидание',
+  legacy_scheduled_action:   'Запланированное действие',
+};
 
 /** Clamp value to [min, max]. */
 const _clamp = (v: number, min = 0, max = 1) => Math.max(min, Math.min(max, v));
@@ -1311,8 +1340,8 @@ function V2DecisionPanel({ agent, v2Context, sendCommand, loadingV2, onExplainV2
           Активных потребностей: {sortedNeeds.length}
         </span>
         {isBackend && (
-          <span style={s.v2SourceBadge} title="Данные получены от бэкенда (теневой режим v2)">
-            Бэкенд
+          <span style={s.v2SourceBadge} title="Данные получены от бэкенда (обновляются каждый тик)">
+            v2
           </span>
         )}
         {!isBackend && (
@@ -1375,8 +1404,10 @@ function V2DecisionPanel({ agent, v2Context, sendCommand, loadingV2, onExplainV2
         )}
         {hasPlan && (
           <div style={s.v2PlanLine}>
-            📋 План: {v2Context!.plan_intent} · {v2Context!.plan_steps} шаг(а) ·{' '}
-            уверенность {(v2Context!.plan_confidence * 100).toFixed(0)}%
+            📋 {v2Context!.plan_step_0
+              ? (_STEP_LABEL_RU[v2Context!.plan_step_0] ?? v2Context!.plan_step_0)
+              : 'Ожидание'
+            } · {v2Context!.plan_steps} шаг(а) · {(v2Context!.plan_confidence * 100).toFixed(0)}%
           </div>
         )}
       </div>

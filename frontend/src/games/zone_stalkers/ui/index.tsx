@@ -150,6 +150,8 @@ interface StalkerAgent {
     plan_intent: string | null;
     plan_steps: number;
     plan_confidence: number;
+    /** Kind of the first plan step (e.g. "travel_to_location"). */
+    plan_step_0: string | null;
   };
 }
 

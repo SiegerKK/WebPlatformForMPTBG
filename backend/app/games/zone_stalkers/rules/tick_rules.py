@@ -28,6 +28,33 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 2000
 
+# ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
+_INTENT_LABEL_RU: dict = {
+    "escape_danger":        "Бегство (крит. HP)",
+    "heal_self":            "Срочное лечение",
+    "flee_emission":        "Бегство от выброса",
+    "wait_in_shelter":      "Укрытие от выброса",
+    "seek_water":           "Поиск воды",
+    "seek_food":            "Поиск еды",
+    "rest":                 "Отдых (сон)",
+    "resupply":             "Получить снаряжение",
+    "sell_artifacts":       "Продажа артефактов",
+    "trade":                "Торговля",
+    "upgrade_equipment":    "Апгрейд снаряжения",
+    "loot":                 "Мародёрство",
+    "explore":              "Исследование",
+    "get_rich":             "Накопление богатства",
+    "hunt_target":          "Охота на цель",
+    "search_information":   "Поиск информации",
+    "leave_zone":           "Покинуть Зону",
+    "negotiate":            "Переговоры",
+    "assist_ally":          "Помощь союзнику",
+    "form_group":           "Создать группу",
+    "follow_group_plan":    "Следовать плану группы",
+    "maintain_group":       "Сохранить группу",
+    "idle":                 "Ожидание",
+}
+
 # Default risk_tolerance used when an agent or item does not specify one.
 DEFAULT_RISK_TOLERANCE = 0.5
 
@@ -3372,13 +3399,58 @@ def _run_bot_decision_v2_inner(
     intent = select_intent(ctx, needs, world_turn)
     plan = build_plan(ctx, intent, state, world_turn)
 
+    # Compute needs dict once (reused below)
+    _needs_dict = asdict(needs)
+
     # Store context for observability / debug
     agent["_v2_context"] = {
-        "need_scores": asdict(needs),
+        "need_scores": _needs_dict,
         "intent_kind": intent.kind,
         "intent_score": round(intent.score, 3),
         "intent_reason": intent.reason,
+        "plan_intent": plan.intent_kind,
+        "plan_steps": len(plan.steps),
+        "plan_confidence": round(plan.confidence, 3),
+        "plan_step_0": plan.steps[0].kind if plan.steps else None,
     }
+
+    # Write a decision memory entry when the intent kind changes.
+    # We skip writing when intent is the same as the last decision entry to avoid
+    # flooding the log with identical entries every tick.
+    _prev_decision_intent = next(
+        (m.get("effects", {}).get("intent_kind")
+         for m in reversed(agent.get("memory", []))
+         if m.get("type") == "decision"),
+        None,
+    )
+    if _prev_decision_intent != intent.kind:
+        _top_needs = sorted(
+            ((k, v) for k, v in _needs_dict.items() if v > 0.05),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:3]
+        _needs_str = (
+            ", ".join(f"{k}: {round(v * 100)}%" for k, v in _top_needs)
+            or "нет"
+        )
+        _step0_kind = plan.steps[0].kind if plan.steps else "wait"
+        _intent_label = _INTENT_LABEL_RU.get(intent.kind, intent.kind)
+        _add_memory(
+            agent, world_turn, state, "decision",
+            f"🧠 {_intent_label}",
+            {
+                "action_kind": "v2_decision",
+                "intent_kind": intent.kind,
+                "intent_score": round(intent.score, 3),
+                "plan_step": _step0_kind,
+                "plan_steps_count": len(plan.steps),
+            },
+            summary=(
+                f"Намерение «{intent.kind}» ({round(intent.score * 100)}%)."
+                + (f" {intent.reason}." if intent.reason else "")
+                + f" Топ потребности: {_needs_str}"
+            ),
+        )
 
     # Update current_goal from intent
     _update_current_goal_from_intent(agent, intent)
