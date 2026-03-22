@@ -3175,7 +3175,6 @@ def _update_current_goal_from_intent(
         "seek_food":            "emergency_eat",
         "seek_water":           "emergency_drink",
         "rest":                 "sleep",
-        "resupply":             "rearm",
         "flee_emission":        "flee_emission",
         "wait_in_shelter":      "shelter",
         "sell_artifacts":       "sell_artifacts",
@@ -3187,6 +3186,16 @@ def _update_current_goal_from_intent(
         "explore":              "explore",
         "idle":                 "idle",
     }
+    if intent.kind == "resupply":
+        # Determine which equipment is actually missing for a more descriptive goal name
+        eq = agent.get("equipment", {})
+        if not eq.get("weapon"):
+            agent["current_goal"] = "get_weapon"
+        elif not eq.get("armor"):
+            agent["current_goal"] = "get_armor"
+        else:
+            agent["current_goal"] = "get_ammo"
+        return
     new_goal = _INTENT_GOAL_MAP.get(intent.kind)
     if new_goal:
         agent["current_goal"] = new_goal
@@ -3202,7 +3211,7 @@ def _run_bot_decision_v2(
     prev_goal = agent.get("current_goal")
     events = _run_bot_decision_v2_inner(agent_id, agent, state, world_turn)
     new_goal = agent.get("current_goal")
-    if new_goal and new_goal != prev_goal:
+    if new_goal and prev_goal is not None and new_goal != prev_goal:
         events.append({
             "event_type": "bot_decision",
             "payload": {
@@ -3213,6 +3222,109 @@ def _run_bot_decision_v2(
             },
         })
     return events
+
+
+def _pre_decision_equipment_maintenance(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Phase-independent pre-decision equipment checks.
+
+    Runs before the needs/intent/plan pipeline.  Returns a non-None event list
+    when an immediate action is taken (and the pipeline should be skipped for
+    this tick), or ``None`` to indicate "nothing to do — run the pipeline".
+
+    Priority order:
+      1. Equip weapon from inventory  → equip in-place
+      2. Pick up weapon from ground   → pick up, equip on next tick
+      3. Seek weapon from memory      → schedule travel
+      4. Equip armor from inventory   → equip in-place
+      5. Pick up armor from ground    → pick up
+      6. Pick up matching ammo from ground
+      7. Seek ammo from memory        → schedule travel
+      8. Seek heal items from memory  → proactive supply
+
+    Steps 1-2 equip/pickup happen via the existing v1 helpers so that all
+    existing memory / event contracts are preserved.
+    """
+    eq = agent.get("equipment", {})
+    inv = agent.get("inventory", [])
+    loc_id = agent.get("location_id", "")
+
+    # 1–3: weapon
+    if not eq.get("weapon"):
+        evs = _bot_equip_from_inventory(agent_id, agent, WEAPON_ITEM_TYPES, "weapon", state, world_turn)
+        if evs:
+            return evs
+        evs = _bot_pickup_item_from_ground(agent_id, agent, WEAPON_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+        mem_loc = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            agent["current_goal"] = "get_weapon"
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "🔫 Ищу оружие по памяти",
+                {"action_kind": "seek_item", "item_category": "weapon",
+                 "destination": mem_loc},
+                summary=f"Иду за оружием в {state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}",
+            )
+            agent["action_used"] = True
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+
+    # 4–5: armor
+    if not eq.get("armor"):
+        evs = _bot_equip_from_inventory(agent_id, agent, ARMOR_ITEM_TYPES, "armor", state, world_turn)
+        if evs:
+            return evs
+        evs = _bot_pickup_item_from_ground(agent_id, agent, ARMOR_ITEM_TYPES, state, world_turn)
+        if evs:
+            return evs
+
+    # 6–7: ammo for equipped weapon
+    weapon = eq.get("weapon")
+    if weapon and isinstance(weapon, dict):
+        weapon_type = weapon.get("type")
+        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+        if required_ammo:
+            has_ammo = any(i.get("type") == required_ammo for i in inv)
+            if not has_ammo:
+                evs = _bot_pickup_item_from_ground(
+                    agent_id, agent, frozenset([required_ammo]), state, world_turn
+                )
+                if evs:
+                    return evs
+                mem_loc = _find_item_memory_location(agent, frozenset([required_ammo]), state)
+                if mem_loc and mem_loc != loc_id:
+                    agent["current_goal"] = "get_ammo"
+                    _add_memory(
+                        agent, world_turn, state, "decision",
+                        "🔫 Ищу патроны по памяти",
+                        {"action_kind": "seek_item", "item_category": "ammo",
+                         "ammo_type": required_ammo, "destination": mem_loc},
+                        summary=f"Иду за патронами в {state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}",
+                    )
+                    agent["action_used"] = True
+                    return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+
+    # 8: proactive seek heal items from memory
+    has_heal = any(i.get("type") in HEAL_ITEM_TYPES for i in inv)
+    if not has_heal:
+        mem_loc = _find_item_memory_location(agent, HEAL_ITEM_TYPES, state)
+        if mem_loc and mem_loc != loc_id:
+            _add_memory(
+                agent, world_turn, state, "decision",
+                "💊 Ищу медикаменты по памяти",
+                {"action_kind": "seek_item", "item_category": "medical",
+                 "destination": mem_loc},
+                summary=f"Иду за медикаментами в {state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}",
+            )
+            agent["action_used"] = True
+            return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
+
+    return None  # nothing to do — run the main pipeline
 
 
 def _run_bot_decision_v2_inner(
@@ -3246,6 +3358,13 @@ def _run_bot_decision_v2_inner(
             if loc.get("exit_zone"):
                 return _execute_leave_zone(agent_id, agent, state, world_turn)
             return _bot_route_to_exit(agent_id, agent, state, world_turn)
+
+    # ── Pre-decision: phase-independent equipment maintenance ─────────────
+    # Equip / pick-up / seek from memory happen before the needs pipeline so
+    # that Phase-1 resource-gathering is not blocked by reload_or_rearm=1.0.
+    _eq_evs = _pre_decision_equipment_maintenance(agent_id, agent, state, world_turn)
+    if _eq_evs is not None:
+        return _eq_evs
 
     # ── V2 pipeline ────────────────────────────────────────────────────────
     ctx = build_agent_context(agent_id, agent, state)

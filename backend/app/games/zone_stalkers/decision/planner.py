@@ -273,28 +273,86 @@ def _plan_rest(
 def _plan_resupply(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Optional[Plan]:
-    trader_loc = _nearest_trader_location(ctx, state)
-    agent_loc = ctx.self_state.get("location_id")
-    if trader_loc and trader_loc != agent_loc:
+    """Plan to resupply equipment (weapon / armor / ammo).
+
+    Priority:
+    1. Seek from memory (travel to observed item location).
+    2. Phase 2 only: buy from a trader.
+    3. Phase 1 fallback: delegate to get_rich behaviour so agent gathers
+       resources instead of idling while waiting for a trader.
+    """
+    from app.games.zone_stalkers.balance.items import (
+        WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_FOR_WEAPON,
+    )
+    from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+
+    agent = ctx.self_state
+    eq = agent.get("equipment", {})
+    has_weapon = eq.get("weapon") is not None
+    has_armor = eq.get("armor") is not None
+    agent_loc = agent.get("location_id", "")
+
+    # Determine what's missing and which item types are needed
+    if not has_weapon:
+        need_types: "frozenset[str]" = WEAPON_ITEM_TYPES
+    elif not has_armor:
+        need_types = ARMOR_ITEM_TYPES
+    else:
+        # Check ammo
+        weapon_type = eq["weapon"].get("type") if isinstance(eq.get("weapon"), dict) else None
+        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+        if not required_ammo:
+            return None
+        has_ammo = any(i.get("type") == required_ammo for i in agent.get("inventory", []))
+        if has_ammo:
+            return None
+        need_types = frozenset([required_ammo])
+
+    # 1. Memory-based travel (check observed item locations)
+    mem_loc = _find_item_memory_location(agent, need_types, state)
+    if mem_loc and mem_loc != agent_loc:
         return Plan(
             intent_kind=intent.kind,
-            steps=[
-                PlanStep(STEP_TRAVEL_TO_LOCATION,
-                         {"target_id": trader_loc, "reason": "resupply"},
-                         expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
-                PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "equipment"},
-                         interruptible=False),
-            ],
-            confidence=0.6, created_turn=world_turn,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": mem_loc, "reason": "seek_item_from_memory"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+            )],
+            confidence=0.85, created_turn=world_turn,
         )
-    if trader_loc == agent_loc:
-        return Plan(
-            intent_kind=intent.kind,
-            steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "equipment"},
-                            interruptible=False)],
-            confidence=0.8, created_turn=world_turn,
-        )
-    return None
+
+    # 2. Phase 2 only: buy from trader
+    wealth = _agent_wealth_from_ctx(ctx)
+    threshold = agent.get("material_threshold", 50000)
+    if wealth >= threshold:
+        trader_loc = _nearest_trader_location(ctx, state)
+        if trader_loc and trader_loc != agent_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(STEP_TRAVEL_TO_LOCATION,
+                             {"target_id": trader_loc, "reason": "resupply"},
+                             expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "equipment"},
+                             interruptible=False),
+                ],
+                confidence=0.6, created_turn=world_turn,
+            )
+        if trader_loc == agent_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "equipment"},
+                                interruptible=False)],
+                confidence=0.8, created_turn=world_turn,
+            )
+
+    # 3. Phase 1 fallback: resource-gathering (treat as get_rich)
+    get_rich_intent = Intent(
+        kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+        reason="Phase-1 resupply fallback → gather resources",
+        created_turn=world_turn,
+    )
+    return _plan_get_rich(ctx, get_rich_intent, state, world_turn)
 
 
 def _plan_sell_artifacts(
@@ -636,16 +694,26 @@ def _nearest_safe_location(
     ctx: AgentContext,
     state: dict[str, Any],
 ) -> Optional[str]:
-    """Return the location_id of the nearest location safe from emission."""
+    """Return the location_id of the nearest location safe from emission (BFS)."""
     from .constants import EMISSION_DANGEROUS_TERRAIN
+    from collections import deque
     loc_id = ctx.self_state.get("location_id", "")
     locations = state.get("locations", {})
-    for conn in locations.get(loc_id, {}).get("connections", []):
-        if conn.get("closed"):
-            continue
-        target = conn["to"]
-        if locations.get(target, {}).get("terrain_type", "") not in EMISSION_DANGEROUS_TERRAIN:
-            return target
+    # BFS — safe means terrain_type NOT in EMISSION_DANGEROUS_TERRAIN
+    queue: deque[str] = deque([loc_id])
+    visited: set[str] = {loc_id}
+    while queue:
+        current = queue.popleft()
+        for conn in locations.get(current, {}).get("connections", []):
+            if conn.get("closed"):
+                continue
+            nxt = conn["to"]
+            if nxt in visited:
+                continue
+            visited.add(nxt)
+            if locations.get(nxt, {}).get("terrain_type", "") not in EMISSION_DANGEROUS_TERRAIN:
+                return nxt
+            queue.append(nxt)
     return None
 
 
@@ -684,3 +752,11 @@ def _estimate_travel_ticks(
         loc_id, state.get("locations", {}), max_minutes=9999
     )
     return int(reachable.get(target_loc, 12))
+
+
+def _agent_wealth_from_ctx(ctx: AgentContext) -> int:
+    """Return agent wealth (money + inventory item values)."""
+    agent = ctx.self_state
+    money = agent.get("money", 0)
+    item_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
+    return money + item_value

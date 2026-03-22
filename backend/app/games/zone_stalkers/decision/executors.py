@@ -224,9 +224,16 @@ def _exec_trade_sell(
     world_turn: int,
 ) -> list[dict[str, Any]]:
     """Sell artifacts at a co-located trader."""
-    from app.games.zone_stalkers.rules.tick_rules import _bot_sell_to_trader
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _bot_sell_to_trader,
+        _find_trader_at_location,
+    )
     loc_id = agent.get("location_id", "")
-    return _bot_sell_to_trader(agent_id, agent, loc_id, state, world_turn) or []
+    trader = _find_trader_at_location(loc_id, state)
+    if trader is None:
+        agent["action_used"] = True
+        return []
+    return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn) or []
 
 
 def _exec_consume(
