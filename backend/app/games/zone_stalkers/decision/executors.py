@@ -133,6 +133,15 @@ def _exec_travel(
     elif reason in ("seek_drink", "emergency_drink", "buy_drink"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "drink", target_id,
                             emergency=True)
+    elif reason in ("sell_artifacts", "sell_artifacts_get_rich"):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART_TYPES
+        _art_set = frozenset(_ART_TYPES.keys())
+        _artifacts_count = sum(1 for i in agent.get("inventory", []) if i.get("type") in _art_set)
+        _write_once_decision(agent, world_turn, state,
+            "🎁 Иду продавать артефакты",
+            {"action_kind": "sell_artifacts", "artifacts_count": _artifacts_count,
+             "destination": target_id},
+            f"Иду к торговцу в {target_id} продавать {_artifacts_count} артефакт(ов)")
 
     return _bot_schedule_travel(agent_id, agent, target_id, state, world_turn,
                                 emergency_flee=emergency_flee)
@@ -172,6 +181,11 @@ def _exec_explore(
     """Schedule an exploration action."""
     from app.games.zone_stalkers.rules.tick_rules import EXPLORE_DURATION_TURNS
     target_id = step.payload.get("target_id", agent.get("location_id", ""))
+    loc_name = state.get("locations", {}).get(target_id, {}).get("name", target_id)
+    _write_once_decision(agent, world_turn, state,
+        "🔍 Исследую аномальную зону",
+        {"action_kind": "explore_decision", "target_id": target_id},
+        f"Решил исследовать локацию «{loc_name}» в поисках артефактов")
     agent["scheduled_action"] = {
         "type": "explore_anomaly_location",
         "target_id": target_id,

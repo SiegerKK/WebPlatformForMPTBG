@@ -440,10 +440,14 @@ def _plan_get_rich(
         )
 
     # 3. Travel to the best reachable anomaly location
+    # Score is risk-adjusted: agents prefer zones whose anomaly_activity/10 is
+    # closest to their risk_tolerance (low-risk prefers quiet zones, high-risk
+    # prefers dangerous ones).
+    risk_tolerance: float = agent.get("risk_tolerance", 0.5)
     locations = state.get("locations", {})
     reachable = _dijkstra_reachable_locations(agent_loc, locations, max_minutes=9999)
     best_loc: Optional[str] = None
-    best_score: float = -1.0
+    best_score: float = -2.0  # sentinel below any possible score
     for cand_id in reachable:
         if cand_id == agent_loc:
             continue
@@ -452,7 +456,8 @@ def _plan_get_rich(
         cand = locations.get(cand_id, {})
         if cand.get("anomaly_activity", 0) <= 0:
             continue
-        score = _score_location(cand, "get_rich")
+        # Proximity of normalised anomaly activity to risk tolerance
+        score = -abs(cand.get("anomaly_activity", 0) / 10.0 - risk_tolerance)
         if score > best_score:
             best_score = score
             best_loc = cand_id

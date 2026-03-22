@@ -3913,6 +3913,18 @@ def _compat_pursue_get_rich(
     """v1-compat get_rich logic: explore anomaly, write move_for_anomaly memory."""
     from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
     art_types = frozenset(ARTIFACT_TYPES.keys())
+
+    # Gate: if agent is below material_threshold, set current_goal based on equipment needs
+    material_threshold = agent.get("material_threshold", 0)
+    money = agent.get("money", 0)
+    if material_threshold > 0 and money < material_threshold:
+        equipment = agent.get("equipment", {})
+        if equipment.get("weapon") is None:
+            agent["current_goal"] = "get_weapon"
+        elif equipment.get("armor") is None:
+            agent["current_goal"] = "get_armor"
+        else:
+            agent["current_goal"] = "gather_resources"
     # Check if agent has artifacts to sell
     has_artifacts = any(i.get("type") in art_types for i in agent.get("inventory", []))
     if has_artifacts:

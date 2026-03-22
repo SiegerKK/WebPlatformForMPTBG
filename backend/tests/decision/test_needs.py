@@ -134,7 +134,7 @@ class TestReloadOrRearm:
     def test_no_weapon_is_1(self):
         agent = make_agent(has_weapon=False, has_armor=False)
         needs = _needs_for(agent=agent)
-        assert needs.reload_or_rearm == 1.0
+        assert needs.reload_or_rearm == 0.65
 
     def test_no_armor_is_0_7(self):
         agent = make_agent(has_weapon=True, has_armor=False, has_ammo=False)

@@ -134,7 +134,10 @@ def _score_reload_or_rearm(agent: dict[str, Any]) -> float:
     has_armor = equipment.get("armor") is not None
 
     if not has_weapon:
-        return 1.0
+        # 0.65 — serious but below emergency survival thresholds (heal ≥0.8,
+        # eat/drink at 75% ≈ 0.75).  Equipment is also handled pre-pipeline
+        # by _pre_decision_equipment_maintenance.
+        return 0.65
     if not has_armor:
         return 0.7
 
