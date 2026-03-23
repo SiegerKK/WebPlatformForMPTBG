@@ -142,6 +142,24 @@ def _exec_travel(
             {"action_kind": "sell_artifacts", "artifacts_count": _artifacts_count,
              "destination": target_id},
             f"Иду к торговцу в {target_id} продавать {_artifacts_count} артефакт(ов)")
+    elif reason == "get_rich_travel_to_anomaly":
+        # Write a decision record only when the target anomaly location changes.
+        _prev_anomaly_target = next(
+            (m.get("effects", {}).get("target_location_id")
+             for m in reversed(agent.get("memory", []))
+             if m.get("type") == "decision"
+             and m.get("effects", {}).get("action_kind") == "anomaly_search_target_chosen"),
+            None,
+        )
+        if _prev_anomaly_target != target_id:
+            _target_loc_name = state.get("locations", {}).get(target_id, {}).get("name", target_id)
+            _add_memory(
+                agent, world_turn, state, "decision",
+                f"🗺️ Выбрал локацию для поиска: «{_target_loc_name}»",
+                {"action_kind": "anomaly_search_target_chosen",
+                 "target_location_id": target_id},
+                summary=f"Отправляюсь искать артефакты в «{_target_loc_name}»",
+            )
 
     return _bot_schedule_travel(agent_id, agent, target_id, state, world_turn,
                                 emergency_flee=emergency_flee)
@@ -342,18 +360,23 @@ def _exec_wait(
     agent["action_used"] = True
     reason = step.payload.get("reason", "")
     if reason == "wait_in_shelter":
-        # Don't spam memory with repeated shelter wait entries (Fix 4):
-        # skip if any of the last 5 action-type entries already have this action_kind.
-        _recent_shelter = [
-            m for m in agent.get("memory", [])[-5:]
-            if m.get("type") == "action"
-            and m.get("effects", {}).get("action_kind") == "wait_in_shelter"
-        ]
-        if not _recent_shelter:
-            _write_once_decision(agent, world_turn, state,
+        # Merge-in-place: if we already have a wait_in_shelter decision entry,
+        # just update its world_turn instead of adding a new entry every tick.
+        # This prevents the shelter/v2_decision pair from writing duplicate
+        # entries on every emission tick.
+        _shelter_entry = next(
+            (m for m in reversed(agent.get("memory", []))
+             if m.get("type") == "decision"
+             and m.get("effects", {}).get("action_kind") == "wait_in_shelter"),
+            None,
+        )
+        if _shelter_entry is not None:
+            _shelter_entry["world_turn"] = world_turn
+        else:
+            _add_memory(agent, world_turn, state, "decision",
                 "🏠 Укрываюсь от выброса",
                 {"action_kind": "wait_in_shelter"},
-                "Нахожусь в укрытии — жду окончания выброса")
+                summary="Нахожусь в укрытии — жду окончания выброса")
     elif reason == "trapped_on_dangerous_terrain":
         _write_once_decision(agent, world_turn, state,
             "⚠️ Нет выхода: застрял на опасной местности",

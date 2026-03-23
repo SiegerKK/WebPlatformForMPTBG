@@ -3482,10 +3482,14 @@ def _run_bot_decision_v2_inner(
     # Write a decision memory entry when the intent kind changes.
     # We skip writing when intent is the same as the last decision entry to avoid
     # flooding the log with identical entries every tick.
+    # Only look at entries that are themselves v2_decision records; other
+    # decision entries (e.g. wait_in_shelter, seek_item, …) do not carry an
+    # intent_kind field and would cause the dedup guard to fail every tick.
     _prev_decision_intent = next(
         (m.get("effects", {}).get("intent_kind")
          for m in reversed(agent.get("memory", []))
-         if m.get("type") == "decision"),
+         if m.get("type") == "decision"
+         and m.get("effects", {}).get("action_kind") == "v2_decision"),
         None,
     )
     if _prev_decision_intent != intent.kind:
