@@ -193,9 +193,22 @@ def _plan_heal_or_flee(
             confidence=1.0, created_turn=world_turn,
         )
 
-    # No heal item — travel to nearest trader
+    # No heal item — travel to nearest trader (or buy immediately if already there)
     trader_loc = _nearest_trader_location(ctx, state)
-    if trader_loc and trader_loc != ctx.self_state.get("location_id"):
+    agent_loc = ctx.self_state.get("location_id")
+    if trader_loc and trader_loc == agent_loc:
+        # Already co-located with the trader — buy immediately (no travel needed).
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                kind=STEP_TRADE_BUY_ITEM,
+                payload={"item_category": "medical"},
+                interruptible=False,
+                expected_duration_ticks=1,
+            )],
+            interruptible=False, confidence=1.0, created_turn=world_turn,
+        )
+    if trader_loc and trader_loc != agent_loc:
         steps = [
             PlanStep(
                 kind=STEP_TRAVEL_TO_LOCATION,
@@ -239,7 +252,16 @@ def _plan_seek_consumable(
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
     trader_loc = _nearest_trader_location(ctx, state)
-    if trader_loc and trader_loc != agent.get("location_id"):
+    agent_loc = agent.get("location_id")
+    if trader_loc and trader_loc == agent_loc:
+        # Already co-located with the trader — buy immediately (no travel needed).
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
+                            interruptible=False)],
+            interruptible=False, confidence=1.0, created_turn=world_turn,
+        )
+    if trader_loc and trader_loc != agent_loc:
         steps = [
             PlanStep(STEP_TRAVEL_TO_LOCATION,
                      {"target_id": trader_loc, "reason": f"buy_{category}"},
