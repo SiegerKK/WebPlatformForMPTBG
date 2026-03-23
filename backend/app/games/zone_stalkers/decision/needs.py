@@ -55,7 +55,10 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
     hunger: int = agent.get("hunger", 0)
     thirst: int = agent.get("thirst", 0)
     sleepiness: int = agent.get("sleepiness", 0)
-    wealth: int = _agent_wealth(agent)
+    # Use only liquid wealth (money + inventory) for goal drives — equipment
+    # value is deliberately excluded so that owning a gun or armour does NOT
+    # count as accumulated wealth for the get_rich / hunt / unravel drives.
+    wealth: int = _agent_liquid_wealth(agent)
     material_threshold: int = agent.get("material_threshold", 3000)
     global_goal: str = agent.get("global_goal", "get_rich")
     kill_target_id: str | None = agent.get("kill_target_id")
@@ -79,6 +82,16 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
     hunt_target = _score_hunt_target(agent, kill_target_id, wealth_ratio)
     unravel = _score_unravel(agent, global_goal, wealth_ratio)
     leave_zone = _score_leave_zone(agent)
+
+    # ── Equipment gate: get_rich is suppressed while resupply is needed ────────
+    # Multiplying by (1 - reload_or_rearm) guarantees that the suppressed
+    # get_rich score is always strictly less than reload_or_rearm when any
+    # equipment gap exists, so INTENT_RESUPPLY always wins in the priority walk:
+    #   reload_or_rearm = 0.65 → get_rich_max * 0.35 = 0.245 < 0.65  ✓
+    #   reload_or_rearm = 0.70 → get_rich_max * 0.30 = 0.210 < 0.70  ✓
+    #   reload_or_rearm = 0.60 → get_rich_max * 0.40 = 0.280 < 0.60  ✓
+    #   reload_or_rearm = 0.00 → get_rich unchanged                    ✓
+    get_rich = get_rich * (1.0 - reload_or_rearm)
 
     # ── Multiplicative suppression: risky drives dampened by survival pressure ──
     # (Fix 2) Apply before goal-achieved zeroing so zeroing is the final word.
@@ -251,7 +264,13 @@ def _clamp(value: float) -> float:
 
 
 def agent_wealth(agent: dict[str, Any]) -> int:
-    """Sum of money + inventory values + equipped item values (public API)."""
+    """Sum of money + inventory values + equipped item values (public API).
+
+    Used by external callers (tick_rules, groups, debug) that need the full
+    picture of agent wealth including gear on the agent's back.
+    ``evaluate_needs`` intentionally uses ``_agent_liquid_wealth`` instead so
+    that owning equipment does not suppress the get_rich drive.
+    """
     money: int = agent.get("money", 0)
     inv_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
     eq_value = sum(
@@ -262,7 +281,19 @@ def agent_wealth(agent: dict[str, Any]) -> int:
     return money + inv_value + eq_value
 
 
-# ── Private alias kept for internal use (needs only) ──────────────────────────
+def _agent_liquid_wealth(agent: dict[str, Any]) -> int:
+    """Liquid wealth used for goal-drive scoring: money + inventory only.
+
+    Equipment value is excluded because gear is a *survival tool*, not
+    accumulated wealth.  An NPC with a pistol but no money should still
+    feel a strong drive to earn more — the pistol does not make them rich.
+    """
+    money: int = agent.get("money", 0)
+    inv_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
+    return money + inv_value
+
+
+# ── Private alias kept for backward-compatible external callers ───────────────
 _agent_wealth = agent_wealth
 
 

@@ -1181,9 +1181,10 @@ function _computeNeedScores(agent: AgentForProfile): Record<string, number> {
   const hunger  = agent.hunger;
   const thirst  = agent.thirst;
   const sleep   = agent.sleepiness;
+  // Liquid wealth: money + inventory only — equipment value excluded.
+  // Mirrors backend _agent_liquid_wealth() in decision/needs.py.
   const wealth  = agent.money
-    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
-    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
+    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
   const threshold = agent.material_threshold ?? 3000;
   const eq  = agent.equipment;
   const inv = agent.inventory;
@@ -1200,22 +1201,23 @@ function _computeNeedScores(agent: AgentForProfile): Record<string, number> {
   const drink = _clamp(thirst / 100);
   const sleeping = _clamp(sleep / 100);
 
-  // Equipment
+  // Equipment — values mirror decision/needs.py _score_reload_or_rearm()
   const hasWeapon = !!eq['weapon'];
   const hasArmor  = !!eq['armor'];
   const weaponType  = eq['weapon']?.type ?? null;
   const reqAmmo     = weaponType ? (_AMMO_FOR_WEAPON_V2[weaponType] ?? null) : null;
   const hasAmmo     = reqAmmo ? inv.some(i => i.type === reqAmmo) : true;
   let reloadOrRearm = 0;
-  if (!hasWeapon)         reloadOrRearm = 1.0;
+  if (!hasWeapon)         reloadOrRearm = 0.65;   // matches backend: serious but below heal threshold
   else if (!hasArmor)     reloadOrRearm = 0.7;
-  else if (!hasAmmo)      reloadOrRearm = 0.5;
+  else if (!hasAmmo)      reloadOrRearm = 0.6;
 
   // Material drive
   const wealthRatio = threshold > 0 ? Math.min(1, wealth / threshold) : 1;
-  const getRich = globalGoal === 'get_rich' || globalGoal === 'unravel_zone_mystery'
-    ? _clamp((1 - wealthRatio) * GET_RICH_WEIGHT)
-    : 0;
+  // Equipment gate: get_rich is suppressed while equipment is needed.
+  // Mirrors backend: get_rich *= (1 - reload_or_rearm).
+  let getRich = _clamp((1 - wealthRatio) * GET_RICH_WEIGHT);
+  getRich = getRich * (1 - reloadOrRearm);
 
   // Goal-specific drives
   const huntTarget = globalGoal === 'kill_stalker' && !!agent.kill_target_id

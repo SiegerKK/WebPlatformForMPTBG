@@ -184,11 +184,17 @@ class TestAvoidEmission:
 # ── get_rich ──────────────────────────────────────────────────────────────────
 
 class TestGetRich:
-    def test_zero_wealth_max_score(self):
-        # money=0 + no inventory value = wealth=0 → get_rich=0.70
+    def test_zero_liquid_wealth_fully_equipped_max_score(self):
+        """Fully equipped agent with zero liquid wealth → get_rich = 0.70 (no suppression).
+
+        Ammo is present (reload_or_rearm=0) but given value=0 so that liquid
+        wealth stays at exactly 0 for a clean formula check.
+        """
         agent = make_agent(money=0, material_threshold=3000,
-                           has_weapon=False, has_armor=False, has_ammo=False)
+                           has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
         needs = _needs_for(agent=agent)
+        assert needs.reload_or_rearm == 0.0, "should be fully equipped"
         assert abs(needs.get_rich - 0.70) < 1e-9
 
     def test_at_threshold_zero(self):
@@ -196,12 +202,68 @@ class TestGetRich:
         needs = _needs_for(agent=agent)
         assert needs.get_rich == 0.0
 
-    def test_half_threshold(self):
-        # money=1500, no items → wealth=1500, ratio=0.5 → get_rich=(1-0.5)*0.7=0.35
+    def test_half_threshold_fully_equipped(self):
+        # money=1500, ammo value=0, fully equipped → liquid_wealth=1500,
+        # ratio=0.5 → base=(1-0.5)*0.7=0.35; reload_or_rearm=0 → no suppression.
         agent = make_agent(money=1500, material_threshold=3000,
+                           has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
+        needs = _needs_for(agent=agent)
+        assert needs.reload_or_rearm == 0.0, "should be fully equipped"
+        assert abs(needs.get_rich - 0.35) < 1e-9
+
+
+# ── Equipment gate on get_rich ────────────────────────────────────────────────
+
+class TestEquipmentGateOnGetRich:
+    def test_no_weapon_suppresses_get_rich(self):
+        """Missing weapon (reload_or_rearm=0.65) suppresses get_rich below resupply score."""
+        agent = make_agent(money=0, material_threshold=3000,
                            has_weapon=False, has_armor=False, has_ammo=False)
         needs = _needs_for(agent=agent)
-        assert abs(needs.get_rich - 0.35) < 1e-9
+        # base get_rich = 0.70; suppression factor = (1 - 0.65) = 0.35
+        assert abs(needs.get_rich - 0.70 * 0.35) < 1e-9
+        # Critically: suppressed get_rich < reload_or_rearm
+        assert needs.get_rich < needs.reload_or_rearm
+
+    def test_no_armor_suppresses_get_rich(self):
+        """Missing armor (reload_or_rearm=0.70) suppresses get_rich below resupply score."""
+        agent = make_agent(money=0, material_threshold=3000,
+                           has_weapon=True, has_armor=False, has_ammo=False)
+        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
+        needs = _needs_for(agent=agent)
+        # reload_or_rearm=0.70; suppression factor=0.30; base get_rich=0.70
+        assert abs(needs.get_rich - 0.70 * 0.30) < 1e-9
+        assert needs.get_rich < needs.reload_or_rearm
+
+    def test_no_ammo_suppresses_get_rich(self):
+        """Missing ammo (reload_or_rearm=0.60) suppresses get_rich below resupply score."""
+        agent = make_agent(money=0, material_threshold=3000,
+                           has_weapon=True, has_armor=True, has_ammo=False)
+        needs = _needs_for(agent=agent)
+        # reload_or_rearm=0.60; suppression factor=0.40; base get_rich=0.70
+        assert abs(needs.get_rich - 0.70 * 0.40) < 1e-9
+        assert needs.get_rich < needs.reload_or_rearm
+
+    def test_fully_equipped_no_suppression(self):
+        """Fully equipped agent → reload_or_rearm=0 → get_rich is not suppressed."""
+        agent = make_agent(money=0, material_threshold=3000,
+                           has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
+        needs = _needs_for(agent=agent)
+        assert needs.reload_or_rearm == 0.0
+        assert abs(needs.get_rich - 0.70) < 1e-9
+
+    def test_equipment_value_excluded_from_wealth_ratio(self):
+        """Equipment value is NOT counted toward liquid wealth for get_rich."""
+        # Agent has weapon (value=300) + armor (value=200) but zero money/inventory.
+        # Old behaviour: wealth=500, ratio=500/3000=0.167, get_rich=0.583.
+        # New behaviour: liquid_wealth=0, ratio=0, base get_rich=0.70 (then suppressed).
+        agent = make_agent(money=0, material_threshold=3000,
+                           has_weapon=True, has_armor=True, has_ammo=False)
+        needs = _needs_for(agent=agent)
+        # reload_or_rearm=0.60, liquid_wealth=0 → base=0.70, suppressed: 0.70*0.40=0.28
+        assert abs(needs.get_rich - 0.70 * 0.40) < 1e-9
 
 
 # ── hunt_target ───────────────────────────────────────────────────────────────
