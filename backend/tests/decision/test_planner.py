@@ -274,14 +274,42 @@ class TestSeekConsumableSellFirst:
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
 
     def test_seek_water_no_money_artifact_trader_elsewhere_travels(self):
-        """money=0 + artifact + trader at loc_b → travel first (sell on arrival, handled by
-        fresh plan rebuild), so first step is still TRAVEL."""
+        """money=0 + artifact + trader at loc_b → plan: TRAVEL → SELL → BUY."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
         agent = self._artifact_agent(thirst=80)
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
-        # Agent must travel first; sell-before-buy fires when agent arrives (plan rebuilds)
+        # First step: travel to trader
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
         assert plan.steps[0].payload["target_id"] == "loc_b"
+        # Sell artifact upon arrival so next step can afford the item
+        sell_step = next((s for s in plan.steps if s.kind == STEP_TRADE_SELL_ITEM), None)
+        assert sell_step is not None, "Plan must include SELL step when money=0 and has artifact"
+        # Buy step must follow the sell step
+        buy_step = next((s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM), None)
+        assert buy_step is not None
+        assert plan.steps.index(sell_step) < plan.steps.index(buy_step), (
+            "SELL must come before BUY in the plan"
+        )
+
+    def test_heal_self_no_money_artifact_trader_elsewhere_travels(self):
+        """heal_self + money=0 + artifact + trader at loc_b → plan: TRAVEL → SELL → BUY medical."""
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
+        artifact_type = next(iter(ARTIFACT_TYPES))
+        agent = make_agent(
+            hp=20, money=0,
+            inventory=[{"id": "art1", "type": artifact_type, "value": 500}],
+        )
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_HEAL_SELF)
+        assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+        sell_step = next((s for s in plan.steps if s.kind == STEP_TRADE_SELL_ITEM), None)
+        assert sell_step is not None, "Plan must include SELL step when money=0 and has artifact"
+        buy_step = next((s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM), None)
+        assert buy_step is not None
+        assert buy_step.payload.get("item_category") == "medical"
+        assert plan.steps.index(sell_step) < plan.steps.index(buy_step)
 
     def test_heal_self_no_money_artifact_at_trader_sells_first(self):
         """heal_self + money=0 + artifact + at trader → SELL before BUY medical."""

@@ -233,6 +233,9 @@ def _plan_heal_or_flee(
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
     if trader_loc and trader_loc != agent_loc:
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT2
+        _artifact_types2 = frozenset(_AT2.keys())
+        _has_artifacts2 = any(i.get("type") in _artifact_types2 for i in inventory)
         steps = [
             PlanStep(
                 kind=STEP_TRAVEL_TO_LOCATION,
@@ -240,13 +243,23 @@ def _plan_heal_or_flee(
                 interruptible=True,
                 expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
             ),
-            PlanStep(
-                kind=STEP_TRADE_BUY_ITEM,
-                payload={"item_category": "medical"},
+        ]
+        # If the agent has no money but holds artifacts, sell one upon arrival so
+        # the next step (buy) can be fulfilled.  Without this the NPC travels to
+        # the trader but still cannot afford medicine and dies.
+        if agent.get("money", 0) == 0 and _has_artifacts2:
+            steps.append(PlanStep(
+                kind=STEP_TRADE_SELL_ITEM,
+                payload={"item_category": "artifact", "reason": "fund_heal"},
                 interruptible=False,
                 expected_duration_ticks=1,
-            ),
-        ]
+            ))
+        steps.append(PlanStep(
+            kind=STEP_TRADE_BUY_ITEM,
+            payload={"item_category": "medical"},
+            interruptible=False,
+            expected_duration_ticks=1,
+        ))
         return Plan(
             intent_kind=intent.kind, steps=steps, interruptible=True,
             confidence=0.7, created_turn=world_turn,
@@ -303,12 +316,13 @@ def _plan_seek_consumable(
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
     if trader_loc and trader_loc != agent_loc:
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT2
+        _artifact_types2 = frozenset(_AT2.keys())
+        _has_artifacts2 = any(i.get("type") in _artifact_types2 for i in inventory)
         steps = [
             PlanStep(STEP_TRAVEL_TO_LOCATION,
                      {"target_id": trader_loc, "reason": f"buy_{category}"},
                      expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
-            PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
-                     interruptible=False),
         ]
         # Opportunistic: if the agent has the complementary consumable in inventory
         # and the secondary need is non-negligible (≥ 25%), consume it immediately
@@ -326,6 +340,14 @@ def _plan_seek_consumable(
                 interruptible=False,
                 expected_duration_ticks=1,
             ))
+        # If the agent has no money but holds artifacts, sell one upon arrival so
+        # the next step (buy) can be fulfilled.
+        if agent.get("money", 0) == 0 and _has_artifacts2:
+            steps.append(PlanStep(STEP_TRADE_SELL_ITEM,
+                                  {"item_category": "artifact", "reason": "fund_consumable"},
+                                  interruptible=False))
+        steps.append(PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
+                              interruptible=False))
         return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
     return None
 
