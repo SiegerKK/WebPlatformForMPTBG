@@ -1533,6 +1533,24 @@ def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Opti
     return None
 
 
+def _find_obs_entry(
+    agent: Dict[str, Any], obs_type: str, loc_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return the most recent observation entry for *obs_type* at *loc_id*.
+
+    Unlike :func:`_last_obs_content`, this returns the **mutable entry dict**
+    itself so callers can update it in-place (merge logic).  Returns ``None``
+    when no such entry exists.
+    """
+    for entry in reversed(agent.get("memory", [])):
+        if entry.get("type") != "observation":
+            continue
+        fx = entry.get("effects", {})
+        if fx.get("observed") == obs_type and fx.get("location_id") == loc_id:
+            return entry
+    return None
+
+
 def _confirmed_empty_locations(agent: Dict[str, Any]) -> "frozenset[str]":
     """Return the set of location IDs the agent has confirmed as artifact-free.
 
@@ -1598,13 +1616,25 @@ def _write_location_observations(
         if tr.get("location_id") == loc_id:
             stalker_names.append(tr.get("name", tid))
     stalker_names.sort()
-    if stalker_names and stalker_names != _last_obs_content(agent, "stalkers", loc_id):
-        _add_memory(
-            agent, world_turn, state, "observation",
-            f"Вижу персонажей в «{loc_name}»",
-            {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
-            summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
-        )
+    if stalker_names:
+        _existing_stalker_entry = _find_obs_entry(agent, "stalkers", loc_id)
+        if _existing_stalker_entry is not None:
+            # Merge: union of previously seen names + currently visible names.
+            _old_names = _existing_stalker_entry["effects"].get("names", [])
+            _merged = sorted(set(_old_names) | set(stalker_names))
+            if _merged != _old_names:
+                _existing_stalker_entry["effects"]["names"] = _merged
+                _existing_stalker_entry["world_turn"] = world_turn
+                _existing_stalker_entry["summary"] = (
+                    f"В локации «{loc_name}» замечены: {', '.join(_merged)}"
+                )
+        else:
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"Вижу персонажей в «{loc_name}»",
+                {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
+                summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
+            )
 
     # ── Mutants at this location ──────────────────────────────────────────────
     mutant_names = sorted(
@@ -1626,13 +1656,24 @@ def _write_location_observations(
 
     # ── Loose items on the ground ─────────────────────────────────────────────
     item_types = sorted(it.get("type", "?") for it in loc.get("items", []))
-    if item_types and item_types != _last_obs_content(agent, "items", loc_id):
-        _add_memory(
-            agent, world_turn, state, "observation",
-            f"Вижу предметы в «{loc_name}»",
-            {"observed": "items", "location_id": loc_id, "item_types": item_types},
-            summary=f"В локации «{loc_name}» на земле: {', '.join(item_types)}",
-        )
+    if item_types:
+        _existing_item_entry = _find_obs_entry(agent, "items", loc_id)
+        if _existing_item_entry is not None:
+            # Replace: the item list always reflects only what is currently on the ground.
+            _old_item_types = _existing_item_entry["effects"].get("item_types", [])
+            if item_types != _old_item_types:
+                _existing_item_entry["effects"]["item_types"] = item_types
+                _existing_item_entry["world_turn"] = world_turn
+                _existing_item_entry["summary"] = (
+                    f"В локации «{loc_name}» на земле: {', '.join(item_types)}"
+                )
+        else:
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"Вижу предметы в «{loc_name}»",
+                {"observed": "items", "location_id": loc_id, "item_types": item_types},
+                summary=f"В локации «{loc_name}» на земле: {', '.join(item_types)}",
+            )
 
 
 # ─────────────────────────────────────────────────────────────────
