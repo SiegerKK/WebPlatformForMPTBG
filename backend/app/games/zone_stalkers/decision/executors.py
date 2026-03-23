@@ -239,8 +239,18 @@ def _exec_trade_buy(
         "weapon": WEAPON_ITEM_TYPES,
         "armor": ARMOR_ITEM_TYPES,
         "ammo": AMMO_ITEM_TYPES,
-        "equipment": WEAPON_ITEM_TYPES,  # simplified
+        "equipment": WEAPON_ITEM_TYPES,  # legacy fallback; prefer explicit "weapon"/"armor"
     }
+
+    # Bug 2 fix: defensive guard — never buy equipment the agent already has equipped.
+    # _plan_resupply now emits the correct category ("weapon"/"armor"/"ammo"), but this
+    # guard also covers stale "equipment" category values from old plan entries.
+    eq = agent.get("equipment", {})
+    if category in ("weapon", "equipment") and eq.get("weapon") is not None:
+        return []   # already armed — nothing to purchase
+    if category == "armor" and eq.get("armor") is not None:
+        return []   # already armoured — nothing to purchase
+
     item_types = type_map.get(category, HEAL_ITEM_TYPES)
     reason = step.payload.get("reason", f"buy_{category}")
     return _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,

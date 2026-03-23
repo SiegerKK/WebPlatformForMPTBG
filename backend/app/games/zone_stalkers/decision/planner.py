@@ -197,6 +197,30 @@ def _plan_heal_or_flee(
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = ctx.self_state.get("location_id")
     if trader_loc and trader_loc == agent_loc:
+        # Bug 1 fix: if the agent has no money but holds sellable artifacts,
+        # sell one first (this turn) so the next tick can afford the medical item.
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT
+        _artifact_types = frozenset(_AT.keys())
+        _has_artifacts = any(i.get("type") in _artifact_types for i in inventory)
+        if agent.get("money", 0) == 0 and _has_artifacts:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(
+                        kind=STEP_TRADE_SELL_ITEM,
+                        payload={"item_category": "artifact", "reason": "fund_heal"},
+                        interruptible=False,
+                        expected_duration_ticks=1,
+                    ),
+                    PlanStep(
+                        kind=STEP_TRADE_BUY_ITEM,
+                        payload={"item_category": "medical"},
+                        interruptible=False,
+                        expected_duration_ticks=1,
+                    ),
+                ],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
         # Already co-located with the trader — buy immediately (no travel needed).
         return Plan(
             intent_kind=intent.kind,
@@ -254,6 +278,23 @@ def _plan_seek_consumable(
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id")
     if trader_loc and trader_loc == agent_loc:
+        # Bug 1 fix: if the agent has no money but holds sellable artifacts,
+        # sell one first (this turn) so the next tick can afford the consumable.
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT
+        _artifact_types = frozenset(_AT.keys())
+        _has_artifacts = any(i.get("type") in _artifact_types for i in inventory)
+        if agent.get("money", 0) == 0 and _has_artifacts:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(STEP_TRADE_SELL_ITEM,
+                             {"item_category": "artifact", "reason": "fund_consumable"},
+                             interruptible=False),
+                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
+                             interruptible=False),
+                ],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
         # Already co-located with the trader — buy immediately (no travel needed).
         return Plan(
             intent_kind=intent.kind,
@@ -327,11 +368,16 @@ def _plan_resupply(
     has_armor = eq.get("armor") is not None
     agent_loc = agent.get("location_id", "")
 
-    # Determine what's missing and which item types are needed
+    # Determine what's missing and which item types are needed.
+    # _buy_category is the item_category string passed to the STEP_TRADE_BUY_ITEM plan step
+    # so the executor buys exactly what is needed (Bug 2 fix: was always "equipment" →
+    # WEAPON_ITEM_TYPES, causing weapons to be purchased even when armor was the need).
     if not has_weapon:
         need_types: "frozenset[str]" = WEAPON_ITEM_TYPES
+        _buy_category = "weapon"
     elif not has_armor:
         need_types = ARMOR_ITEM_TYPES
+        _buy_category = "armor"
     else:
         # Check ammo
         weapon_type = eq["weapon"].get("type") if isinstance(eq.get("weapon"), dict) else None
@@ -342,6 +388,7 @@ def _plan_resupply(
         if has_ammo:
             return None
         need_types = frozenset([required_ammo])
+        _buy_category = "ammo"
 
     # 1. Memory-based travel (check observed item locations)
     mem_loc = _find_item_memory_location(agent, need_types, state)
@@ -368,7 +415,7 @@ def _plan_resupply(
                     PlanStep(STEP_TRAVEL_TO_LOCATION,
                              {"target_id": trader_loc, "reason": "resupply"},
                              expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
-                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "equipment"},
+                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": _buy_category},
                              interruptible=False),
                 ],
                 confidence=0.6, created_turn=world_turn,
@@ -376,7 +423,7 @@ def _plan_resupply(
         if trader_loc == agent_loc:
             return Plan(
                 intent_kind=intent.kind,
-                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "equipment"},
+                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": _buy_category},
                                 interruptible=False)],
                 confidence=0.8, created_turn=world_turn,
             )

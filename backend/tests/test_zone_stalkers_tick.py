@@ -1752,7 +1752,12 @@ class TestEquipmentMaintenance:
             assert sched is not None
             assert sched["type"] == "travel"
             goal = agent.get("current_goal")
-            assert goal in ("get_weapon", "get_armor"), f"Expected get_weapon or get_armor goal, got {goal}"
+            # v2 pipeline: INTENT_RESUPPLY → current_goal="resupply" (via _INTENT_TO_GOAL).
+            # Old v1 code set "get_weapon"/"get_armor" directly; v2 uses the unified
+            # "resupply" goal label instead.  Either value is acceptable during migration.
+            assert goal in ("resupply", "get_weapon", "get_armor"), (
+                f"Expected resupply/get_weapon/get_armor goal, got {goal}"
+            )
 
     def test_equipment_buy_skipped_in_phase1(self):
         """Bot should NOT travel to a trader for equipment when wealth < threshold (Phase 1)."""
