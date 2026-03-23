@@ -397,7 +397,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 
     # 3b. Per-turn location observations for every alive stalker agent.
     # Writes a new observation entry only when content has changed since the last
-    # entry of the same category (deduplication prevents memory flooding).
+    # entry of the same category; merges repeated observations via the semantic
+    # merge system; marks stale entries before writing new ones.
+    from app.games.zone_stalkers.rules.memory_merge import apply_staleness  # noqa: PLC0415
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -407,6 +409,10 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         loc_id = agent.get("location_id")
         if loc_id:
+            # Apply staleness decay before writing so that a previously-stale
+            # entry is properly re-opened (status→active) when the same
+            # observation recurs, rather than being confused with a fresh one.
+            apply_staleness(agent.get("memory", []), world_turn)
             _write_location_observations(agent_id, agent, loc_id, state, world_turn)
 
     # 4. Advance world time (1 tick = 1 minute)
@@ -949,6 +955,18 @@ def _add_memory(
     # Legacy reason= kwarg (deprecated; use summary= instead)
     if reason and memory_type == "decision" and "reason" not in effects:
         effects = {**effects, "reason": reason}
+
+    # Auto-inject aggregate tracking fields for observation-type entries.
+    # This ensures every observation written via _add_memory carries the
+    # new schema fields (first_seen_turn, last_seen_turn, times_seen,
+    # confidence, importance, status) regardless of call site.
+    if memory_type == "observation":
+        from app.games.zone_stalkers.rules.memory_merge import (  # noqa: PLC0415
+            new_obs_aggregate_fields,
+        )
+        _agg = new_obs_aggregate_fields(effects, world_turn)
+        # Only fill in fields that the caller has NOT explicitly set.
+        effects = {**_agg, **effects}
 
     memory_entry: Dict[str, Any] = {
         "world_turn": world_turn,
@@ -1596,10 +1614,27 @@ def _write_location_observations(
     """Write 'observation' memory entries for everything the agent currently sees.
 
     Called both on arrival AND each turn so that observations stay up-to-date as
-    entities enter or leave the agent's location.  Deduplication ensures a new entry
-    is only appended when the observed content has changed since the last entry of the
-    same category.
+    entities enter or leave the agent's location.
+
+    Uses the semantic merge system (memory_merge.py) to aggregate repeated
+    observations into a single entry with ``times_seen``, ``first_seen_turn``,
+    ``last_seen_turn``, ``confidence``, ``importance``, and ``status`` fields,
+    rather than appending a new entry on every turn.
+
+    Merge rules per category
+    ------------------------
+    * **stalkers** (TACTICAL, window=20): union of names; same-location entries
+      are merged regardless of which specific stalkers are present.
+    * **mutants** (TACTICAL, window=20): merged only when the exact same group
+      is visible; a different group composition triggers a new entry.
+    * **items** (AMBIENT, window=40): current item list replaces the stored one
+      on each merge-update; a new entry is created only when outside the window.
     """
+    from app.games.zone_stalkers.rules.memory_merge import (  # noqa: PLC0415
+        find_mergeable_entry,
+        update_merged_entry,
+    )
+
     loc = state.get("locations", {}).get(loc_id, {})
     loc_name = loc.get("name", loc_id)
 
@@ -1616,19 +1651,31 @@ def _write_location_observations(
         if tr.get("location_id") == loc_id:
             stalker_names.append(tr.get("name", tid))
     stalker_names.sort()
+
     if stalker_names:
-        _existing_stalker_entry = _find_obs_entry(agent, "stalkers", loc_id)
-        if _existing_stalker_entry is not None:
-            # Merge: union of previously seen names + currently visible names.
-            _old_names = _existing_stalker_entry["effects"].get("names", [])
+        _stalker_effects_proto = {
+            "observed": "stalkers",
+            "location_id": loc_id,
+            "names": stalker_names,
+        }
+        _existing = find_mergeable_entry(
+            agent.get("memory", []), _stalker_effects_proto, world_turn
+        )
+        if _existing is not None:
+            # Semantic merge: union of previously-seen and currently-visible names.
+            _old_names = _existing["effects"].get("names", [])
             _merged = sorted(set(_old_names) | set(stalker_names))
+            _existing["effects"]["names"] = _merged
+            update_merged_entry(_existing, world_turn)
             if _merged != _old_names:
-                _existing_stalker_entry["effects"]["names"] = _merged
-                _existing_stalker_entry["world_turn"] = world_turn
-                _existing_stalker_entry["summary"] = (
-                    f"В локации «{loc_name}» замечены: {', '.join(_merged)}"
-                )
+                # Content changed (new name added) — bump the semantic change timestamp.
+                _existing["world_turn"] = world_turn
+            _existing["summary"] = (
+                f"В локации «{loc_name}» замечены: {', '.join(_merged)}"
+            )
         else:
+            # No mergeable entry found — create a fresh one.
+            # new_obs_aggregate_fields is injected automatically by _add_memory.
             _add_memory(
                 agent, world_turn, state, "observation",
                 f"Вижу персонажей в «{loc_name}»",
@@ -1642,13 +1689,30 @@ def _write_location_observations(
         for m in state.get("mutants", {}).values()
         if m.get("location_id") == loc_id and m.get("is_alive", True)
     )
-    if mutant_names and mutant_names != _last_obs_content(agent, "mutants", loc_id):
-        _add_memory(
-            agent, world_turn, state, "observation",
-            f"Вижу мутантов в «{loc_name}»",
-            {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
-            summary=f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}",
+    if mutant_names:
+        _mutant_effects_proto = {
+            "observed": "mutants",
+            "location_id": loc_id,
+            "names": mutant_names,
+        }
+        _existing_mut = find_mergeable_entry(
+            agent.get("memory", []), _mutant_effects_proto, world_turn
         )
+        if _existing_mut is not None:
+            # Same mutant group visible again — merge.
+            _existing_mut["effects"]["names"] = mutant_names
+            update_merged_entry(_existing_mut, world_turn)
+            _existing_mut["summary"] = (
+                f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}"
+            )
+        else:
+            # Different group (or first sighting, or outside window) — new entry.
+            _add_memory(
+                agent, world_turn, state, "observation",
+                f"Вижу мутантов в «{loc_name}»",
+                {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
+                summary=f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}",
+            )
 
     # NOTE: Artifacts are NOT recorded as a location observation on arrival.
     # They can only be discovered and recorded through the explore action.
@@ -1657,16 +1721,26 @@ def _write_location_observations(
     # ── Loose items on the ground ─────────────────────────────────────────────
     item_types = sorted(it.get("type", "?") for it in loc.get("items", []))
     if item_types:
-        _existing_item_entry = _find_obs_entry(agent, "items", loc_id)
-        if _existing_item_entry is not None:
-            # Replace: the item list always reflects only what is currently on the ground.
-            _old_item_types = _existing_item_entry["effects"].get("item_types", [])
+        _item_effects_proto = {
+            "observed": "items",
+            "location_id": loc_id,
+            "item_types": item_types,
+        }
+        _existing_items = find_mergeable_entry(
+            agent.get("memory", []), _item_effects_proto, world_turn
+        )
+        if _existing_items is not None:
+            # Replace item list with current ground state; update aggregate fields.
+            _old_item_types = _existing_items["effects"].get("item_types", [])
             if item_types != _old_item_types:
-                _existing_item_entry["effects"]["item_types"] = item_types
-                _existing_item_entry["world_turn"] = world_turn
-                _existing_item_entry["summary"] = (
+                _existing_items["effects"]["item_types"] = item_types
+                _existing_items["summary"] = (
                     f"В локации «{loc_name}» на земле: {', '.join(item_types)}"
                 )
+            update_merged_entry(_existing_items, world_turn)
+            if item_types != _old_item_types:
+                # Content changed — bump the semantic change timestamp.
+                _existing_items["world_turn"] = world_turn
         else:
             _add_memory(
                 agent, world_turn, state, "observation",
