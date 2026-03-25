@@ -744,6 +744,7 @@ def resolve_world_command(
                 "artifacts": list(loc_data.get("artifacts", [])),
                 "agents": list(old.get("agents", [])),
                 "items": list(old.get("items", [])),
+                "image_url": loc_data.get("image_url") or old.get("image_url") or None,
             }
         state["locations"] = new_locations
 
