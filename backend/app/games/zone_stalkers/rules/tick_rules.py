@@ -2932,11 +2932,9 @@ def _bot_ask_colocated_stalkers_about_item(
     agents = state.get("agents", {})
 
     # Build a set of (source_agent_id, loc_id) pairs the asking agent already
-    # knows this turn so we don't write duplicate entries.
+    # knows (any turn) so we don't write duplicate entries.
     already_known: set = set()
     for mem in agent.get("memory", []):
-        if mem.get("world_turn") != world_turn:
-            continue
         fx = mem.get("effects", {})
         if fx.get("action_kind") == "intel_from_stalker":
             already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
@@ -2991,10 +2989,6 @@ def _bot_ask_colocated_stalkers_about_item(
             if not obs_types.intersection(item_types):
                 continue
 
-            # Skip if already known from this turn (don't re-write).
-            if (other_id, obs_loc) in already_known:
-                continue  # keep scanning — other locations may still be new
-
             # Skip if we already wrote an entry for this (stalker, location)
             # in this call.  Because the loop iterates newest-first, the first
             # observation we encounter for a given location is always the most
@@ -3017,6 +3011,32 @@ def _bot_ask_colocated_stalkers_about_item(
             obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
             current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
             matched_types = sorted(obs_types.intersection(item_types))
+
+            if (other_id, obs_loc) in already_known:
+                # Entry already exists — update in-place if this intel is fresher.
+                for _em in agent.get("memory", []):
+                    _efx = _em.get("effects", {})
+                    if (
+                        _efx.get("action_kind") == "intel_from_stalker"
+                        and _efx.get("source_agent_id") == other_id
+                        and _efx.get("location_id") == obs_loc
+                        and _efx.get("observed") == "items"
+                    ):
+                        if obs_turn > _efx.get("obs_world_turn", 0):
+                            _efx["obs_world_turn"] = obs_turn
+                            _efx["item_types"] = matched_types
+                            _em["world_turn"] = world_turn
+                            _em["summary"] = (
+                                f"{other_name} рассказал, что видел {item_category_name} "
+                                f"в «{obs_loc_name}» (в {current_loc_name}). "
+                                f"Видел {_obs_time_label}."
+                            )
+                        break
+                seen_locs_this_stalker.add(obs_loc)
+                if first_loc is None:
+                    first_loc = obs_loc
+                continue
+
             _add_memory(
                 agent, world_turn, state, "observation",
                 f"💬 Разведданные от {other_name}",
@@ -3066,11 +3086,9 @@ def _bot_ask_colocated_stalkers_about_agent(
     loc_id = agent.get("location_id", "")
     agents = state.get("agents", {})
 
-    # Build set of (source_agent_id, loc_id) pairs already known this turn.
+    # Build set of (source_agent_id, loc_id) pairs already known (any turn).
     already_known: set = set()
     for mem in agent.get("memory", []):
-        if mem.get("world_turn") != world_turn:
-            continue
         fx = mem.get("effects", {})
         if fx.get("action_kind") == "intel_from_stalker" and fx.get("observed") == "agent_location":
             already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
@@ -3113,8 +3131,6 @@ def _bot_ask_colocated_stalkers_about_agent(
                 continue
             if obs_loc in exhausted_locs:
                 continue
-            if (other_id, obs_loc) in already_known:
-                continue
             if obs_loc in seen_locs_this_stalker:
                 continue
 
@@ -3122,6 +3138,30 @@ def _bot_ask_colocated_stalkers_about_agent(
             _obs_time_label = _turn_to_time_label(obs_turn)
             obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
             current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+
+            if (other_id, obs_loc) in already_known:
+                # Entry already exists — update in-place if this intel is fresher.
+                for _em in agent.get("memory", []):
+                    _efx = _em.get("effects", {})
+                    if (
+                        _efx.get("action_kind") == "intel_from_stalker"
+                        and _efx.get("source_agent_id") == other_id
+                        and _efx.get("location_id") == obs_loc
+                        and _efx.get("observed") == "agent_location"
+                    ):
+                        if obs_turn > _efx.get("obs_world_turn", 0):
+                            _efx["obs_world_turn"] = obs_turn
+                            _em["world_turn"] = world_turn
+                            _em["summary"] = (
+                                f"{other_name} рассказал, что видел «{target_agent_name}» "
+                                f"в «{obs_loc_name}» (в {current_loc_name}). "
+                                f"Видел {_obs_time_label}."
+                            )
+                        break
+                seen_locs_this_stalker.add(obs_loc)
+                if first_loc is None:
+                    first_loc = obs_loc
+                continue
 
             _add_memory(
                 agent, world_turn, state, "observation",
