@@ -26,7 +26,7 @@ router = APIRouter(tags=["zone_stalkers"])
 
 MEDIA_ROOT = os.environ.get("MEDIA_ROOT", "/app/media")
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 _EXT_MAP = {
     "image/jpeg": ".jpg",
