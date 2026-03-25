@@ -197,18 +197,15 @@ def _plan_heal_or_flee(
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = ctx.self_state.get("location_id")
     if trader_loc and trader_loc == agent_loc:
-        # Bug 1 fix: if the agent has no money but holds sellable artifacts,
-        # sell one first (this turn) so the next tick can afford the medical item.
-        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT
-        _artifact_types = frozenset(_AT.keys())
-        _has_artifacts = any(i.get("type") in _artifact_types for i in inventory)
-        if agent.get("money", 0) == 0 and _has_artifacts:
+        # If the agent has no money but holds sellable items, sell first this turn
+        # so the next tick can afford the medical item.
+        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
             return Plan(
                 intent_kind=intent.kind,
                 steps=[
                     PlanStep(
                         kind=STEP_TRADE_SELL_ITEM,
-                        payload={"item_category": "artifact", "reason": "fund_heal"},
+                        payload={"item_category": "any_sellable", "reason": "fund_heal"},
                         interruptible=False,
                         expected_duration_ticks=1,
                     ),
@@ -233,9 +230,6 @@ def _plan_heal_or_flee(
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
     if trader_loc and trader_loc != agent_loc:
-        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT2
-        _artifact_types2 = frozenset(_AT2.keys())
-        _has_artifacts2 = any(i.get("type") in _artifact_types2 for i in inventory)
         steps = [
             PlanStep(
                 kind=STEP_TRAVEL_TO_LOCATION,
@@ -244,13 +238,12 @@ def _plan_heal_or_flee(
                 expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
             ),
         ]
-        # If the agent has no money but holds artifacts, sell one upon arrival so
-        # the next step (buy) can be fulfilled.  Without this the NPC travels to
-        # the trader but still cannot afford medicine and dies.
-        if agent.get("money", 0) == 0 and _has_artifacts2:
+        # If the agent has no money but holds sellable items, sell upon arrival so
+        # the next step (buy) can be fulfilled.
+        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
             steps.append(PlanStep(
                 kind=STEP_TRADE_SELL_ITEM,
-                payload={"item_category": "artifact", "reason": "fund_heal"},
+                payload={"item_category": "any_sellable", "reason": "fund_heal"},
                 interruptible=False,
                 expected_duration_ticks=1,
             ))
@@ -291,17 +284,14 @@ def _plan_seek_consumable(
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id")
     if trader_loc and trader_loc == agent_loc:
-        # Bug 1 fix: if the agent has no money but holds sellable artifacts,
-        # sell one first (this turn) so the next tick can afford the consumable.
-        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT
-        _artifact_types = frozenset(_AT.keys())
-        _has_artifacts = any(i.get("type") in _artifact_types for i in inventory)
-        if agent.get("money", 0) == 0 and _has_artifacts:
+        # If the agent has no money but holds sellable items, sell first this turn
+        # so the next tick can afford the consumable.
+        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
             return Plan(
                 intent_kind=intent.kind,
                 steps=[
                     PlanStep(STEP_TRADE_SELL_ITEM,
-                             {"item_category": "artifact", "reason": "fund_consumable"},
+                             {"item_category": "any_sellable", "reason": "fund_consumable"},
                              interruptible=False),
                     PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
                              interruptible=False),
@@ -316,9 +306,6 @@ def _plan_seek_consumable(
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
     if trader_loc and trader_loc != agent_loc:
-        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _AT2
-        _artifact_types2 = frozenset(_AT2.keys())
-        _has_artifacts2 = any(i.get("type") in _artifact_types2 for i in inventory)
         steps = [
             PlanStep(STEP_TRAVEL_TO_LOCATION,
                      {"target_id": trader_loc, "reason": f"buy_{category}"},
@@ -340,11 +327,11 @@ def _plan_seek_consumable(
                 interruptible=False,
                 expected_duration_ticks=1,
             ))
-        # If the agent has no money but holds artifacts, sell one upon arrival so
+        # If the agent has no money but holds sellable items, sell upon arrival so
         # the next step (buy) can be fulfilled.
-        if agent.get("money", 0) == 0 and _has_artifacts2:
+        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
             steps.append(PlanStep(STEP_TRADE_SELL_ITEM,
-                                  {"item_category": "artifact", "reason": "fund_consumable"},
+                                  {"item_category": "any_sellable", "reason": "fund_consumable"},
                                   interruptible=False))
         steps.append(PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
                               interruptible=False))
@@ -869,3 +856,36 @@ def _agent_wealth_from_ctx(ctx: AgentContext) -> int:
     money = agent.get("money", 0)
     item_value = sum(i.get("value", 0) for i in agent.get("inventory", []))
     return money + item_value
+
+
+def _has_sellable_items(agent: dict) -> bool:
+    """Return True if the agent has any non-critical inventory item that can be sold.
+
+    Sellable categories (in order of sell priority):
+      - Artifacts
+      - Detectors
+      - Spare weapons (in inventory; equipped weapon is in agent["equipment"])
+      - Spare armor   (in inventory; equipped armor  is in agent["equipment"])
+
+    Not sellable:
+      - Consumables (food / drink / medical items)
+      - Ammo (low value, needed for combat)
+      - Secret documents (needed for ``unravel_zone_mystery`` goal)
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _IT
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART
+
+    _art_set = frozenset(_ART.keys())
+    _non_sellable_base = frozenset(["medical", "consumable", "ammo", "secret_document"])
+    _sellable_base = frozenset(["weapon", "armor", "detector"])
+
+    for item in agent.get("inventory", []):
+        t = item.get("type", "")
+        if t in _art_set:
+            return True
+        base = _IT.get(t, {}).get("type", t)
+        if base in _non_sellable_base:
+            continue
+        if base in _sellable_base and item.get("value", _IT.get(t, {}).get("value", 0)) > 0:
+            return True
+    return False

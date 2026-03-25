@@ -274,9 +274,16 @@ def _exec_trade_sell(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    """Sell artifacts at a co-located trader."""
+    """Sell inventory items at a co-located trader.
+
+    Dispatches based on ``step.payload["item_category"]``:
+    - ``"any_sellable"`` — sell non-critical items (artifacts, detectors, spare
+      weapons/armor) to raise cash for urgent needs via ``_bot_sell_items_for_cash``.
+    - anything else (default) — sell all artifacts via ``_bot_sell_to_trader``.
+    """
     from app.games.zone_stalkers.rules.tick_rules import (
         _bot_sell_to_trader,
+        _bot_sell_items_for_cash,
         _find_trader_at_location,
     )
     loc_id = agent.get("location_id", "")
@@ -284,6 +291,9 @@ def _exec_trade_sell(
     if trader is None:
         agent["action_used"] = True
         return []
+    item_category = step.payload.get("item_category", "artifact")
+    if item_category == "any_sellable":
+        return _bot_sell_items_for_cash(agent_id, agent, trader, state, world_turn) or []
     return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn) or []
 
 

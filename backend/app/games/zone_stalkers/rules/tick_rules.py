@@ -1999,6 +1999,155 @@ def _bot_sell_to_trader(
     return events
 
 
+def _bot_sell_items_for_cash(
+    agent_id: str,
+    agent: Dict[str, Any],
+    trader: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+    target_amount: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Sell non-critical inventory items to raise cash for urgent needs.
+
+    Sells items in descending priority:
+      1. Artifacts (highest resale value per slot)
+      2. Detectors
+      3. Spare weapons  (in inventory, NOT the equipped weapon)
+      4. Spare armor    (in inventory, NOT the equipped armor)
+
+    Items that are never sold here:
+      - Consumables (food / drink / medical / ammo) — needed for survival / combat
+      - Secret documents — needed for the ``unravel_zone_mystery`` goal
+
+    Stops as soon as ``agent["money"] >= target_amount`` (if given), or when all
+    eligible items have been sold / the trader can no longer afford more.
+
+    Returns a list of ``bot_sold_item`` events.
+    """
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _IT
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART
+
+    _SELL_RATIO = 0.6
+    _art_set: frozenset = frozenset(_ART.keys())
+    _non_sellable_base_types: frozenset = frozenset(
+        ["medical", "consumable", "ammo", "secret_document"]
+    )
+
+    def _item_priority(item: Dict[str, Any]) -> int:
+        """Lower number = sell first."""
+        t = item.get("type", "")
+        if t in _art_set:
+            return 0
+        base = _IT.get(t, {}).get("type", t)
+        if base == "detector":
+            return 1
+        if base == "weapon":
+            return 2
+        if base == "armor":
+            return 3
+        return 99  # not sold
+
+    # Collect candidates from inventory only (equipped items are in agent["equipment"])
+    candidates: List[Dict[str, Any]] = []
+    for item in agent.get("inventory", []):
+        t = item.get("type", "")
+        base = _IT.get(t, {}).get("type", t)
+        if base in _non_sellable_base_types:
+            continue
+        val = item.get("value", _IT.get(t, {}).get("value", 0))
+        if val <= 0:
+            continue
+        pri = _item_priority(item)
+        if pri == 99:
+            continue
+        candidates.append(item)
+
+    # Sort: highest priority first; within same priority sell most valuable first
+    candidates.sort(key=lambda i: (_item_priority(i), -i.get("value", 0)))
+
+    if not candidates:
+        agent["action_used"] = True
+        return []
+
+    events: List[Dict[str, Any]] = []
+    sold_items: List[Dict[str, Any]] = []
+    total_earned = 0
+
+    for item in candidates:
+        if target_amount is not None and agent.get("money", 0) >= target_amount:
+            break
+        t = item.get("type", "")
+        val = item.get("value", _IT.get(t, {}).get("value", 0))
+        sell_price = int(val * _SELL_RATIO)
+        if sell_price <= 0:
+            continue
+        if trader.get("money", 0) < sell_price:
+            continue  # trader cannot afford this item
+        agent["money"] = agent.get("money", 0) + sell_price
+        trader["money"] = trader.get("money", 0) - sell_price
+        total_earned += sell_price
+        sold_item = dict(item)
+        sold_item["stock"] = 1
+        trader.setdefault("inventory", []).append(sold_item)
+        sold_items.append(item)
+        events.append({
+            "event_type": "bot_sold_item",
+            "payload": {
+                "agent_id": agent_id,
+                "trader_id": trader.get("id", ""),
+                "item_type": t,
+                "price": sell_price,
+            },
+        })
+
+    if not sold_items:
+        agent["action_used"] = True
+        return []
+
+    # Remove sold items (compare by object identity)
+    sold_obj_ids = {id(i) for i in sold_items}
+    agent["inventory"] = [i for i in agent.get("inventory", []) if id(i) not in sold_obj_ids]
+    agent["action_used"] = True
+
+    item_names = ", ".join(
+        _IT.get(i.get("type", ""), {}).get("name", i.get("type", "?"))
+        for i in sold_items
+    )
+    trader_name = trader.get("name", trader.get("id", "?"))
+    loc_name = (
+        state.get("locations", {})
+        .get(agent.get("location_id", ""), {})
+        .get("name", "?")
+    )
+    _add_memory(
+        agent, world_turn, state, "action",
+        f"Продал {len(sold_items)} предметов на {total_earned} денег (экстренная продажа)",
+        {
+            "action_kind": "trade_sell_for_cash",
+            "money_gained": total_earned,
+            "items_sold": [i.get("type") for i in sold_items],
+            "trader_id": trader.get("id", ""),
+        },
+        summary=(
+            f"Продал {item_names} торговцу {trader_name} в «{loc_name}» "
+            f"за {total_earned} денег, чтобы покрыть критические нужды"
+        ),
+    )
+
+    stalker_name = agent.get("name", agent_id)
+    _add_trader_memory(
+        trader, world_turn, state, "trade_buy",
+        f"Купил {item_names} у сталкера {stalker_name}",
+        {
+            "money_spent": total_earned,
+            "items_bought": [i.get("type") for i in sold_items],
+            "stalker_id": agent_id,
+        },
+    )
+
+    return events
+
+
 def _bot_schedule_travel(
     agent_id: str,
     agent: Dict[str, Any],
