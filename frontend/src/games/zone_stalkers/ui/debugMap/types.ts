@@ -19,6 +19,8 @@ export interface ZoneLocation {
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];
   exit_zone?: boolean;
+  /** URL of an attached image, served from /media/... */
+  image_url?: string | null;
 }
 
 export interface StalkerAgent {

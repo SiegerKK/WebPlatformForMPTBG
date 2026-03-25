@@ -111,6 +111,17 @@ export function LocationDetailPanel({
         </div>
       </div>
 
+      {/* Image */}
+      {loc.image_url && (
+        <Section label="🖼 Изображение">
+          <img
+            src={loc.image_url}
+            alt={loc.name}
+            style={{ width: '100%', borderRadius: 6, objectFit: 'cover', maxHeight: 200, border: '1px solid #1e3a5f' }}
+          />
+        </Section>
+      )}
+
       {/* Characteristics */}
       <Section label="🌍 Характеристики">
         {regionName && (

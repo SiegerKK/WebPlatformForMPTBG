@@ -53,6 +53,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - media_data:/app/media
     command: >
       sh -c "alembic upgrade head && python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     healthcheck:
@@ -93,3 +94,4 @@ services:
 
 volumes:
   postgres_data:
+  media_data:

@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from app.core.auth.router import router as auth_router
 from app.core.matches.router import router as matches_router
 from app.core.contexts.router import router as contexts_router
@@ -117,6 +119,11 @@ register_ruleset("zone_stalkers", ZoneStalkerRuleSet())
 @app.get("/")
 def root():
     return {"status": "ok", "platform": "WebPlatformForMPTBG"}
+
+# ── Static media files (location images, etc.) ────────────────────────────────
+_media_root = os.environ.get("MEDIA_ROOT", "/app/media")
+os.makedirs(_media_root, exist_ok=True)
+app.mount("/media", StaticFiles(directory=_media_root), name="media")
 
 @app.get("/health")
 def health():

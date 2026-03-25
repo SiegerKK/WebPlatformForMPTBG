@@ -248,6 +248,8 @@ def resolve_world_command(
             loc["region"] = region_val if region_val else None
         if "exit_zone" in payload:
             loc["exit_zone"] = bool(payload["exit_zone"])
+        if "image_url" in payload:
+            loc["image_url"] = payload["image_url"] or None
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 

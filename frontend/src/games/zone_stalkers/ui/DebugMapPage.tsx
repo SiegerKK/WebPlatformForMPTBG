@@ -25,6 +25,7 @@ import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from '
 import { LocationModal } from './debugMap/Modals';
 import AgentProfileModal from './AgentProfileModal';
 import type { AgentForProfile } from './AgentProfileModal';
+import { locationsApi } from '../../../api/client';
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -868,8 +869,24 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
 
 
   const handleSaveEdit = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean; imageFile?: File | null }) => {
       if (!editingLocId) return;
+
+      // Handle image upload / removal before updating the game state
+      let imageUrl: string | null | undefined;
+      if (data.imageFile instanceof File && contextId) {
+        // Upload new image
+        const response = await locationsApi.uploadImage(contextId, editingLocId, data.imageFile);
+        imageUrl = response.data.url;
+      } else if (data.imageFile === null) {
+        // Explicit removal
+        if (contextId) {
+          try { await locationsApi.deleteImage(contextId, editingLocId); } catch { /* ignore 404 */ }
+        }
+        imageUrl = null;
+      }
+      // imageFile === undefined means "no change" → imageUrl stays undefined → not sent
+
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
         name: data.name,
@@ -878,9 +895,10 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
         exit_zone: data.exitZone,
+        ...(imageUrl !== undefined && { image_url: imageUrl }),
       });
     },
-    [editingLocId, sendCommand],
+    [editingLocId, sendCommand, contextId],
   );
 
   const handleSaveCreate = useCallback(
@@ -1489,6 +1507,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           initialDominantAnomalyType={zoneState.locations[editingLocId].dominant_anomaly_type ?? ''}
           initialRegion={zoneState.locations[editingLocId].region ?? ''}
           initialExitZone={zoneState.locations[editingLocId].exit_zone ?? false}
+          initialImageUrl={zoneState.locations[editingLocId].image_url ?? null}
           regions={localRegions}
           locId={editingLocId}
           onClose={() => setEditingLocId(null)}
