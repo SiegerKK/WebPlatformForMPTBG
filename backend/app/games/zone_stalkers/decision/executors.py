@@ -228,30 +228,39 @@ def _exec_trade_buy(
     from app.games.zone_stalkers.balance.items import (
         HEAL_ITEM_TYPES, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES,
         WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_ITEM_TYPES,
+        AMMO_FOR_WEAPON,
     )
     from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
 
     category = step.payload.get("item_category", "medical")
-    type_map = {
-        "medical": HEAL_ITEM_TYPES,
-        "food": FOOD_ITEM_TYPES,
-        "drink": DRINK_ITEM_TYPES,
-        "weapon": WEAPON_ITEM_TYPES,
-        "armor": ARMOR_ITEM_TYPES,
-        "ammo": AMMO_ITEM_TYPES,
-        "equipment": WEAPON_ITEM_TYPES,  # legacy fallback; prefer explicit "weapon"/"armor"
-    }
 
-    # Bug 2 fix: defensive guard — never buy equipment the agent already has equipped.
-    # _plan_resupply now emits the correct category ("weapon"/"armor"/"ammo"), but this
-    # guard also covers stale "equipment" category values from old plan entries.
+    # Bug fix: defensive guard — never buy equipment the agent already has equipped.
     eq = agent.get("equipment", {})
     if category in ("weapon", "equipment") and eq.get("weapon") is not None:
         return []   # already armed — nothing to purchase
     if category == "armor" and eq.get("armor") is not None:
         return []   # already armoured — nothing to purchase
 
-    item_types = type_map.get(category, HEAL_ITEM_TYPES)
+    if category == "ammo":
+        # Only buy ammo that is compatible with the agent's equipped weapon.
+        # Using AMMO_ITEM_TYPES (all ammo) would allow buying wrong-caliber ammo.
+        weapon = eq.get("weapon")
+        weapon_type = weapon.get("type") if isinstance(weapon, dict) else None
+        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+        if not required_ammo:
+            return []   # no weapon or unknown caliber — nothing to buy
+        item_types: "frozenset[str]" = frozenset([required_ammo])
+    else:
+        type_map = {
+            "medical": HEAL_ITEM_TYPES,
+            "food": FOOD_ITEM_TYPES,
+            "drink": DRINK_ITEM_TYPES,
+            "weapon": WEAPON_ITEM_TYPES,
+            "armor": ARMOR_ITEM_TYPES,
+            "equipment": WEAPON_ITEM_TYPES,  # legacy fallback; prefer explicit "weapon"/"armor"
+        }
+        item_types = type_map.get(category, HEAL_ITEM_TYPES)
+
     reason = step.payload.get("reason", f"buy_{category}")
     return _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                 purchase_reason=reason) or []
