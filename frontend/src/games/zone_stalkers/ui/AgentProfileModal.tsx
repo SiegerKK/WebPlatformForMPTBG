@@ -54,6 +54,7 @@ export interface AgentForProfile {
   risk_tolerance?: number;
   reputation?: number;
   has_left_zone?: boolean;
+  global_goal_achieved?: boolean;
   kill_target_id?: string | null;
   memory?: Array<{
     world_turn: number;
@@ -65,6 +66,18 @@ export interface AgentForProfile {
     summary?: string;
     effects?: Record<string, unknown>;
   }>;
+  /** Output of the v2 decision pipeline. Populated on every tick. */
+  _v2_context?: {
+    need_scores: Record<string, number>;
+    intent_kind: string;
+    intent_score: number;
+    intent_reason: string | null;
+    plan_intent: string | null;
+    plan_steps: number;
+    plan_confidence: number;
+    /** Kind of the first plan step (e.g. "travel_to_location"). */
+    plan_step_0: string | null;
+  };
 }
 
 interface Props {
@@ -309,6 +322,28 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     return null;
   });
   const [loadingDecision, setLoadingDecision] = React.useState(false);
+
+  // v2 pipeline explanation state
+  type V2Explanation = NonNullable<AgentForProfile['_v2_context']>;
+  const [v2Explanation, setV2Explanation] = React.useState<V2Explanation | null>(
+    () => agent._v2_context ?? null,
+  );
+  const [loadingV2, setLoadingV2] = React.useState(false);
+
+  const handleExplainV2 = async () => {
+    if (!sendCommand) return;
+    setLoadingV2(true);
+    try {
+      await sendCommand('debug_explain_agent_v2', { agent_id: agent.id });
+    } finally {
+      setLoadingV2(false);
+    }
+  };
+
+  // Keep v2 explanation in sync when agent._v2_context changes (tick updates)
+  React.useEffect(() => {
+    if (agent._v2_context) setV2Explanation(agent._v2_context);
+  }, [agent._v2_context]);
 
   // Fire the backend preview command whenever the displayed agent changes.
   // The result is discarded here — we rely on the client-side hint for
@@ -637,6 +672,13 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 const t = m.world_day !== undefined
                   ? { world_day: m.world_day, world_hour: m.world_hour ?? 0, world_minute: m.world_minute ?? 0 }
                   : turnToTime(m.world_turn);
+                const decisionIntentKind = m.type === 'decision' && m.effects?.intent_kind
+                  ? (m.effects.intent_kind as string)
+                  : null;
+                const decisionIntentMeta = decisionIntentKind ? (_INTENT_META[decisionIntentKind] ?? null) : null;
+                const decisionScore = m.type === 'decision' && typeof m.effects?.intent_score === 'number'
+                  ? m.effects.intent_score as number
+                  : null;
                 return (
                   <div key={i} style={{ ...s.memoryEntry, borderLeft: `3px solid ${color}` }}>
                     <div style={s.memoryMeta}>
@@ -648,6 +690,14 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       </span>
                     </div>
                     <div style={s.memoryTitle}>{m.title}</div>
+                    {decisionIntentMeta && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                        <span style={{ fontSize: '0.78rem' }}>{decisionIntentMeta.icon} {decisionIntentMeta.label}</span>
+                        {decisionScore !== null && (
+                          <span style={{ fontSize: '0.72rem', color: '#64748b' }}>· {Math.round(decisionScore * 100)}%</span>
+                        )}
+                      </div>
+                    )}
                     {!!m.summary && (
                       <div style={s.memorySummary}>{m.summary}</div>
                     )}
@@ -686,6 +736,19 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 {loadingDecision ? '⏳ Анализ…' : '🔄 Обновить решение'}
               </button>
             </div>
+          </Section>
+        )}
+
+        {/* ── v2 Decision Architecture: NeedScores + Intent ── */}
+        {agent.controller.kind === 'bot' && (
+          <Section label="🧠 Потребности и намерения (v2)">
+            <V2DecisionPanel
+              agent={agent}
+              v2Context={v2Explanation}
+              sendCommand={sendCommand}
+              loadingV2={loadingV2}
+              onExplainV2={handleExplainV2}
+            />
           </Section>
         )}
       </div>
@@ -929,6 +992,98 @@ const s: Record<string, React.CSSProperties> = {
     alignSelf: 'flex-start',
     marginTop: 4,
   },
+  // ── v2 Decision Architecture styles ──
+  v2NeedRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '0.15rem 0',
+  },
+  v2NeedLabel: {
+    color: '#94a3b8',
+    fontSize: '0.7rem',
+    width: 112,
+    flexShrink: 0,
+    whiteSpace: 'nowrap' as const,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  v2BarBg: {
+    flex: 1,
+    height: 5,
+    background: '#0f172a',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  v2ScoreVal: {
+    color: '#64748b',
+    fontSize: '0.68rem',
+    width: 34,
+    textAlign: 'right' as const,
+  },
+  v2IntentBox: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 3,
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: 7,
+    padding: '0.45rem 0.6rem',
+    marginTop: 4,
+  },
+  v2IntentHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  v2IntentIcon: {
+    fontSize: '0.95rem',
+    flexShrink: 0,
+  },
+  v2IntentLabel: {
+    color: '#f8fafc',
+    fontWeight: 700,
+    fontSize: '0.82rem',
+    flex: 1,
+  },
+  v2IntentScore: {
+    fontSize: '0.7rem',
+    color: '#64748b',
+    fontVariantNumeric: 'tabular-nums' as const,
+  },
+  v2IntentReason: {
+    color: '#94a3b8',
+    fontSize: '0.72rem',
+    lineHeight: 1.45,
+    marginTop: 1,
+  },
+  v2PlanLine: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 2,
+    fontSize: '0.7rem',
+    color: '#475569',
+  },
+  v2SourceBadge: {
+    fontSize: '0.6rem',
+    color: '#6366f1',
+    border: '1px solid #6366f1',
+    borderRadius: 4,
+    padding: '0px 4px',
+    flexShrink: 0,
+  },
+  v2RefreshBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#64748b',
+    borderRadius: 6,
+    padding: '0.2rem 0.55rem',
+    fontSize: '0.72rem',
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
+    marginTop: 6,
+  },
 };
 
 // ─── Client-side decision hint (approximates backend _describe_bot_decision_tree) ─
@@ -939,16 +1094,342 @@ const _ARTIFACT_TYPES = new Set([
   'goldfish', 'night_star', 'stone_blood', 'spring',
 ]);
 
-// ─── Priority groups ──────────────────────────────────────────────────────────
+// ─── v2 Decision Architecture ─────────────────────────────────────────────────
 
-/** Weapon type → required ammo type (mirrors AMMO_FOR_WEAPON in items.py). */
-const _AMMO_FOR_WEAPON: Record<string, string> = {
+/** Human-readable labels for each NeedScore drive. */
+const _NEED_META: Record<string, { icon: string; label: string }> = {
+  survive_now:          { icon: '🚨', label: 'Выживание (крит.)' },
+  heal_self:            { icon: '💊', label: 'Лечение' },
+  eat:                  { icon: '🍖', label: 'Голод' },
+  drink:                { icon: '💧', label: 'Жажда' },
+  sleep:                { icon: '😴', label: 'Усталость' },
+  reload_or_rearm:      { icon: '🔫', label: 'Снаряжение' },
+  avoid_emission:       { icon: '⚡', label: 'Выброс' },
+  get_rich:             { icon: '💰', label: 'Накопление' },
+  hunt_target:          { icon: '🎯', label: 'Охота' },
+  unravel_zone_mystery: { icon: '📜', label: 'Тайна Зоны' },
+  leave_zone:           { icon: '🚪', label: 'Покинуть Зону' },
+  trade:                { icon: '🏪', label: 'Торговля' },
+  negotiate:            { icon: '🗣', label: 'Общение' },
+  maintain_group:       { icon: '📋', label: 'Группа' },
+  help_ally:            { icon: '🤝', label: 'Помощь' },
+  join_group:           { icon: '👥', label: 'Влиться в группу' },
+};
+
+/** Human-readable labels for each intent kind. */
+const _INTENT_META: Record<string, { icon: string; label: string }> = {
+  escape_danger:        { icon: '🚨', label: 'Бегство (критический HP)' },
+  heal_self:            { icon: '💊', label: 'Срочное лечение' },
+  flee_emission:        { icon: '⚡', label: 'Бегство от выброса' },
+  wait_in_shelter:      { icon: '🏚️', label: 'Укрытие от выброса' },
+  seek_water:           { icon: '💧', label: 'Поиск воды' },
+  seek_food:            { icon: '🍖', label: 'Поиск еды' },
+  rest:                 { icon: '😴', label: 'Отдых (сон)' },
+  resupply:             { icon: '🔫', label: 'Получить снаряжение' },
+  sell_artifacts:       { icon: '💎', label: 'Продажа артефактов' },
+  trade:                { icon: '🏪', label: 'Торговля' },
+  upgrade_equipment:    { icon: '⬆️', label: 'Апгрейд снаряжения' },
+  loot:                 { icon: '🎁', label: 'Мародёрство' },
+  explore:              { icon: '🔭', label: 'Исследование' },
+  get_rich:             { icon: '💰', label: 'Накопление богатства' },
+  hunt_target:          { icon: '🎯', label: 'Охота на цель' },
+  search_information:   { icon: '📜', label: 'Поиск информации' },
+  leave_zone:           { icon: '🚪', label: 'Покинуть Зону' },
+  negotiate:            { icon: '🗣️', label: 'Переговоры' },
+  assist_ally:          { icon: '🤝', label: 'Помощь союзнику' },
+  form_group:           { icon: '👥', label: 'Создать группу' },
+  follow_group_plan:    { icon: '📋', label: 'Следовать плану группы' },
+  maintain_group:       { icon: '🔗', label: 'Сохранить группу' },
+  idle:                 { icon: '💤', label: 'Ожидание' },
+};
+/** Human-readable Russian labels for plan step kinds. */
+const _STEP_LABEL_RU: Record<string, string> = {
+  travel_to_location:        'Путешествие',
+  sleep_for_hours:           'Сон',
+  explore_location:          'Исследование',
+  trade_buy_item:            'Покупка',
+  trade_sell_item:           'Продажа',
+  consume_item:              'Употребление предмета',
+  equip_item:                'Экипировка',
+  pickup_item:               'Подбор предмета',
+  heal_self:                 'Лечение',
+  ask_for_intel:             'Запрос информации',
+  wait:                      'Ожидание',
+  legacy_scheduled_action:   'Запланированное действие',
+};
+
+/** Clamp value to [min, max]. */
+const _clamp = (v: number, min = 0, max = 1) => Math.max(min, Math.min(max, v));
+
+/**
+ * Client-side computation of NeedScores.
+ * Mirrors ``evaluate_needs()`` in ``decision/needs.py``.
+ *
+ * GET_RICH_WEIGHT = 0.70 (matches Python constant).
+ */
+const GET_RICH_WEIGHT = 0.70;
+const _AMMO_FOR_WEAPON_V2: Record<string, string> = {
   ak74:    'ammo_545',
   pistol:  'ammo_9mm',
   shotgun: 'ammo_12gauge',
   pkm:     'ammo_762',
   svu_svd: 'ammo_762',
 };
+
+function _computeNeedScores(agent: AgentForProfile): Record<string, number> {
+  const hp      = agent.hp;
+  const hunger  = agent.hunger;
+  const thirst  = agent.thirst;
+  const sleep   = agent.sleepiness;
+  // Liquid wealth: money + inventory only — equipment value excluded.
+  // Mirrors backend _agent_liquid_wealth() in decision/needs.py.
+  const wealth  = agent.money
+    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
+  const threshold = agent.material_threshold ?? 3000;
+  const eq  = agent.equipment;
+  const inv = agent.inventory;
+  const globalGoal = agent.global_goal ?? 'get_rich';
+
+  // survive_now: HP ≤ 30 → emergency
+  const surviveNow = hp <= 30 ? _clamp((30 - hp) / 20) : 0;
+
+  // heal_self: HP ≤ 50 → gradual urgency
+  const healSelf = hp <= 50 ? _clamp((50 - hp) / 30) : 0;
+
+  // Basic survival
+  const eat   = _clamp(hunger / 100);
+  const drink = _clamp(thirst / 100);
+  const sleeping = _clamp(sleep / 100);
+
+  // Equipment — values mirror decision/needs.py _score_reload_or_rearm()
+  const hasWeapon = !!eq['weapon'];
+  const hasArmor  = !!eq['armor'];
+  const weaponType  = eq['weapon']?.type ?? null;
+  const reqAmmo     = weaponType ? (_AMMO_FOR_WEAPON_V2[weaponType] ?? null) : null;
+  const hasAmmo     = reqAmmo ? inv.some(i => i.type === reqAmmo) : true;
+  let reloadOrRearm = 0;
+  if (!hasWeapon)         reloadOrRearm = 0.65;   // matches backend: serious but below heal threshold
+  else if (!hasArmor)     reloadOrRearm = 0.7;
+  else if (!hasAmmo)      reloadOrRearm = 0.6;
+
+  // Material drive
+  const wealthRatio = threshold > 0 ? Math.min(1, wealth / threshold) : 1;
+  // Equipment gate: get_rich is suppressed while equipment is needed.
+  // Mirrors backend: get_rich *= (1 - reload_or_rearm).
+  let getRich = _clamp((1 - wealthRatio) * GET_RICH_WEIGHT);
+  getRich = getRich * (1 - reloadOrRearm);
+
+  // Goal-specific drives
+  const huntTarget = globalGoal === 'kill_stalker' && !!agent.kill_target_id
+    ? _clamp(0.8 * Math.max(0.25, wealthRatio))
+    : 0;
+  const unravelMystery = globalGoal === 'unravel_zone_mystery'
+    ? _clamp(0.75 * Math.max(0.40, wealthRatio))
+    : 0;
+  const leaveZone = agent.global_goal_achieved ? 1.0 : 0;
+
+  // Artifacts to trade
+  const artifactCount = inv.filter(i => _ARTIFACT_TYPES.has(i.type)).length;
+  const tradeDrive = artifactCount > 0 ? _clamp(0.6 + artifactCount * 0.05) : 0;
+
+  return {
+    survive_now:          +surviveNow.toFixed(3),
+    heal_self:            +healSelf.toFixed(3),
+    eat:                  +eat.toFixed(3),
+    drink:                +drink.toFixed(3),
+    sleep:                +sleeping.toFixed(3),
+    reload_or_rearm:      +reloadOrRearm.toFixed(3),
+    avoid_emission:       0, // can't detect emission client-side
+    get_rich:             +getRich.toFixed(3),
+    hunt_target:          +huntTarget.toFixed(3),
+    unravel_zone_mystery: +unravelMystery.toFixed(3),
+    leave_zone:           +leaveZone.toFixed(3),
+    trade:                +tradeDrive.toFixed(3),
+    negotiate:            0,
+    maintain_group:       0,
+    help_ally:            0,
+    join_group:           0,
+  };
+}
+
+/** Priority tie-break order — mirrors intents.py. */
+const _INTENT_PRIORITY: string[] = [
+  'survive_now', 'heal_self', 'avoid_emission', 'drink', 'eat', 'sleep',
+  'reload_or_rearm', 'maintain_group', 'help_ally', 'trade',
+  'get_rich', 'hunt_target', 'unravel_zone_mystery', 'leave_zone',
+  'negotiate', 'join_group',
+];
+
+/** Drive key → intent kind mapping. */
+const _NEED_TO_INTENT: Record<string, string> = {
+  survive_now:          'escape_danger',
+  heal_self:            'heal_self',
+  avoid_emission:       'flee_emission',
+  drink:                'seek_water',
+  eat:                  'seek_food',
+  sleep:                'rest',
+  reload_or_rearm:      'resupply',
+  maintain_group:       'maintain_group',
+  help_ally:            'assist_ally',
+  trade:                'sell_artifacts',
+  get_rich:             'get_rich',
+  hunt_target:          'hunt_target',
+  unravel_zone_mystery: 'search_information',
+  leave_zone:           'leave_zone',
+  negotiate:            'negotiate',
+  join_group:           'form_group',
+};
+
+/** Select the intent with the highest score, respecting priority tie-breaks. */
+function _selectTopIntent(scores: Record<string, number>): { needKey: string; kind: string; score: number } {
+  const THRESHOLD = 0.05;
+  // Find the maximum score among all drives
+  const maxScore = Math.max(...Object.values(scores));
+  if (maxScore < THRESHOLD) return { needKey: 'idle', kind: 'idle', score: 0 };
+
+  // Among drives at or near the max score (within 0.02), pick the highest-priority one
+  for (const needKey of _INTENT_PRIORITY) {
+    const sc = scores[needKey] ?? 0;
+    if (sc >= maxScore - 0.02 && sc >= THRESHOLD) {
+      return { needKey, kind: _NEED_TO_INTENT[needKey] ?? 'idle', score: sc };
+    }
+  }
+  return { needKey: 'idle', kind: 'idle', score: 0 };
+}
+
+/**
+ * V2DecisionPanel — displays NeedScores bars + selected intent.
+ *
+ * Shows client-side computed values by default.
+ * When v2Context is provided (from backend shadow pipeline), uses those values
+ * instead and marks the panel with a "Бэкенд" badge.
+ */
+interface V2DecisionPanelProps {
+  agent: AgentForProfile;
+  v2Context: AgentForProfile['_v2_context'] | null;
+  sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
+  loadingV2: boolean;
+  onExplainV2: () => void;
+}
+
+function V2DecisionPanel({ agent, v2Context, sendCommand, loadingV2, onExplainV2 }: V2DecisionPanelProps) {
+  // Use backend scores when available, else compute client-side
+  const isBackend = !!v2Context;
+  const scores: Record<string, number> = isBackend
+    ? v2Context!.need_scores
+    : _computeNeedScores(agent);
+
+  // Sort drives by score descending, show only those with score > 0
+  const sortedNeeds = Object.entries(scores)
+    .filter(([, v]) => v > 0)
+    .sort(([, a], [, b]) => b - a);
+
+  // Determine selected intent
+  const topIntent = isBackend
+    ? { kind: v2Context!.intent_kind, score: v2Context!.intent_score }
+    : _selectTopIntent(scores);
+  const intentMeta = _INTENT_META[topIntent.kind] ?? { icon: '💤', label: topIntent.kind };
+  const intentReason = isBackend ? v2Context!.intent_reason : null;
+
+  // Plan summary (backend only)
+  const hasPlan = isBackend && v2Context!.plan_intent != null && v2Context!.plan_steps > 0;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {/* ── Header: source badge ── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ color: '#475569', fontSize: '0.7rem', flex: 1 }}>
+          Активных потребностей: {sortedNeeds.length}
+        </span>
+        {isBackend && (
+          <span style={s.v2SourceBadge} title="Данные получены от бэкенда (обновляются каждый тик)">
+            v2
+          </span>
+        )}
+        {!isBackend && (
+          <span
+            style={{ ...s.v2SourceBadge, color: '#64748b', borderColor: '#334155' }}
+            title="Оценка вычислена на стороне клиента"
+          >
+            Оценка
+          </span>
+        )}
+      </div>
+
+      {/* ── NeedScores bars (top 8 by score) ── */}
+      {sortedNeeds.length === 0 ? (
+        <div style={{ color: '#475569', fontSize: '0.72rem' }}>Все потребности удовлетворены</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {sortedNeeds.slice(0, 8).map(([key, val]) => {
+            const meta = _NEED_META[key] ?? { icon: '●', label: key };
+            const barColor = val >= 0.7 ? '#ef4444' : val >= 0.35 ? '#f59e0b' : '#22c55e';
+            return (
+              <div key={key} style={s.v2NeedRow}>
+                <span style={s.v2NeedLabel} title={key}>
+                  {meta.icon} {meta.label}
+                </span>
+                <div style={s.v2BarBg}>
+                  <div style={{
+                    height: '100%',
+                    borderRadius: 3,
+                    width: `${Math.round(val * 100)}%`,
+                    background: barColor,
+                    transition: 'width 0.3s',
+                  }} />
+                </div>
+                <span style={s.v2ScoreVal}>{(val * 100).toFixed(0)}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Selected intent ── */}
+      <div style={s.v2IntentBox}>
+        <div style={s.v2IntentHeader}>
+          <span style={s.v2IntentIcon}>{intentMeta.icon}</span>
+          <span style={s.v2IntentLabel}>{intentMeta.label}</span>
+          <span style={s.v2IntentScore}>{(topIntent.score * 100).toFixed(0)}%</span>
+          {/* Score bar */}
+          <div style={{ width: 40, height: 4, background: '#0f172a', borderRadius: 2, overflow: 'hidden', flexShrink: 0 }}>
+            <div style={{
+              height: '100%',
+              borderRadius: 2,
+              width: `${Math.round(topIntent.score * 100)}%`,
+              background: topIntent.score >= 0.7 ? '#ef4444' : topIntent.score >= 0.35 ? '#f59e0b' : '#22c55e',
+            }} />
+          </div>
+        </div>
+        {intentReason && (
+          <div style={s.v2IntentReason}>{intentReason}</div>
+        )}
+        {hasPlan && (
+          <div style={s.v2PlanLine}>
+            📋 {v2Context!.plan_step_0
+              ? (_STEP_LABEL_RU[v2Context!.plan_step_0] ?? v2Context!.plan_step_0)
+              : 'Ожидание'
+            } · {v2Context!.plan_steps} шаг(а) · {(v2Context!.plan_confidence * 100).toFixed(0)}%
+          </div>
+        )}
+      </div>
+
+      {/* ── Refresh button (debug mode only) ── */}
+      {sendCommand && (
+        <button
+          style={s.v2RefreshBtn}
+          onClick={onExplainV2}
+          disabled={loadingV2}
+          title="Запросить полный анализ v2 от бэкенда"
+        >
+          {loadingV2 ? '⏳ Анализ v2…' : '🔬 Запросить v2-анализ'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
 
 type StatusColor = 'green' | 'yellow' | 'red';
 
@@ -1035,7 +1516,7 @@ function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
   // ── Group 2: Equipment ────────────────────────────────────────────────────
   const weaponItem = eq['weapon'] ?? null;
   const armorItem  = eq['armor']  ?? null;
-  const reqAmmo    = weaponItem ? (_AMMO_FOR_WEAPON[weaponItem.type] ?? null) : null;
+  const reqAmmo    = weaponItem ? (_AMMO_FOR_WEAPON_V2[weaponItem.type] ?? null) : null;
   const hasAmmo    = reqAmmo ? inv.some(i => i.type === reqAmmo) : null;
 
   const hasHeal  = inv.some(i => ['bandage', 'medkit', 'army_medkit', 'stimpack', 'morphine'].includes(i.type));
@@ -1280,7 +1761,7 @@ function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
   const noWeapon = !(eq['weapon']);
   const noArmor  = !(eq['armor']);
   const weaponType  = eq['weapon']?.type ?? null;
-  const reqAmmoType = weaponType ? (_AMMO_FOR_WEAPON[weaponType] ?? null) : null;
+  const reqAmmoType = weaponType ? (_AMMO_FOR_WEAPON_V2[weaponType] ?? null) : null;
   const noAmmo = weaponType !== null && reqAmmoType !== null
     && !inv.some(i => i.type === reqAmmoType);
   const condEquip = noWeapon || noArmor || noAmmo;

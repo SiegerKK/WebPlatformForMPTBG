@@ -15,6 +15,7 @@ from app.core.entities.models import Entity
 from app.core.commands.models import Command
 from app.core.events.models import GameEvent
 from app.core.turns.models import TurnState
+from app.games.zone_stalkers.models import LocationImage  # noqa: F401
 
 config = context.config
 

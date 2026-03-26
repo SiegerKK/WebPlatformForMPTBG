@@ -141,6 +141,18 @@ interface StalkerAgent {
   has_left_zone?: boolean;
   wealth_goal_target?: number;
   kill_target_id?: string | null;
+  /** Output of the v2 decision pipeline. Populated on every tick. */
+  _v2_context?: {
+    need_scores: Record<string, number>;
+    intent_kind: string;
+    intent_score: number;
+    intent_reason: string | null;
+    plan_intent: string | null;
+    plan_steps: number;
+    plan_confidence: number;
+    /** Kind of the first plan step (e.g. "travel_to_location"). */
+    plan_step_0: string | null;
+  };
 }
 
 interface ZoneMapState {
@@ -2222,6 +2234,7 @@ const styles: Record<string, React.CSSProperties> = {
   lobbyActions: { display: 'flex', gap: 10, flexWrap: 'wrap' as const, justifyContent: 'center' as const },
 
   btnPrimary: { padding: '0.5rem 1.2rem', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: '0.95rem' },
+  btnSecondary: { padding: '0.35rem 0.9rem', background: '#1e293b', color: '#94a3b8', border: '1px solid #334155', borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' },
   btnDisabled: { background: '#334155', color: '#64748b', cursor: 'not-allowed' as const },
   btnDanger: { padding: '0.5rem 1.2rem', background: '#7f1d1d', color: '#fca5a5', border: '1px solid #ef4444', borderRadius: 8, cursor: 'pointer', fontWeight: 600 },
   btnDangerSmall: { padding: '0.25rem 0.7rem', background: '#7f1d1d', color: '#fca5a5', border: '1px solid #ef4444', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem' },

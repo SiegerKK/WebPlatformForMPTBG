@@ -117,4 +117,24 @@ export const usersApi = {
   publicProfile: (userId: string) => apiClient.get(`/admin/profile/${userId}`),
 };
 
+export const locationsApi = {
+  /**
+   * Upload an image for a zone-map location.
+   * Returns `{ url: string }` — the public path to the uploaded image.
+   */
+  uploadImage: (contextId: string, locationId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.post<{ url: string }>(
+      `/locations/${contextId}/${locationId}/image`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    );
+  },
+
+  /** Delete the image attached to a location. */
+  deleteImage: (contextId: string, locationId: string) =>
+    apiClient.delete(`/locations/${contextId}/${locationId}/image`),
+};
+
 export default apiClient;

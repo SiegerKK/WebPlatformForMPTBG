@@ -1,7 +1,7 @@
 /**
  * Modals — LocationModal (edit/create location) and SpawnMutantModal.
  */
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { s } from './styles';
 
 // ─── Terrain type options ─────────────────────────────────────────────────────
@@ -57,6 +57,8 @@ export interface LocationSaveData {
   dominantAnomalyType: string;
   region: string;
   exitZone: boolean;
+  /** New image file to upload. `null` means "remove existing image". `undefined` means "no change". */
+  imageFile?: File | null;
 }
 
 export function LocationModal({
@@ -67,6 +69,7 @@ export function LocationModal({
   initialDominantAnomalyType = '',
   initialRegion = '',
   initialExitZone = false,
+  initialImageUrl = null,
   regions,
   locId,
   onClose,
@@ -79,6 +82,8 @@ export function LocationModal({
   initialDominantAnomalyType?: string;
   initialRegion?: string;
   initialExitZone?: boolean;
+  /** Current image URL (only relevant in edit mode). */
+  initialImageUrl?: string | null;
   regions?: Record<string, { name: string; colorIndex: number }>;
   locId?: string;
   onClose: () => void;
@@ -93,12 +98,30 @@ export function LocationModal({
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Image state
+  const [imageFile, setImageFile] = useState<File | null | undefined>(undefined);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(initialImageUrl ?? null);
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    setImageFile(file);
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setPreviewUrl(url);
+    }
+  };
+
+  const handleRemoveImage = () => {
+    setImageFile(null);
+    setPreviewUrl(null);
+  };
+
   const handleSubmit = async () => {
     const trimmed = name.trim();
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region, exitZone });
+      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region, exitZone, imageFile });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -184,6 +207,37 @@ export function LocationModal({
           />
           🚪 Выход из Зоны
         </label>
+
+        {/* ── Image upload (edit mode only) ────────────────────────── */}
+        {mode === 'edit' && (
+          <div style={{ marginTop: 12 }}>
+            <label style={s.modalLabel}>🖼 Изображение локации</label>
+            {previewUrl ? (
+              <div style={{ marginBottom: 8 }}>
+                <img
+                  src={previewUrl}
+                  alt="preview"
+                  style={{ width: '100%', maxHeight: 160, objectFit: 'cover', borderRadius: 6, border: '1px solid #1e3a5f' }}
+                />
+                <button
+                  type="button"
+                  onClick={handleRemoveImage}
+                  style={{ marginTop: 4, background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.72rem', padding: 0 }}
+                >
+                  ✕ Удалить изображение
+                </button>
+              </div>
+            ) : (
+              <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: 6 }}>Изображение не задано</div>
+            )}
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              onChange={handleImageChange}
+              style={{ display: 'block', fontSize: '0.72rem', color: '#94a3b8', marginBottom: 4 }}
+            />
+          </div>
+        )}
 
         {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
 

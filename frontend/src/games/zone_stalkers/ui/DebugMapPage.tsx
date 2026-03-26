@@ -25,6 +25,8 @@ import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from '
 import { LocationModal } from './debugMap/Modals';
 import AgentProfileModal from './AgentProfileModal';
 import type { AgentForProfile } from './AgentProfileModal';
+import { locationsApi } from '../../../api/client';
+import JSZip from 'jszip';
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -639,15 +641,29 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   }, []);
 
   // ── Export full map ───────────────────────────────────────────────────────
-  const handleExport = useCallback(() => {
-    const exportData = {
-      version: 3,
-      // Canvas layout
-      positions: effectivePosRef.current,
-      regions: localRegionsRef.current,
-      // Full location data (IDs, connections, terrain, anomalies, region)
-      locations: Object.fromEntries(
-        Object.entries(zoneState.locations).map(([id, loc]) => [
+  const handleExport = useCallback(async () => {
+    const zip = new JSZip();
+    const imagesFolder = zip.folder('images')!;
+
+    // Build location entries, fetching images where present
+    const locEntries = await Promise.all(
+      Object.entries(zoneState.locations).map(async ([id, loc]) => {
+        let imageFile: string | null = null;
+        if (loc.image_url) {
+          try {
+            const resp = await fetch(loc.image_url);
+            if (resp.ok) {
+              const blob = await resp.blob();
+              // Last segment of the URL path, e.g. "loc_forest.jpg"
+              const filename = loc.image_url.split('/').pop() ?? `${id}.jpg`;
+              imagesFolder.file(filename, blob);
+              imageFile = `images/${filename}`;
+            }
+          } catch {
+            // skip — image not critical for export
+          }
+        }
+        return [
           id,
           {
             name: loc.name,
@@ -655,7 +671,6 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             anomaly_activity: loc.anomaly_activity,
             dominant_anomaly_type: loc.dominant_anomaly_type ?? null,
             region: loc.region ?? null,
-            // Use the live canvas connections (may differ from zoneState if unsaved)
             connections: (localConnsRef.current[id] ?? loc.connections ?? []).map((c) => ({
               to: c.to,
               travel_time: c.travel_time,
@@ -663,25 +678,33 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               closed: c.closed ?? false,
             })),
             artifacts: loc.artifacts ?? [],
+            ...(imageFile !== null && { image_file: imageFile }),
           },
-        ]),
-      ),
-      // World time
+        ] as [string, Record<string, unknown>];
+      }),
+    );
+
+    const exportData = {
+      version: 4,
+      positions: effectivePosRef.current,
+      regions: localRegionsRef.current,
+      locations: Object.fromEntries(locEntries),
       world_turn: zoneState.world_turn,
       world_day: zoneState.world_day,
       world_hour: zoneState.world_hour,
       world_minute: zoneState.world_minute ?? 0,
-      // Emission state
       emission_active: zoneState.emission_active,
       emission_scheduled_turn: zoneState.emission_scheduled_turn ?? null,
       emission_ends_turn: zoneState.emission_ends_turn ?? null,
     };
-    const json = JSON.stringify(exportData, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
+
+    zip.file('map.json', JSON.stringify(exportData, null, 2));
+
+    const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    const url = URL.createObjectURL(zipBlob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `zone_map_day${zoneState.world_day}_turn${zoneState.world_turn}.json`;
+    a.download = `zone_map_day${zoneState.world_day}_turn${zoneState.world_turn}.zip`;
     a.click();
     URL.revokeObjectURL(url);
   }, [zoneState]);
@@ -691,6 +714,124 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
+
+      // ── ZIP import (v4) ─────────────────────────────────────────────────
+      if (file.name.endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed') {
+        file.arrayBuffer().then(async (buf) => {
+          let zip: JSZip;
+          try {
+            zip = await JSZip.loadAsync(buf);
+          } catch (err) {
+            setSaveError(`Import failed: could not read ZIP file — ${(err as Error).message ?? err}`);
+            e.target.value = '';
+            return;
+          }
+
+          const mapJsonFile = zip.file('map.json');
+          if (!mapJsonFile) {
+            setSaveError('Import failed: ZIP does not contain map.json');
+            e.target.value = '';
+            return;
+          }
+
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = JSON.parse(await mapJsonFile.async('text')) as Record<string, unknown>;
+          } catch {
+            setSaveError('Import failed: map.json contains invalid JSON');
+            e.target.value = '';
+            return;
+          }
+
+          if (
+            !parsed.locations ||
+            typeof parsed.locations !== 'object' ||
+            Array.isArray(parsed.locations)
+          ) {
+            setSaveError('Import failed: map.json has no locations');
+            e.target.value = '';
+            return;
+          }
+
+          const locsData = parsed.locations as Record<string, Record<string, unknown>>;
+          const locCount = Object.keys(locsData).length;
+          const confirmed = window.confirm(
+            `⚠️ Полный импорт карты из ZIP!\n\n` +
+            `Это заменит ВСЕ локации (${locCount}), переходы, регионы, ` +
+            `время и состояние выброса.\n\n` +
+            `Персонажи и предметы в совпадающих локациях будут сохранены, ` +
+            `остальные могут стать недоступны.\n\n` +
+            `Продолжить?`
+          );
+          if (!confirmed) { e.target.value = ''; return; }
+
+          // Upload images for locations that have image_file in the ZIP
+          const imageUrlMap: Record<string, string> = {};
+          const failedImageLocs: string[] = [];
+          if (contextId) {
+            await Promise.all(
+              Object.entries(locsData).map(async ([locId, locData]) => {
+                const imageFilePath = locData['image_file'] as string | undefined;
+                if (!imageFilePath) return;
+                const zipEntry = zip.file(imageFilePath);
+                if (!zipEntry) return;
+                try {
+                  const imgBuf = await zipEntry.async('arraybuffer');
+                  const ext = imageFilePath.split('.').pop()?.toLowerCase() ?? '';
+                  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+                  const mime = mimeMap[ext] ?? 'application/octet-stream';
+                  const imgFile = new File([imgBuf], imageFilePath.split('/').pop() ?? `${locId}.jpg`, { type: mime });
+                  const resp = await locationsApi.uploadImage(contextId, locId, imgFile);
+                  imageUrlMap[locId] = resp.data.url;
+                } catch {
+                  failedImageLocs.push(locId);
+                }
+              }),
+            );
+          }
+
+          // Inject uploaded image_url back into location data
+          const finalLocs: Record<string, Record<string, unknown>> = {};
+          for (const [locId, locData] of Object.entries(locsData)) {
+            const url = imageUrlMap[locId];
+            finalLocs[locId] = url ? { ...locData, image_url: url } : { ...locData };
+          }
+
+          await sendCommand('debug_import_full_map', {
+            locations: finalLocs,
+            positions: parsed.positions ?? {},
+            regions: parsed.regions ?? {},
+            world_turn: parsed.world_turn,
+            world_day: parsed.world_day,
+            world_hour: parsed.world_hour,
+            world_minute: parsed.world_minute,
+            emission_active: parsed.emission_active,
+            emission_scheduled_turn: parsed.emission_scheduled_turn,
+            emission_ends_turn: parsed.emission_ends_turn,
+          });
+
+          const newPositions = (parsed.positions ?? {}) as Record<string, { x: number; y: number }>;
+          const newConns = {} as Record<string, LocationConn[]>;
+          for (const [id, locData] of Object.entries(finalLocs)) {
+            if (Array.isArray(locData.connections)) {
+              newConns[id] = locData.connections as LocationConn[];
+            }
+          }
+          const newRegions = (typeof parsed.regions === 'object' && !Array.isArray(parsed.regions) && parsed.regions !== null)
+            ? parsed.regions as Record<string, { name: string; colorIndex: number }>
+            : {};
+          setDragOverrides(newPositions);
+          setLocalConns(newConns);
+          setLocalRegions(newRegions);
+          if (failedImageLocs.length > 0) {
+            setSaveError(`Карта импортирована, но не удалось загрузить картинки для: ${failedImageLocs.join(', ')}`);
+          }
+          e.target.value = '';
+        });
+        return;
+      }
+
+      // ── JSON import (v3 / v1 / v2) ─────────────────────────────────────
       file.text().then(async (text) => {
         let parsed: Record<string, unknown>;
         try {
@@ -863,13 +1004,29 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         e.target.value = '';
       });
     },
-    [persistMap, sendCommand, zoneState.locations],
+    [persistMap, sendCommand, zoneState.locations, contextId],
   );
 
 
   const handleSaveEdit = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean; imageFile?: File | null }) => {
       if (!editingLocId) return;
+
+      // Handle image upload / removal before updating the game state
+      let imageUrl: string | null | undefined;
+      if (data.imageFile instanceof File && contextId) {
+        // Upload new image
+        const response = await locationsApi.uploadImage(contextId, editingLocId, data.imageFile);
+        imageUrl = response.data.url;
+      } else if (data.imageFile === null) {
+        // Explicit removal
+        if (contextId) {
+          try { await locationsApi.deleteImage(contextId, editingLocId); } catch { /* ignore 404 */ }
+        }
+        imageUrl = null;
+      }
+      // imageFile === undefined means "no change" → imageUrl stays undefined → not sent
+
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
         name: data.name,
@@ -878,9 +1035,10 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
         exit_zone: data.exitZone,
+        ...(imageUrl !== undefined && { image_url: imageUrl }),
       });
     },
-    [editingLocId, sendCommand],
+    [editingLocId, sendCommand, contextId],
   );
 
   const handleSaveCreate = useCallback(
@@ -1144,10 +1302,10 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             <div style={s.toolbarSep} />
             {/* Group: Data */}
             <div style={s.toolbarGroup}>
-              <button style={s.toolBtn} onClick={handleExport} title="Экспортировать карту в JSON">
+              <button style={s.toolBtn} onClick={handleExport} title="Экспортировать карту в ZIP (с картинками)">
                 📤
               </button>
-              <button style={s.toolBtn} onClick={() => importInputRef.current?.click()} title="Импортировать карту из JSON">
+              <button style={s.toolBtn} onClick={() => importInputRef.current?.click()} title="Импортировать карту из ZIP или JSON">
                 📥
               </button>
             </div>
@@ -1426,7 +1584,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       <input
         ref={importInputRef}
         type="file"
-        accept=".json"
+        accept=".zip,.json"
         style={{ display: 'none' }}
         onChange={handleImportFile}
       />
@@ -1489,6 +1647,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           initialDominantAnomalyType={zoneState.locations[editingLocId].dominant_anomaly_type ?? ''}
           initialRegion={zoneState.locations[editingLocId].region ?? ''}
           initialExitZone={zoneState.locations[editingLocId].exit_zone ?? false}
+          initialImageUrl={zoneState.locations[editingLocId].image_url ?? null}
           regions={localRegions}
           locId={editingLocId}
           onClose={() => setEditingLocId(null)}
