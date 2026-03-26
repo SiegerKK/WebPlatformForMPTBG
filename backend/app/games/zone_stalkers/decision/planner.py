@@ -44,6 +44,7 @@ from .models.intent import (
     INTENT_FOLLOW_GROUP_PLAN,
     INTENT_ASSIST_ALLY,
 )
+from .constants import DESIRED_AMMO_COUNT
 from .models.plan import (
     Plan, PlanStep,
     STEP_TRAVEL_TO_LOCATION,
@@ -355,67 +356,105 @@ def _plan_rest(
     )
 
 
+def _desired_supply_count(risk_tolerance: float, min_count: int, max_count: int) -> int:
+    """Desired inventory count for a supply category based on risk tolerance.
+
+    More risk-averse agents (low ``risk_tolerance``) want larger stocks.
+    Mirrors the same helper in ``needs.py``.
+    """
+    return min_count + round((1.0 - risk_tolerance) * (max_count - min_count))
+
+
 def _plan_resupply(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Optional[Plan]:
-    """Plan to resupply equipment (weapon / armor / ammo).
+    """Plan to resupply consumables, equipment, and upgrades.
 
-    Priority:
-    1. Seek from memory (travel to observed item location).
-    2. Phase 2 only: buy from a trader.
-    3. Phase 1 fallback: delegate to get_rich behaviour so agent gathers
-       resources instead of idling while waiting for a trader.
+    Priority order (no money gate — the NPC always seeks proper equipment
+    regardless of wealth; the material_threshold gate remains ONLY for get_rich):
+      1. Food stock below desired count (based on risk_tolerance)
+      2. Drink stock below desired count (based on risk_tolerance)
+      3. No armor equipped
+      4. No weapon equipped
+      5. Ammo count below DESIRED_AMMO_COUNT (3 boxes)
+      6. Medicine stock below desired count (based on risk_tolerance)
+      7. Equipment upgrade available (weapon or armor, closer risk_tolerance + higher tier)
+
+    For each gap:
+      a. Travel to remembered item location (ground pickup)
+      b. Buy from nearest trader (travel there if needed)
+      c. Fallback: gather resources (get_rich behaviour)
     """
     from app.games.zone_stalkers.balance.items import (
         WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_FOR_WEAPON,
+        FOOD_ITEM_TYPES, DRINK_ITEM_TYPES, HEAL_ITEM_TYPES,
     )
     from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
 
     agent = ctx.self_state
     eq = agent.get("equipment", {})
+    inventory = agent.get("inventory", [])
+    agent_loc = agent.get("location_id", "")
+    risk_tolerance = float(agent.get("risk_tolerance", 0.5))
+
+    # Desired supply counts based on risk tolerance
+    desired_food = _desired_supply_count(risk_tolerance, 1, 3)
+    desired_drink = _desired_supply_count(risk_tolerance, 1, 3)
+    desired_medicine = _desired_supply_count(risk_tolerance, 2, 4)
+
+    # Count current inventory by category
+    food_count = sum(1 for i in inventory if i.get("type") in FOOD_ITEM_TYPES)
+    drink_count = sum(1 for i in inventory if i.get("type") in DRINK_ITEM_TYPES)
+    medicine_count = sum(1 for i in inventory if i.get("type") in HEAL_ITEM_TYPES)
+
     has_weapon = eq.get("weapon") is not None
     has_armor = eq.get("armor") is not None
-    agent_loc = agent.get("location_id", "")
 
-    # Determine what's missing and which item types are needed.
-    # _buy_category is the item_category string passed to the STEP_TRADE_BUY_ITEM plan step
-    # so the executor buys exactly what is needed (Bug 2 fix: was always "equipment" →
-    # WEAPON_ITEM_TYPES, causing weapons to be purchased even when armor was the need).
-    if not has_weapon:
-        need_types: "frozenset[str]" = WEAPON_ITEM_TYPES
-        _buy_category = "weapon"
+    # Determine highest-priority gap in the stated priority order
+    need_types: Optional["frozenset[str]"] = None
+    _buy_category: Optional[str] = None
+
+    if food_count < desired_food:
+        need_types = FOOD_ITEM_TYPES
+        _buy_category = "food"
+    elif drink_count < desired_drink:
+        need_types = DRINK_ITEM_TYPES
+        _buy_category = "drink"
     elif not has_armor:
         need_types = ARMOR_ITEM_TYPES
         _buy_category = "armor"
+    elif not has_weapon:
+        need_types = WEAPON_ITEM_TYPES
+        _buy_category = "weapon"
     else:
-        # Check ammo
+        # Check ammo (need DESIRED_AMMO_COUNT items)
         weapon_type = eq["weapon"].get("type") if isinstance(eq.get("weapon"), dict) else None
         required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
-        if not required_ammo:
-            return None
-        has_ammo = any(i.get("type") == required_ammo for i in agent.get("inventory", []))
-        if has_ammo:
-            return None
-        need_types = frozenset([required_ammo])
-        _buy_category = "ammo"
+        if required_ammo:
+            ammo_count = sum(1 for i in inventory if i.get("type") == required_ammo)
+            if ammo_count < DESIRED_AMMO_COUNT:
+                need_types = frozenset([required_ammo])
+                _buy_category = "ammo"
 
-    # 1. Memory-based travel (check observed item locations)
-    mem_loc = _find_item_memory_location(agent, need_types, state)
-    if mem_loc and mem_loc != agent_loc:
-        return Plan(
-            intent_kind=intent.kind,
-            steps=[PlanStep(
-                STEP_TRAVEL_TO_LOCATION,
-                {"target_id": mem_loc, "reason": "seek_item_from_memory"},
-                expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
-            )],
-            confidence=0.85, created_turn=world_turn,
-        )
+        if need_types is None and medicine_count < desired_medicine:
+            need_types = HEAL_ITEM_TYPES
+            _buy_category = "medical"
 
-    # 2. Phase 2 only: buy from trader
-    wealth = _agent_wealth_from_ctx(ctx)
-    threshold = agent.get("material_threshold", 50000)
-    if wealth >= threshold:
+    if need_types is not None:
+        # a. Memory-based travel (pick up from ground)
+        mem_loc = _find_item_memory_location(agent, need_types, state)
+        if mem_loc and mem_loc != agent_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": mem_loc, "reason": "seek_item_from_memory"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+                )],
+                confidence=0.85, created_turn=world_turn,
+            )
+
+        # b. Buy from trader
         trader_loc = _nearest_trader_location(ctx, state)
         if trader_loc and trader_loc != agent_loc:
             return Plan(
@@ -437,13 +476,71 @@ def _plan_resupply(
                 confidence=0.8, created_turn=world_turn,
             )
 
-    # 3. Phase 1 fallback: resource-gathering (treat as get_rich)
-    get_rich_intent = Intent(
-        kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
-        reason="Phase-1 resupply fallback → gather resources",
-        created_turn=world_turn,
-    )
-    return _plan_get_rich(ctx, get_rich_intent, state, world_turn)
+        # c. No trader known → fallback to resource-gathering
+        get_rich_intent = Intent(
+            kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+            reason="Resupply fallback — no trader known, gather resources",
+            created_turn=world_turn,
+        )
+        return _plan_get_rich(ctx, get_rich_intent, state, world_turn)
+
+    # All basic needs met — check for equipment upgrades
+    return _plan_resupply_upgrade(ctx, intent, state, world_turn)
+
+
+def _plan_resupply_upgrade(
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+) -> Optional[Plan]:
+    """Plan an equipment upgrade when all basic resupply needs are met.
+
+    Checks weapon first, then armor.  An upgrade is valid when a catalogued
+    item of the same slot offers a closer ``risk_tolerance`` match AND has a
+    higher base value (higher tier), AND the agent can afford it at trader
+    price (base × 1.5).
+    """
+    from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
+    from app.games.zone_stalkers.rules.tick_rules import _find_upgrade_target
+
+    agent = ctx.self_state
+    eq = agent.get("equipment", {})
+    agent_risk = float(agent.get("risk_tolerance", 0.5))
+    agent_money = agent.get("money", 0)
+    agent_loc = agent.get("location_id", "")
+
+    for slot, item_types, category in [
+        ("weapon", WEAPON_ITEM_TYPES, "weapon_upgrade"),
+        ("armor", ARMOR_ITEM_TYPES, "armor_upgrade"),
+    ]:
+        current = eq.get(slot)
+        if not isinstance(current, dict):
+            continue
+        current_type = current.get("type")
+        upgrade_key = _find_upgrade_target(item_types, current_type, agent_risk, agent_money)
+        if upgrade_key is None:
+            continue
+
+        trader_loc = _nearest_trader_location(ctx, state)
+        if trader_loc == agent_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
+                                interruptible=False)],
+                confidence=0.7, created_turn=world_turn,
+            )
+        if trader_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(STEP_TRAVEL_TO_LOCATION,
+                             {"target_id": trader_loc, "reason": f"upgrade_{slot}"},
+                             expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
+                             interruptible=False),
+                ],
+                confidence=0.5, created_turn=world_turn,
+            )
+
+    return None
 
 
 def _plan_sell_artifacts(

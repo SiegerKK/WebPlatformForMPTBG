@@ -3539,14 +3539,37 @@ def _update_current_goal_from_intent(
         "idle":                 "idle",
     }
     if intent.kind == "resupply":
-        # Determine which equipment is actually missing for a more descriptive goal name
+        # Determine which need is most urgent for a descriptive goal name,
+        # following the same priority order as planner._plan_resupply.
+        from app.games.zone_stalkers.balance.items import (
+            FOOD_ITEM_TYPES, DRINK_ITEM_TYPES, HEAL_ITEM_TYPES, AMMO_FOR_WEAPON,
+        )
         eq = agent.get("equipment", {})
-        if not eq.get("weapon"):
-            agent["current_goal"] = "get_weapon"
+        inv = agent.get("inventory", [])
+        risk_tolerance = float(agent.get("risk_tolerance", 0.5))
+        desired_food = 1 + round((1.0 - risk_tolerance) * 2)
+        desired_drink = desired_food
+        desired_medicine = 2 + round((1.0 - risk_tolerance) * 2)
+        food_count = sum(1 for i in inv if i.get("type") in FOOD_ITEM_TYPES)
+        drink_count = sum(1 for i in inv if i.get("type") in DRINK_ITEM_TYPES)
+        medicine_count = sum(1 for i in inv if i.get("type") in HEAL_ITEM_TYPES)
+        weapon = eq.get("weapon")
+        weapon_type = weapon.get("type") if isinstance(weapon, dict) else None
+        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+        ammo_count = sum(1 for i in inv if i.get("type") == required_ammo) if required_ammo else 3
+
+        if food_count < desired_food or drink_count < desired_drink:
+            agent["current_goal"] = "get_supplies"
         elif not eq.get("armor"):
             agent["current_goal"] = "get_armor"
-        else:
+        elif not eq.get("weapon"):
+            agent["current_goal"] = "get_weapon"
+        elif ammo_count < 3:
             agent["current_goal"] = "get_ammo"
+        elif medicine_count < desired_medicine:
+            agent["current_goal"] = "get_medicine"
+        else:
+            agent["current_goal"] = "upgrade_equipment"
         return
     new_goal = _INTENT_GOAL_MAP.get(intent.kind)
     if new_goal:

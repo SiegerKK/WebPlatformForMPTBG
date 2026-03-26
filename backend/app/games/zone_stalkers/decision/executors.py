@@ -234,6 +234,30 @@ def _exec_trade_buy(
 
     category = step.payload.get("item_category", "medical")
 
+    # Upgrade categories: buy the best upgrade target and immediately equip it.
+    if category in ("weapon_upgrade", "armor_upgrade"):
+        slot = "weapon" if category == "weapon_upgrade" else "armor"
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import (
+            _find_upgrade_target, _bot_equip_from_inventory,
+        )
+        item_types_for_slot = WEAPON_ITEM_TYPES if slot == "weapon" else ARMOR_ITEM_TYPES
+        agent_risk = float(agent.get("risk_tolerance", 0.5))
+        agent_money = agent.get("money", 0)
+        current = agent.get("equipment", {}).get(slot)
+        current_type = current.get("type") if isinstance(current, dict) else None
+        upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
+        if upgrade_key is None:
+            return []
+        bought = _bot_buy_from_trader(agent_id, agent, frozenset([upgrade_key]), state, world_turn,
+                                      purchase_reason=f"апгрейд {slot}") or []
+        if bought:
+            equip_evs = _bot_equip_from_inventory(
+                agent_id, agent, frozenset([upgrade_key]), slot, state, world_turn,
+            )
+            return bought + equip_evs
+        return []
+
     # Bug fix: defensive guard — never buy equipment the agent already has equipped.
     eq = agent.get("equipment", {})
     if category in ("weapon", "equipment") and eq.get("weapon") is not None:

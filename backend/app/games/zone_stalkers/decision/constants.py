@@ -12,3 +12,7 @@ from __future__ import annotations
 EMISSION_DANGEROUS_TERRAIN: frozenset[str] = frozenset({
     "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
 })
+
+# Target number of ammo items (boxes) the agent should carry for each equipped weapon.
+# Used by both ``needs._score_reload_or_rearm`` and ``planner._plan_resupply``.
+DESIRED_AMMO_COUNT: int = 3
