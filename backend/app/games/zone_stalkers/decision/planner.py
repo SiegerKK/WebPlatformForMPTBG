@@ -19,6 +19,7 @@ Supported intents (Phase 4):
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 
 from .models.agent_context import AgentContext
@@ -358,6 +359,12 @@ def _build_sleep_preparation_steps(
     agent = ctx.self_state
     inventory = agent.get("inventory", [])
     steps: list[PlanStep] = []
+    # Basic sleep duration policy:
+    # linearly map sleepiness 0..100 -> 1..DEFAULT_SLEEP_HOURS.
+    sleepiness = max(0, int(agent.get("sleepiness", 0)))
+    sleepiness_per_hour = max(1, math.ceil(100 / DEFAULT_SLEEP_HOURS))
+    estimated_hours = max(1, math.ceil(sleepiness / sleepiness_per_hour))
+    sleep_hours = min(DEFAULT_SLEEP_HOURS, estimated_hours)
 
     if agent.get("thirst", 0) >= SLEEP_SAFE_THIRST_THRESHOLD:
         drink = next((i for i in inventory if i.get("type") in DRINK_ITEM_TYPES), None)
@@ -381,9 +388,9 @@ def _build_sleep_preparation_steps(
 
     steps.append(PlanStep(
         kind=STEP_SLEEP_FOR_HOURS,
-        payload={"hours": DEFAULT_SLEEP_HOURS},
+        payload={"hours": sleep_hours},
         interruptible=True,
-        expected_duration_ticks=DEFAULT_SLEEP_HOURS * 60,
+        expected_duration_ticks=sleep_hours * 60,
     ))
     return steps
 
@@ -391,7 +398,6 @@ def _build_sleep_preparation_steps(
 def _plan_rest(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Plan:
-    from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
     steps = _build_sleep_preparation_steps(ctx, world_turn)
     reason = intent.reason or ""
     if len(steps) > 1:
@@ -1035,3 +1041,9 @@ def _has_sellable_items(agent: dict) -> bool:
         if base in _sellable_base and item.get("value", _IT.get(t, {}).get("value", 0)) > 0:
             return True
     return False
+    # Basic sleep duration policy:
+    # linearly map sleepiness 0..100 -> 1..DEFAULT_SLEEP_HOURS.
+    sleepiness = max(0, int(agent.get("sleepiness", 0)))
+    sleepiness_per_hour = max(1, math.ceil(100 / DEFAULT_SLEEP_HOURS))
+    estimated_hours = max(1, math.ceil(sleepiness / sleepiness_per_hour))
+    sleep_hours = min(DEFAULT_SLEEP_HOURS, estimated_hours)

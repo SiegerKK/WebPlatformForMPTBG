@@ -175,7 +175,7 @@ def _exec_sleep(
 ) -> list[dict[str, Any]]:
     """Schedule a sleep action."""
     from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
-    hours = step.payload.get("hours", DEFAULT_SLEEP_HOURS)
+    hours = max(1, int(step.payload.get("hours", DEFAULT_SLEEP_HOURS)))
     from app.games.zone_stalkers.rules.tick_rules import MINUTES_PER_TURN
     turns = hours * 60 // MINUTES_PER_TURN
     agent["scheduled_action"] = {
@@ -185,6 +185,7 @@ def _exec_sleep(
         "turns_total": turns,
         "sleep_progress_turns": 0,
         "sleep_intervals_applied": 0,
+        "sleep_turns_slept": 0,
     }
     agent["action_used"] = True
     return []

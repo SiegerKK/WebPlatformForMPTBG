@@ -125,6 +125,7 @@ def _sleeping_bot(
             "turns_total": turns_total,
             "sleep_progress_turns": 0,
             "sleep_intervals_applied": 0,
+            "sleep_turns_slept": 0,
         },
         "skill_stalker": 1,
         "risk_tolerance": 0.5,
@@ -181,6 +182,14 @@ def test_process_sleep_tick_backward_compat_no_fields():
     for _ in range(SLEEP_EFFECT_INTERVAL_TURNS):
         _process_sleep_tick("bot", agent, sched, {}, 100)
     assert sched["sleep_intervals_applied"] == 1
+
+
+def test_process_sleep_tick_sets_early_wake_when_sleepiness_zero():
+    agent: dict[str, Any] = {"sleepiness": 0, "hunger": 10, "thirst": 10}
+    sched: dict[str, Any] = {"sleep_progress_turns": 0, "sleep_intervals_applied": 0}
+    evs = _process_sleep_tick("bot", agent, sched, {}, 100)
+    assert evs == []
+    assert sched.get("wake_due_to_rested") is True
 
 
 # ─── Integration: full tick loop ─────────────────────────────────────────────
@@ -240,6 +249,26 @@ def test_sleep_completion_memory_written_and_no_double_reset():
     # With 3 turns (< 30), no interval fired, so sleepiness should still be ~80.
     # It may have been reduced from HP/hunger ticks, so just verify it's > 0.
     assert state["agents"]["bot1"]["sleepiness"] > 0
+
+
+def test_sleep_wakes_up_early_when_sleepiness_reaches_zero():
+    state = _make_base_state()
+    # Scheduled for long sleep, but low sleepiness should finish after first interval.
+    bot = _sleeping_bot(sleepiness=10, turns_remaining=480, turns_total=480)
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    for _ in range(SLEEP_EFFECT_INTERVAL_TURNS):
+        state, _ = tick_zone_map(state)
+
+    bot_state = state["agents"]["bot1"]
+    assert bot_state.get("scheduled_action") is None
+    completion_entries = [
+        m for m in bot_state.get("memory", [])
+        if m.get("effects", {}).get("action_kind") == "sleep_completed"
+    ]
+    assert completion_entries, "Expected sleep_completed memory after early wake"
+    assert completion_entries[-1]["effects"].get("hours_slept", 0) <= 1.0
 
 
 def test_interrupted_sleep_keeps_partial_recovery():
@@ -417,6 +446,38 @@ def test_rest_plan_no_preparation_when_items_not_available():
 
     assert len(plan.steps) == 1
     assert plan.steps[0].kind == STEP_SLEEP_FOR_HOURS
+
+
+def test_rest_plan_chooses_short_sleep_for_low_sleepiness():
+    agent = make_agent(
+        hunger=0,
+        thirst=0,
+        sleepiness=10,
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    intent = _make_rest_intent()
+    plan = build_plan(ctx, intent, state, 100)
+
+    assert plan.steps[-1].kind == STEP_SLEEP_FOR_HOURS
+    assert plan.steps[-1].payload["hours"] == 1
+
+
+def test_rest_plan_chooses_longer_sleep_for_high_sleepiness():
+    from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
+    agent = make_agent(
+        hunger=0,
+        thirst=0,
+        sleepiness=100,
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    intent = _make_rest_intent()
+    plan = build_plan(ctx, intent, state, 100)
+
+    assert plan.steps[-1].kind == STEP_SLEEP_FOR_HOURS
+    assert 1 <= plan.steps[-1].payload["hours"] <= DEFAULT_SLEEP_HOURS
+    assert plan.steps[-1].payload["hours"] == DEFAULT_SLEEP_HOURS
 
 
 # ─── Executor: prepare_sleep_* records correct action_kind ───────────────────

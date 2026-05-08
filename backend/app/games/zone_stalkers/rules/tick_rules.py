@@ -643,6 +643,10 @@ def _process_scheduled_action(
     # this tick.  This ensures partial recovery on abort.
     if action_type == "sleep":
         events.extend(_process_sleep_tick(agent_id, agent, sched, state, world_turn))
+        # _process_sleep_tick may force early wake-up when sleepiness reaches 0.
+        if sched.pop("wake_due_to_rested", False):
+            sched["turns_remaining"] = 0
+        turns_remaining = int(sched.get("turns_remaining", turns_remaining))
 
     if turns_remaining > 0:
         # ── Emergency interrupt: emission warning during any long-running action ──
@@ -857,11 +861,18 @@ def _process_scheduled_action(
 
     elif action_type == "sleep":
         _resolve_sleep(agent, sched, world_turn, state)
+        turns_slept = int(
+            sched.get(
+                "sleep_turns_slept",
+                max(0, int(sched.get("turns_total", 0)) - max(0, int(sched.get("turns_remaining", 0)))),
+            )
+        )
         events.append({
             "event_type": "sleep_completed",
             "payload": {
                 "agent_id": agent_id,
-                "hours_slept": sched.get("turns_total", 6),
+                "hours_slept": round(turns_slept / _HOUR_IN_TURNS, 2),
+                "turns_slept": turns_slept,
                 "hp_after": agent["hp"],
                 "radiation_after": agent["radiation"],
             },
@@ -1067,12 +1078,22 @@ def _process_sleep_tick(
 
     sched.setdefault("sleep_progress_turns", 0)
     sched.setdefault("sleep_intervals_applied", 0)
+    sched.setdefault("sleep_turns_slept", 0)
+
+    # If sleepiness is already gone, stop sleeping on this tick.
+    if agent.get("sleepiness", 0) <= 0:
+        sched["wake_due_to_rested"] = True
+        return events
 
     sched["sleep_progress_turns"] = int(sched["sleep_progress_turns"]) + 1
+    sched["sleep_turns_slept"] = int(sched["sleep_turns_slept"]) + 1
 
     while sched["sleep_progress_turns"] >= SLEEP_EFFECT_INTERVAL_TURNS:
         sched["sleep_progress_turns"] -= SLEEP_EFFECT_INTERVAL_TURNS
         events.extend(_apply_sleep_interval_effect(agent_id, agent, sched, state, world_turn))
+        if agent.get("sleepiness", 0) <= 0:
+            sched["wake_due_to_rested"] = True
+            break
 
     return events
 
@@ -1089,18 +1110,19 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     * ``turns_total`` – fallback; total turns of the sleep action (converted via
                         ``turns_total // _HOUR_IN_TURNS``).
     """
-    hours_from_sched = sched.get("hours")
-    if hours_from_sched is not None:
-        hours = int(hours_from_sched)
-    elif sched.get("turns_total"):
-        hours = sched["turns_total"] // _HOUR_IN_TURNS
-    else:
-        hours = DEFAULT_SLEEP_HOURS
-    # Heal HP (15 per hour, max 100)
-    hp_regen = min(15 * hours, agent["max_hp"] - agent["hp"])
+    turns_total = int(sched.get("turns_total", DEFAULT_SLEEP_HOURS * _HOUR_IN_TURNS))
+    turns_slept = int(
+        sched.get(
+            "sleep_turns_slept",
+            max(0, turns_total - max(0, int(sched.get("turns_remaining", 0)))),
+        )
+    )
+    hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
+
+    # Heal HP / reduce radiation by actual slept time (not planned full duration).
+    hp_regen = min(int(15 * hours_slept), agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
-    # Reduce radiation (5 per hour)
-    rad_reduce = 5 * hours
+    rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
     # DO NOT reset sleepiness=0 here; interval effects already reduced it progressively.
     intervals = int(sched.get("sleep_intervals_applied", 0))
@@ -1114,10 +1136,15 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
             "action_kind": "sleep_completed",
             "sleep_intervals_applied": intervals,
             "turns_total": sched.get("turns_total"),
+            "turns_slept": turns_slept,
+            "hours_slept": round(hours_slept, 2),
             "hp_gained": hp_regen,
             "radiation_reduced": rad_reduce,
         },
-        summary=f"Проснулся после сна: восстановлено {hp_regen} HP, снято {rad_reduce} радиации ({intervals} интервал(ов) сна)",
+        summary=(
+            f"Проснулся после сна ({hours_slept:.1f} ч): восстановлено {hp_regen} HP, "
+            f"снято {rad_reduce} радиации ({intervals} интервал(ов) сна)"
+        ),
     )
 
 
