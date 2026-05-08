@@ -122,3 +122,30 @@ def test_emergency_flee_is_not_aborted_by_plan_monitor() -> None:
     abort_events = [e for e in events if e.get("event_type") == "plan_monitor_aborted_action"]
     assert not abort_events
     assert new_state["agents"]["bot1"].get("scheduled_action") is not None
+
+
+def test_continue_path_keeps_legacy_action_queue_progression() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["thirst"] = 10
+    bot["scheduled_action"] = {
+        "type": "sleep",
+        "turns_remaining": 1,
+        "turns_total": 1,
+        "target_id": "loc_a",
+    }
+    bot["action_queue"] = [{
+        "type": "sleep",
+        "turns_remaining": 2,
+        "turns_total": 2,
+        "target_id": "loc_a",
+    }]
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    next_sched = new_state["agents"]["bot1"].get("scheduled_action")
+    assert next_sched is not None
+    assert next_sched.get("turns_remaining") == 2
+    assert new_state["agents"]["bot1"].get("action_queue") == []
