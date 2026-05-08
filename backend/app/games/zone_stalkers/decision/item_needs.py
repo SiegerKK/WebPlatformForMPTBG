@@ -16,6 +16,11 @@ from .constants import DESIRED_AMMO_COUNT
 from .models.agent_context import AgentContext
 from .models.item_need import ItemNeed
 
+# Weapon urgency scores: boosted for kill_stalker agents because a hunter
+# without a weapon cannot pursue their primary global goal at all.
+_WEAPON_URGENCY_NORMAL: float = 0.65
+_WEAPON_URGENCY_HUNT: float = 0.80
+
 
 def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNeed]:
     agent = ctx.self_state
@@ -49,7 +54,10 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     weapon_missing = 0 if has_weapon else 1
     # For hunters (kill_stalker goal) a missing weapon is critical — boost urgency
     # so that the resupply drive clearly dominates get_rich or unravel drives.
-    weapon_urgency = (0.80 if global_goal == "kill_stalker" else 0.65) if weapon_missing else 0.0
+    weapon_urgency = (
+        (_WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL)
+        if weapon_missing else 0.0
+    )
     weapon_reason = ("Нет оружия (критично для охоты)" if global_goal == "kill_stalker"
                      else "Нет оружия") if weapon_missing else ""
     needs.append(

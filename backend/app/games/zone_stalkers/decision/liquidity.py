@@ -154,7 +154,11 @@ def find_liquidity_options(
 
         # ── Ammo: explicit hunt-critical protection ──────────────────────────
         # Compatible ammo that is at or below the reserve threshold must never
-        # be sold.  Extra ammo (above reserve) can be sold safely.
+        # be sold.  Items are included with safety='forbidden' (rather than
+        # being silently skipped) so that callers and debug traces can observe
+        # which ammo packs are protected.  Planners and executors must always
+        # filter out 'forbidden' entries before selecting an item to sell.
+        # Extra ammo (above reserve) can be sold safely.
         if item_type in AMMO_ITEM_TYPES:
             if item_type == _required_ammo_type:
                 # This is the compatible ammo type for the equipped weapon.
