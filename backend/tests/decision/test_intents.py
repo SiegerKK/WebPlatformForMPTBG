@@ -41,13 +41,10 @@ class TestIntentPriority:
         assert intent.kind == INTENT_ESCAPE_DANGER
 
     def test_hunger_low_does_not_trigger_food(self):
-        """Hunger=20 is low; get_rich=0.0 (rich agent) or other priorities dominate."""
-        # Use a rich, fully equipped agent so that only hunger matters
+        """Hunger=20 is below soft threshold; should not trigger seek_food."""
         agent = make_agent(hunger=20, money=9000, material_threshold=3000)
         intent = _intent_for(agent=agent)
-        # get_rich=0.0 (rich), reload_or_rearm=0.0 (equipped)
-        # eat=0.20, all others=0.0 → eat wins → seek_food
-        assert intent.kind == INTENT_SEEK_FOOD
+        assert intent.kind == INTENT_IDLE
 
     def test_emission_beats_hunger(self):
         """Emission on dangerous terrain beats hunger."""

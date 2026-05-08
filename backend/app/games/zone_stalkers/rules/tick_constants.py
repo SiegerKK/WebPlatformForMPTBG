@@ -26,3 +26,8 @@ THIRST_INCREASE_PER_SLEEP_INTERVAL = 2
 # Thresholds above which sleep preconditions require consuming food/water first.
 SLEEP_SAFE_HUNGER_THRESHOLD = 70
 SLEEP_SAFE_THIRST_THRESHOLD = 70
+
+# ── MemoryStore v3 caps (PR 3) ────────────────────────────────────────────────
+MEMORY_V3_MAX_RECORDS = 5000
+MEMORY_V3_IMPORT_LEGACY_LIMIT = 200
+MEMORY_V3_RETRIEVAL_MAX_RESULTS = 50

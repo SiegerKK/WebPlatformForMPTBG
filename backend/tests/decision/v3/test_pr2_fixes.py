@@ -687,7 +687,7 @@ def test_noncritical_seek_water_reason_is_not_critical_text() -> None:
 def test_noncritical_seek_food_reason_is_not_critical_text() -> None:
     """Non-critical hunger should use non-critical reason template."""
     agent = make_agent(
-        hunger=45,
+        hunger=55,
         thirst=0,
         money=9000,
         material_threshold=3000,
@@ -812,3 +812,65 @@ def test_resupply_fallback_get_money_reason_is_explicit_in_step_payload() -> Non
         f"Fallback plan step must include fallback_reason for traceability, got {first_payload}"
     )
     assert "fallback_get_money" in first_payload["fallback_reason"]
+
+
+def test_noncritical_thirst_below_soft_threshold_does_not_select_seek_water_if_get_rich_available() -> None:
+    agent = make_agent(
+        thirst=20,
+        hunger=10,
+        sleepiness=0,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent)
+    # Keep get_rich attractive.
+    state["locations"]["loc_a"]["anomaly_activity"] = 5
+
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
+    assert intent.kind != INTENT_SEEK_WATER
+
+
+def test_noncritical_hunger_below_soft_threshold_does_not_select_seek_food_if_get_rich_available() -> None:
+    agent = make_agent(
+        thirst=10,
+        hunger=20,
+        sleepiness=0,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent)
+    state["locations"]["loc_a"]["anomaly_activity"] = 5
+
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
+    assert intent.kind != INTENT_SEEK_FOOD
+
+
+def test_critical_thirst_still_selects_seek_water_after_soft_filter() -> None:
+    agent = make_agent(thirst=95, hunger=10)
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
+    assert intent.kind == INTENT_SEEK_WATER
+
+
+def test_rest_preparation_thirst_still_allows_sleep_preparation_drink() -> None:
+    agent = make_agent(
+        thirst=70,
+        hunger=10,
+        sleepiness=90,
+        inventory=[
+            {"id": "w0", "type": "water", "value": 10},
+            {"id": "f0", "type": "bread", "value": 10},
+        ],
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    plan = build_plan(ctx, _make_intent(INTENT_REST), state, 100, need_result=need_result)
+    assert any(
+        step.kind == STEP_CONSUME_ITEM and step.payload.get("reason") == "prepare_sleep_drink"
+        for step in plan.steps
+    )
