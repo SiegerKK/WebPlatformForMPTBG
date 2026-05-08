@@ -47,6 +47,7 @@ from typing import Any, Optional
 
 from .constants import EMISSION_DANGEROUS_TERRAIN
 from .models.agent_context import AgentContext
+from .models.need_evaluation import NeedEvaluationResult
 from .models.need_scores import NeedScores
 from .models.intent import (
     Intent,
@@ -88,13 +89,15 @@ _HARD_INTERRUPT_HEAL = 0.80
 #
 # The list is ordered by tie-break priority (highest first).
 # Each entry: (drive_attr, intent_kind, reason_template)
+# NOTE: drink/eat templates below are non-critical baseline reasons.
+# Critical hunger/thirst reasons are handled earlier via ImmediateNeed/hard-threshold logic.
 # P5 fix: maintain_group → INTENT_MAINTAIN_GROUP (was erroneously INTENT_FOLLOW_GROUP_PLAN)
 _PRIORITY_MAP: list[tuple[str, str, str]] = [
     ("survive_now",        INTENT_ESCAPE_DANGER,      "HP критически низкий"),
     ("heal_self",          INTENT_HEAL_SELF,           "Нужно лечение"),
     ("avoid_emission",     INTENT_FLEE_EMISSION,       "Угроза выброса"),
-    ("drink",              INTENT_SEEK_WATER,          "Критическая жажда"),
-    ("eat",                INTENT_SEEK_FOOD,           "Критический голод"),
+    ("drink",              INTENT_SEEK_WATER,          "Жажда растёт"),
+    ("eat",                INTENT_SEEK_FOOD,           "Голод растёт"),
     ("sleep",              INTENT_REST,                "Сильная усталость"),
     ("reload_or_rearm",    INTENT_RESUPPLY,            "Не хватает снаряжения"),
     ("maintain_group",     INTENT_MAINTAIN_GROUP,      "Нужды группы"),
@@ -113,6 +116,7 @@ def select_intent(
     ctx: AgentContext,
     needs: NeedScores,
     world_turn: int,
+    need_result: NeedEvaluationResult | None = None,
 ) -> Intent:
     """Choose the dominant Intent for this tick.
 
@@ -133,6 +137,38 @@ def select_intent(
     agent = ctx.self_state
     global_goal: str = agent.get("global_goal", "get_rich")
     kill_target_id: Optional[str] = agent.get("kill_target_id")
+
+    # ── PR2 immediate needs: critical survival/healing first ──────────────────
+    if need_result is not None:
+        immediate = [n for n in need_result.immediate_needs if n.trigger_context in ("survival", "healing")]
+        drink_now = next((n for n in immediate if n.key == "drink_now"), None)
+        eat_now = next((n for n in immediate if n.key == "eat_now"), None)
+        heal_now = next((n for n in immediate if n.key == "heal_now"), None)
+
+        if drink_now and drink_now.urgency >= CRITICAL_THIRST_THRESHOLD / 100.0:
+            return _make_intent(
+                INTENT_SEEK_WATER,
+                float(drink_now.urgency),
+                source_goal=None,
+                reason=drink_now.reason or f"Критическая жажда — срочный поиск воды (жажда {agent.get('thirst', 0)}%)",
+                created_turn=world_turn,
+            )
+        if eat_now and eat_now.urgency >= CRITICAL_HUNGER_THRESHOLD / 100.0:
+            return _make_intent(
+                INTENT_SEEK_FOOD,
+                float(eat_now.urgency),
+                source_goal=None,
+                reason=eat_now.reason or f"Критический голод — срочный поиск еды (голод {agent.get('hunger', 0)}%)",
+                created_turn=world_turn,
+            )
+        if heal_now and heal_now.urgency >= _HARD_INTERRUPT_HEAL:
+            return _make_intent(
+                INTENT_HEAL_SELF,
+                float(heal_now.urgency),
+                source_goal=None,
+                reason=heal_now.reason or f"HP опасно низкий — срочное лечение (HP={agent.get('hp', '?')})",
+                created_turn=world_turn,
+            )
 
     # ── Special case: emission threat (always overrides equipment/resource needs) ──
     # Emission is a life-threatening event — it must override reload_or_rearm (1.0)
@@ -204,6 +240,8 @@ def select_intent(
         score: float = getattr(needs, drive_attr, 0.0)
         if score > best_score:
             best_score = score
+            if drive_attr == "reload_or_rearm":
+                reason_tmpl = _resupply_reason_template(need_result) or reason_tmpl
             # Enrich reason template with agent context
             reason = _enrich_reason(reason_tmpl, drive_attr, needs, agent)
             target_id, target_loc_id = _resolve_targets(intent_kind, ctx, kill_target_id)
@@ -315,3 +353,25 @@ def _enrich_reason(
     if detail:
         return f"{template} ({detail})"
     return f"{template} (score={value:.2f})"
+
+
+def _resupply_reason_template(need_result: NeedEvaluationResult | None) -> str | None:
+    if need_result is None:
+        return None
+    item_needs = list(need_result.item_needs)
+    if not item_needs:
+        return None
+    from .item_needs import choose_dominant_item_need
+
+    dominant = choose_dominant_item_need(item_needs)
+    if dominant is None:
+        return None
+    mapping = {
+        "drink": "Недостаточный запас воды",
+        "food": "Недостаточный запас еды",
+        "ammo": "Недостаточно патронов",
+        "medicine": "Недостаточно медикаментов",
+        "weapon": "Нет оружия",
+        "armor": "Нет брони",
+    }
+    return mapping.get(dominant.key, dominant.reason or None)

@@ -58,7 +58,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ..context_builder import build_agent_context
-from ..needs import evaluate_needs
+from ..needs import evaluate_need_result
 from ..intents import select_intent
 from ..planner import build_plan
 from ..bridges import plan_from_scheduled_action
@@ -93,16 +93,17 @@ def explain_agent_decision(
     ctx = build_agent_context(agent_id, agent, state)
 
     # ── 2. Evaluate needs ─────────────────────────────────────────────────────
-    needs = evaluate_needs(ctx, state)
+    need_result = evaluate_need_result(ctx, state)
+    needs = need_result.scores
     needs_dict = asdict(needs)
     scores_sorted = sorted(needs_dict.items(), key=lambda x: -x[1])
     top_3 = [(name, round(score, 3)) for name, score in scores_sorted[:3] if score > 0]
 
     # ── 3. Select intent ──────────────────────────────────────────────────────
-    intent = select_intent(ctx, needs, world_turn)
+    intent = select_intent(ctx, needs, world_turn, need_result=need_result)
 
     # ── 4. Build plan ─────────────────────────────────────────────────────────
-    plan = build_plan(ctx, intent, state, world_turn)
+    plan = build_plan(ctx, intent, state, world_turn, need_result=need_result)
 
     # ── 5. Assemble context summary ───────────────────────────────────────────
     loc_id = agent.get("location_id", "")
@@ -153,6 +154,26 @@ def explain_agent_decision(
             **{k: round(v, 3) for k, v in needs_dict.items()},
             "top_3": top_3,
         },
+        "immediate_needs": [
+            {
+                "key": n.key,
+                "urgency": round(float(n.urgency), 3),
+                "trigger_context": n.trigger_context,
+                "selected_item_type": n.selected_item_type,
+                "reason": n.reason,
+            }
+            for n in need_result.immediate_needs
+        ],
+        "item_needs": [
+            {
+                "key": n.key,
+                "urgency": round(float(n.urgency), 3),
+                "missing_count": n.missing_count,
+                "reason": n.reason,
+            }
+            for n in need_result.item_needs
+            if n.urgency > 0
+        ],
         "selected_intent": {
             "kind": intent.kind,
             "score": round(intent.score, 3),

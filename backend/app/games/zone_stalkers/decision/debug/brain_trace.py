@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.games.zone_stalkers.decision.models.need_evaluation import NeedEvaluationResult
+
 from app.games.zone_stalkers.rules.tick_constants import BRAIN_TRACE_MAX_EVENTS
 
 
@@ -67,6 +69,10 @@ def append_brain_trace_event(
     intent_kind: str | None = None,
     intent_score: float | None = None,
     dominant_pressure: dict[str, Any] | None = None,
+    immediate_needs: list[dict[str, Any]] | None = None,
+    item_needs: list[dict[str, Any]] | None = None,
+    liquidity: dict[str, Any] | None = None,
+    combat_readiness: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     trace = agent.get("brain_trace")
@@ -88,6 +94,14 @@ def append_brain_trace_event(
         event["intent_score"] = round(float(intent_score), 3)
     if dominant_pressure is not None:
         event["dominant_pressure"] = dominant_pressure
+    if immediate_needs:
+        event["immediate_needs"] = immediate_needs[:3]
+    if item_needs:
+        event["item_needs"] = item_needs[:5]
+    if liquidity is not None:
+        event["liquidity"] = liquidity
+    if combat_readiness is not None:
+        event["combat_readiness"] = combat_readiness
 
     if not isinstance(trace, dict):
         thought = summary
@@ -148,10 +162,40 @@ def write_decision_brain_trace_from_v2(
     intent_score: float,
     reason: str | None,
     state: dict[str, Any] | None = None,
+    need_result: NeedEvaluationResult | None = None,
 ) -> None:
     thought = f"Выбран intent {intent_kind} ({round(intent_score * 100)}%)."
     if reason:
         thought += f" {reason}"
+
+    immediate_payload = None
+    item_payload = None
+    liquidity_payload = None
+    combat_readiness_payload = None
+    if need_result is not None:
+        immediate_payload = [
+            {
+                "key": n.key,
+                "urgency": round(float(n.urgency), 3),
+                "selected_item_type": n.selected_item_type,
+                "reason": n.reason,
+            }
+            for n in need_result.immediate_needs
+            if n.urgency > 0
+        ]
+        item_payload = [
+            {
+                "key": n.key,
+                "urgency": round(float(n.urgency), 3),
+                "missing_count": n.missing_count,
+                "reason": n.reason,
+            }
+            for n in need_result.item_needs
+            if n.urgency > 0
+        ]
+        liquidity_payload = dict(need_result.liquidity_summary or {})
+        if need_result.combat_readiness:
+            combat_readiness_payload = dict(need_result.combat_readiness)
 
     append_brain_trace_event(
         agent,
@@ -162,6 +206,10 @@ def write_decision_brain_trace_from_v2(
         reason=reason,
         intent_kind=intent_kind,
         intent_score=intent_score,
+        immediate_needs=immediate_payload,
+        item_needs=item_payload,
+        liquidity=liquidity_payload,
+        combat_readiness=combat_readiness_payload,
         state=state,
     )
 

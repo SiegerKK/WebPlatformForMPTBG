@@ -6,6 +6,10 @@ from .intent import Intent
 from .plan import Plan, PlanStep
 from .relation_state import RelationState
 from .group_state import GroupState
+from .immediate_need import ImmediateNeed
+from .item_need import ItemNeed
+from .affordability import AffordabilityResult, LiquidityOption
+from .need_evaluation import NeedEvaluationResult
 
 __all__ = [
     "AgentContext",
@@ -15,4 +19,9 @@ __all__ = [
     "PlanStep",
     "RelationState",
     "GroupState",
+    "ImmediateNeed",
+    "ItemNeed",
+    "AffordabilityResult",
+    "LiquidityOption",
+    "NeedEvaluationResult",
 ]

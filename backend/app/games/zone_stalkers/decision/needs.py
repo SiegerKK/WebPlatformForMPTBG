@@ -17,6 +17,10 @@ from typing import Any
 
 from .constants import EMISSION_DANGEROUS_TERRAIN, DESIRED_AMMO_COUNT
 from .models.agent_context import AgentContext
+from .immediate_needs import evaluate_immediate_needs
+from .item_needs import evaluate_item_needs
+from .liquidity import find_liquidity_options
+from .models.need_evaluation import NeedEvaluationResult
 from .models.need_scores import NeedScores
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -35,21 +39,8 @@ _GET_RICH_WEIGHT = 0.70              # weight for the get_rich material drive fo
 GET_RICH_WEIGHT = _GET_RICH_WEIGHT   # public alias
 
 
-def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
-    """Compute NeedScores from the agent's current context.
-
-    Parameters
-    ----------
-    ctx
-        Pre-built AgentContext for this agent.
-    state
-        The full world state dict (read-only; used for relational lookups).
-
-    Returns
-    -------
-    NeedScores
-        All scores clamped to [0.0, 1.0].
-    """
+def evaluate_need_result(ctx: AgentContext, state: dict[str, Any]) -> NeedEvaluationResult:
+    """Compute NeedScores together with PR2 immediate/item need structures."""
     agent = ctx.self_state
     hp: int = agent.get("hp", 100)
     hunger: int = agent.get("hunger", 0)
@@ -63,13 +54,16 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
     global_goal: str = agent.get("global_goal", "get_rich")
     kill_target_id: str | None = agent.get("kill_target_id")
 
+    immediate_needs = evaluate_immediate_needs(ctx, state)
+    item_needs = evaluate_item_needs(ctx, state)
+
     # ── Survival ──────────────────────────────────────────────────────────────
     survive_now = _score_survive_now(hp)
-    heal_self = _score_heal_self(hp)
-    eat = _clamp(hunger / 100.0)
-    drink = _clamp(thirst / 100.0)
+    heal_self = max(_score_heal_self(hp), _immediate_urgency(immediate_needs, "heal_now"))
+    eat = max(_clamp(hunger / 100.0), _immediate_urgency(immediate_needs, "eat_now"))
+    drink = max(_clamp(thirst / 100.0), _immediate_urgency(immediate_needs, "drink_now"))
     sleep = _clamp(sleepiness / 100.0)
-    reload_or_rearm = _score_reload_or_rearm(agent)
+    reload_or_rearm = _item_need_max_urgency(item_needs)
 
     # ── Environmental ─────────────────────────────────────────────────────────
     avoid_emission = _score_avoid_emission(ctx)
@@ -84,17 +78,9 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
     leave_zone = _score_leave_zone(agent)
 
     # ── Equipment gate: get_rich is suppressed while resupply is needed ────────
-    # Multiplying by (1 - reload_or_rearm) guarantees that the suppressed
-    # get_rich score is always strictly less than reload_or_rearm when any
-    # equipment gap exists, so INTENT_RESUPPLY always wins in the priority walk:
-    #   reload_or_rearm = 0.65 → get_rich_max * 0.35 = 0.245 < 0.65  ✓
-    #   reload_or_rearm = 0.70 → get_rich_max * 0.30 = 0.210 < 0.70  ✓
-    #   reload_or_rearm = 0.60 → get_rich_max * 0.40 = 0.280 < 0.60  ✓
-    #   reload_or_rearm = 0.00 → get_rich unchanged                    ✓
     get_rich = get_rich * (1.0 - reload_or_rearm)
 
     # ── Multiplicative suppression: risky drives dampened by survival pressure ──
-    # (Fix 2) Apply before goal-achieved zeroing so zeroing is the final word.
     _survival_pressure = max(survive_now, heal_self * 0.5)
     if _survival_pressure > 0:
         get_rich = get_rich * max(0.0, 1.0 - _survival_pressure)
@@ -117,7 +103,7 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
     help_ally = 0.0
     join_group = 0.0
 
-    return NeedScores(
+    scores = NeedScores(
         survive_now=survive_now,
         heal_self=heal_self,
         eat=eat,
@@ -135,6 +121,82 @@ def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
         help_ally=help_ally,
         join_group=join_group,
     )
+
+    liquidity_options = find_liquidity_options(
+        agent=agent,
+        immediate_needs=immediate_needs,
+        item_needs=item_needs,
+    )
+    safe_count = sum(1 for o in liquidity_options if o.safety == "safe")
+    risky_count = sum(1 for o in liquidity_options if o.safety == "risky")
+    emergency_count = sum(1 for o in liquidity_options if o.safety == "emergency_only")
+
+    # Compute dominant item need affordability for trace enrichment.
+    from .item_needs import choose_dominant_item_need
+    from .liquidity import evaluate_affordability
+    dominant = choose_dominant_item_need(list(item_needs))
+    money = int(agent.get("money", 0))
+    if dominant and dominant.expected_min_price is not None:
+        required_price = dominant.expected_min_price
+        money_missing = max(0, required_price - money)
+        can_buy_now = money >= required_price
+        if can_buy_now:
+            planner_allowed_decision = "affordable"
+        elif safe_count > 0:
+            planner_allowed_decision = "sell_safe_then_buy"
+        elif emergency_count > 0:
+            planner_allowed_decision = "sell_emergency_then_buy"
+        else:
+            planner_allowed_decision = "fallback_get_money"
+    else:
+        required_price = None
+        money_missing = 0
+        can_buy_now = None
+        planner_allowed_decision = "no_dominant_need"
+
+    liquidity_summary = {
+        "safe_sale_options": safe_count,
+        "risky_sale_options": risky_count,
+        "emergency_sale_options": emergency_count,
+        "risky_liquidity_available": risky_count > 0,
+        "can_buy_now": can_buy_now,
+        "required_price": required_price,
+        "money_missing": money_missing,
+        "planner_allowed_decision": planner_allowed_decision,
+        # Alias kept for compatibility with older trace consumers expecting "decision".
+        "decision": planner_allowed_decision,
+    }
+
+    return NeedEvaluationResult(
+        scores=scores,
+        immediate_needs=tuple(immediate_needs),
+        item_needs=tuple(item_needs),
+        liquidity_summary=liquidity_summary,
+        combat_readiness={
+            "weapon_missing": next(
+                (n.missing_count for n in item_needs if n.key == "weapon"), 0
+            ),
+            "ammo_missing": next(
+                (n.missing_count for n in item_needs if n.key == "ammo"), 0
+            ),
+            "medicine_missing": next(
+                (n.missing_count for n in item_needs if n.key == "medicine"), 0
+            ),
+        },
+    )
+
+
+def evaluate_needs(ctx: AgentContext, state: dict[str, Any]) -> NeedScores:
+    """Backward-compatible wrapper returning only NeedScores."""
+    return evaluate_need_result(ctx, state).scores
+
+
+def _immediate_urgency(immediate_needs: list[Any], key: str) -> float:
+    return max((float(n.urgency) for n in immediate_needs if n.key == key), default=0.0)
+
+
+def _item_need_max_urgency(item_needs: list[Any]) -> float:
+    return max((float(n.urgency) for n in item_needs if n.key != "upgrade"), default=0.0)
 
 
 # ── Score helpers ─────────────────────────────────────────────────────────────
