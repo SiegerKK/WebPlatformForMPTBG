@@ -262,7 +262,11 @@ def _plan_heal_or_flee(
                 interruptible=False, confidence=1.0, created_turn=world_turn,
             )
         # No safe liquidity available — legacy fallback: try any sellable item
-        # (e.g. detector). Do not sell food/water (they're risky or emergency_only).
+        # (e.g. detector, spare weapon/armor). Do not sell food/water
+        # (they're risky or emergency_only per liquidity policy).
+        # TODO PR3: replace this with a proper "can I trade-sell this tick?" affordability
+        # gate so that risky items (e.g. spare weapon) are also protected when the
+        # agent's survival needs change before the sell executes.
         legacy_sellable = next((o for o in liquidity_options if o.safety in ("safe", "risky")), None)
         if legacy_sellable:
             return Plan(
