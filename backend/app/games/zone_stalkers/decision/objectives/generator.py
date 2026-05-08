@@ -154,6 +154,47 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             ),
         )
 
+
+    if not any(o.key == OBJECTIVE_RESTORE_WATER for o in result) and float(need_result.scores.drink) > 0.05:
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_RESTORE_WATER,
+                source="immediate_need",
+                urgency=_clamp01(need_result.scores.drink),
+                expected_value=0.85,
+                risk=0.1,
+                time_cost=0.3,
+                resource_cost=0.1,
+                confidence=0.9,
+                goal_alignment=0.8,
+                memory_confidence=memory_conf,
+                reasons=("Жажда растёт",),
+                source_refs=("need:drink",),
+                metadata={"is_blocking": float(need_result.scores.drink) >= 0.8, "critical": float(need_result.scores.drink) >= 0.8},
+            ),
+        )
+
+    if not any(o.key == OBJECTIVE_RESTORE_FOOD for o in result) and float(need_result.scores.eat) > 0.05:
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_RESTORE_FOOD,
+                source="immediate_need",
+                urgency=_clamp01(need_result.scores.eat),
+                expected_value=0.8,
+                risk=0.1,
+                time_cost=0.3,
+                resource_cost=0.1,
+                confidence=0.9,
+                goal_alignment=0.75,
+                memory_confidence=memory_conf,
+                reasons=("Голод растёт",),
+                source_refs=("need:eat",),
+                metadata={"is_blocking": float(need_result.scores.eat) >= 0.8, "critical": float(need_result.scores.eat) >= 0.8},
+            ),
+        )
+
     sleep_score = float(need_result.scores.sleep)
     if sleep_score > 0.05:
         _append_unique(

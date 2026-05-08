@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from app.games.zone_stalkers.decision.beliefs import BeliefState
-from .need_evaluation import NeedEvaluationResult
+if TYPE_CHECKING:
+    from app.games.zone_stalkers.decision.beliefs import BeliefState
+    from .need_evaluation import NeedEvaluationResult
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class ObjectiveDecision:
 class ObjectiveGenerationContext:
     agent_id: str
     world_turn: int
-    belief_state: BeliefState
-    need_result: NeedEvaluationResult
+    belief_state: "BeliefState"
+    need_result: "NeedEvaluationResult"
     active_plan_summary: dict[str, Any] | None
     personality: dict[str, Any]
