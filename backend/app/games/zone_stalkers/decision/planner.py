@@ -285,6 +285,68 @@ def _plan_seek_consumable(
     immediate_key = "eat_now" if is_food else "drink_now"
     immediate_need = _find_immediate_need(need_result, immediate_key)
 
+    # Legacy compatibility path (used by existing tests / v2 callers):
+    # keep opportunistic consume and sell-before-buy behavior from PR1.
+    if need_result is None:
+        item = next((i for i in inventory if i.get("type") in item_types), None)
+        if item:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    kind=STEP_CONSUME_ITEM,
+                    payload={"item_type": item.get("type"), "reason": f"emergency_{category}"},
+                    interruptible=False,
+                    expected_duration_ticks=1,
+                )],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
+
+        trader_loc = _nearest_trader_location(ctx, state)
+        agent_loc = agent.get("location_id")
+        if trader_loc and trader_loc == agent_loc:
+            if agent.get("money", 0) == 0 and _has_sellable_items(agent):
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[
+                        PlanStep(STEP_TRADE_SELL_ITEM,
+                                 {"item_category": "any_sellable", "reason": "fund_consumable"},
+                                 interruptible=False),
+                        PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category}, interruptible=False),
+                    ],
+                    interruptible=False, confidence=1.0, created_turn=world_turn,
+                )
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category}, interruptible=False)],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
+
+        if trader_loc and trader_loc != agent_loc:
+            steps = [
+                PlanStep(STEP_TRAVEL_TO_LOCATION,
+                         {"target_id": trader_loc, "reason": f"buy_{category}"},
+                         expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+            ]
+            _OPPORTUNISTIC_THRESHOLD = 25
+            other_types = DRINK_ITEM_TYPES if is_food else FOOD_ITEM_TYPES
+            other_attr = "thirst" if is_food else "hunger"
+            other_item = next((i for i in inventory if i.get("type") in other_types), None)
+            if other_item and agent.get(other_attr, 0) >= _OPPORTUNISTIC_THRESHOLD:
+                other_category = "drink" if is_food else "food"
+                steps.insert(0, PlanStep(
+                    kind=STEP_CONSUME_ITEM,
+                    payload={"item_type": other_item.get("type"), "reason": f"opportunistic_{other_category}"},
+                    interruptible=False,
+                    expected_duration_ticks=1,
+                ))
+            if agent.get("money", 0) == 0 and _has_sellable_items(agent):
+                steps.append(PlanStep(STEP_TRADE_SELL_ITEM,
+                                      {"item_category": "any_sellable", "reason": "fund_consumable"},
+                                      interruptible=False))
+            steps.append(PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category}, interruptible=False))
+            return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
+        return None
+
     selected_item_type = immediate_need.selected_item_type if immediate_need else None
     selected_item_id = immediate_need.selected_item_id if immediate_need else None
 
@@ -521,6 +583,94 @@ def _plan_resupply(
 
     agent = ctx.self_state
     agent_loc = agent.get("location_id", "")
+
+    if need_result is None:
+        from app.games.zone_stalkers.balance.items import (
+            WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_FOR_WEAPON,
+            FOOD_ITEM_TYPES, DRINK_ITEM_TYPES, HEAL_ITEM_TYPES,
+        )
+
+        eq = agent.get("equipment", {})
+        inventory = agent.get("inventory", [])
+        risk_tolerance = float(agent.get("risk_tolerance", 0.5))
+        desired_food = _desired_supply_count(risk_tolerance, 1, 3)
+        desired_drink = _desired_supply_count(risk_tolerance, 1, 3)
+        desired_medicine = _desired_supply_count(risk_tolerance, 2, 4)
+
+        food_count = sum(1 for i in inventory if i.get("type") in FOOD_ITEM_TYPES)
+        drink_count = sum(1 for i in inventory if i.get("type") in DRINK_ITEM_TYPES)
+        medicine_count = sum(1 for i in inventory if i.get("type") in HEAL_ITEM_TYPES)
+
+        has_weapon = eq.get("weapon") is not None
+        has_armor = eq.get("armor") is not None
+
+        need_types: Optional["frozenset[str]"] = None
+        _buy_category: Optional[str] = None
+
+        if food_count < desired_food:
+            need_types = FOOD_ITEM_TYPES
+            _buy_category = "food"
+        elif drink_count < desired_drink:
+            need_types = DRINK_ITEM_TYPES
+            _buy_category = "drink"
+        elif not has_armor:
+            need_types = ARMOR_ITEM_TYPES
+            _buy_category = "armor"
+        elif not has_weapon:
+            need_types = WEAPON_ITEM_TYPES
+            _buy_category = "weapon"
+        else:
+            weapon_type = eq["weapon"].get("type") if isinstance(eq.get("weapon"), dict) else None
+            required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+            if required_ammo:
+                ammo_count = sum(1 for i in inventory if i.get("type") == required_ammo)
+                if ammo_count < DESIRED_AMMO_COUNT:
+                    need_types = frozenset([required_ammo])
+                    _buy_category = "ammo"
+            if need_types is None and medicine_count < desired_medicine:
+                need_types = HEAL_ITEM_TYPES
+                _buy_category = "medical"
+
+        if need_types is not None:
+            mem_loc = _find_item_memory_location(agent, need_types, state)
+            if mem_loc and mem_loc != agent_loc:
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[PlanStep(
+                        STEP_TRAVEL_TO_LOCATION,
+                        {"target_id": mem_loc, "reason": "seek_item_from_memory"},
+                        expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+                    )],
+                    confidence=0.85, created_turn=world_turn,
+                )
+
+            trader_loc = _nearest_trader_location(ctx, state)
+            if trader_loc and trader_loc != agent_loc:
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[
+                        PlanStep(STEP_TRAVEL_TO_LOCATION,
+                                 {"target_id": trader_loc, "reason": "resupply"},
+                                 expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+                        PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": _buy_category}, interruptible=False),
+                    ],
+                    confidence=0.6, created_turn=world_turn,
+                )
+            if trader_loc == agent_loc:
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": _buy_category}, interruptible=False)],
+                    confidence=0.8, created_turn=world_turn,
+                )
+
+            get_rich_intent = Intent(
+                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                reason="Resupply fallback — no trader known, gather resources",
+                created_turn=world_turn,
+            )
+            return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+
+        return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
 
     item_needs = list(need_result.item_needs) if need_result is not None else evaluate_item_needs(ctx, state)
     dominant = choose_dominant_item_need(item_needs)

@@ -2623,7 +2623,7 @@ def _bot_buy_from_trader(
         agent.setdefault("inventory", []).append(new_item)
         agent["action_used"] = True
         item_name = ITEM_TYPES[item_type].get("name", item_type)
-        trader_name = trader.get("name", trader["id"])
+        trader_name = trader.get("name", trader.get("id", "trader"))
         # Collect up to 2 runner-ups (next candidates in the scored list, regardless of affordability)
         runners_up = [
             {
@@ -2679,7 +2679,7 @@ def _bot_buy_from_trader(
         return [{
             "event_type": "bot_bought_item",
             "payload": {
-                "agent_id": agent_id, "trader_id": trader["id"],
+                "agent_id": agent_id, "trader_id": trader.get("id", "trader"),
                 "item_type": item_type, "price": buy_price,
                 "agent_risk_tolerance": agent_risk, "item_risk_tolerance": item_risk,
                 "score": round(score, 3),

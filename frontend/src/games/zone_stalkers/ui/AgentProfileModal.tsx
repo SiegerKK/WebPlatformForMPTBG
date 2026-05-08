@@ -700,7 +700,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               <div style={{ fontSize: '0.82rem', color: '#cbd5e1' }}>
                 <strong>Мысль:</strong> {agent.brain_trace.current_thought}
               </div>
-              {agent.active_plan_v3 && (
+              {Boolean(agent.active_plan_v3) && (
                 <div style={s.memoryEntry}>
                   <div style={s.memoryMeta}>
                     <span style={s.memoryType}>🗺 Активный план</span>
@@ -1127,33 +1127,7 @@ const s: Record<string, React.CSSProperties> = {
 
 // ─── Client-side decision hint (approximates backend _describe_bot_decision_tree) ─
 // Used to show an immediate result on mount before the backend responds.
-// Known artifact item types (mirrors Python ARTIFACT_ITEM_TYPES in tick_rules.py).
-const _ARTIFACT_TYPES = new Set([
-  'artifact', 'fireball', 'jellyfish', 'moonlight', 'soul', 'gravi',
-  'goldfish', 'night_star', 'stone_blood', 'spring',
-]);
-
 // ─── v2 Decision Architecture ─────────────────────────────────────────────────
-
-/** Human-readable labels for each NeedScore drive. */
-const _NEED_META: Record<string, { icon: string; label: string }> = {
-  survive_now:          { icon: '🚨', label: 'Выживание (крит.)' },
-  heal_self:            { icon: '💊', label: 'Лечение' },
-  eat:                  { icon: '🍖', label: 'Голод' },
-  drink:                { icon: '💧', label: 'Жажда' },
-  sleep:                { icon: '😴', label: 'Усталость' },
-  reload_or_rearm:      { icon: '🔫', label: 'Снаряжение' },
-  avoid_emission:       { icon: '⚡', label: 'Выброс' },
-  get_rich:             { icon: '💰', label: 'Накопление' },
-  hunt_target:          { icon: '🎯', label: 'Охота' },
-  unravel_zone_mystery: { icon: '📜', label: 'Тайна Зоны' },
-  leave_zone:           { icon: '🚪', label: 'Покинуть Зону' },
-  trade:                { icon: '🏪', label: 'Торговля' },
-  negotiate:            { icon: '🗣', label: 'Общение' },
-  maintain_group:       { icon: '📋', label: 'Группа' },
-  help_ally:            { icon: '🤝', label: 'Помощь' },
-  join_group:           { icon: '👥', label: 'Влиться в группу' },
-};
 
 /** Human-readable labels for each intent kind. */
 const _INTENT_META: Record<string, { icon: string; label: string }> = {
@@ -1181,22 +1155,6 @@ const _INTENT_META: Record<string, { icon: string; label: string }> = {
   maintain_group:       { icon: '🔗', label: 'Сохранить группу' },
   idle:                 { icon: '💤', label: 'Ожидание' },
 };
-/** Human-readable Russian labels for plan step kinds. */
-const _STEP_LABEL_RU: Record<string, string> = {
-  travel_to_location:        'Путешествие',
-  sleep_for_hours:           'Сон',
-  explore_location:          'Исследование',
-  trade_buy_item:            'Покупка',
-  trade_sell_item:           'Продажа',
-  consume_item:              'Употребление предмета',
-  equip_item:                'Экипировка',
-  pickup_item:               'Подбор предмета',
-  heal_self:                 'Лечение',
-  ask_for_intel:             'Запрос информации',
-  wait:                      'Ожидание',
-  legacy_scheduled_action:   'Запланированное действие',
-};
-
 // ─── AgentCreateModal ─────────────────────────────────────────────────────────
 
 export interface AgentCreateProps {
