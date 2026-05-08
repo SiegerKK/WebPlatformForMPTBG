@@ -127,10 +127,43 @@ def evaluate_need_result(ctx: AgentContext, state: dict[str, Any]) -> NeedEvalua
         immediate_needs=immediate_needs,
         item_needs=item_needs,
     )
+    safe_count = sum(1 for o in liquidity_options if o.safety == "safe")
+    risky_count = sum(1 for o in liquidity_options if o.safety == "risky")
+    emergency_count = sum(1 for o in liquidity_options if o.safety == "emergency_only")
+
+    # Compute dominant item need affordability for trace enrichment.
+    from .item_needs import choose_dominant_item_need
+    from .liquidity import evaluate_affordability
+    dominant = choose_dominant_item_need(list(item_needs))
+    money = int(agent.get("money", 0))
+    if dominant and dominant.expected_min_price is not None:
+        required_price = dominant.expected_min_price
+        money_missing = max(0, required_price - money)
+        can_buy_now = money >= required_price
+        if can_buy_now:
+            liq_decision = "affordable"
+        elif safe_count > 0:
+            liq_decision = "sell_safe_then_buy"
+        elif risky_count > 0:
+            liq_decision = "sell_risky_then_buy"
+        elif emergency_count > 0:
+            liq_decision = "sell_emergency_then_buy"
+        else:
+            liq_decision = "fallback_get_money"
+    else:
+        required_price = None
+        money_missing = 0
+        can_buy_now = None
+        liq_decision = "no_dominant_need"
+
     liquidity_summary = {
-        "safe_sale_options": sum(1 for o in liquidity_options if o.safety == "safe"),
-        "risky_sale_options": sum(1 for o in liquidity_options if o.safety == "risky"),
-        "emergency_sale_options": sum(1 for o in liquidity_options if o.safety == "emergency_only"),
+        "safe_sale_options": safe_count,
+        "risky_sale_options": risky_count,
+        "emergency_sale_options": emergency_count,
+        "can_buy_now": can_buy_now,
+        "required_price": required_price,
+        "money_missing": money_missing,
+        "decision": liq_decision,
     }
 
     return NeedEvaluationResult(

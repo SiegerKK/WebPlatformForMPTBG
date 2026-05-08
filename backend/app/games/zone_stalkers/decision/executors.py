@@ -368,8 +368,22 @@ def _exec_consume(
         "prepare_sleep_drink": "consume_drink",
         "opportunistic_food": "consume_food",
         "opportunistic_drink": "consume_drink",
+        # PR2 explicit reason keys
+        "need_food": "consume_food",
+        "need_drink": "consume_drink",
+        "need_medical": "consume_heal",
     }
-    action_kind = action_kind_map.get(reason_key, "consume_heal")
+    if reason_key in action_kind_map:
+        action_kind = action_kind_map[reason_key]
+    else:
+        # Fallback: derive action_kind from item type category.
+        from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+        if item.get("type") in FOOD_ITEM_TYPES:
+            action_kind = "consume_food"
+        elif item.get("type") in DRINK_ITEM_TYPES:
+            action_kind = "consume_drink"
+        else:
+            action_kind = "consume_heal"
     return _bot_consume(agent_id, agent, item, world_turn, state, action_kind) or []
 
 

@@ -190,7 +190,17 @@ def _plan_heal_or_flee(
     inventory = agent.get("inventory", [])
 
     from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES
-    heal_item = next((i for i in inventory if i.get("type") in HEAL_ITEM_TYPES), None)
+
+    # PR2: prefer the item selected by ImmediateNeed.heal_now when available.
+    heal_need = _find_immediate_need(need_result, "heal_now") if need_result else None
+    if heal_need and heal_need.selected_item_type:
+        heal_item = next(
+            (i for i in inventory if i.get("type") == heal_need.selected_item_type),
+            None,
+        )
+    else:
+        heal_item = next((i for i in inventory if i.get("type") in HEAL_ITEM_TYPES), None)
+
     if heal_item:
         step = PlanStep(
             kind=STEP_CONSUME_ITEM,
@@ -203,13 +213,58 @@ def _plan_heal_or_flee(
             confidence=1.0, created_turn=world_turn,
         )
 
-    # No heal item — travel to nearest trader (or buy immediately if already there)
+    # No heal item in inventory — evaluate buy affordability.
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = ctx.self_state.get("location_id")
+
+    afford = evaluate_affordability(agent=agent, trader={}, category="medical")
+
     if trader_loc and trader_loc == agent_loc:
-        # If the agent has no money but holds sellable items, sell first this turn
-        # so the next tick can afford the medical item.
-        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
+        if afford.can_buy_now:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    kind=STEP_TRADE_BUY_ITEM,
+                    payload={"item_category": "medical", "reason": "buy_medical_heal",
+                             "required_price": afford.required_price},
+                    interruptible=False,
+                    expected_duration_ticks=1,
+                )],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
+
+        # Cannot afford — check liquidity; only use safe options (not last food/water).
+        liquidity_options = find_liquidity_options(
+            agent=agent,
+            immediate_needs=list(need_result.immediate_needs) if need_result else [],
+            item_needs=list(need_result.item_needs) if need_result else evaluate_item_needs(ctx, state),
+        )
+        sellable = next((o for o in liquidity_options if o.safety == "safe"), None)
+        if sellable:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(
+                        kind=STEP_TRADE_SELL_ITEM,
+                        payload={"item_category": "any_sellable", "reason": "fund_heal",
+                                 "required_price": afford.required_price},
+                        interruptible=False,
+                        expected_duration_ticks=1,
+                    ),
+                    PlanStep(
+                        kind=STEP_TRADE_BUY_ITEM,
+                        payload={"item_category": "medical", "reason": "buy_medical_heal",
+                                 "required_price": afford.required_price},
+                        interruptible=False,
+                        expected_duration_ticks=1,
+                    ),
+                ],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
+        # No safe liquidity available — legacy fallback: try any sellable item
+        # (e.g. detector). Do not sell food/water (they're risky or emergency_only).
+        legacy_sellable = next((o for o in liquidity_options if o.safety in ("safe", "risky")), None)
+        if legacy_sellable:
             return Plan(
                 intent_kind=intent.kind,
                 steps=[
@@ -226,20 +281,23 @@ def _plan_heal_or_flee(
                         expected_duration_ticks=1,
                     ),
                 ],
-                interruptible=False, confidence=1.0, created_turn=world_turn,
+                interruptible=False, confidence=0.7, created_turn=world_turn,
             )
-        # Already co-located with the trader — buy immediately (no travel needed).
-        return Plan(
-            intent_kind=intent.kind,
-            steps=[PlanStep(
-                kind=STEP_TRADE_BUY_ITEM,
-                payload={"item_category": "medical"},
-                interruptible=False,
-                expected_duration_ticks=1,
-            )],
-            interruptible=False, confidence=1.0, created_turn=world_turn,
-        )
+        # Nothing to sell at all; wait/idle
+        return None
+
     if trader_loc and trader_loc != agent_loc:
+        # Check affordability before committing to travel→buy.
+        if not afford.can_buy_now:
+            liquidity_options = find_liquidity_options(
+                agent=agent,
+                immediate_needs=list(need_result.immediate_needs) if need_result else [],
+                item_needs=list(need_result.item_needs) if need_result else evaluate_item_needs(ctx, state),
+            )
+            safe_local = next((o for o in liquidity_options if o.safety == "safe"), None)
+            if safe_local is None:
+                # Cannot afford and nothing safe to sell
+                return None
         steps = [
             PlanStep(
                 kind=STEP_TRAVEL_TO_LOCATION,
@@ -248,9 +306,7 @@ def _plan_heal_or_flee(
                 expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
             ),
         ]
-        # If the agent has no money but holds sellable items, sell upon arrival so
-        # the next step (buy) can be fulfilled.
-        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
+        if not afford.can_buy_now and _has_sellable_items(agent):
             steps.append(PlanStep(
                 kind=STEP_TRADE_SELL_ITEM,
                 payload={"item_category": "any_sellable", "reason": "fund_heal"},
@@ -438,6 +494,53 @@ def _plan_seek_consumable(
                 return Plan(intent_kind=intent.kind, steps=steps, interruptible=False, confidence=1.0, created_turn=world_turn)
 
         if trader_loc and trader_loc != agent_loc:
+            # Check affordability before committing to travel→buy.
+            # If the agent cannot afford the item AND has no safe local sell option,
+            # fallback to get_rich rather than building a pointless travel plan.
+            compatible_types = set(item_types)
+            remote_afford = evaluate_affordability(
+                agent=agent,
+                trader={},
+                category=category,
+                compatible_item_types=compatible_types,
+            )
+            if not remote_afford.can_buy_now:
+                # Try local liquidity first (sell at current location before traveling)
+                local_liq = find_liquidity_options(
+                    agent=agent,
+                    immediate_needs=list(need_result.immediate_needs) if need_result else [],
+                    item_needs=list(need_result.item_needs) if need_result else evaluate_item_needs(ctx, state),
+                )
+                safe_local = next((o for o in local_liq if o.safety in ("safe", "emergency_only")), None)
+                if safe_local is None:
+                    # Cannot afford and nothing to sell — fallback to gather money
+                    get_rich_intent = Intent(
+                        kind=INTENT_GET_RICH,
+                        score=0.6,
+                        source_goal="get_rich",
+                        reason=f"Survival {category}: unaffordable and no liquidity — gather money first",
+                        created_turn=world_turn,
+                    )
+                    return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+                # Has something to sell locally → travel to trader, sell, then buy
+                steps = [
+                    PlanStep(STEP_TRAVEL_TO_LOCATION,
+                             {"target_id": trader_loc, "reason": f"buy_{category}_survival"},
+                             expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+                    PlanStep(STEP_TRADE_SELL_ITEM,
+                             {"item_category": "any_sellable", "reason": f"fund_{category}",
+                              "required_price": remote_afford.required_price},
+                             interruptible=False),
+                    PlanStep(STEP_TRADE_BUY_ITEM,
+                             {
+                                 "item_category": category,
+                                 "reason": f"buy_{category}_survival",
+                                 "buy_mode": "survival_cheapest",
+                                 "compatible_item_types": sorted(compatible_types),
+                             },
+                             interruptible=False),
+                ]
+                return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
             steps = [
                 PlanStep(STEP_TRAVEL_TO_LOCATION,
                          {"target_id": trader_loc, "reason": f"buy_{category}_survival"},
@@ -735,7 +838,10 @@ def _plan_resupply(
             immediate_needs=list(need_result.immediate_needs) if need_result else [],
             item_needs=item_needs,
         )
-        sellable = next((o for o in liquidity_options if o.safety in ("safe", "risky")), None)
+        # Only allow safe-to-sell items for normal resupply.
+        # Risky items (e.g. last food/water below reserve) must not be sold
+        # automatically for weapon/armor/ammo acquisition.
+        sellable = next((o for o in liquidity_options if o.safety == "safe"), None)
         if sellable is not None:
             return Plan(
                 intent_kind=intent.kind,
