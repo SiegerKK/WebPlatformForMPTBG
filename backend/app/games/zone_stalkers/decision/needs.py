@@ -141,29 +141,30 @@ def evaluate_need_result(ctx: AgentContext, state: dict[str, Any]) -> NeedEvalua
         money_missing = max(0, required_price - money)
         can_buy_now = money >= required_price
         if can_buy_now:
-            liq_decision = "affordable"
+            planner_allowed_decision = "affordable"
         elif safe_count > 0:
-            liq_decision = "sell_safe_then_buy"
-        elif risky_count > 0:
-            liq_decision = "sell_risky_then_buy"
+            planner_allowed_decision = "sell_safe_then_buy"
         elif emergency_count > 0:
-            liq_decision = "sell_emergency_then_buy"
+            planner_allowed_decision = "sell_emergency_then_buy"
         else:
-            liq_decision = "fallback_get_money"
+            planner_allowed_decision = "fallback_get_money"
     else:
         required_price = None
         money_missing = 0
         can_buy_now = None
-        liq_decision = "no_dominant_need"
+        planner_allowed_decision = "no_dominant_need"
 
     liquidity_summary = {
         "safe_sale_options": safe_count,
         "risky_sale_options": risky_count,
         "emergency_sale_options": emergency_count,
+        "risky_liquidity_available": risky_count > 0,
         "can_buy_now": can_buy_now,
         "required_price": required_price,
         "money_missing": money_missing,
-        "decision": liq_decision,
+        "planner_allowed_decision": planner_allowed_decision,
+        # Backward-compat alias for existing trace readers/tests.
+        "decision": planner_allowed_decision,
     }
 
     return NeedEvaluationResult(

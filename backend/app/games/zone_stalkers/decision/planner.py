@@ -264,6 +264,8 @@ def _plan_heal_or_flee(
         # No safe liquidity available — legacy fallback: try any sellable item
         # (e.g. detector, spare weapon/armor). Do not sell food/water
         # (they're risky or emergency_only per liquidity policy).
+        # KNOWN LIMITATION (PR2): emergency heal may still use risky liquidity
+        # through this fallback path.
         # TODO PR3: replace this with a proper "can I trade-sell this tick?" affordability
         # gate so that risky items (e.g. spare weapon) are also protected when the
         # agent's survival needs change before the sell executes.

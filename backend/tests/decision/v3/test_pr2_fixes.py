@@ -460,11 +460,20 @@ def test_brain_trace_liquidity_summary_has_enriched_fields() -> None:
     assert liq is not None, "brain_trace event must include liquidity block"
     assert "required_price" in liq, f"liquidity must have required_price; got {liq}"
     assert "money_missing" in liq, f"liquidity must have money_missing; got {liq}"
-    assert "decision" in liq, f"liquidity must have decision; got {liq}"
-    assert liq["money_missing"] > 0, "agent with no money should have money_missing > 0"
-    assert liq["decision"] == "fallback_get_money", (
-        f"Expected fallback_get_money when no money and no liquidity, got {liq['decision']}"
+    assert "planner_allowed_decision" in liq, (
+        f"liquidity must have planner_allowed_decision; got {liq}"
     )
+    assert "risky_liquidity_available" in liq, (
+        f"liquidity must expose risky_liquidity_available; got {liq}"
+    )
+    assert liq["money_missing"] > 0, "agent with no money should have money_missing > 0"
+    assert liq["planner_allowed_decision"] == "fallback_get_money", (
+        "Expected fallback_get_money when no money and no liquidity, "
+        f"got {liq['planner_allowed_decision']}"
+    )
+    # Backward-compatible alias mirrors planner_allowed_decision.
+    assert liq["decision"] == liq["planner_allowed_decision"]
+    assert liq["risky_liquidity_available"] is False
 
 
 def test_brain_trace_liquidity_decision_affordable() -> None:
@@ -491,9 +500,42 @@ def test_brain_trace_liquidity_decision_affordable() -> None:
     last_event = trace["events"][-1]
     liq = last_event.get("liquidity")
     assert liq is not None
-    assert liq.get("decision") == "affordable", (
-        f"Expected affordable when agent has 5000 money, got {liq.get('decision')}"
+    assert liq.get("planner_allowed_decision") == "affordable", (
+        "Expected affordable when agent has 5000 money, "
+        f"got {liq.get('planner_allowed_decision')}"
     )
+    assert liq.get("decision") == "affordable"
+
+
+def test_brain_trace_liquidity_risky_available_but_not_planner_allowed() -> None:
+    """Risky liquidity can exist while planner_allowed_decision still disallows risky sell."""
+    agent = make_agent(
+        has_weapon=False,
+        money=0,
+        inventory=[{"id": "b0", "type": "bread", "value": 30}],
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+
+    write_decision_brain_trace_from_v2(
+        agent,
+        world_turn=100,
+        intent_kind=INTENT_RESUPPLY,
+        intent_score=0.7,
+        reason="no_weapon",
+        state=state,
+        need_result=need_result,
+    )
+    liq = agent["brain_trace"]["events"][-1].get("liquidity") or {}
+    assert liq.get("risky_liquidity_available") is True, (
+        f"Expected risky liquidity from a single bread below reserve, got {liq}"
+    )
+    assert liq.get("planner_allowed_decision") == "fallback_get_money", (
+        "Risky liquidity must not auto-promote planner decision to sell; "
+        f"got {liq.get('planner_allowed_decision')}"
+    )
+    assert liq.get("decision") == liq.get("planner_allowed_decision")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
