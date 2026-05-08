@@ -4,12 +4,15 @@ from typing import Any
 
 from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
 from app.games.zone_stalkers.balance.items import (
+    AMMO_FOR_WEAPON,
+    AMMO_ITEM_TYPES,
     DRINK_ITEM_TYPES,
     FOOD_ITEM_TYPES,
     HEAL_ITEM_TYPES,
     ITEM_TYPES,
 )
 
+from .constants import DESIRED_AMMO_COUNT
 from .models.affordability import AffordabilityResult, LiquidityOption
 from .models.immediate_need import ImmediateNeed
 from .models.item_need import ItemNeed
@@ -82,6 +85,7 @@ def find_liquidity_options(
     item_needs: list[ItemNeed],
 ) -> list[LiquidityOption]:
     inventory = agent.get("inventory", [])
+    equipment = agent.get("equipment", {})
 
     critical_thirst = any(n.key == "drink_now" and n.trigger_context == "survival" for n in immediate_needs)
     critical_hunger = any(n.key == "eat_now" and n.trigger_context == "survival" for n in immediate_needs)
@@ -94,6 +98,15 @@ def find_liquidity_options(
     desired_food = _need_desired(item_needs, "food", fallback=1)
     desired_drink = _need_desired(item_needs, "drink", fallback=1)
     desired_med = _need_desired(item_needs, "medicine", fallback=2)
+
+    # Determine compatible ammo type for equipped weapon (for ammo sell-protection).
+    _equipped_weapon = equipment.get("weapon")
+    _equipped_weapon_type = _equipped_weapon.get("type") if isinstance(_equipped_weapon, dict) else None
+    _required_ammo_type: str | None = AMMO_FOR_WEAPON.get(_equipped_weapon_type) if _equipped_weapon_type else None
+    _ammo_count: int = (
+        sum(1 for i in inventory if i.get("type") == _required_ammo_type)
+        if _required_ammo_type else 0
+    )
 
     options: list[LiquidityOption] = []
     artifact_types = frozenset(ARTIFACT_TYPES.keys())
@@ -132,10 +145,40 @@ def find_liquidity_options(
 
         if item_type in HEAL_ITEM_TYPES:
             if critical_heal and heal_count <= 1:
+                # Last healing item and agent hp is low — do not offer for sale at all.
                 continue
             safety = "safe" if heal_count > desired_med else "emergency_only"
             options.append(LiquidityOption(str(item.get("id", "")), item_type, item_name, sell_value, safety,
                                            "Лишняя медицина или экстренная ликвидность"))
+            continue
+
+        # ── Ammo: explicit hunt-critical protection ──────────────────────────
+        # Compatible ammo that is at or below the reserve threshold must never
+        # be sold.  Extra ammo (above reserve) can be sold safely.
+        if item_type in AMMO_ITEM_TYPES:
+            if item_type == _required_ammo_type:
+                # This is the compatible ammo type for the equipped weapon.
+                if _ammo_count <= DESIRED_AMMO_COUNT:
+                    # Below or at reserve — forbidden to sell.
+                    options.append(LiquidityOption(
+                        str(item.get("id", "")), item_type, item_name, sell_value,
+                        "forbidden",
+                        "Патроны к экипированному оружию — продажа запрещена (запас ниже нормы)",
+                    ))
+                else:
+                    # Above reserve — excess ammo is safe to sell.
+                    options.append(LiquidityOption(
+                        str(item.get("id", "")), item_type, item_name, sell_value,
+                        "safe",
+                        "Излишек патронов можно продать",
+                    ))
+            else:
+                # Incompatible ammo (for a weapon we don't have) — safe to sell.
+                options.append(LiquidityOption(
+                    str(item.get("id", "")), item_type, item_name, sell_value,
+                    "safe",
+                    "Патроны не для текущего оружия — можно продать",
+                ))
             continue
 
         base_type = ITEM_TYPES.get(item_type, {}).get("type")
@@ -158,7 +201,7 @@ def _candidate_types_for_category(category: str, compatible_item_types: set[str]
         "drink": DRINK_ITEM_TYPES,
         "medical": HEAL_ITEM_TYPES,
     }
-    from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_ITEM_TYPES
+    from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
 
     mapping.update({
         "weapon": WEAPON_ITEM_TYPES,

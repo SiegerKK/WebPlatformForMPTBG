@@ -16,3 +16,4 @@ class NeedEvaluationResult:
     immediate_needs: tuple[ImmediateNeed, ...]
     item_needs: tuple[ItemNeed, ...]
     liquidity_summary: dict[str, Any] | None = None
+    combat_readiness: dict[str, Any] | None = None

@@ -23,6 +23,7 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     inventory = agent.get("inventory", [])
     risk_tolerance = float(agent.get("risk_tolerance", 0.5))
     agent_money = int(agent.get("money", 0))
+    global_goal: str = agent.get("global_goal", "get_rich")
 
     desired_food = _desired_supply_count(risk_tolerance, 1, 3)
     desired_drink = _desired_supply_count(risk_tolerance, 1, 3)
@@ -46,16 +47,21 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
 
     weapon_min_price = _min_buy_price(WEAPON_ITEM_TYPES)
     weapon_missing = 0 if has_weapon else 1
+    # For hunters (kill_stalker goal) a missing weapon is critical — boost urgency
+    # so that the resupply drive clearly dominates get_rich or unravel drives.
+    weapon_urgency = (0.80 if global_goal == "kill_stalker" else 0.65) if weapon_missing else 0.0
+    weapon_reason = ("Нет оружия (критично для охоты)" if global_goal == "kill_stalker"
+                     else "Нет оружия") if weapon_missing else ""
     needs.append(
         ItemNeed(
             key="weapon",
             desired_count=1,
             current_count=0 if not has_weapon else 1,
             missing_count=weapon_missing,
-            urgency=0.65 if weapon_missing else 0.0,
+            urgency=weapon_urgency,
             compatible_item_types=WEAPON_ITEM_TYPES,
             priority=40,
-            reason="Нет оружия" if weapon_missing else "",
+            reason=weapon_reason,
             expected_min_price=weapon_min_price,
             affordability_hint=_affordability_hint(agent_money, weapon_min_price) if weapon_missing else None,
         )

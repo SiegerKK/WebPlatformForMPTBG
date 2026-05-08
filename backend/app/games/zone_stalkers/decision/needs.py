@@ -171,6 +171,17 @@ def evaluate_need_result(ctx: AgentContext, state: dict[str, Any]) -> NeedEvalua
         immediate_needs=tuple(immediate_needs),
         item_needs=tuple(item_needs),
         liquidity_summary=liquidity_summary,
+        combat_readiness={
+            "weapon_missing": next(
+                (n.missing_count for n in item_needs if n.key == "weapon"), 0
+            ),
+            "ammo_missing": next(
+                (n.missing_count for n in item_needs if n.key == "ammo"), 0
+            ),
+            "medicine_missing": next(
+                (n.missing_count for n in item_needs if n.key == "medicine"), 0
+            ),
+        },
     )
 
 

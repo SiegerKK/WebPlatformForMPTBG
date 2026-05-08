@@ -72,6 +72,7 @@ def append_brain_trace_event(
     immediate_needs: list[dict[str, Any]] | None = None,
     item_needs: list[dict[str, Any]] | None = None,
     liquidity: dict[str, Any] | None = None,
+    combat_readiness: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     trace = agent.get("brain_trace")
@@ -99,6 +100,8 @@ def append_brain_trace_event(
         event["item_needs"] = item_needs[:5]
     if liquidity is not None:
         event["liquidity"] = liquidity
+    if combat_readiness is not None:
+        event["combat_readiness"] = combat_readiness
 
     if not isinstance(trace, dict):
         thought = summary
@@ -168,6 +171,7 @@ def write_decision_brain_trace_from_v2(
     immediate_payload = None
     item_payload = None
     liquidity_payload = None
+    combat_readiness_payload = None
     if need_result is not None:
         immediate_payload = [
             {
@@ -190,6 +194,8 @@ def write_decision_brain_trace_from_v2(
             if n.urgency > 0
         ]
         liquidity_payload = dict(need_result.liquidity_summary or {})
+        if need_result.combat_readiness:
+            combat_readiness_payload = dict(need_result.combat_readiness)
 
     append_brain_trace_event(
         agent,
@@ -203,6 +209,7 @@ def write_decision_brain_trace_from_v2(
         immediate_needs=immediate_payload,
         item_needs=item_payload,
         liquidity=liquidity_payload,
+        combat_readiness=combat_readiness_payload,
         state=state,
     )
 
