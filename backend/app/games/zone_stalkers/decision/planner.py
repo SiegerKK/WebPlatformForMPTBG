@@ -266,9 +266,9 @@ def _plan_heal_or_flee(
         # (they're risky or emergency_only per liquidity policy).
         # KNOWN LIMITATION (PR2): emergency heal may still use risky liquidity
         # through this fallback path.
-        # TODO PR3: replace this with a proper "can I trade-sell this tick?" affordability
-        # gate so that risky items (e.g. spare weapon) are also protected when the
-        # agent's survival needs change before the sell executes.
+        # TODO(PR3 spec): replace this with a proper "can I trade-sell this tick?"
+        # affordability gate so that risky items (e.g. spare weapon) are also
+        # protected when the agent's survival needs change before the sell executes.
         legacy_sellable = next((o for o in liquidity_options if o.safety in ("safe", "risky")), None)
         if legacy_sellable:
             return Plan(

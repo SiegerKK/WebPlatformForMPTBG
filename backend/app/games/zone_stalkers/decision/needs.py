@@ -163,7 +163,7 @@ def evaluate_need_result(ctx: AgentContext, state: dict[str, Any]) -> NeedEvalua
         "required_price": required_price,
         "money_missing": money_missing,
         "planner_allowed_decision": planner_allowed_decision,
-        # Backward-compat alias for existing trace readers/tests.
+        # Alias kept for compatibility with older trace consumers expecting "decision".
         "decision": planner_allowed_decision,
     }
 

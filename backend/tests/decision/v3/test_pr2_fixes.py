@@ -461,10 +461,12 @@ def test_brain_trace_liquidity_summary_has_enriched_fields() -> None:
     assert "required_price" in liq, f"liquidity must have required_price; got {liq}"
     assert "money_missing" in liq, f"liquidity must have money_missing; got {liq}"
     assert "planner_allowed_decision" in liq, (
-        f"liquidity must have planner_allowed_decision; got {liq}"
+        "liquidity must include planner_allowed_decision to represent what planner "
+        f"is allowed to do with available liquidity; got {liq}"
     )
     assert "risky_liquidity_available" in liq, (
-        f"liquidity must expose risky_liquidity_available; got {liq}"
+        "liquidity must include risky_liquidity_available so trace can show risky "
+        f"liquidity presence without implying planner can use it; got {liq}"
     )
     assert liq["money_missing"] > 0, "agent with no money should have money_missing > 0"
     assert liq["planner_allowed_decision"] == "fallback_get_money", (
