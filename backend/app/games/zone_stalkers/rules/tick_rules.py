@@ -219,6 +219,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                         reason="monitor_error",
                         summary="PlanMonitor дал ошибку; продолжаю legacy действие.",
                         scheduled_action_type=sched.get("type"),
+                        state=state,
                     )
                 if monitor_result.decision == "abort":
                     _dominant_pressure = None
@@ -239,6 +240,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                         scheduled_action_type=sched.get("type"),
                         dominant_pressure_key=monitor_result.dominant_pressure,
                         dominant_pressure_value=monitor_result.dominant_pressure_value,
+                        state=state,
                     )
                     _add_memory(
                         agent,
@@ -280,6 +282,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     reason=monitor_result.reason,
                     summary=f"Продолжаю {sched.get('type')} — {monitor_result.reason}.",
                     scheduled_action_type=sched.get("type"),
+                    state=state,
                 )
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
             events.extend(new_evs)
@@ -505,7 +508,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     for _agent in state.get("agents", {}).values():
         if not is_v3_monitored_bot(_agent):
             continue
-        ensure_brain_trace_for_tick(_agent, world_turn=world_turn)
+        ensure_brain_trace_for_tick(_agent, world_turn=world_turn, state=state)
 
     # 3b. Per-turn location observations for every alive stalker agent.
     # Writes a new observation entry only when content has changed since the last
@@ -3927,6 +3930,7 @@ def _run_bot_decision_v2_inner(
         intent_kind=intent.kind,
         intent_score=float(intent.score),
         reason=intent.reason,
+        state=state,
     )
 
     return execute_plan_step(ctx, plan, state, world_turn)

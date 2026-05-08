@@ -30,6 +30,8 @@ def test_append_brain_trace_event_keeps_last_five() -> None:
         "event-5",
         "event-6",
     ]
+    assert "world_time" in agent["brain_trace"]
+    assert "world_time" in events[-1]
 
 
 def test_ensure_brain_trace_for_tick_creates_default_trace() -> None:
@@ -39,6 +41,7 @@ def test_ensure_brain_trace_for_tick_creates_default_trace() -> None:
     assert trace["schema_version"] == 1
     assert trace["turn"] == 123
     assert trace["mode"] == "system"
+    assert "world_time" in trace
 
 
 def test_write_decision_brain_trace_from_v2_writes_decision_event() -> None:
@@ -53,5 +56,7 @@ def test_write_decision_brain_trace_from_v2_writes_decision_event() -> None:
     trace = agent["brain_trace"]
     assert trace["mode"] == "decision"
     assert trace["turn"] == 77
+    assert trace["world_time"]["world_day"] >= 1
     assert trace["events"][-1]["decision"] == "new_intent"
     assert trace["events"][-1]["intent_kind"] == "seek_water"
+    assert "world_time" in trace["events"][-1]
