@@ -340,19 +340,68 @@ def _plan_seek_consumable(
     return None
 
 
+def _build_sleep_preparation_steps(
+    ctx: AgentContext,
+    world_turn: int,
+) -> list[PlanStep]:
+    """Return consume steps for food/drink that should precede sleep.
+
+    Only inserts steps for items already in inventory; does not plan purchases.
+    """
+    from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+    from app.games.zone_stalkers.rules.tick_constants import (
+        SLEEP_SAFE_HUNGER_THRESHOLD,
+        SLEEP_SAFE_THIRST_THRESHOLD,
+    )
+    from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
+
+    agent = ctx.self_state
+    inventory = agent.get("inventory", [])
+    steps: list[PlanStep] = []
+
+    if agent.get("thirst", 0) >= SLEEP_SAFE_THIRST_THRESHOLD:
+        drink = next((i for i in inventory if i.get("type") in DRINK_ITEM_TYPES), None)
+        if drink:
+            steps.append(PlanStep(
+                kind=STEP_CONSUME_ITEM,
+                payload={"item_type": drink["type"], "reason": "prepare_sleep_drink"},
+                interruptible=False,
+                expected_duration_ticks=1,
+            ))
+
+    if agent.get("hunger", 0) >= SLEEP_SAFE_HUNGER_THRESHOLD:
+        food = next((i for i in inventory if i.get("type") in FOOD_ITEM_TYPES), None)
+        if food:
+            steps.append(PlanStep(
+                kind=STEP_CONSUME_ITEM,
+                payload={"item_type": food["type"], "reason": "prepare_sleep_food"},
+                interruptible=False,
+                expected_duration_ticks=1,
+            ))
+
+    steps.append(PlanStep(
+        kind=STEP_SLEEP_FOR_HOURS,
+        payload={"hours": DEFAULT_SLEEP_HOURS},
+        interruptible=True,
+        expected_duration_ticks=DEFAULT_SLEEP_HOURS * 60,
+    ))
+    return steps
+
+
 def _plan_rest(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
 ) -> Plan:
     from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
+    steps = _build_sleep_preparation_steps(ctx, world_turn)
+    reason = intent.reason or ""
+    if len(steps) > 1:
+        # At least one preparation step was inserted
+        reason = "rest_preparation_required"
     return Plan(
         intent_kind=intent.kind,
-        steps=[PlanStep(
-            kind=STEP_SLEEP_FOR_HOURS,
-            payload={"hours": DEFAULT_SLEEP_HOURS},
-            interruptible=True,
-            expected_duration_ticks=DEFAULT_SLEEP_HOURS * 60,
-        )],
-        confidence=1.0, created_turn=world_turn,
+        steps=steps,
+        confidence=1.0,
+        created_turn=world_turn,
     )
 
 

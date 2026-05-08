@@ -34,6 +34,10 @@ from app.games.zone_stalkers.rules.tick_constants import (
     HP_DAMAGE_PER_HOUR_CRITICAL_THIRST,
     SLEEPINESS_INCREASE_PER_HOUR,
     THIRST_INCREASE_PER_HOUR,
+    SLEEP_EFFECT_INTERVAL_TURNS,
+    SLEEPINESS_RECOVERY_PER_SLEEP_INTERVAL,
+    HUNGER_INCREASE_PER_SLEEP_INTERVAL,
+    THIRST_INCREASE_PER_SLEEP_INTERVAL,
 )
 
 # 1 game turn = 1 real minute
@@ -229,9 +233,16 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                             "key": monitor_result.dominant_pressure,
                             "value": round(float(monitor_result.dominant_pressure_value), 3),
                         }
-                    _summary = (
-                        f"Прерываю {sched.get('type')} из-за {monitor_result.reason}."
-                    )
+                    # For sleep aborts, include partial-sleep info in the summary.
+                    if sched.get("type") == "sleep":
+                        _sleep_intervals = int(sched.get("sleep_intervals_applied", 0))
+                        _slept_hours = round(_sleep_intervals * SLEEP_EFFECT_INTERVAL_TURNS / 60, 1)
+                        _summary = (
+                            f"Прерываю sleep из-за {monitor_result.reason}. "
+                            f"Успел поспать {_slept_hours} ч."
+                        )
+                    else:
+                        _summary = f"Прерываю {sched.get('type')} из-за {monitor_result.reason}."
                     _signature = {
                         "reason": monitor_result.reason,
                         "scheduled_action_type": sched.get("type"),
@@ -281,6 +292,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                             "cancelled_final_target": sched.get("final_target_id"),
                             "current_location_id": agent.get("location_id"),
                             "turns_remaining": sched.get("turns_remaining"),
+                            **(
+                                {
+                                    "sleep_intervals_applied": sched.get("sleep_intervals_applied"),
+                                    "sleep_progress_turns": sched.get("sleep_progress_turns"),
+                                }
+                                if sched.get("type") == "sleep"
+                                else {}
+                            ),
                         },
                     })
                     agent["scheduled_action"] = None
@@ -618,6 +637,12 @@ def _process_scheduled_action(
     action_type = sched["type"]
     turns_remaining = sched["turns_remaining"] - 1
     sched["turns_remaining"] = turns_remaining
+
+    # ── Per-tick sleep interval processing ──────────────────────────────────
+    # Apply effects every 30 turns regardless of whether the action completes
+    # this tick.  This ensures partial recovery on abort.
+    if action_type == "sleep":
+        events.extend(_process_sleep_tick(agent_id, agent, sched, state, world_turn))
 
     if turns_remaining > 0:
         # ── Emergency interrupt: emission warning during any long-running action ──
@@ -998,8 +1023,66 @@ def _resolve_exploration(
     return events
 
 
+def _apply_sleep_interval_effect(
+    agent_id: str,
+    agent: Dict[str, Any],
+    sched: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Apply one 30-minute sleep interval: recover sleepiness, increase hunger/thirst."""
+    old_sleepiness = agent.get("sleepiness", 0)
+    old_hunger = agent.get("hunger", 0)
+    old_thirst = agent.get("thirst", 0)
+
+    agent["sleepiness"] = max(0, old_sleepiness - SLEEPINESS_RECOVERY_PER_SLEEP_INTERVAL)
+    agent["hunger"] = min(100, old_hunger + HUNGER_INCREASE_PER_SLEEP_INTERVAL)
+    agent["thirst"] = min(100, old_thirst + THIRST_INCREASE_PER_SLEEP_INTERVAL)
+
+    interval_index = int(sched.get("sleep_intervals_applied", 0))
+    sched["sleep_intervals_applied"] = interval_index + 1
+
+    return [{
+        "event_type": "sleep_interval_applied",
+        "payload": {
+            "agent_id": agent_id,
+            "interval_index": interval_index,
+            "sleepiness_before": old_sleepiness,
+            "sleepiness_after": agent["sleepiness"],
+            "hunger_after": agent["hunger"],
+            "thirst_after": agent["thirst"],
+        },
+    }]
+
+
+def _process_sleep_tick(
+    agent_id: str,
+    agent: Dict[str, Any],
+    sched: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Advance sleep by one turn, applying interval effects every 30 turns."""
+    events: List[Dict[str, Any]] = []
+
+    sched.setdefault("sleep_progress_turns", 0)
+    sched.setdefault("sleep_intervals_applied", 0)
+
+    sched["sleep_progress_turns"] = int(sched["sleep_progress_turns"]) + 1
+
+    while sched["sleep_progress_turns"] >= SLEEP_EFFECT_INTERVAL_TURNS:
+        sched["sleep_progress_turns"] -= SLEEP_EFFECT_INTERVAL_TURNS
+        events.extend(_apply_sleep_interval_effect(agent_id, agent, sched, state, world_turn))
+
+    return events
+
+
 def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int, state: Dict[str, Any]) -> None:
-    """Apply sleep healing effects.
+    """Write sleep-completion memory.
+
+    Interval effects (sleepiness, hunger, thirst) were already applied during
+    tick-by-tick processing via ``_process_sleep_tick``.  This function only
+    records a final summary and applies HP/radiation recovery.
 
     ``sched`` must contain either:
     * ``hours``       – preferred; the number of in-game hours slept.
@@ -1019,12 +1102,23 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     # Reduce radiation (5 per hour)
     rad_reduce = 5 * hours
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
-    # Reset sleepiness
-    agent["sleepiness"] = 0
-    _add_memory(agent, world_turn, state, "action",
-                f"Поспал {hours} ч.",
-                {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce},
-                summary=f"Поспал {hours} часов: восстановлено {hp_regen} HP, снято {rad_reduce} радиации")
+    # DO NOT reset sleepiness=0 here; interval effects already reduced it progressively.
+    intervals = int(sched.get("sleep_intervals_applied", 0))
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "action",
+        "😴 Сон завершён",
+        {
+            "action_kind": "sleep_completed",
+            "sleep_intervals_applied": intervals,
+            "turns_total": sched.get("turns_total"),
+            "hp_gained": hp_regen,
+            "radiation_reduced": rad_reduce,
+        },
+        summary=f"Проснулся после сна: восстановлено {hp_regen} HP, снято {rad_reduce} радиации ({intervals} интервал(ов) сна)",
+    )
 
 
 def _turn_to_time_label(world_turn: int) -> str:

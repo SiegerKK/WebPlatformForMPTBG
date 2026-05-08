@@ -117,34 +117,36 @@ class TestIntentPriority:
 
 class TestHardInterruptCriticalNeeds:
     def test_seek_water_forced_when_thirst_critical(self):
-        """INTENT_SEEK_WATER is forced when thirst >= 90 (Fix 2 hard interrupt)."""
-        # Rich, healthy, equipped agent with only extreme thirst
+        """INTENT_SEEK_WATER is forced when thirst >= 80 (shared CRITICAL_THIRST_THRESHOLD)."""
+        from app.games.zone_stalkers.rules.tick_constants import CRITICAL_THIRST_THRESHOLD
         agent = make_agent(
-            hp=100, hunger=0, thirst=90, sleepiness=0,
+            hp=100, hunger=0, thirst=CRITICAL_THIRST_THRESHOLD, sleepiness=0,
             money=9000, material_threshold=3000,
             has_weapon=True, has_armor=True, has_ammo=True,
         )
         intent = _intent_for(agent=agent)
         assert intent.kind == INTENT_SEEK_WATER, (
-            f"Expected INTENT_SEEK_WATER on thirst=90, got {intent.kind}"
+            f"Expected INTENT_SEEK_WATER on thirst={CRITICAL_THIRST_THRESHOLD}, got {intent.kind}"
         )
 
     def test_seek_food_forced_when_hunger_critical(self):
-        """INTENT_SEEK_FOOD is forced when hunger >= 90 (Fix 2 hard interrupt)."""
+        """INTENT_SEEK_FOOD is forced when hunger >= 80 (shared CRITICAL_HUNGER_THRESHOLD)."""
+        from app.games.zone_stalkers.rules.tick_constants import CRITICAL_HUNGER_THRESHOLD
         agent = make_agent(
-            hp=100, hunger=90, thirst=0, sleepiness=0,
+            hp=100, hunger=CRITICAL_HUNGER_THRESHOLD, thirst=0, sleepiness=0,
             money=9000, material_threshold=3000,
             has_weapon=True, has_armor=True, has_ammo=True,
         )
         intent = _intent_for(agent=agent)
         assert intent.kind == INTENT_SEEK_FOOD, (
-            f"Expected INTENT_SEEK_FOOD on hunger=90, got {intent.kind}"
+            f"Expected INTENT_SEEK_FOOD on hunger={CRITICAL_HUNGER_THRESHOLD}, got {intent.kind}"
         )
 
     def test_survive_now_beats_critical_thirst(self):
-        """INTENT_ESCAPE_DANGER wins over INTENT_SEEK_WATER when survive_now fires (Fix 2 priority)."""
+        """INTENT_ESCAPE_DANGER wins over INTENT_SEEK_WATER when survive_now fires."""
+        from app.games.zone_stalkers.rules.tick_constants import CRITICAL_THIRST_THRESHOLD
         agent = make_agent(
-            hp=5, thirst=90,
+            hp=5, thirst=CRITICAL_THIRST_THRESHOLD,
             money=9000, material_threshold=3000,
             has_weapon=True, has_armor=True, has_ammo=True,
         )
@@ -153,17 +155,16 @@ class TestHardInterruptCriticalNeeds:
             f"Expected INTENT_ESCAPE_DANGER (survive_now > drink), got {intent.kind}"
         )
 
-    def test_thirst_89_does_not_hard_interrupt(self):
-        """Thirst=89 is below the 0.90 threshold — no hard interrupt, normal priority wins (Fix 2)."""
-        # Rich equipped agent with thirst=89 → drink score=0.89, get_rich=0.0 → seek_water wins anyway
-        # but it's via priority map not hard interrupt; score should still be seek_water
+    def test_thirst_below_critical_does_not_hard_interrupt(self):
+        """Thirst just below the critical threshold (79) — no hard interrupt."""
+        from app.games.zone_stalkers.rules.tick_constants import CRITICAL_THIRST_THRESHOLD
         agent = make_agent(
-            hp=100, hunger=0, thirst=89, sleepiness=0,
+            hp=100, hunger=0, thirst=CRITICAL_THIRST_THRESHOLD - 1, sleepiness=0,
             money=9000, material_threshold=3000,
             has_weapon=True, has_armor=True, has_ammo=True,
         )
         intent = _intent_for(agent=agent)
-        # drink=0.89 still beats idle (0.0) via the priority map → should be seek_water
+        # drink score should still win via priority map
         assert intent.kind == INTENT_SEEK_WATER, (
-            f"Expected INTENT_SEEK_WATER via priority map at thirst=89, got {intent.kind}"
+            f"Expected INTENT_SEEK_WATER via priority map at thirst<critical, got {intent.kind}"
         )

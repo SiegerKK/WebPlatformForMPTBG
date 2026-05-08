@@ -183,6 +183,8 @@ def _exec_sleep(
         "hours": hours,
         "turns_remaining": turns,
         "turns_total": turns,
+        "sleep_progress_turns": 0,
+        "sleep_intervals_applied": 0,
     }
     agent["action_used"] = True
     return []
@@ -341,6 +343,10 @@ def _exec_consume(
         "emergency_heal": "consume_heal",
         "emergency_food": "consume_food",
         "emergency_drink": "consume_drink",
+        "prepare_sleep_food": "consume_food",
+        "prepare_sleep_drink": "consume_drink",
+        "opportunistic_food": "consume_food",
+        "opportunistic_drink": "consume_drink",
     }
     action_kind = action_kind_map.get(reason_key, "consume_heal")
     return _bot_consume(agent_id, agent, item, world_turn, state, action_kind) or []

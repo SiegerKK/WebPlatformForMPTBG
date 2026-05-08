@@ -70,6 +70,10 @@ from .models.intent import (
     INTENT_MAINTAIN_GROUP,
     INTENT_IDLE,
 )
+from app.games.zone_stalkers.rules.tick_constants import (
+    CRITICAL_HUNGER_THRESHOLD,
+    CRITICAL_THIRST_THRESHOLD,
+)
 
 # Score threshold below which a drive is considered negligible
 _NEGLIGIBLE_THRESHOLD = 0.05
@@ -78,7 +82,6 @@ _NEGLIGIBLE_THRESHOLD = 0.05
 _HARD_INTERRUPT_SURVIVE_NOW = 0.70
 _HARD_INTERRUPT_EMISSION = 0.80
 _HARD_INTERRUPT_HEAL = 0.80
-_HARD_INTERRUPT_NEEDS = 0.90  # ≥ 90% hunger OR thirst OR sleepiness
 
 
 # ── Priority-ordered mapping: drive name → (intent_kind, reason_template) ─────
@@ -172,7 +175,11 @@ def select_intent(
             reason=f"HP опасно низкий — срочное лечение (HP={agent.get('hp', '?')})",
             created_turn=world_turn,
         )
-    if needs.drink >= _HARD_INTERRUPT_NEEDS:
+    # Critical thirst / hunger use the same integer thresholds as PlanMonitor
+    # (tick_constants.CRITICAL_THIRST_THRESHOLD / CRITICAL_HUNGER_THRESHOLD = 80)
+    # to prevent the sleep-abort loop where PlanMonitor aborts sleep for hunger/thirst
+    # but select_intent picks rest again.
+    if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
         return _make_intent(
             INTENT_SEEK_WATER,
             needs.drink,
@@ -180,7 +187,7 @@ def select_intent(
             reason=f"Критическая жажда — срочный поиск воды (жажда {agent.get('thirst', 0)}%)",
             created_turn=world_turn,
         )
-    if needs.eat >= _HARD_INTERRUPT_NEEDS:
+    if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
         return _make_intent(
             INTENT_SEEK_FOOD,
             needs.eat,
@@ -216,7 +223,7 @@ def select_intent(
     return best_intent
 
 
-def is_hard_interrupt(needs: NeedScores) -> bool:
+def is_hard_interrupt(needs: NeedScores, agent: dict[str, Any] | None = None) -> bool:
     """Return True if current needs demand an unconditional plan reset."""
     if needs.survive_now >= _HARD_INTERRUPT_SURVIVE_NOW:
         return True
@@ -224,10 +231,17 @@ def is_hard_interrupt(needs: NeedScores) -> bool:
         return True
     if needs.heal_self >= _HARD_INTERRUPT_HEAL:
         return True
-    if needs.drink >= _HARD_INTERRUPT_NEEDS:
-        return True
-    if needs.eat >= _HARD_INTERRUPT_NEEDS:
-        return True
+    if agent is not None:
+        if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
+            return True
+        if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
+            return True
+    else:
+        # Fallback: use need score approximation when agent dict unavailable
+        if needs.drink >= CRITICAL_THIRST_THRESHOLD / 100.0:
+            return True
+        if needs.eat >= CRITICAL_HUNGER_THRESHOLD / 100.0:
+            return True
     return False
 
 
