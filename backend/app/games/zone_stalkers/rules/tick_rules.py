@@ -16,6 +16,25 @@ import random
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.games.zone_stalkers.decision.debug.brain_trace import (
+    ensure_brain_trace_for_tick,
+    write_decision_brain_trace_from_v2,
+    write_plan_monitor_trace,
+)
+from app.games.zone_stalkers.decision.plan_monitor import (
+    PlanMonitorResult,
+    assess_scheduled_action_v3,
+    is_v3_monitored_bot,
+)
+from app.games.zone_stalkers.rules.tick_constants import (
+    CRITICAL_HUNGER_THRESHOLD,
+    CRITICAL_THIRST_THRESHOLD,
+    HUNGER_INCREASE_PER_HOUR,
+    HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER,
+    HP_DAMAGE_PER_HOUR_CRITICAL_THIRST,
+    SLEEPINESS_INCREASE_PER_HOUR,
+    THIRST_INCREASE_PER_HOUR,
+)
 
 # 1 game turn = 1 real minute
 MINUTES_PER_TURN = 1
@@ -153,6 +172,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     events: List[Dict[str, Any]] = []
     world_turn = state.get("world_turn", 1)
 
+    for _agent in state.get("agents", {}).values():
+        _agent.setdefault("brain_trace", None)
+        _agent.setdefault("active_plan_v3", None)
+        _agent.setdefault("memory_v3", None)
+
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
     if not state.get("_terrain_migrated_v3"):
@@ -174,6 +198,89 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         sched = agent.get("scheduled_action")
         if sched:
+            if is_v3_monitored_bot(agent):
+                try:
+                    monitor_result = assess_scheduled_action_v3(
+                        agent_id=agent_id,
+                        agent=agent,
+                        scheduled_action=sched,
+                        state=state,
+                        world_turn=world_turn,
+                    )
+                except Exception:
+                    monitor_result = PlanMonitorResult(
+                        decision="continue",
+                        reason="monitor_error",
+                    )
+                    write_plan_monitor_trace(
+                        agent,
+                        world_turn=world_turn,
+                        decision="continue",
+                        reason="monitor_error",
+                        summary="PlanMonitor дал ошибку; продолжаю legacy действие.",
+                        scheduled_action_type=sched.get("type"),
+                    )
+                if monitor_result.decision == "abort":
+                    _dominant_pressure = None
+                    if monitor_result.dominant_pressure is not None and monitor_result.dominant_pressure_value is not None:
+                        _dominant_pressure = {
+                            "key": monitor_result.dominant_pressure,
+                            "value": round(float(monitor_result.dominant_pressure_value), 3),
+                        }
+                    _summary = (
+                        f"Прерываю {sched.get('type')} из-за {monitor_result.reason}."
+                    )
+                    write_plan_monitor_trace(
+                        agent,
+                        world_turn=world_turn,
+                        decision="abort",
+                        reason=monitor_result.reason,
+                        summary=_summary,
+                        scheduled_action_type=sched.get("type"),
+                        dominant_pressure_key=monitor_result.dominant_pressure,
+                        dominant_pressure_value=monitor_result.dominant_pressure_value,
+                    )
+                    _add_memory(
+                        agent,
+                        world_turn,
+                        state,
+                        "decision",
+                        "⚡ PlanMonitor: прерываю активное действие",
+                        {
+                            "action_kind": "plan_monitor_abort",
+                            "reason": monitor_result.reason,
+                            "scheduled_action_type": sched.get("type"),
+                            "dominant_pressure": _dominant_pressure,
+                        },
+                        summary=_summary,
+                    )
+                    events.append({
+                        "event_type": "plan_monitor_aborted_action",
+                        "payload": {
+                            "agent_id": agent_id,
+                            "scheduled_action_type": sched.get("type"),
+                            "reason": monitor_result.reason,
+                            "dominant_pressure": _dominant_pressure
+                            or {"key": "unknown", "value": 0.0},
+                            "cancelled_target": sched.get("target_id"),
+                            "cancelled_final_target": sched.get("final_target_id"),
+                            "current_location_id": agent.get("location_id"),
+                            "turns_remaining": sched.get("turns_remaining"),
+                        },
+                    })
+                    agent["scheduled_action"] = None
+                    if monitor_result.should_clear_action_queue:
+                        agent["action_queue"] = []
+                    agent["_v3_forced_replan"] = True
+                    continue
+                write_plan_monitor_trace(
+                    agent,
+                    world_turn=world_turn,
+                    decision="continue",
+                    reason=monitor_result.reason,
+                    summary=f"Продолжаю {sched.get('type')} — {monitor_result.reason}.",
+                    scheduled_action_type=sched.get("type"),
+                )
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
             events.extend(new_evs)
 
@@ -186,14 +293,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 continue
             if agent.get("has_left_zone"):  # departed agents need no hunger/thirst/sleep degradation
                 continue
-            agent["hunger"] = min(100, agent.get("hunger", 0) + 3)
-            agent["thirst"] = min(100, agent.get("thirst", 0) + 5)
-            agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + 4)
+            agent["hunger"] = min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR)
+            agent["thirst"] = min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR)
+            agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR)
             # Critical thirst causes HP damage faster than hunger
-            if agent.get("thirst", 0) >= 80:
-                agent["hp"] = max(0, agent["hp"] - 2)
-            if agent.get("hunger", 0) >= 80:
-                agent["hp"] = max(0, agent["hp"] - 1)
+            if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
+                agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_THIRST)
+            if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
+                agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER)
             if agent["hp"] <= 0 and agent.get("is_alive", True):
                 agent["is_alive"] = False
                 _hunger = agent.get("hunger", 0)
@@ -395,6 +502,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         bot_evs = _run_bot_decision_v2(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
+    for _agent in state.get("agents", {}).values():
+        if not is_v3_monitored_bot(_agent):
+            continue
+        ensure_brain_trace_for_tick(_agent, world_turn=world_turn)
+
     # 3b. Per-turn location observations for every alive stalker agent.
     # Writes a new observation entry only when content has changed since the last
     # entry of the same category; merges repeated observations via the semantic
@@ -436,6 +548,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     for agent in state.get("agents", {}).values():
         if agent.get("is_alive", True) and not agent.get("has_left_zone"):
             agent["action_used"] = False
+        for _k in [k for k in list(agent.keys()) if k.startswith("_v3_")]:
+            agent.pop(_k, None)
 
     # Check game-over (max_turns=0 means unlimited)
     max_turns = state.get("max_turns", 0)
@@ -3806,6 +3920,14 @@ def _run_bot_decision_v2_inner(
                 + f" Топ потребности: {_needs_str}"
             ),
         )
+
+    write_decision_brain_trace_from_v2(
+        agent,
+        world_turn=world_turn,
+        intent_kind=intent.kind,
+        intent_score=float(intent.score),
+        reason=intent.reason,
+    )
 
     return execute_plan_step(ctx, plan, state, world_turn)
 

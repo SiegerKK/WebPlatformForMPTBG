@@ -17,6 +17,31 @@ interface AgentInventoryItem {
   value?: number;
 }
 
+type BrainTraceMode = 'plan_monitor' | 'decision' | 'system';
+type BrainTraceDecision = 'continue' | 'abort' | 'new_intent' | 'no_op';
+
+type BrainTraceEvent = {
+  turn: number;
+  mode: BrainTraceMode;
+  decision: BrainTraceDecision;
+  summary: string;
+  reason?: string;
+  scheduled_action_type?: string | null;
+  intent_kind?: string | null;
+  intent_score?: number | null;
+  dominant_pressure?: { key: string; value: number } | null;
+};
+
+type BrainTrace = {
+  schema_version: 1;
+  turn: number;
+  mode: BrainTraceMode;
+  current_thought: string;
+  events: BrainTraceEvent[];
+  active_plan?: unknown;
+  top_drives?: Array<{ key: string; value: number; rank: number }>;
+};
+
 export interface AgentForProfile {
   id: string;
   name: string;
@@ -78,6 +103,8 @@ export interface AgentForProfile {
     /** Kind of the first plan step (e.g. "travel_to_location"). */
     plan_step_0: string | null;
   };
+  brain_trace?: BrainTrace | null;
+  active_plan_v3?: unknown;
 }
 
 interface Props {
@@ -704,6 +731,31 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                   </div>
                 );
               })}
+            </div>
+          </Section>
+        )}
+
+        {agent.brain_trace && (
+          <Section label="🧠 Brain Trace (v3)">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ fontSize: '0.82rem', color: '#cbd5e1' }}>
+                <strong>Мысль:</strong> {agent.brain_trace.current_thought}
+              </div>
+              {agent.brain_trace.events.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {[...agent.brain_trace.events].slice(-5).map((ev, idx) => (
+                    <div key={`${ev.turn}-${idx}`} style={s.memoryEntry}>
+                      <div style={s.memoryMeta}>
+                        <span style={s.memoryType}>
+                          [{ev.mode}] {ev.decision}
+                        </span>
+                        <span style={s.memoryWhen}>turn {ev.turn}</span>
+                      </div>
+                      <div style={s.memorySummary}>{ev.summary}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </Section>
         )}
