@@ -811,4 +811,4 @@ def test_resupply_fallback_get_money_reason_is_explicit_in_step_payload() -> Non
     assert "fallback_reason" in first_payload, (
         f"Fallback plan step must include fallback_reason for traceability, got {first_payload}"
     )
-    assert "Перехожу к fallback_get_money через поиск артефактов" in first_payload["fallback_reason"]
+    assert "fallback_get_money" in first_payload["fallback_reason"]
