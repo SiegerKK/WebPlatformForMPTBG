@@ -35,6 +35,8 @@ def test_ensure_brain_trace_for_tick_creates_default_trace() -> None:
     assert trace["turn"] == 123
     assert trace["mode"] == "system"
     assert "world_time" in trace
+    assert trace["events"][-1]["decision"] == "no_op"
+    assert trace["events"][-1]["mode"] == "system"
 
 
 def test_write_decision_brain_trace_from_v2_writes_decision_event() -> None:

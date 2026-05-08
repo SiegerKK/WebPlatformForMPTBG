@@ -151,3 +151,67 @@ def test_continue_path_keeps_legacy_action_queue_progression() -> None:
     assert next_sched is not None
     assert next_sched.get("turns_remaining") == 2
     assert new_state["agents"]["bot1"].get("action_queue") == []
+
+
+def test_plan_monitor_abort_memory_is_deduplicated_within_window() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["action_queue"] = [{"type": "sleep", "turns_remaining": 2, "turns_total": 2, "target_id": "loc_a"}]
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    state_after_first, _ = tick_zone_map(state)
+    bot_after_first = state_after_first["agents"]["bot1"]
+    first_count = sum(
+        1
+        for m in bot_after_first.get("memory", [])
+        if m.get("effects", {}).get("action_kind") == "plan_monitor_abort"
+    )
+    assert first_count == 1
+
+    bot_after_first["scheduled_action"] = {
+        "type": "travel",
+        "turns_remaining": 4,
+        "turns_total": 4,
+        "target_id": "loc_b",
+        "final_target_id": "loc_b",
+        "remaining_route": [],
+    }
+    bot_after_first["action_queue"] = []
+
+    state_after_second, _ = tick_zone_map(state_after_first)
+    bot_after_second = state_after_second["agents"]["bot1"]
+    second_count = sum(
+        1
+        for m in bot_after_second.get("memory", [])
+        if m.get("effects", {}).get("action_kind") == "plan_monitor_abort"
+    )
+    assert second_count == 1
+
+
+def test_bot_decision_pipeline_writes_decision_brain_trace_event() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["thirst"] = 10
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    trace = new_state["agents"]["bot1"]["brain_trace"]
+    assert trace["turn"] == 100
+    assert any(ev.get("mode") == "decision" and ev.get("decision") == "new_intent" for ev in trace.get("events", []))
+
+
+def test_v3_transient_flags_are_removed_after_tick() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["_v3_debug_temp"] = True
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+    new_bot = new_state["agents"]["bot1"]
+    assert not any(k.startswith("_v3_") for k in new_bot.keys())

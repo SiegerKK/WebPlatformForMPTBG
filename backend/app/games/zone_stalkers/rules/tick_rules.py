@@ -46,6 +46,7 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 2000
+PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
 
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
@@ -231,6 +232,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     _summary = (
                         f"Прерываю {sched.get('type')} из-за {monitor_result.reason}."
                     )
+                    _signature = {
+                        "reason": monitor_result.reason,
+                        "scheduled_action_type": sched.get("type"),
+                        "cancelled_final_target": sched.get("final_target_id", sched.get("target_id")),
+                    }
                     write_plan_monitor_trace(
                         agent,
                         world_turn=world_turn,
@@ -242,20 +248,27 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                         dominant_pressure_value=monitor_result.dominant_pressure_value,
                         state=state,
                     )
-                    _add_memory(
+                    if should_write_plan_monitor_memory_event(
                         agent,
                         world_turn,
-                        state,
-                        "decision",
-                        "⚡ PlanMonitor: прерываю активное действие",
-                        {
-                            "action_kind": "plan_monitor_abort",
-                            "reason": monitor_result.reason,
-                            "scheduled_action_type": sched.get("type"),
-                            "dominant_pressure": _dominant_pressure,
-                        },
-                        summary=_summary,
-                    )
+                        action_kind="plan_monitor_abort",
+                        signature=_signature,
+                    ):
+                        _add_memory(
+                            agent,
+                            world_turn,
+                            state,
+                            "decision",
+                            "⚡ PlanMonitor: прерываю активное действие",
+                            {
+                                "action_kind": "plan_monitor_abort",
+                                "reason": monitor_result.reason,
+                                "scheduled_action_type": sched.get("type"),
+                                "dominant_pressure": _dominant_pressure,
+                                "dedup_signature": _signature,
+                            },
+                            summary=_summary,
+                        )
                     events.append({
                         "event_type": "plan_monitor_aborted_action",
                         "payload": {
@@ -273,7 +286,6 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     agent["scheduled_action"] = None
                     if monitor_result.should_clear_action_queue:
                         agent["action_queue"] = []
-                    agent["_v3_forced_replan"] = True
                     continue
                 write_plan_monitor_trace(
                     agent,
@@ -1099,6 +1111,28 @@ def _add_memory(
     # Keep only the last MAX_AGENT_MEMORY memory entries
     if len(mem) > MAX_AGENT_MEMORY:
         agent["memory"] = mem[-MAX_AGENT_MEMORY:]
+
+
+def should_write_plan_monitor_memory_event(
+    agent: Dict[str, Any],
+    world_turn: int,
+    *,
+    action_kind: str,
+    signature: Dict[str, Any],
+    dedup_turns: int = PLAN_MONITOR_MEMORY_DEDUP_TURNS,
+) -> bool:
+    """Return False when a semantically identical memory exists in the recent window."""
+    for mem in reversed(agent.get("memory", [])):
+        mem_turn = int(mem.get("world_turn", 0))
+        if world_turn - mem_turn > dedup_turns:
+            break
+
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") != action_kind:
+            continue
+        if effects.get("dedup_signature") == signature:
+            return False
+    return True
 
 
 # ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─

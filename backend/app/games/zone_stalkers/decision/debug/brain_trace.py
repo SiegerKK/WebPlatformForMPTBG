@@ -45,6 +45,16 @@ def _new_trace(
     }
 
 
+def _no_op_event(world_turn: int, world_time: dict[str, int]) -> dict[str, Any]:
+    return {
+        "turn": world_turn,
+        "world_time": world_time,
+        "mode": "system",
+        "decision": "no_op",
+        "summary": "В этот тик не было нового решения NPC Brain.",
+    }
+
+
 def append_brain_trace_event(
     agent: dict[str, Any],
     *,
@@ -164,11 +174,13 @@ def ensure_brain_trace_for_tick(
 ) -> None:
     trace = agent.get("brain_trace")
     world_time = _time_payload(world_turn, state)
+    no_op_event = _no_op_event(world_turn, world_time)
     if not isinstance(trace, dict):
         agent["brain_trace"] = _new_trace(
             world_turn,
             "system",
             "Нет изменений плана в этом тике.",
+            no_op_event,
             world_time=world_time,
         )
         return
@@ -180,3 +192,4 @@ def ensure_brain_trace_for_tick(
         trace["world_time"] = world_time
         trace["mode"] = "system"
         trace["current_thought"] = "Нет изменений плана в этом тике."
+        trace["events"] = (list(trace.get("events", [])) + [no_op_event])[-BRAIN_TRACE_MAX_EVENTS:]
