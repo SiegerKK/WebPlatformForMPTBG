@@ -10,6 +10,7 @@ from .immediate_need import ImmediateNeed
 from .item_need import ItemNeed
 from .affordability import AffordabilityResult, LiquidityOption
 from .need_evaluation import NeedEvaluationResult
+from .objective import Objective, ObjectiveScore, ObjectiveDecision, ObjectiveGenerationContext
 
 __all__ = [
     "AgentContext",
@@ -24,4 +25,8 @@ __all__ = [
     "AffordabilityResult",
     "LiquidityOption",
     "NeedEvaluationResult",
+    "Objective",
+    "ObjectiveScore",
+    "ObjectiveDecision",
+    "ObjectiveGenerationContext",
 ]

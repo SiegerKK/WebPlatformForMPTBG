@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+from app.games.zone_stalkers.decision.beliefs import build_belief_state
+from app.games.zone_stalkers.decision.context_builder import build_agent_context
+from app.games.zone_stalkers.decision.models.objective import ObjectiveGenerationContext
+from app.games.zone_stalkers.decision.needs import evaluate_need_result
+from app.games.zone_stalkers.decision.objectives.generator import (
+    OBJECTIVE_CONTINUE_CURRENT_PLAN,
+    OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+    OBJECTIVE_HUNT_TARGET,
+    OBJECTIVE_LOCATE_TARGET,
+    OBJECTIVE_PREPARE_FOR_HUNT,
+    OBJECTIVE_REACH_SAFE_SHELTER,
+    OBJECTIVE_RESTORE_WATER,
+    OBJECTIVE_RESUPPLY_WEAPON,
+    generate_objectives,
+)
+from tests.decision.conftest import make_agent, make_minimal_state
+
+
+def _make_ctx(agent: dict, state: dict, agent_id: str = "bot1") -> ObjectiveGenerationContext:
+    ctx = build_agent_context(agent_id, agent, state)
+    belief = build_belief_state(ctx, agent, state["world_turn"])
+    need_result = evaluate_need_result(ctx, state)
+    return ObjectiveGenerationContext(
+        agent_id=agent_id,
+        world_turn=state["world_turn"],
+        belief_state=belief,
+        need_result=need_result,
+        active_plan_summary={
+            "urgency": 0.4,
+            "remaining_value": 0.7,
+            "risk": 0.2,
+            "remaining_time": 0.3,
+            "resource_cost": 0.0,
+            "confidence": 0.8,
+            "goal_alignment": 0.8,
+        } if agent.get("scheduled_action") else None,
+        personality=agent,
+    )
+
+
+def test_generate_objectives_from_immediate_item_emission_and_goal() -> None:
+    agent = make_agent(
+        thirst=95,
+        money=5,
+        has_weapon=False,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent, loc_terrain="plain")
+    state["emission_active"] = True
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+
+    assert OBJECTIVE_RESTORE_WATER in keys
+    assert OBJECTIVE_RESUPPLY_WEAPON in keys
+    assert OBJECTIVE_GET_MONEY_FOR_RESUPPLY in keys
+    assert OBJECTIVE_REACH_SAFE_SHELTER in keys
+
+
+def test_generate_hunt_objectives_without_forcing_immediate_engage() -> None:
+    agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", has_weapon=False)
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    objective_map = {obj.key: obj for obj in objectives}
+
+    assert OBJECTIVE_HUNT_TARGET in objective_map
+    assert OBJECTIVE_PREPARE_FOR_HUNT in objective_map
+    assert OBJECTIVE_LOCATE_TARGET in objective_map
+    prepare = objective_map[OBJECTIVE_PREPARE_FOR_HUNT]
+    assert prepare.metadata.get("blockers")
+
+
+def test_generate_continue_current_plan_when_scheduled_action_present() -> None:
+    agent = make_agent()
+    agent["scheduled_action"] = {
+        "type": "travel",
+        "turns_remaining": 5,
+        "turns_total": 10,
+        "target_id": "loc_b",
+    }
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+
+    assert OBJECTIVE_CONTINUE_CURRENT_PLAN in keys

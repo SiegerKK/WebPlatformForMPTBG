@@ -36,6 +36,14 @@ type BrainTraceMemoryUsed = {
   used_for: string;
 };
 
+type BrainTraceObjectiveInfo = {
+  key: string;
+  score: number;
+  source?: string;
+  reason?: string;
+  decision?: string;
+};
+
 type BrainTraceEvent = {
   turn: number;
   world_time?: { world_day: number; world_hour: number; world_minute: number };
@@ -51,6 +59,9 @@ type BrainTraceEvent = {
   item_needs?: BrainTraceNeed[];
   liquidity?: { safe_sale_options?: number; risky_sale_options?: number; emergency_sale_options?: number; money_missing?: number } | null;
   memory_used?: BrainTraceMemoryUsed[];
+  active_objective?: BrainTraceObjectiveInfo;
+  objective_scores?: BrainTraceObjectiveInfo[];
+  alternatives?: BrainTraceObjectiveInfo[];
 };
 
 type BrainTrace = {
@@ -794,6 +805,36 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                             safe: {ev.liquidity.safe_sale_options ?? 0}, risky: {ev.liquidity.risky_sale_options ?? 0}, emergency: {ev.liquidity.emergency_sale_options ?? 0}
                             {typeof ev.liquidity.money_missing === 'number' ? `, не хватает: ${ev.liquidity.money_missing}` : ''}
                           </div>
+                        </div>
+                      )}
+                      {ev.active_objective && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Активная цель:</strong>
+                          <div style={{ color: '#94a3b8' }}>
+                            {ev.active_objective.key} ({Math.round((ev.active_objective.score ?? 0) * 100)}%)
+                            {ev.active_objective.reason ? ` — ${ev.active_objective.reason}` : ''}
+                          </div>
+                        </div>
+                      )}
+                      {ev.objective_scores && ev.objective_scores.length > 0 && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Objective scores:</strong>
+                          {ev.objective_scores.map((o, oi) => (
+                            <div key={`obj-${o.key}-${oi}`} style={{ color: '#94a3b8' }}>
+                              • {o.key} ({Math.round((o.score ?? 0) * 100)}%) {o.decision ? `· ${o.decision}` : ''}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ev.alternatives && ev.alternatives.length > 0 && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Отвергнутые альтернативы:</strong>
+                          {ev.alternatives.map((o, oi) => (
+                            <div key={`alt-${o.key}-${oi}`} style={{ color: '#94a3b8' }}>
+                              • {o.key} ({Math.round((o.score ?? 0) * 100)}%)
+                              {o.reason ? ` — ${o.reason}` : ''}
+                            </div>
+                          ))}
                         </div>
                       )}
                       {ev.memory_used && ev.memory_used.length > 0 && (

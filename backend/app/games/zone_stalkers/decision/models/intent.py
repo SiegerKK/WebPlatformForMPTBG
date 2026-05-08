@@ -8,7 +8,7 @@ At any given moment an agent has exactly one dominant Intent
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 # ── Valid intent kinds ────────────────────────────────────────────────────────
 # Survival
@@ -107,3 +107,4 @@ class Intent:
     reason: Optional[str] = None
     created_turn: Optional[int] = None
     expires_turn: Optional[int] = None
+    metadata: Optional[dict[str, Any]] = None

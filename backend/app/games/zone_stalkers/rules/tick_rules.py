@@ -4059,6 +4059,27 @@ def _pre_decision_equipment_maintenance(
     return None  # nothing to do — run the main pipeline
 
 
+def _build_active_plan_summary(agent: Dict[str, Any]) -> dict[str, Any] | None:
+    sched = agent.get("scheduled_action")
+    if not isinstance(sched, dict):
+        return None
+
+    turns_total = max(1, int(sched.get("turns_total") or 1))
+    turns_remaining = max(0, int(sched.get("turns_remaining") or 0))
+    progress = 1.0 - (turns_remaining / turns_total)
+
+    return {
+        "scheduled_action_type": sched.get("type"),
+        "urgency": 0.45,
+        "remaining_value": max(0.0, min(1.0, 0.9 - progress * 0.4)),
+        "risk": 0.2,
+        "remaining_time": max(0.0, min(1.0, turns_remaining / turns_total)),
+        "resource_cost": 0.0,
+        "confidence": 0.7,
+        "goal_alignment": 0.75,
+    }
+
+
 def _run_bot_decision_v2_inner(
     agent_id: str,
     agent: Dict[str, Any],
@@ -4071,6 +4092,10 @@ def _run_bot_decision_v2_inner(
     from app.games.zone_stalkers.decision.intents import select_intent
     from app.games.zone_stalkers.decision.planner import build_plan
     from app.games.zone_stalkers.decision.executors import execute_plan_step
+    from app.games.zone_stalkers.decision.models.objective import ObjectiveGenerationContext
+    from app.games.zone_stalkers.decision.objectives.generator import generate_objectives
+    from app.games.zone_stalkers.decision.objectives.selection import choose_objective
+    from app.games.zone_stalkers.decision.objectives.intent_adapter import objective_to_intent
 
     # ── Commitment logic: handle scheduled arrivals first ─────────────────
     arrival_evs = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
@@ -4123,7 +4148,33 @@ def _run_bot_decision_v2_inner(
 
     need_result = evaluate_need_result(ctx, state)
     needs = need_result.scores
-    intent = select_intent(ctx, needs, world_turn, need_result=need_result)
+
+    objective_decision = None
+    objective_pairs: list[tuple[Any, Any]] = []
+    try:
+        objective_ctx = ObjectiveGenerationContext(
+            agent_id=agent_id,
+            world_turn=world_turn,
+            belief_state=belief,
+            need_result=need_result,
+            active_plan_summary=_build_active_plan_summary(agent),
+            personality=agent,
+        )
+        objective_candidates = generate_objectives(objective_ctx)
+        objective_decision = choose_objective(
+            objective_candidates,
+            personality=agent,
+        )
+        objective_pairs = [(objective_decision.selected, objective_decision.selected_score)] + list(objective_decision.alternatives)
+        intent = objective_to_intent(
+            objective_decision.selected,
+            objective_decision.selected_score,
+            world_turn=world_turn,
+            source_goal=agent.get("global_goal"),
+        )
+    except Exception:
+        intent = select_intent(ctx, needs, world_turn, need_result=need_result)
+
     plan = build_plan(ctx, intent, state, world_turn, need_result=need_result)
 
     # Compute needs dict once (reused below)
@@ -4139,6 +4190,9 @@ def _run_bot_decision_v2_inner(
         "plan_steps": len(plan.steps),
         "plan_confidence": round(plan.confidence, 3),
         "plan_step_0": plan.steps[0].kind if plan.steps else None,
+        "objective_key": ((intent.metadata or {}).get("objective_key") if isinstance(intent.metadata, dict) else None),
+        "objective_score": ((intent.metadata or {}).get("objective_score") if isinstance(intent.metadata, dict) else None),
+        "objective_switch_decision": objective_decision.switch_decision if objective_decision else None,
     }
 
     # Update current_goal from intent BEFORE writing the decision memory entry
@@ -4201,6 +4255,34 @@ def _run_bot_decision_v2_inner(
     ]
     _memory_used_payload: list[dict] = (_planner_memory_used + _context_memory_used)[:5]
 
+    _selected_objective_trace = None
+    _objective_scores_trace = None
+    _alternatives_trace = None
+    if objective_decision is not None:
+        _selected_objective_trace = {
+            "key": objective_decision.selected.key,
+            "score": round(float(objective_decision.selected_score.final_score), 3),
+            "source": objective_decision.selected.source,
+            "reason": "; ".join(objective_decision.selected.reasons) if objective_decision.selected.reasons else "",
+        }
+        _objective_scores_trace = []
+        for _obj, _score in objective_pairs[:5]:
+            _objective_scores_trace.append({
+                "key": _obj.key,
+                "score": round(float(_score.final_score), 3),
+                "decision": _score.decision or ("selected" if _obj.key == objective_decision.selected.key else "rejected"),
+                "reason": "; ".join(_obj.reasons) if _obj.reasons else "",
+            })
+        _alternatives_trace = [
+            {
+                "key": _obj.key,
+                "score": round(float(_score.final_score), 3),
+                "decision": _score.decision or "rejected",
+                "reason": "; ".join(_obj.reasons) if _obj.reasons else "",
+            }
+            for _obj, _score in objective_decision.alternatives[:5]
+        ]
+
     write_decision_brain_trace_from_v2(
         agent,
         world_turn=world_turn,
@@ -4210,6 +4292,9 @@ def _run_bot_decision_v2_inner(
         state=state,
         need_result=need_result,
         memory_used=_memory_used_payload if _memory_used_payload else None,
+        active_objective=_selected_objective_trace,
+        objective_scores=_objective_scores_trace,
+        alternatives=_alternatives_trace,
     )
 
     result = execute_plan_step(ctx, plan, state, world_turn)
