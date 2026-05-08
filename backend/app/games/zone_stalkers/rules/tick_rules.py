@@ -336,23 +336,23 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
                 agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER)
             if agent["hp"] <= 0 and agent.get("is_alive", True):
-                agent["is_alive"] = False
                 _hunger = agent.get("hunger", 0)
                 _thirst = agent.get("thirst", 0)
                 _death_cause_str = (
                     "обезвоживание" if _thirst >= _hunger else "голод"
                 )
-                _add_memory(
-                    agent, world_turn, state, "observation",
-                    "💀 Смерть",
-                    {"action_kind": "death", "cause": "starvation_or_thirst",
-                     "hunger": _hunger, "thirst": _thirst},
-                    summary=f"Погиб от {_death_cause_str} — голод {_hunger}%, жажда {_thirst}%",
+                _mark_agent_dead(
+                    agent_id=agent_id,
+                    agent=agent,
+                    state=state,
+                    world_turn=world_turn,
+                    cause="starvation_or_thirst",
+                    memory_title="💀 Смерть",
+                    memory_effects={"action_kind": "death", "cause": "starvation_or_thirst",
+                                    "hunger": _hunger, "thirst": _thirst},
+                    memory_summary=f"Погиб от {_death_cause_str} — голод {_hunger}%, жажда {_thirst}%",
+                    events=events,
                 )
-                events.append({
-                    "event_type": "agent_died",
-                    "payload": {"agent_id": agent_id, "cause": "starvation_or_thirst"},
-                })
 
 
     # 2b. Emission (Выброс) mechanic — replaces the old midnight artifact spawn.
@@ -436,19 +436,20 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _em_agent_loc = state.get("locations", {}).get(_em_agent.get("location_id", ""), {})
             _em_terrain = _em_agent_loc.get("terrain_type", "")
             if _em_terrain in _EMISSION_DANGEROUS_TERRAIN:
-                _em_agent["is_alive"] = False
                 _em_loc_name = _em_agent_loc.get("name", _em_agent.get("location_id", "?"))
-                _add_memory(
-                    _em_agent, world_turn, state, "observation",
-                    "💀 Смерть",
-                    {"action_kind": "death", "cause": "emission",
-                     "location_id": _em_agent.get("location_id"), "terrain": _em_terrain},
-                    summary=f"Погиб от выброса в локации «{_em_loc_name}» (местность: {_TERRAIN_NAME_RU.get(_em_terrain, _em_terrain)})",
+                _mark_agent_dead(
+                    agent_id=_em_agent_id,
+                    agent=_em_agent,
+                    state=state,
+                    world_turn=world_turn,
+                    cause="emission",
+                    memory_title="💀 Смерть",
+                    memory_effects={"action_kind": "death", "cause": "emission",
+                                    "location_id": _em_agent.get("location_id"),
+                                    "terrain": _em_terrain},
+                    memory_summary=f"Погиб от выброса в локации «{_em_loc_name}» (местность: {_TERRAIN_NAME_RU.get(_em_terrain, _em_terrain)})",
+                    events=events,
                 )
-                events.append({
-                    "event_type": "agent_died",
-                    "payload": {"agent_id": _em_agent_id, "cause": "emission"},
-                })
 
         # Write observation memory for every still-alive stalker
         _em_world_day = state.get("world_day", 1)
@@ -606,6 +607,54 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 # ─────────────────────────────────────────────────────────────────
 # Scheduled action processing
 # ─────────────────────────────────────────────────────────────────
+
+def _mark_agent_dead(
+    *,
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+    cause: str,
+    memory_title: str,
+    memory_effects: Dict[str, Any],
+    memory_summary: str,
+    events: List[Dict[str, Any]],
+) -> None:
+    """Centralized death handler: mark agent dead, clean up runtime state,
+    write death memory, emit ``agent_died`` event, and update brain_trace.
+
+    Using this helper ensures the invariant:
+        is_alive == False  →  scheduled_action is None, action_queue == [].
+    """
+    from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
+
+    agent["is_alive"] = False
+    agent["scheduled_action"] = None
+    agent["action_queue"] = []
+    agent["action_used"] = False
+
+    _add_memory(
+        agent, world_turn, state, "observation",
+        memory_title,
+        memory_effects,
+        summary=memory_summary,
+    )
+    events.append({
+        "event_type": "agent_died",
+        "payload": {"agent_id": agent_id, "cause": cause},
+    })
+    # Overwrite brain_trace so it does not remain as "continue sleep" or similar.
+    _death_thought = "Погиб; дальнейшие решения не принимаются."
+    append_brain_trace_event(
+        agent,
+        world_turn=world_turn,
+        mode="system",
+        decision="no_op",
+        summary=_death_thought,
+        reason=cause,
+        state=state,
+    )
+
 
 def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:
     """Return True if an active emission or a live emission_imminent warning
@@ -843,15 +892,18 @@ def _process_scheduled_action(
                 # Write observations for what's visible at the final destination
                 _write_location_observations(agent_id, agent, destination, state, world_turn)
             if agent["hp"] <= 0:
-                agent["is_alive"] = False
                 _travel_loc_name = state.get("locations", {}).get(destination, {}).get("name", destination)
-                _add_memory(
-                    agent, world_turn, state, "observation",
-                    "💀 Смерть",
-                    {"action_kind": "death", "cause": "travel_anomaly", "location_id": destination},
-                    summary=f"Погиб от урона аномалии при путешествии в локацию «{_travel_loc_name}»",
+                _mark_agent_dead(
+                    agent_id=agent_id,
+                    agent=agent,
+                    state=state,
+                    world_turn=world_turn,
+                    cause="travel_anomaly",
+                    memory_title="💀 Смерть",
+                    memory_effects={"action_kind": "death", "cause": "travel_anomaly", "location_id": destination},
+                    memory_summary=f"Погиб от урона аномалии при путешествии в локацию «{_travel_loc_name}»",
+                    events=events,
                 )
-                events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "travel_anomaly"}})
 
     elif action_type == "explore_anomaly_location":
         loc_id = agent["location_id"]
@@ -1008,18 +1060,18 @@ def _resolve_exploration(
             },
         })
         if agent["hp"] <= 0:
-            agent["is_alive"] = False
-            _add_memory(
-                agent, world_turn, state, "observation",
-                "💀 Смерть",
-                {"action_kind": "death", "cause": "anomaly_exploration",
-                 "location_id": loc_id, "anomaly_type": anomaly_type},
-                summary=f"Погиб от аномалии «{anomaly_type}» при исследовании «{loc.get('name', loc_id)}»",
+            _mark_agent_dead(
+                agent_id=agent_id,
+                agent=agent,
+                state=state,
+                world_turn=world_turn,
+                cause="anomaly_exploration",
+                memory_title="💀 Смерть",
+                memory_effects={"action_kind": "death", "cause": "anomaly_exploration",
+                                "location_id": loc_id, "anomaly_type": anomaly_type},
+                memory_summary=f"Погиб от аномалии «{anomaly_type}» при исследовании «{loc.get('name', loc_id)}»",
+                events=events,
             )
-            events.append({
-                "event_type": "agent_died",
-                "payload": {"agent_id": agent_id, "cause": "anomaly_exploration"},
-            })
 
     events.insert(0, {
         "event_type": "exploration_completed",

@@ -642,7 +642,9 @@ def _plan_rest(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
     need_result: NeedEvaluationResult | None = None
 ) -> Plan:
-    del state
+    if need_result is None:
+        from app.games.zone_stalkers.decision.needs import evaluate_need_result
+        need_result = evaluate_need_result(ctx, state)
     steps = _build_sleep_preparation_steps(ctx, world_turn, need_result)
     return Plan(
         intent_kind=intent.kind,

@@ -25,6 +25,32 @@ class PlanMonitorResult:
     should_clear_action_queue: bool = False
 
 
+def _is_emission_threat_for_monitor(
+    agent: dict[str, Any], state: dict[str, Any]
+) -> bool:
+    """Detect emission threat without importing from tick_rules (avoids circular import).
+
+    Returns True when:
+    - emission is currently active, OR
+    - the agent has an ``emission_imminent`` observation memory that is not
+      superseded by a later ``emission_ended`` observation.
+    """
+    if state.get("emission_active", False):
+        return True
+    last_ended: int = 0
+    last_imminent: int = 0
+    for mem in agent.get("memory", []):
+        if mem.get("type") != "observation":
+            continue
+        mk = mem.get("effects", {}).get("action_kind")
+        mt = int(mem.get("world_turn", 0))
+        if mk == "emission_ended" and mt > last_ended:
+            last_ended = mt
+        elif mk == "emission_imminent" and mt > last_imminent:
+            last_imminent = mt
+    return last_imminent > last_ended
+
+
 def is_v3_monitored_bot(agent: dict[str, Any]) -> bool:
     if not agent.get("is_alive", True):
         return False
@@ -64,6 +90,18 @@ def assess_scheduled_action_v3(
             decision="continue",
             reason="emergency_flee_is_uninterruptible",
             interruptible=False,
+        )
+
+    # Emission threat interrupts any monitored action (especially sleep).
+    # Emergency flee is already protected above.
+    if _is_emission_threat_for_monitor(agent, state):
+        return PlanMonitorResult(
+            decision="abort",
+            reason="emission_threat",
+            dominant_pressure="emission",
+            dominant_pressure_value=1.0,
+            should_run_decision_pipeline=True,
+            should_clear_action_queue=True,
         )
 
     world_minute = int(state.get("world_minute", 0))
