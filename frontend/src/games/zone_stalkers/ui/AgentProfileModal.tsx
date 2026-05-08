@@ -17,6 +17,33 @@ interface AgentInventoryItem {
   value?: number;
 }
 
+type BrainTraceMode = 'plan_monitor' | 'decision' | 'system';
+type BrainTraceDecision = 'continue' | 'abort' | 'new_intent' | 'no_op';
+
+type BrainTraceEvent = {
+  turn: number;
+  world_time?: { world_day: number; world_hour: number; world_minute: number };
+  mode: BrainTraceMode;
+  decision: BrainTraceDecision;
+  summary: string;
+  reason?: string;
+  scheduled_action_type?: string | null;
+  intent_kind?: string | null;
+  intent_score?: number | null;
+  dominant_pressure?: { key: string; value: number } | null;
+};
+
+type BrainTrace = {
+  schema_version: 1;
+  turn: number;
+  world_time?: { world_day: number; world_hour: number; world_minute: number };
+  mode: BrainTraceMode;
+  current_thought: string;
+  events: BrainTraceEvent[];
+  active_plan?: unknown;
+  top_drives?: Array<{ key: string; value: number; rank: number }>;
+};
+
 export interface AgentForProfile {
   id: string;
   name: string;
@@ -66,18 +93,8 @@ export interface AgentForProfile {
     summary?: string;
     effects?: Record<string, unknown>;
   }>;
-  /** Output of the v2 decision pipeline. Populated on every tick. */
-  _v2_context?: {
-    need_scores: Record<string, number>;
-    intent_kind: string;
-    intent_score: number;
-    intent_reason: string | null;
-    plan_intent: string | null;
-    plan_steps: number;
-    plan_confidence: number;
-    /** Kind of the first plan step (e.g. "travel_to_location"). */
-    plan_step_0: string | null;
-  };
+  brain_trace?: BrainTrace | null;
+  active_plan_v3?: unknown;
 }
 
 interface Props {
@@ -160,6 +177,14 @@ const turnToTime = (worldTurn: number): { world_day: number; world_hour: number;
   };
 };
 
+const traceTimeLabel = (
+  worldTurn: number,
+  worldTime?: { world_day: number; world_hour: number; world_minute: number },
+): string => {
+  const worldTimeData = worldTime ?? turnToTime(worldTurn);
+  return `День ${worldTimeData.world_day} · ${TIME_LABEL(worldTimeData.world_hour, worldTimeData.world_minute)}`;
+};
+
 /**
  * Format a scheduled-action countdown for display.
  * For sleep, turns are converted to hours; everything else shows minutes.
@@ -220,15 +245,6 @@ const CURRENT_GOAL_LABELS: Record<string, string> = {
 /** Return a display label for a current_goal identifier. */
 const currentGoalLabel = (raw: string): string =>
   CURRENT_GOAL_LABELS[raw] ?? raw.replace(/_/g, ' ');
-
-// ─── Decision preview type ───────────────────────────────────────────────────
-
-type DecisionPreview = {
-  goal: string;
-  action: string;
-  reason: string;
-  layers?: Array<{ name: string; skipped: boolean; action: string; reason: string }>;
-};
 
 export default function AgentProfileModal({ agent, locationName, onClose, locations, sendCommand, contextId }: Props) {
   // Initialise immediately with the client-side hint so the panel renders on
@@ -312,55 +328,6 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     } finally {
       setThresholdSaving(false);
       setThresholdEdit(null);
-    }
-  };
-
-  const [decisionPreview, setDecisionPreview] = React.useState<DecisionPreview | null>(() => {
-    if (sendCommand && agent.controller.kind === 'bot') {
-      return _clientSideDecisionHint(agent);
-    }
-    return null;
-  });
-  const [loadingDecision, setLoadingDecision] = React.useState(false);
-
-  // v2 pipeline explanation state
-  type V2Explanation = NonNullable<AgentForProfile['_v2_context']>;
-  const [v2Explanation, setV2Explanation] = React.useState<V2Explanation | null>(
-    () => agent._v2_context ?? null,
-  );
-  const [loadingV2, setLoadingV2] = React.useState(false);
-
-  const handleExplainV2 = async () => {
-    if (!sendCommand) return;
-    setLoadingV2(true);
-    try {
-      await sendCommand('debug_explain_agent_v2', { agent_id: agent.id });
-    } finally {
-      setLoadingV2(false);
-    }
-  };
-
-  // Keep v2 explanation in sync when agent._v2_context changes (tick updates)
-  React.useEffect(() => {
-    if (agent._v2_context) setV2Explanation(agent._v2_context);
-  }, [agent._v2_context]);
-
-  // Fire the backend preview command whenever the displayed agent changes.
-  // The result is discarded here — we rely on the client-side hint for
-  // immediate display; the backend call keeps server-side state in sync.
-  React.useEffect(() => {
-    if (!sendCommand || agent.controller.kind !== 'bot') return;
-    sendCommand('debug_preview_bot_decision', { agent_id: agent.id }).catch(() => {});
-  }, [agent.id, agent.controller.kind]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handlePreviewDecision = async () => {
-    if (!sendCommand) return;
-    setLoadingDecision(true);
-    try {
-      await sendCommand('debug_preview_bot_decision', { agent_id: agent.id });
-      setDecisionPreview(_clientSideDecisionHint(agent));
-    } finally {
-      setLoadingDecision(false);
     }
   };
 
@@ -708,47 +675,79 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
           </Section>
         )}
 
-        {/* ── Bot decision preview (debug, bots only) ── */}
-        {sendCommand && agent.controller.kind === 'bot' && (
-          <Section label="🤖 Приоритеты и решение">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-
-              {/* Priority groups panel — always visible, derived from agent data */}
-              <PriorityGroupsPanel agent={agent} />
-
-              {/* Chosen action — from decisionPreview (client-side or backend) */}
-              {decisionPreview && (
-                <div style={s.decisionChosen}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span>✅</span>
-                    <span style={s.decisionChosenAction}>{decisionPreview.action}</span>
+        {agent.brain_trace && (
+          <Section label="🧠 Brain Trace (v3)">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={s.memoryMeta}>
+                <span style={s.memoryType}>
+                  schema v{agent.brain_trace.schema_version} · mode: {agent.brain_trace.mode}
+                </span>
+                <span style={s.memoryWhen}>
+                  {traceTimeLabel(agent.brain_trace.turn, agent.brain_trace.world_time)}
+                </span>
+              </div>
+              <div style={{ fontSize: '0.82rem', color: '#cbd5e1' }}>
+                <strong>Мысль:</strong> {agent.brain_trace.current_thought}
+              </div>
+              {agent.active_plan_v3 && (
+                <div style={s.memoryEntry}>
+                  <div style={s.memoryMeta}>
+                    <span style={s.memoryType}>🗺 Активный план</span>
                   </div>
-                  <div style={s.decisionChosenReason}>{decisionPreview.reason}</div>
-                  <div style={s.decisionChosenGoal}>🎯 Цель: {decisionPreview.goal}</div>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: '#cbd5e1', fontSize: '0.72rem' }}>
+                    {JSON.stringify(agent.active_plan_v3, null, 2)}
+                  </pre>
                 </div>
               )}
-
-              <button
-                style={s.decisionRefreshBtn}
-                onClick={handlePreviewDecision}
-                disabled={loadingDecision}
-              >
-                {loadingDecision ? '⏳ Анализ…' : '🔄 Обновить решение'}
-              </button>
+              {agent.brain_trace.top_drives && agent.brain_trace.top_drives.length > 0 && (
+                <div style={s.memoryEntry}>
+                  <div style={s.memoryMeta}>
+                    <span style={s.memoryType}>📈 Топ драйвы</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    {agent.brain_trace.top_drives.map((d) => (
+                      <div key={`${d.key}-${d.rank}`} style={{ color: '#cbd5e1', fontSize: '0.75rem' }}>
+                        #{d.rank} {d.key}: {Math.round(d.value * 100)}%
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {agent.brain_trace.events.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {[...agent.brain_trace.events].slice(-5).map((ev, idx) => (
+                    <div key={`${ev.turn}-${idx}`} style={s.memoryEntry}>
+                      <div style={s.memoryMeta}>
+                        <span style={s.memoryType}>
+                          [{ev.mode}] {ev.decision}
+                        </span>
+                        <span style={s.memoryWhen}>{traceTimeLabel(ev.turn, ev.world_time)}</span>
+                      </div>
+                      <div style={s.memorySummary}>{ev.summary}</div>
+                      {ev.reason && (
+                        <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>Причина: {ev.reason}</div>
+                      )}
+                      {ev.scheduled_action_type && (
+                        <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                          Действие: {ev.scheduled_action_type}
+                        </div>
+                      )}
+                      {ev.intent_kind && (
+                        <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                          Intent: {ev.intent_kind}
+                          {typeof ev.intent_score === 'number' ? ` (${Math.round(ev.intent_score * 100)}%)` : ''}
+                        </div>
+                      )}
+                      {ev.dominant_pressure && (
+                        <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
+                          Pressure: {ev.dominant_pressure.key} = {Math.round(ev.dominant_pressure.value)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          </Section>
-        )}
-
-        {/* ── v2 Decision Architecture: NeedScores + Intent ── */}
-        {agent.controller.kind === 'bot' && (
-          <Section label="🧠 Потребности и намерения (v2)">
-            <V2DecisionPanel
-              agent={agent}
-              v2Context={v2Explanation}
-              sendCommand={sendCommand}
-              loadingV2={loadingV2}
-              onExplainV2={handleExplainV2}
-            />
           </Section>
         )}
       </div>
@@ -1157,762 +1156,6 @@ const _STEP_LABEL_RU: Record<string, string> = {
   wait:                      'Ожидание',
   legacy_scheduled_action:   'Запланированное действие',
 };
-
-/** Clamp value to [min, max]. */
-const _clamp = (v: number, min = 0, max = 1) => Math.max(min, Math.min(max, v));
-
-/**
- * Client-side computation of NeedScores.
- * Mirrors ``evaluate_needs()`` in ``decision/needs.py``.
- *
- * GET_RICH_WEIGHT = 0.70 (matches Python constant).
- */
-const GET_RICH_WEIGHT = 0.70;
-const _AMMO_FOR_WEAPON_V2: Record<string, string> = {
-  ak74:    'ammo_545',
-  pistol:  'ammo_9mm',
-  shotgun: 'ammo_12gauge',
-  pkm:     'ammo_762',
-  svu_svd: 'ammo_762',
-};
-
-function _computeNeedScores(agent: AgentForProfile): Record<string, number> {
-  const hp      = agent.hp;
-  const hunger  = agent.hunger;
-  const thirst  = agent.thirst;
-  const sleep   = agent.sleepiness;
-  // Liquid wealth: money + inventory only — equipment value excluded.
-  // Mirrors backend _agent_liquid_wealth() in decision/needs.py.
-  const wealth  = agent.money
-    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0);
-  const threshold = agent.material_threshold ?? 3000;
-  const eq  = agent.equipment;
-  const inv = agent.inventory;
-  const globalGoal = agent.global_goal ?? 'get_rich';
-
-  // survive_now: HP ≤ 30 → emergency
-  const surviveNow = hp <= 30 ? _clamp((30 - hp) / 20) : 0;
-
-  // heal_self: HP ≤ 50 → gradual urgency
-  const healSelf = hp <= 50 ? _clamp((50 - hp) / 30) : 0;
-
-  // Basic survival
-  const eat   = _clamp(hunger / 100);
-  const drink = _clamp(thirst / 100);
-  const sleeping = _clamp(sleep / 100);
-
-  // Equipment — values mirror decision/needs.py _score_reload_or_rearm()
-  const hasWeapon = !!eq['weapon'];
-  const hasArmor  = !!eq['armor'];
-  const weaponType  = eq['weapon']?.type ?? null;
-  const reqAmmo     = weaponType ? (_AMMO_FOR_WEAPON_V2[weaponType] ?? null) : null;
-  const hasAmmo     = reqAmmo ? inv.some(i => i.type === reqAmmo) : true;
-  let reloadOrRearm = 0;
-  if (!hasWeapon)         reloadOrRearm = 0.65;   // matches backend: serious but below heal threshold
-  else if (!hasArmor)     reloadOrRearm = 0.7;
-  else if (!hasAmmo)      reloadOrRearm = 0.6;
-
-  // Material drive
-  const wealthRatio = threshold > 0 ? Math.min(1, wealth / threshold) : 1;
-  // Equipment gate: get_rich is suppressed while equipment is needed.
-  // Mirrors backend: get_rich *= (1 - reload_or_rearm).
-  let getRich = _clamp((1 - wealthRatio) * GET_RICH_WEIGHT);
-  getRich = getRich * (1 - reloadOrRearm);
-
-  // Goal-specific drives
-  const huntTarget = globalGoal === 'kill_stalker' && !!agent.kill_target_id
-    ? _clamp(0.8 * Math.max(0.25, wealthRatio))
-    : 0;
-  const unravelMystery = globalGoal === 'unravel_zone_mystery'
-    ? _clamp(0.75 * Math.max(0.40, wealthRatio))
-    : 0;
-  const leaveZone = agent.global_goal_achieved ? 1.0 : 0;
-
-  // Artifacts to trade
-  const artifactCount = inv.filter(i => _ARTIFACT_TYPES.has(i.type)).length;
-  const tradeDrive = artifactCount > 0 ? _clamp(0.6 + artifactCount * 0.05) : 0;
-
-  return {
-    survive_now:          +surviveNow.toFixed(3),
-    heal_self:            +healSelf.toFixed(3),
-    eat:                  +eat.toFixed(3),
-    drink:                +drink.toFixed(3),
-    sleep:                +sleeping.toFixed(3),
-    reload_or_rearm:      +reloadOrRearm.toFixed(3),
-    avoid_emission:       0, // can't detect emission client-side
-    get_rich:             +getRich.toFixed(3),
-    hunt_target:          +huntTarget.toFixed(3),
-    unravel_zone_mystery: +unravelMystery.toFixed(3),
-    leave_zone:           +leaveZone.toFixed(3),
-    trade:                +tradeDrive.toFixed(3),
-    negotiate:            0,
-    maintain_group:       0,
-    help_ally:            0,
-    join_group:           0,
-  };
-}
-
-/** Priority tie-break order — mirrors intents.py. */
-const _INTENT_PRIORITY: string[] = [
-  'survive_now', 'heal_self', 'avoid_emission', 'drink', 'eat', 'sleep',
-  'reload_or_rearm', 'maintain_group', 'help_ally', 'trade',
-  'get_rich', 'hunt_target', 'unravel_zone_mystery', 'leave_zone',
-  'negotiate', 'join_group',
-];
-
-/** Drive key → intent kind mapping. */
-const _NEED_TO_INTENT: Record<string, string> = {
-  survive_now:          'escape_danger',
-  heal_self:            'heal_self',
-  avoid_emission:       'flee_emission',
-  drink:                'seek_water',
-  eat:                  'seek_food',
-  sleep:                'rest',
-  reload_or_rearm:      'resupply',
-  maintain_group:       'maintain_group',
-  help_ally:            'assist_ally',
-  trade:                'sell_artifacts',
-  get_rich:             'get_rich',
-  hunt_target:          'hunt_target',
-  unravel_zone_mystery: 'search_information',
-  leave_zone:           'leave_zone',
-  negotiate:            'negotiate',
-  join_group:           'form_group',
-};
-
-/** Select the intent with the highest score, respecting priority tie-breaks. */
-function _selectTopIntent(scores: Record<string, number>): { needKey: string; kind: string; score: number } {
-  const THRESHOLD = 0.05;
-  // Find the maximum score among all drives
-  const maxScore = Math.max(...Object.values(scores));
-  if (maxScore < THRESHOLD) return { needKey: 'idle', kind: 'idle', score: 0 };
-
-  // Among drives at or near the max score (within 0.02), pick the highest-priority one
-  for (const needKey of _INTENT_PRIORITY) {
-    const sc = scores[needKey] ?? 0;
-    if (sc >= maxScore - 0.02 && sc >= THRESHOLD) {
-      return { needKey, kind: _NEED_TO_INTENT[needKey] ?? 'idle', score: sc };
-    }
-  }
-  return { needKey: 'idle', kind: 'idle', score: 0 };
-}
-
-/**
- * V2DecisionPanel — displays NeedScores bars + selected intent.
- *
- * Shows client-side computed values by default.
- * When v2Context is provided (from backend shadow pipeline), uses those values
- * instead and marks the panel with a "Бэкенд" badge.
- */
-interface V2DecisionPanelProps {
-  agent: AgentForProfile;
-  v2Context: AgentForProfile['_v2_context'] | null;
-  sendCommand?: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
-  loadingV2: boolean;
-  onExplainV2: () => void;
-}
-
-function V2DecisionPanel({ agent, v2Context, sendCommand, loadingV2, onExplainV2 }: V2DecisionPanelProps) {
-  // Use backend scores when available, else compute client-side
-  const isBackend = !!v2Context;
-  const scores: Record<string, number> = isBackend
-    ? v2Context!.need_scores
-    : _computeNeedScores(agent);
-
-  // Sort drives by score descending, show only those with score > 0
-  const sortedNeeds = Object.entries(scores)
-    .filter(([, v]) => v > 0)
-    .sort(([, a], [, b]) => b - a);
-
-  // Determine selected intent
-  const topIntent = isBackend
-    ? { kind: v2Context!.intent_kind, score: v2Context!.intent_score }
-    : _selectTopIntent(scores);
-  const intentMeta = _INTENT_META[topIntent.kind] ?? { icon: '💤', label: topIntent.kind };
-  const intentReason = isBackend ? v2Context!.intent_reason : null;
-
-  // Plan summary (backend only)
-  const hasPlan = isBackend && v2Context!.plan_intent != null && v2Context!.plan_steps > 0;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      {/* ── Header: source badge ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ color: '#475569', fontSize: '0.7rem', flex: 1 }}>
-          Активных потребностей: {sortedNeeds.length}
-        </span>
-        {isBackend && (
-          <span style={s.v2SourceBadge} title="Данные получены от бэкенда (обновляются каждый тик)">
-            v2
-          </span>
-        )}
-        {!isBackend && (
-          <span
-            style={{ ...s.v2SourceBadge, color: '#64748b', borderColor: '#334155' }}
-            title="Оценка вычислена на стороне клиента"
-          >
-            Оценка
-          </span>
-        )}
-      </div>
-
-      {/* ── NeedScores bars (top 8 by score) ── */}
-      {sortedNeeds.length === 0 ? (
-        <div style={{ color: '#475569', fontSize: '0.72rem' }}>Все потребности удовлетворены</div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {sortedNeeds.slice(0, 8).map(([key, val]) => {
-            const meta = _NEED_META[key] ?? { icon: '●', label: key };
-            const barColor = val >= 0.7 ? '#ef4444' : val >= 0.35 ? '#f59e0b' : '#22c55e';
-            return (
-              <div key={key} style={s.v2NeedRow}>
-                <span style={s.v2NeedLabel} title={key}>
-                  {meta.icon} {meta.label}
-                </span>
-                <div style={s.v2BarBg}>
-                  <div style={{
-                    height: '100%',
-                    borderRadius: 3,
-                    width: `${Math.round(val * 100)}%`,
-                    background: barColor,
-                    transition: 'width 0.3s',
-                  }} />
-                </div>
-                <span style={s.v2ScoreVal}>{(val * 100).toFixed(0)}%</span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* ── Selected intent ── */}
-      <div style={s.v2IntentBox}>
-        <div style={s.v2IntentHeader}>
-          <span style={s.v2IntentIcon}>{intentMeta.icon}</span>
-          <span style={s.v2IntentLabel}>{intentMeta.label}</span>
-          <span style={s.v2IntentScore}>{(topIntent.score * 100).toFixed(0)}%</span>
-          {/* Score bar */}
-          <div style={{ width: 40, height: 4, background: '#0f172a', borderRadius: 2, overflow: 'hidden', flexShrink: 0 }}>
-            <div style={{
-              height: '100%',
-              borderRadius: 2,
-              width: `${Math.round(topIntent.score * 100)}%`,
-              background: topIntent.score >= 0.7 ? '#ef4444' : topIntent.score >= 0.35 ? '#f59e0b' : '#22c55e',
-            }} />
-          </div>
-        </div>
-        {intentReason && (
-          <div style={s.v2IntentReason}>{intentReason}</div>
-        )}
-        {hasPlan && (
-          <div style={s.v2PlanLine}>
-            📋 {v2Context!.plan_step_0
-              ? (_STEP_LABEL_RU[v2Context!.plan_step_0] ?? v2Context!.plan_step_0)
-              : 'Ожидание'
-            } · {v2Context!.plan_steps} шаг(а) · {(v2Context!.plan_confidence * 100).toFixed(0)}%
-          </div>
-        )}
-      </div>
-
-      {/* ── Refresh button (debug mode only) ── */}
-      {sendCommand && (
-        <button
-          style={s.v2RefreshBtn}
-          onClick={onExplainV2}
-          disabled={loadingV2}
-          title="Запросить полный анализ v2 от бэкенда"
-        >
-          {loadingV2 ? '⏳ Анализ v2…' : '🔬 Запросить v2-анализ'}
-        </button>
-      )}
-    </div>
-  );
-}
-
-
-
-type StatusColor = 'green' | 'yellow' | 'red';
-
-/** Hex colours for each status level. */
-const _STATUS_HEX: Record<StatusColor, string> = {
-  green:  '#22c55e',
-  yellow: '#f59e0b',
-  red:    '#ef4444',
-};
-
-/** Emoji dot for each status level. */
-const _STATUS_DOT: Record<StatusColor, string> = {
-  green:  '🟢',
-  yellow: '🟡',
-  red:    '🔴',
-};
-
-interface PriorityCriterion {
-  label: string;
-  status: StatusColor;
-  detail: string;
-}
-
-interface PriorityGroup {
-  id: string;
-  icon: string;
-  label: string;
-  criteria: PriorityCriterion[];
-}
-
-/** Return the worst (most urgent) status among a list of criteria. */
-function _worstStatus(criteria: PriorityCriterion[]): StatusColor {
-  if (criteria.some(c => c.status === 'red'))    return 'red';
-  if (criteria.some(c => c.status === 'yellow')) return 'yellow';
-  return 'green';
-}
-
-/**
- * Derive the 4 priority groups with per-criterion colour-coded status.
- * Groups:
- *   1. Жизненные   — HP / hunger / thirst / sleep / radiation
- *   2. Экипировка  — weapon / armor / ammo / medicine / food / water
- *   3. Материальное — wealth vs threshold / upgrade-available / artifacts to sell
- *   4. Глобальная цель — threshold gate (locked/unlocked) + current global goal
- */
-function _buildPriorityGroups(agent: AgentForProfile): PriorityGroup[] {
-  const { hp, max_hp, hunger, thirst, sleepiness, radiation } = agent;
-  const wealth = agent.money
-    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
-    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
-  const threshold = agent.material_threshold ?? 3000;
-  const eq = agent.equipment;
-  const inv = agent.inventory;
-  const hpPct = max_hp > 0 ? hp / max_hp : 1;
-  const vitalCriteria: PriorityCriterion[] = [
-    {
-      label:  'HP',
-      // Mirror backend emergency threshold (≤30%) for red; yellow 31–60%; green >60%.
-      status: hpPct <= 0.3 ? 'red' : hpPct <= 0.6 ? 'yellow' : 'green',
-      detail: `${hp} / ${max_hp}`,
-    },
-    {
-      label:  'Голод',
-      status: hunger >= 70 ? 'red' : hunger >= 50 ? 'yellow' : 'green',
-      detail: `${hunger}/100`,
-    },
-    {
-      label:  'Жажда',
-      status: thirst >= 70 ? 'red' : thirst >= 50 ? 'yellow' : 'green',
-      detail: `${thirst}/100`,
-    },
-    {
-      label:  'Сон',
-      status: sleepiness >= 75 ? 'red' : sleepiness >= 50 ? 'yellow' : 'green',
-      detail: `${sleepiness}/100`,
-    },
-    {
-      label:  'Радиация',
-      status: radiation >= 60 ? 'red' : radiation >= 30 ? 'yellow' : 'green',
-      detail: `${radiation}`,
-    },
-  ];
-
-  // ── Group 2: Equipment ────────────────────────────────────────────────────
-  const weaponItem = eq['weapon'] ?? null;
-  const armorItem  = eq['armor']  ?? null;
-  const reqAmmo    = weaponItem ? (_AMMO_FOR_WEAPON_V2[weaponItem.type] ?? null) : null;
-  const hasAmmo    = reqAmmo ? inv.some(i => i.type === reqAmmo) : null;
-
-  const hasHeal  = inv.some(i => ['bandage', 'medkit', 'army_medkit', 'stimpack', 'morphine'].includes(i.type));
-  const hasFood  = inv.some(i => ['bread', 'canned_food', 'military_ration', 'energy_drink', 'glucose'].includes(i.type));
-  const hasDrink = inv.some(i => ['water', 'purified_water', 'vodka', 'energy_drink'].includes(i.type));
-
-  const equipCriteria: PriorityCriterion[] = [
-    {
-      label:  'Оружие',
-      status: weaponItem ? 'green' : 'red',
-      detail: weaponItem ? weaponItem.name : '— не экипировано —',
-    },
-    {
-      label:  'Броня',
-      status: armorItem ? 'green' : 'red',
-      detail: armorItem ? armorItem.name : '— не экипирована —',
-    },
-    {
-      label:  'Патроны',
-      status: reqAmmo === null ? 'yellow'
-            : hasAmmo          ? 'green'
-            :                    'red',
-      detail: reqAmmo === null  ? 'Нет оружия'
-            : hasAmmo           ? `Есть (${reqAmmo})`
-            :                     `Нет (нужны ${reqAmmo})`,
-    },
-    {
-      label:  'Медицина',
-      status: hasHeal ? 'green' : 'red',
-      detail: hasHeal ? 'В наличии' : 'Нет аптечки',
-    },
-    {
-      label:  'Еда',
-      // Empty supply is always at least yellow (a warning), red when hunger is already high.
-      status: hasFood ? 'green' : hunger >= 70 ? 'red' : 'yellow',
-      detail: hasFood ? 'В наличии' : 'Запас пуст',
-    },
-    {
-      label:  'Вода',
-      // Empty supply is always at least yellow (a warning), red when thirst is already high.
-      status: hasDrink ? 'green' : thirst >= 70 ? 'red' : 'yellow',
-      detail: hasDrink ? 'В наличии' : 'Запас пуст',
-    },
-  ];
-
-  // ── Group 3: Material state ───────────────────────────────────────────────
-  const artifactCount = inv.filter(i => _ARTIFACT_TYPES.has(i.type)).length;
-  const wealthFrac    = threshold > 0 ? wealth / threshold : 1;
-  const materialCriteria: PriorityCriterion[] = [
-    {
-      label:  'Богатство',
-      status: wealthFrac >= 1 ? 'green' : wealthFrac >= 0.5 ? 'yellow' : 'red',
-      detail: `${wealth} / ${threshold} RU (деньги + инвентарь + снаряжение)`,
-    },
-    {
-      // Upgrade check only activates once the wealth threshold is reached.
-      label:  'Апгрейд снаряжения',
-      status: wealthFrac >= 1 ? 'yellow' : 'green',
-      detail: wealthFrac >= 1
-        ? 'Порог достигнут — проверяю апгрейд'
-        : `Накапливаю ресурсы (${Math.round(wealthFrac * 100)}% от порога)`,
-    },
-    {
-      label:  'Артефакты',
-      status: artifactCount > 0 ? 'yellow' : 'green',
-      detail: artifactCount > 0 ? `${artifactCount} шт. — продать торговцу` : 'Нет артефактов',
-    },
-  ];
-
-  // ── Group 4: Global goal ──────────────────────────────────────────────────
-  const goalUnlocked = wealthFrac >= 1;
-  const goalCriteria: PriorityCriterion[] = [
-    {
-      label:  'Порог богатства',
-      status: goalUnlocked ? 'green' : 'yellow',
-      detail: goalUnlocked
-        ? `Открыто (${wealth} ≥ ${threshold} RU)`
-        : `Заблокировано — нужно ещё ${threshold - wealth} RU`,
-    },
-    {
-      label:  'Цель',
-      status: goalUnlocked ? 'green' : 'yellow',
-      detail: agent.global_goal
-        ? agent.global_goal + (agent.current_goal ? ` → ${currentGoalLabel(agent.current_goal)}` : '')
-        : '—',
-    },
-  ];
-
-  return [
-    { id: 'vital',    icon: '❤️',  label: 'Жизненные',            criteria: vitalCriteria    },
-    { id: 'equip',    icon: '🔫',  label: 'Экипировка',           criteria: equipCriteria    },
-    { id: 'material', icon: '💰',  label: 'Материальное состояние', criteria: materialCriteria },
-    { id: 'goal',     icon: '🎯',  label: 'Глобальная цель',      criteria: goalCriteria     },
-  ];
-}
-
-/**
- * Collapsible panel showing agent priorities in 4 groups.
- * Groups with red criteria start expanded; others start collapsed.
- */
-function PriorityGroupsPanel({ agent }: { agent: AgentForProfile }) {
-  const groups = _buildPriorityGroups(agent);
-
-  // Pre-expand any group that has a red criterion.
-  const [open, setOpen] = React.useState<Set<string>>(
-    () => new Set(groups.filter(g => _worstStatus(g.criteria) === 'red').map(g => g.id)),
-  );
-
-  const toggle = (id: string) =>
-    setOpen(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      {groups.map(group => {
-        const overall  = _worstStatus(group.criteria);
-        const isOpen   = open.has(group.id);
-        const hex      = _STATUS_HEX[overall];
-
-        return (
-          <div
-            key={group.id}
-            style={{
-              borderRadius: 7,
-              border: `1px solid ${hex}44`,
-              overflow: 'hidden',
-            }}
-          >
-            {/* ── Group header (always visible) ── */}
-            <button
-              onClick={() => toggle(group.id)}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '0.38rem 0.6rem',
-                background: `${hex}18`,
-                border: 'none',
-                cursor: 'pointer',
-                textAlign: 'left' as const,
-              }}
-            >
-              <span style={{ color: '#64748b', fontSize: '0.65rem', flexShrink: 0 }}>
-                {isOpen ? '▼' : '▶'}
-              </span>
-              <span style={{ fontSize: '0.8rem', flexShrink: 0 }}>{group.icon}</span>
-              <span style={{ flex: 1, color: '#e2e8f0', fontSize: '0.78rem', fontWeight: 600 }}>
-                {group.label}
-              </span>
-              {/* Mini status dots for each criterion */}
-              <span style={{ display: 'flex', gap: 2, marginRight: 4 }}>
-                {group.criteria.map((c, i) => (
-                  <span key={i} style={{ fontSize: '0.5rem', color: _STATUS_HEX[c.status] }}>●</span>
-                ))}
-              </span>
-              <span style={{ fontSize: '0.75rem', flexShrink: 0 }}>
-                {_STATUS_DOT[overall]}
-              </span>
-            </button>
-
-            {/* ── Expanded criteria rows ── */}
-            {isOpen && (
-              <div style={{ background: '#070e1a', padding: '0.3rem 0.55rem 0.4rem' }}>
-                {group.criteria.map((c, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '0.2rem 0',
-                      borderBottom: i < group.criteria.length - 1 ? '1px solid #1e293b' : 'none',
-                    }}
-                  >
-                    <span style={{ fontSize: '0.6rem', color: _STATUS_HEX[c.status], flexShrink: 0 }}>
-                      ●
-                    </span>
-                    <span style={{ color: '#64748b', fontSize: '0.72rem', width: 76, flexShrink: 0 }}>
-                      {c.label}
-                    </span>
-                    <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1 }}>
-                      {c.detail}
-                    </span>
-                    <span style={{ fontSize: '0.72rem', flexShrink: 0 }}>
-                      {_STATUS_DOT[c.status]}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * Client-side approximation of the backend `_describe_bot_decision_tree` logic.
- *
- * Evaluates the same 9-layer priority tree using agent fields available in the
- * frontend state, returning an immediate result that is displayed before (or
- * instead of) a backend round-trip.  The backend version is authoritative;
- * this function is used only for instantaneous UI feedback.
- *
- * Layers:
- *  1. EMERGENCY: HP критический
- *  2. EMERGENCY: Голод
- *  3. EMERGENCY: Жажда
- *  4. СНАРЯЖЕНИЕ: Оружие / броня / патроны
- *  5. ВЫЖИВАНИЕ: Сон
- *  6. ТОРГОВЛЯ: Продать артефакты (all agents)
- *  7. ЦЕЛЬ: Накопить богатство   (wealth < threshold)
- *  8. АПГРЕЙД: Улучшение снаряжения  (wealth >= threshold, before global goal)
- *  9. ЦЕЛЬ: Глобальная цель      (wealth >= threshold)
- *
- * @param agent - The bot agent whose decision should be previewed.
- * @returns A `DecisionPreview` with `goal`, `action`, `reason`, and the full
- *          `layers` array (each layer marked `skipped: true` if its condition
- *          was not met).
- */
-function _clientSideDecisionHint(agent: AgentForProfile): DecisionPreview {
-  const hp = agent.hp;
-  const hunger = agent.hunger;
-  const thirst = agent.thirst;
-  const sleepiness = agent.sleepiness;
-  const wealth = agent.money
-    + agent.inventory.reduce((s, i) => s + (i.value ?? 0), 0)
-    + Object.values(agent.equipment).reduce((s, item) => s + (item?.value ?? 0), 0);
-  const threshold = agent.material_threshold ?? 3000;
-  const goal = agent.current_goal ?? '—';
-  const scheduled = agent.scheduled_action;
-  const globalGoal = agent.global_goal ?? 'get_rich';
-  const artifactCount = agent.inventory.filter((i) => _ARTIFACT_TYPES.has(i.type)).length;
-
-  const eq  = agent.equipment;
-  const inv = agent.inventory;
-  const noWeapon = !(eq['weapon']);
-  const noArmor  = !(eq['armor']);
-  const weaponType  = eq['weapon']?.type ?? null;
-  const reqAmmoType = weaponType ? (_AMMO_FOR_WEAPON_V2[weaponType] ?? null) : null;
-  const noAmmo = weaponType !== null && reqAmmoType !== null
-    && !inv.some(i => i.type === reqAmmoType);
-  const condEquip = noWeapon || noArmor || noAmmo;
-
-  type Layer = { name: string; skipped: boolean; action: string; reason: string };
-  const layers: Layer[] = [];
-
-  // Layer 1: EMERGENCY: HP критический
-  const cond1 = hp <= 30;
-  layers.push({
-    name: 'EMERGENCY: HP критический',
-    skipped: !cond1,
-    action: 'Лечение/бегство',
-    reason: cond1 ? `HP = ${hp} (порог ≤30)` : `HP = ${hp}, выше критического`,
-  });
-
-  // Layer 2: EMERGENCY: Голод
-  const cond2 = hunger >= 70;
-  layers.push({
-    name: 'EMERGENCY: Голод',
-    skipped: !cond2,
-    action: 'Поесть',
-    reason: cond2 ? `Голод = ${hunger} (порог ≥70)` : `Голод = ${hunger}, терпимо`,
-  });
-
-  // Layer 3: EMERGENCY: Жажда
-  const cond3 = thirst >= 70;
-  layers.push({
-    name: 'EMERGENCY: Жажда',
-    skipped: !cond3,
-    action: 'Попить',
-    reason: cond3 ? `Жажда = ${thirst} (порог ≥70)` : `Жажда = ${thirst}, терпимо`,
-  });
-
-  // Layer 4: СНАРЯЖЕНИЕ: Оружие / броня / патроны (added in equipment maintenance PR)
-  const equipReason = noWeapon ? 'Нет оружия'
-    : noArmor ? 'Нет брони'
-    : noAmmo  ? `Нет патронов (${reqAmmoType})`
-    :           'Снаряжение в порядке';
-  layers.push({
-    name: 'СНАРЯЖЕНИЕ: Оружие / броня / патроны',
-    skipped: !condEquip,
-    action: 'Найти/купить снаряжение',
-    reason: equipReason,
-  });
-
-  // Layer 5: ВЫЖИВАНИЕ: Сон
-  const cond5 = sleepiness >= 75;
-  layers.push({
-    name: 'ВЫЖИВАНИЕ: Сон',
-    skipped: !cond5,
-    action: 'Спать 6ч',
-    reason: cond5 ? `Усталость = ${sleepiness} (порог ≥75)` : `Усталость = ${sleepiness}, норма`,
-  });
-
-  // Layer 6: ТОРГОВЛЯ: Продать артефакты
-  // All agents travel to sell artifacts (not just get_rich since the previous fix).
-  // Client-side can't check for a trader at the current location, so we show
-  // only whether artifacts are in inventory; the backend will handle routing.
-  const cond6 = artifactCount > 0;
-  layers.push({
-    name: 'ТОРГОВЛЯ: Продать артефакты',
-    skipped: !cond6,
-    action: 'Продать артефакты торговцу',
-    reason: cond6
-      ? `${artifactCount} арт. в инвентаре — идти к торговцу`
-      : 'Нет артефактов в инвентаре',
-  });
-
-  // Layer 7: ЦЕЛЬ: Накопить богатство
-  const cond7 = wealth < threshold;
-  layers.push({
-    name: 'ЦЕЛЬ: Накопить богатство',
-    skipped: !cond7,
-    action: 'Собирать ресурсы',
-    reason: cond7
-      ? `Богатство ${wealth} < порог ${threshold}`
-      : `Богатство ${wealth} ≥ порог ${threshold}`,
-  });
-
-  // Layer 8: АПГРЕЙД: Улучшение снаряжения
-  // Fires when wealth >= threshold. The bot checks for a better-matching item
-  // at a trader before pursuing the global goal.
-  const cond8 = wealth >= threshold;
-  layers.push({
-    name: 'АПГРЕЙД: Улучшение снаряжения',
-    skipped: !cond8,
-    action: 'Купить улучшенное снаряжение',
-    reason: cond8
-      ? `Порог ${threshold} достигнут — проверяю возможность апгрейда`
-      : `Богатство ${wealth} < порог ${threshold}, апгрейд недоступен`,
-  });
-
-  // Layer 9: ЦЕЛЬ: Глобальная цель
-  const cond9 = wealth >= threshold;
-  layers.push({
-    name: 'ЦЕЛЬ: Глобальная цель',
-    skipped: !cond9,
-    action: `Преследование цели «${globalGoal}»`,
-    reason: cond9
-      ? `Богатство ${wealth} ≥ порог ${threshold}, цель: ${globalGoal}`
-      : `Богатство ${wealth} < порог ${threshold}`,
-  });
-
-  // Determine chosen action/reason (priority: scheduled_action > stat conditions)
-  let action = 'Бездействие';
-  let reason = '—';
-
-  if (scheduled) {
-    const t = scheduled.type;
-    if (t === 'travel') {
-      action = `Движение (${scheduled.turns_remaining} мин осталось)`;
-      reason = 'Запланированное перемещение';
-    } else if (t === 'sleep') {
-      action = 'Спать';
-      reason = 'Запланированный отдых';
-    } else if (t === 'explore_anomaly_location') {
-      action = 'Исследование';
-      reason = 'Запланированное исследование';
-    }
-  } else if (cond1) {
-    action = 'Лечение или бегство';
-    reason = `HP критически низкий (${hp})`;
-  } else if (cond2) {
-    action = 'Поиск еды';
-    reason = `Голод ${hunger}/100`;
-  } else if (cond3) {
-    action = 'Поиск воды';
-    reason = `Жажда ${thirst}/100`;
-  } else if (condEquip) {
-    action = 'Добыть снаряжение';
-    reason = equipReason;
-  } else if (cond5) {
-    action = 'Спать 6 часов';
-    reason = `Усталость ${sleepiness}/100`;
-  } else if (cond6) {
-    action = 'Продажа или путь к торговцу';
-    reason = `${artifactCount} артефактов в инвентаре`;
-  } else if (cond7) {
-    action = 'Сбор ресурсов';
-    reason = `Богатство ${wealth} < порог ${threshold}`;
-  } else if (goal === 'upgrade_equipment') {
-    action = 'Улучшение снаряжения';
-    reason = `Порог ${threshold} достигнут — апгрейд снаряжения`;
-  } else {
-    action = 'Преследование глобальной цели';
-    reason = `Цель: ${globalGoal}`;
-  }
-
-  return { goal, action, reason, layers };
-}
 
 // ─── AgentCreateModal ─────────────────────────────────────────────────────────
 

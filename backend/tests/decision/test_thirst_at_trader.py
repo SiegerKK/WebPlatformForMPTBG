@@ -52,7 +52,7 @@ class TestSeekWaterAtTrader:
         Before the fix this returned None (→ idle), causing the NPC to die of
         thirst while standing next to a trader.
         """
-        agent = make_agent(thirst=80, money=500, location_id="loc_a")
+        agent = make_agent(thirst=80, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _build_plan(agent, state, INTENT_SEEK_WATER)
         assert plan is not None, "Expected a plan but got None"
@@ -64,7 +64,7 @@ class TestSeekWaterAtTrader:
 
     def test_high_thirst_at_trader_single_step_plan(self):
         """Co-located buy plan must have exactly one step (no travel step)."""
-        agent = make_agent(thirst=80, money=500, location_id="loc_a")
+        agent = make_agent(thirst=80, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _build_plan(agent, state, INTENT_SEEK_WATER)
         assert len(plan.steps) == 1, (
@@ -73,7 +73,7 @@ class TestSeekWaterAtTrader:
 
     def test_high_thirst_trader_elsewhere_still_travels(self):
         """Sanity: trader at *different* location → plan still starts with travel."""
-        agent = make_agent(thirst=80, money=500, location_id="loc_a")
+        agent = make_agent(thirst=80, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
         plan = _build_plan(agent, state, INTENT_SEEK_WATER)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
@@ -95,7 +95,7 @@ class TestSeekFoodAtTrader:
 
     def test_high_hunger_at_trader_plans_buy_not_travel(self):
         """hunger≥75 + no food + trader at same location → STEP_TRADE_BUY_ITEM."""
-        agent = make_agent(hunger=80, money=500, location_id="loc_a")
+        agent = make_agent(hunger=80, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _build_plan(agent, state, INTENT_SEEK_FOOD)
         assert plan is not None
@@ -103,7 +103,7 @@ class TestSeekFoodAtTrader:
         assert plan.steps[0].payload.get("item_category") == "food"
 
     def test_high_hunger_at_trader_single_step_plan(self):
-        agent = make_agent(hunger=80, money=500, location_id="loc_a")
+        agent = make_agent(hunger=80, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _build_plan(agent, state, INTENT_SEEK_FOOD)
         assert len(plan.steps) == 1
@@ -116,7 +116,7 @@ class TestHealSelfAtTrader:
 
     def test_no_heal_item_at_trader_plans_buy(self):
         """HP low + no heal item + trader at same location → STEP_TRADE_BUY_ITEM."""
-        agent = make_agent(hp=20, money=500, location_id="loc_a")
+        agent = make_agent(hp=20, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _build_plan(agent, state, INTENT_HEAL_SELF)
         assert plan is not None
@@ -184,6 +184,7 @@ class TestFullPipelineThirstyAtTrader:
         agent = make_agent(
             thirst=80, money=500, location_id="loc_a",
             has_weapon=True, has_armor=True, has_ammo=True,
+            inventory=[],  # empty: no water in inventory → should buy
         )
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         ctx = build_agent_context("bot1", agent, state)

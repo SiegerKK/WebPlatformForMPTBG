@@ -97,7 +97,7 @@ class TestHealSelfPlan:
 
     def test_no_heal_item_travels_to_trader(self):
         """heal_self + no heal item + trader exists → STEP_TRAVEL_TO_LOCATION."""
-        agent = make_agent(hp=20)
+        agent = make_agent(hp=20, inventory=[])  # empty inventory: no heal items
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_HEAL_SELF)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
@@ -157,7 +157,7 @@ class TestSeekConsumablePlan:
 
     def test_seek_water_no_water_no_food_just_travels(self):
         """seek_water + no water + no food → travel + buy (no prepend)."""
-        agent = make_agent(thirst=80, hunger=50)
+        agent = make_agent(thirst=80, hunger=50, inventory=[])  # empty: no water or food
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
@@ -267,7 +267,7 @@ class TestSeekConsumableSellFirst:
 
     def test_seek_water_no_money_no_artifact_no_sell_step(self):
         """money=0 but no artifact → no sell step (just travel+buy as before)."""
-        agent = make_agent(money=0, thirst=80)
+        agent = make_agent(money=0, thirst=80, inventory=[])  # empty: no artifact, no water
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         # No artifact to sell → falls through to travel+buy
@@ -330,14 +330,29 @@ class TestSeekConsumableSellFirst:
 # ── Bug 2: equipped-weapon check before generating buy-weapon plan ─────────────
 
 class TestResupplyWeaponGuard:
-    """NPC with weapon equipped must not be assigned a buy-weapon plan."""
+    """Tests for _plan_resupply priority ordering and executor guards."""
+
+    def _stocked_agent(self, **kwargs):
+        """Agent with food/drink/medicine at target levels so equipment gaps drive plans."""
+        agent = make_agent(**kwargs)
+        # Add enough food, drink, and medicine so those don't interfere
+        agent["inventory"] = list(agent.get("inventory", [])) + [
+            {"id": "f0", "type": "bread", "value": 40},
+            {"id": "f1", "type": "bread", "value": 40},
+            {"id": "d0", "type": "water", "value": 30},
+            {"id": "d1", "type": "water", "value": 30},
+            {"id": "m0", "type": "bandage", "value": 50},
+            {"id": "m1", "type": "bandage", "value": 50},
+            {"id": "m2", "type": "bandage", "value": 50},
+        ]
+        return agent
 
     def test_no_weapon_generates_buy_weapon_plan(self):
-        """INTENT_RESUPPLY + no weapon + wealthy + at trader → buys weapon."""
+        """INTENT_RESUPPLY + no weapon + supplies stocked + at trader → buys weapon."""
         from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
         from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
-        agent = make_agent(has_weapon=False, has_armor=True, has_ammo=False,
-                           money=5000, material_threshold=3000)
+        agent = self._stocked_agent(has_weapon=False, has_armor=True, has_ammo=False,
+                                    money=5000, material_threshold=3000)
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
         assert plan.steps[0].kind == STEP_TRADE_BUY_ITEM
@@ -346,11 +361,17 @@ class TestResupplyWeaponGuard:
         )
 
     def test_weapon_equipped_no_armor_buys_armor_not_weapon(self):
-        """INTENT_RESUPPLY + weapon equipped + no armor + wealthy + at trader → buys armor."""
+        """INTENT_RESUPPLY + weapon equipped + no armor + supplies stocked + at trader → buys armor."""
         from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
         from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
-        agent = make_agent(has_weapon=True, has_armor=False, has_ammo=True,
-                           money=5000, material_threshold=3000)
+        agent = self._stocked_agent(has_weapon=True, has_armor=False, has_ammo=False,
+                                    money=5000, material_threshold=3000)
+        # Add 3 ammo items to avoid ammo gap
+        agent["inventory"] += [
+            {"id": "a0", "type": "ammo_9mm", "value": 60},
+            {"id": "a1", "type": "ammo_9mm", "value": 60},
+            {"id": "a2", "type": "ammo_9mm", "value": 60},
+        ]
         state = make_state_with_trader(agent=agent, trader_at="loc_a")
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
         assert plan.steps[0].kind == STEP_TRADE_BUY_ITEM
@@ -359,22 +380,35 @@ class TestResupplyWeaponGuard:
         )
 
     def test_weapon_equipped_reload_or_rearm_low(self):
-        """reload_or_rearm need is 0.0 when weapon+armor+ammo all equipped."""
+        """reload_or_rearm == 0.0 when weapon+armor+3 ammo+2 food+2 drink+3 medicine all present."""
         from app.games.zone_stalkers.decision.needs import evaluate_needs
         from app.games.zone_stalkers.decision.context_builder import build_agent_context
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=True)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [
+            {"id": "a0", "type": "ammo_9mm", "value": 60},
+            {"id": "a1", "type": "ammo_9mm", "value": 60},
+            {"id": "a2", "type": "ammo_9mm", "value": 60},
+            {"id": "f0", "type": "bread", "value": 40},
+            {"id": "f1", "type": "bread", "value": 40},
+            {"id": "d0", "type": "water", "value": 30},
+            {"id": "d1", "type": "water", "value": 30},
+            {"id": "m0", "type": "bandage", "value": 50},
+            {"id": "m1", "type": "bandage", "value": 50},
+            {"id": "m2", "type": "bandage", "value": 50},
+        ]
         state = make_minimal_state(agent=agent)
         ctx = build_agent_context("bot1", agent, state)
         needs = evaluate_needs(ctx, state)
         assert needs.reload_or_rearm == 0.0, (
-            f"reload_or_rearm should be 0.0 when fully equipped, got {needs.reload_or_rearm}"
+            f"reload_or_rearm should be 0.0 when fully stocked, got {needs.reload_or_rearm}"
         )
 
     def test_no_weapon_reload_or_rearm_is_065(self):
-        """reload_or_rearm == 0.65 when no weapon equipped."""
+        """reload_or_rearm == 0.65 when no weapon but armor is present."""
         from app.games.zone_stalkers.decision.needs import evaluate_needs
         from app.games.zone_stalkers.decision.context_builder import build_agent_context
-        agent = make_agent(has_weapon=False, has_armor=False, has_ammo=False)
+        # has_armor=True so that armor gap doesn't mask the weapon score (armor=0.70 > weapon=0.65)
+        agent = make_agent(has_weapon=False, has_armor=True, has_ammo=False)
         state = make_minimal_state(agent=agent)
         ctx = build_agent_context("bot1", agent, state)
         needs = evaluate_needs(ctx, state)
@@ -430,3 +464,111 @@ class TestResupplyWeaponGuard:
             "Guard should block 'equipment' category buy when weapon already equipped"
         )
         assert state["agents"]["bot1"]["money"] == 5000
+
+
+class TestResupplyPriorityOrder:
+    """Tests for the new resupply priority: food→drink→armor→weapon→ammo→medicine→upgrade."""
+
+    def _stocked(self, agent):
+        """Add full food/drink/medicine/ammo stock to agent inventory."""
+        agent["inventory"] = list(agent.get("inventory", [])) + [
+            {"id": "a0", "type": "ammo_9mm", "value": 60},
+            {"id": "a1", "type": "ammo_9mm", "value": 60},
+            {"id": "a2", "type": "ammo_9mm", "value": 60},
+            {"id": "f0", "type": "bread", "value": 40},
+            {"id": "f1", "type": "bread", "value": 40},
+            {"id": "d0", "type": "water", "value": 30},
+            {"id": "d1", "type": "water", "value": 30},
+            {"id": "m0", "type": "bandage", "value": 50},
+            {"id": "m1", "type": "bandage", "value": 50},
+            {"id": "m2", "type": "bandage", "value": 50},
+        ]
+        return agent
+
+    def test_food_bought_before_weapon(self):
+        """No food + no weapon + at trader → food is bought first (priority 1 > priority 4)."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
+        from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
+        # inventory=[] to strip default supplies so food gap exists
+        agent = make_agent(has_weapon=False, has_armor=True, has_ammo=False, money=500, inventory=[])
+        state = make_state_with_trader(agent=agent, trader_at="loc_a")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
+        assert plan.steps[0].kind == STEP_TRADE_BUY_ITEM
+        assert plan.steps[0].payload.get("item_category") == "food", (
+            f"Food should be bought before weapon; got {plan.steps[0].payload.get('item_category')}"
+        )
+
+    def test_drink_bought_before_armor(self):
+        """No drink + no armor + at trader → drink is bought first (priority 2 > priority 3)."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
+        from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
+        agent = make_agent(has_weapon=True, has_armor=False, has_ammo=False, money=500)
+        # Add enough food but no drink
+        agent["inventory"] = [
+            {"id": "f0", "type": "bread", "value": 40},
+            {"id": "f1", "type": "bread", "value": 40},
+        ]
+        state = make_state_with_trader(agent=agent, trader_at="loc_a")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
+        assert plan.steps[0].kind == STEP_TRADE_BUY_ITEM
+        assert plan.steps[0].payload.get("item_category") == "drink", (
+            f"Drink should be bought before armor; got {plan.steps[0].payload.get('item_category')}"
+        )
+
+    def test_ammo_x3_required(self):
+        """2 ammo items (< DESIRED_AMMO_COUNT=3) + all other supplies → buys ammo."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
+        from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, money=500)
+        agent["inventory"] = [
+            {"id": "a0", "type": "ammo_9mm", "value": 60},
+            {"id": "a1", "type": "ammo_9mm", "value": 60},  # only 2 ammo < 3 desired
+            {"id": "f0", "type": "bread", "value": 40},
+            {"id": "f1", "type": "bread", "value": 40},
+            {"id": "d0", "type": "water", "value": 30},
+            {"id": "d1", "type": "water", "value": 30},
+            {"id": "m0", "type": "bandage", "value": 50},
+            {"id": "m1", "type": "bandage", "value": 50},
+            {"id": "m2", "type": "bandage", "value": 50},
+        ]
+        state = make_state_with_trader(agent=agent, trader_at="loc_a")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
+        assert plan.steps[0].kind == STEP_TRADE_BUY_ITEM
+        assert plan.steps[0].payload.get("item_category") == "ammo", (
+            f"Should buy ammo (2/3 present); got {plan.steps[0].payload.get('item_category')}"
+        )
+
+    def test_medicine_after_equipment(self):
+        """Weapon+armor+3 ammo+2 food+2 drink but no medicine + at trader → buys medicine."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
+        from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, money=500)
+        agent["inventory"] = [
+            {"id": "a0", "type": "ammo_9mm", "value": 60},
+            {"id": "a1", "type": "ammo_9mm", "value": 60},
+            {"id": "a2", "type": "ammo_9mm", "value": 60},
+            {"id": "f0", "type": "bread", "value": 40},
+            {"id": "f1", "type": "bread", "value": 40},
+            {"id": "d0", "type": "water", "value": 30},
+            {"id": "d1", "type": "water", "value": 30},
+            # No medicine
+        ]
+        state = make_state_with_trader(agent=agent, trader_at="loc_a")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
+        assert plan.steps[0].kind == STEP_TRADE_BUY_ITEM
+        assert plan.steps[0].payload.get("item_category") == "medical", (
+            f"Should buy medicine; got {plan.steps[0].payload.get('item_category')}"
+        )
+
+    def test_no_wealth_gate_poor_agent_travels_to_trader(self):
+        """Even a poor agent (money=0) travels to trader for resupply (no material_threshold gate)."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRAVEL_TO_LOCATION
+        from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
+        # money=0, well below any material_threshold
+        agent = make_agent(has_weapon=False, has_armor=True, has_ammo=False, money=0,
+                           material_threshold=3000)
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_RESUPPLY)
+        # With no food and no weapon, the NPC should still travel toward resupply
+        # (either to memory location or to trader) regardless of money
+        assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION

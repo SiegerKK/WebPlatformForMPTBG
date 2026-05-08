@@ -29,10 +29,19 @@ def make_agent(
 ) -> dict[str, Any]:
     """Construct a minimal bot agent dict for testing.
 
-    Defaults to having a weapon, armor, and ammo so that ``reload_or_rearm``
-    is 0.0 and does not mask other needs in tests that don't cover equipment.
+    Defaults to having a weapon, armor, ammo, and sufficient food/drink/medicine
+    stock so that ``reload_or_rearm`` is 0.0 and does not mask other needs in
+    tests that don't cover equipment or supply logic.
+
+    Supply stock defaults (risk_tolerance=0.5):
+      - 3 ammo items (DESIRED_AMMO_COUNT) when has_weapon=True and has_ammo=True
+      - 2 food items (desired_food for risk_tolerance=0.5)
+      - 2 drink items (desired_drink for risk_tolerance=0.5)
+      - 3 medicine items (desired_medicine for risk_tolerance=0.5)
+
     Pass ``has_weapon=False`` / ``has_armor=False`` / ``has_ammo=False`` when
-    specifically testing equipment-related logic.
+    specifically testing equipment-related logic.  Override ``inventory``
+    directly when testing specific inventory states.
     """
     agent: dict[str, Any] = {
         "archetype": "stalker_agent",
@@ -59,7 +68,25 @@ def make_agent(
     if has_armor:
         agent["equipment"]["armor"] = {"type": _ARMOR_TYPE, "value": 200}
     if has_ammo and has_weapon:
-        agent["inventory"].append({"type": _AMMO_TYPE, "quantity": 20, "value": 50})
+        # Add DESIRED_AMMO_COUNT (3) ammo items so reload_or_rearm stays 0.0 by default.
+        # value=0 to avoid affecting liquid wealth in tests.
+        agent["inventory"] += [
+            {"id": f"{_AMMO_TYPE}_{i}", "type": _AMMO_TYPE, "value": 0}
+            for i in range(3)
+        ]
+    # Add default food/drink/medicine stock (desired counts for risk_tolerance=0.5)
+    # so that reload_or_rearm stays 0.0 by default in tests that don't test supplies.
+    # value=0 to avoid affecting liquid wealth calculations.
+    if inventory is None:
+        agent["inventory"] += [
+            {"id": "default_food_0", "type": "bread", "value": 0},
+            {"id": "default_food_1", "type": "bread", "value": 0},
+            {"id": "default_drink_0", "type": "water", "value": 0},
+            {"id": "default_drink_1", "type": "water", "value": 0},
+            {"id": "default_med_0", "type": "bandage", "value": 0},
+            {"id": "default_med_1", "type": "bandage", "value": 0},
+            {"id": "default_med_2", "type": "bandage", "value": 0},
+        ]
     if kill_target_id:
         agent["kill_target_id"] = kill_target_id
         agent["global_goal"] = "kill_stalker"

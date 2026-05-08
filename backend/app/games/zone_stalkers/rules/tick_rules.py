@@ -16,6 +16,29 @@ import random
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.games.zone_stalkers.decision.debug.brain_trace import (
+    ensure_brain_trace_for_tick,
+    write_decision_brain_trace_from_v2,
+    write_plan_monitor_trace,
+)
+from app.games.zone_stalkers.decision.plan_monitor import (
+    PlanMonitorResult,
+    assess_scheduled_action_v3,
+    is_v3_monitored_bot,
+)
+from app.games.zone_stalkers.rules.tick_constants import (
+    CRITICAL_HUNGER_THRESHOLD,
+    CRITICAL_THIRST_THRESHOLD,
+    HUNGER_INCREASE_PER_HOUR,
+    HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER,
+    HP_DAMAGE_PER_HOUR_CRITICAL_THIRST,
+    SLEEPINESS_INCREASE_PER_HOUR,
+    THIRST_INCREASE_PER_HOUR,
+    SLEEP_EFFECT_INTERVAL_TURNS,
+    SLEEPINESS_RECOVERY_PER_SLEEP_INTERVAL,
+    HUNGER_INCREASE_PER_SLEEP_INTERVAL,
+    THIRST_INCREASE_PER_SLEEP_INTERVAL,
+)
 
 # 1 game turn = 1 real minute
 MINUTES_PER_TURN = 1
@@ -27,6 +50,7 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 2000
+PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
 
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
@@ -153,6 +177,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     events: List[Dict[str, Any]] = []
     world_turn = state.get("world_turn", 1)
 
+    for _agent in state.get("agents", {}).values():
+        _agent.setdefault("brain_trace", None)
+        _agent.setdefault("active_plan_v3", None)
+        _agent.setdefault("memory_v3", None)
+
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
     if not state.get("_terrain_migrated_v3"):
@@ -174,6 +203,118 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         sched = agent.get("scheduled_action")
         if sched:
+            if is_v3_monitored_bot(agent):
+                try:
+                    monitor_result = assess_scheduled_action_v3(
+                        agent_id=agent_id,
+                        agent=agent,
+                        scheduled_action=sched,
+                        state=state,
+                        world_turn=world_turn,
+                    )
+                except Exception:
+                    monitor_result = PlanMonitorResult(
+                        decision="continue",
+                        reason="monitor_error",
+                    )
+                    write_plan_monitor_trace(
+                        agent,
+                        world_turn=world_turn,
+                        decision="continue",
+                        reason="monitor_error",
+                        summary="PlanMonitor дал ошибку; продолжаю legacy действие.",
+                        scheduled_action_type=sched.get("type"),
+                        state=state,
+                    )
+                if monitor_result.decision == "abort":
+                    _dominant_pressure = None
+                    if monitor_result.dominant_pressure is not None and monitor_result.dominant_pressure_value is not None:
+                        _dominant_pressure = {
+                            "key": monitor_result.dominant_pressure,
+                            "value": round(float(monitor_result.dominant_pressure_value), 3),
+                        }
+                    # For sleep aborts, include partial-sleep info in the summary.
+                    if sched.get("type") == "sleep":
+                        _sleep_intervals = int(sched.get("sleep_intervals_applied", 0))
+                        _slept_hours = round(_sleep_intervals * SLEEP_EFFECT_INTERVAL_TURNS / 60, 1)
+                        _summary = (
+                            f"Прерываю sleep из-за {monitor_result.reason}. "
+                            f"Успел поспать {_slept_hours} ч."
+                        )
+                    else:
+                        _summary = f"Прерываю {sched.get('type')} из-за {monitor_result.reason}."
+                    _signature = {
+                        "reason": monitor_result.reason,
+                        "scheduled_action_type": sched.get("type"),
+                        "cancelled_final_target": sched.get("final_target_id", sched.get("target_id")),
+                    }
+                    write_plan_monitor_trace(
+                        agent,
+                        world_turn=world_turn,
+                        decision="abort",
+                        reason=monitor_result.reason,
+                        summary=_summary,
+                        scheduled_action_type=sched.get("type"),
+                        dominant_pressure_key=monitor_result.dominant_pressure,
+                        dominant_pressure_value=monitor_result.dominant_pressure_value,
+                        state=state,
+                    )
+                    if should_write_plan_monitor_memory_event(
+                        agent,
+                        world_turn,
+                        action_kind="plan_monitor_abort",
+                        signature=_signature,
+                    ):
+                        _add_memory(
+                            agent,
+                            world_turn,
+                            state,
+                            "decision",
+                            "⚡ PlanMonitor: прерываю активное действие",
+                            {
+                                "action_kind": "plan_monitor_abort",
+                                "reason": monitor_result.reason,
+                                "scheduled_action_type": sched.get("type"),
+                                "dominant_pressure": _dominant_pressure,
+                                "dedup_signature": _signature,
+                            },
+                            summary=_summary,
+                        )
+                    events.append({
+                        "event_type": "plan_monitor_aborted_action",
+                        "payload": {
+                            "agent_id": agent_id,
+                            "scheduled_action_type": sched.get("type"),
+                            "reason": monitor_result.reason,
+                            "dominant_pressure": _dominant_pressure
+                            or {"key": "unknown", "value": 0.0},
+                            "cancelled_target": sched.get("target_id"),
+                            "cancelled_final_target": sched.get("final_target_id"),
+                            "current_location_id": agent.get("location_id"),
+                            "turns_remaining": sched.get("turns_remaining"),
+                            **(
+                                {
+                                    "sleep_intervals_applied": sched.get("sleep_intervals_applied"),
+                                    "sleep_progress_turns": sched.get("sleep_progress_turns"),
+                                }
+                                if sched.get("type") == "sleep"
+                                else {}
+                            ),
+                        },
+                    })
+                    agent["scheduled_action"] = None
+                    if monitor_result.should_clear_action_queue:
+                        agent["action_queue"] = []
+                    continue
+                write_plan_monitor_trace(
+                    agent,
+                    world_turn=world_turn,
+                    decision="continue",
+                    reason=monitor_result.reason,
+                    summary=f"Продолжаю {sched.get('type')} — {monitor_result.reason}.",
+                    scheduled_action_type=sched.get("type"),
+                    state=state,
+                )
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
             events.extend(new_evs)
 
@@ -186,14 +327,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 continue
             if agent.get("has_left_zone"):  # departed agents need no hunger/thirst/sleep degradation
                 continue
-            agent["hunger"] = min(100, agent.get("hunger", 0) + 3)
-            agent["thirst"] = min(100, agent.get("thirst", 0) + 5)
-            agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + 4)
+            agent["hunger"] = min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR)
+            agent["thirst"] = min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR)
+            agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR)
             # Critical thirst causes HP damage faster than hunger
-            if agent.get("thirst", 0) >= 80:
-                agent["hp"] = max(0, agent["hp"] - 2)
-            if agent.get("hunger", 0) >= 80:
-                agent["hp"] = max(0, agent["hp"] - 1)
+            if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
+                agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_THIRST)
+            if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
+                agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER)
             if agent["hp"] <= 0 and agent.get("is_alive", True):
                 agent["is_alive"] = False
                 _hunger = agent.get("hunger", 0)
@@ -395,6 +536,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         bot_evs = _run_bot_decision_v2(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
+    for _agent in state.get("agents", {}).values():
+        if not is_v3_monitored_bot(_agent):
+            continue
+        ensure_brain_trace_for_tick(_agent, world_turn=world_turn, state=state)
+
     # 3b. Per-turn location observations for every alive stalker agent.
     # Writes a new observation entry only when content has changed since the last
     # entry of the same category; merges repeated observations via the semantic
@@ -436,6 +582,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     for agent in state.get("agents", {}).values():
         if agent.get("is_alive", True) and not agent.get("has_left_zone"):
             agent["action_used"] = False
+        for _k in [k for k in list(agent.keys()) if k.startswith("_v3_")]:
+            agent.pop(_k, None)
 
     # Check game-over (max_turns=0 means unlimited)
     max_turns = state.get("max_turns", 0)
@@ -489,6 +637,16 @@ def _process_scheduled_action(
     action_type = sched["type"]
     turns_remaining = sched["turns_remaining"] - 1
     sched["turns_remaining"] = turns_remaining
+
+    # ── Per-tick sleep interval processing ──────────────────────────────────
+    # Apply effects every 30 turns regardless of whether the action completes
+    # this tick.  This ensures partial recovery on abort.
+    if action_type == "sleep":
+        events.extend(_process_sleep_tick(agent_id, agent, sched, state, world_turn))
+        # _process_sleep_tick may force early wake-up when sleepiness reaches 0.
+        if sched.pop("wake_due_to_rested", False):
+            sched["turns_remaining"] = 0
+        turns_remaining = int(sched.get("turns_remaining", turns_remaining))
 
     if turns_remaining > 0:
         # ── Emergency interrupt: emission warning during any long-running action ──
@@ -703,11 +861,18 @@ def _process_scheduled_action(
 
     elif action_type == "sleep":
         _resolve_sleep(agent, sched, world_turn, state)
+        turns_slept = int(
+            sched.get(
+                "sleep_turns_slept",
+                max(0, int(sched.get("turns_total", 0)) - max(0, int(sched.get("turns_remaining", 0)))),
+            )
+        )
         events.append({
             "event_type": "sleep_completed",
             "payload": {
                 "agent_id": agent_id,
-                "hours_slept": sched.get("turns_total", 6),
+                "hours_slept": round(turns_slept / _HOUR_IN_TURNS, 2),
+                "turns_slept": turns_slept,
                 "hp_after": agent["hp"],
                 "radiation_after": agent["radiation"],
             },
@@ -869,33 +1034,118 @@ def _resolve_exploration(
     return events
 
 
+def _apply_sleep_interval_effect(
+    agent_id: str,
+    agent: Dict[str, Any],
+    sched: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Apply one 30-minute sleep interval: recover sleepiness, increase hunger/thirst."""
+    old_sleepiness = agent.get("sleepiness", 0)
+    old_hunger = agent.get("hunger", 0)
+    old_thirst = agent.get("thirst", 0)
+
+    agent["sleepiness"] = max(0, old_sleepiness - SLEEPINESS_RECOVERY_PER_SLEEP_INTERVAL)
+    agent["hunger"] = min(100, old_hunger + HUNGER_INCREASE_PER_SLEEP_INTERVAL)
+    agent["thirst"] = min(100, old_thirst + THIRST_INCREASE_PER_SLEEP_INTERVAL)
+
+    interval_index = int(sched.get("sleep_intervals_applied", 0))
+    sched["sleep_intervals_applied"] = interval_index + 1
+
+    return [{
+        "event_type": "sleep_interval_applied",
+        "payload": {
+            "agent_id": agent_id,
+            "interval_index": interval_index,
+            "sleepiness_before": old_sleepiness,
+            "sleepiness_after": agent["sleepiness"],
+            "hunger_after": agent["hunger"],
+            "thirst_after": agent["thirst"],
+        },
+    }]
+
+
+def _process_sleep_tick(
+    agent_id: str,
+    agent: Dict[str, Any],
+    sched: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Advance sleep by one turn, applying interval effects every 30 turns."""
+    events: List[Dict[str, Any]] = []
+
+    sched.setdefault("sleep_progress_turns", 0)
+    sched.setdefault("sleep_intervals_applied", 0)
+    sched.setdefault("sleep_turns_slept", 0)
+
+    # If sleepiness is already gone, stop sleeping on this tick.
+    if agent.get("sleepiness", 0) <= 0:
+        sched["wake_due_to_rested"] = True
+        return events
+
+    sched["sleep_progress_turns"] = int(sched["sleep_progress_turns"]) + 1
+    sched["sleep_turns_slept"] = int(sched["sleep_turns_slept"]) + 1
+
+    while sched["sleep_progress_turns"] >= SLEEP_EFFECT_INTERVAL_TURNS:
+        sched["sleep_progress_turns"] -= SLEEP_EFFECT_INTERVAL_TURNS
+        events.extend(_apply_sleep_interval_effect(agent_id, agent, sched, state, world_turn))
+        if agent.get("sleepiness", 0) <= 0:
+            sched["wake_due_to_rested"] = True
+            break
+
+    return events
+
+
 def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int, state: Dict[str, Any]) -> None:
-    """Apply sleep healing effects.
+    """Write sleep-completion memory.
+
+    Interval effects (sleepiness, hunger, thirst) were already applied during
+    tick-by-tick processing via ``_process_sleep_tick``.  This function only
+    records a final summary and applies HP/radiation recovery.
 
     ``sched`` must contain either:
     * ``hours``       – preferred; the number of in-game hours slept.
     * ``turns_total`` – fallback; total turns of the sleep action (converted via
                         ``turns_total // _HOUR_IN_TURNS``).
     """
-    hours_from_sched = sched.get("hours")
-    if hours_from_sched is not None:
-        hours = int(hours_from_sched)
-    elif sched.get("turns_total"):
-        hours = sched["turns_total"] // _HOUR_IN_TURNS
-    else:
-        hours = DEFAULT_SLEEP_HOURS
-    # Heal HP (15 per hour, max 100)
-    hp_regen = min(15 * hours, agent["max_hp"] - agent["hp"])
+    turns_total = int(sched.get("turns_total", DEFAULT_SLEEP_HOURS * _HOUR_IN_TURNS))
+    turns_slept = int(
+        sched.get(
+            "sleep_turns_slept",
+            max(0, turns_total - max(0, int(sched.get("turns_remaining", 0)))),
+        )
+    )
+    hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
+
+    # Heal HP / reduce radiation by actual slept time (not planned full duration).
+    hp_regen = min(int(15 * hours_slept), agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
-    # Reduce radiation (5 per hour)
-    rad_reduce = 5 * hours
+    rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
-    # Reset sleepiness
-    agent["sleepiness"] = 0
-    _add_memory(agent, world_turn, state, "action",
-                f"Поспал {hours} ч.",
-                {"action_kind": "sleep", "hp_gained": hp_regen, "radiation_reduced": rad_reduce},
-                summary=f"Поспал {hours} часов: восстановлено {hp_regen} HP, снято {rad_reduce} радиации")
+    # DO NOT reset sleepiness=0 here; interval effects already reduced it progressively.
+    intervals = int(sched.get("sleep_intervals_applied", 0))
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "action",
+        "😴 Сон завершён",
+        {
+            "action_kind": "sleep_completed",
+            "sleep_intervals_applied": intervals,
+            "turns_total": sched.get("turns_total"),
+            "turns_slept": turns_slept,
+            "hours_slept": round(hours_slept, 2),
+            "hp_gained": hp_regen,
+            "radiation_reduced": rad_reduce,
+        },
+        summary=(
+            f"Проснулся после сна ({hours_slept:.1f} ч): восстановлено {hp_regen} HP, "
+            f"снято {rad_reduce} радиации ({intervals} интервал(ов) сна)"
+        ),
+    )
 
 
 def _turn_to_time_label(world_turn: int) -> str:
@@ -982,6 +1232,28 @@ def _add_memory(
     # Keep only the last MAX_AGENT_MEMORY memory entries
     if len(mem) > MAX_AGENT_MEMORY:
         agent["memory"] = mem[-MAX_AGENT_MEMORY:]
+
+
+def should_write_plan_monitor_memory_event(
+    agent: Dict[str, Any],
+    world_turn: int,
+    *,
+    action_kind: str,
+    signature: Dict[str, Any],
+    dedup_turns: int = PLAN_MONITOR_MEMORY_DEDUP_TURNS,
+) -> bool:
+    """Return False when a semantically identical memory exists in the recent window."""
+    for mem in reversed(agent.get("memory", [])):
+        mem_turn = int(mem.get("world_turn", 0))
+        if world_turn - mem_turn > dedup_turns:
+            break
+
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") != action_kind:
+            continue
+        if effects.get("dedup_signature") == signature:
+            return False
+    return True
 
 
 # ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─# ─
@@ -3539,14 +3811,37 @@ def _update_current_goal_from_intent(
         "idle":                 "idle",
     }
     if intent.kind == "resupply":
-        # Determine which equipment is actually missing for a more descriptive goal name
+        # Determine which need is most urgent for a descriptive goal name,
+        # following the same priority order as planner._plan_resupply.
+        from app.games.zone_stalkers.balance.items import (
+            FOOD_ITEM_TYPES, DRINK_ITEM_TYPES, HEAL_ITEM_TYPES, AMMO_FOR_WEAPON,
+        )
         eq = agent.get("equipment", {})
-        if not eq.get("weapon"):
-            agent["current_goal"] = "get_weapon"
+        inv = agent.get("inventory", [])
+        risk_tolerance = float(agent.get("risk_tolerance", 0.5))
+        desired_food = 1 + round((1.0 - risk_tolerance) * 2)
+        desired_drink = desired_food
+        desired_medicine = 2 + round((1.0 - risk_tolerance) * 2)
+        food_count = sum(1 for i in inv if i.get("type") in FOOD_ITEM_TYPES)
+        drink_count = sum(1 for i in inv if i.get("type") in DRINK_ITEM_TYPES)
+        medicine_count = sum(1 for i in inv if i.get("type") in HEAL_ITEM_TYPES)
+        weapon = eq.get("weapon")
+        weapon_type = weapon.get("type") if isinstance(weapon, dict) else None
+        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+        ammo_count = sum(1 for i in inv if i.get("type") == required_ammo) if required_ammo else 3
+
+        if food_count < desired_food or drink_count < desired_drink:
+            agent["current_goal"] = "get_supplies"
         elif not eq.get("armor"):
             agent["current_goal"] = "get_armor"
-        else:
+        elif not eq.get("weapon"):
+            agent["current_goal"] = "get_weapon"
+        elif ammo_count < 3:
             agent["current_goal"] = "get_ammo"
+        elif medicine_count < desired_medicine:
+            agent["current_goal"] = "get_medicine"
+        else:
+            agent["current_goal"] = "upgrade_equipment"
         return
     new_goal = _INTENT_GOAL_MAP.get(intent.kind)
     if new_goal:
@@ -3783,6 +4078,15 @@ def _run_bot_decision_v2_inner(
                 + f" Топ потребности: {_needs_str}"
             ),
         )
+
+    write_decision_brain_trace_from_v2(
+        agent,
+        world_turn=world_turn,
+        intent_kind=intent.kind,
+        intent_score=float(intent.score),
+        reason=intent.reason,
+        state=state,
+    )
 
     return execute_plan_step(ctx, plan, state, world_turn)
 

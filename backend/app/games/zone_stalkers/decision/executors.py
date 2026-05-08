@@ -175,7 +175,7 @@ def _exec_sleep(
 ) -> list[dict[str, Any]]:
     """Schedule a sleep action."""
     from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
-    hours = step.payload.get("hours", DEFAULT_SLEEP_HOURS)
+    hours = max(1, int(step.payload.get("hours", DEFAULT_SLEEP_HOURS)))
     from app.games.zone_stalkers.rules.tick_rules import MINUTES_PER_TURN
     turns = hours * 60 // MINUTES_PER_TURN
     agent["scheduled_action"] = {
@@ -183,6 +183,9 @@ def _exec_sleep(
         "hours": hours,
         "turns_remaining": turns,
         "turns_total": turns,
+        "sleep_progress_turns": 0,
+        "sleep_intervals_applied": 0,
+        "sleep_turns_slept": 0,
     }
     agent["action_used"] = True
     return []
@@ -233,6 +236,30 @@ def _exec_trade_buy(
     from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
 
     category = step.payload.get("item_category", "medical")
+
+    # Upgrade categories: buy the best upgrade target and immediately equip it.
+    if category in ("weapon_upgrade", "armor_upgrade"):
+        slot = "weapon" if category == "weapon_upgrade" else "armor"
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
+        from app.games.zone_stalkers.rules.tick_rules import (
+            _find_upgrade_target, _bot_equip_from_inventory,
+        )
+        item_types_for_slot = WEAPON_ITEM_TYPES if slot == "weapon" else ARMOR_ITEM_TYPES
+        agent_risk = float(agent.get("risk_tolerance", 0.5))
+        agent_money = agent.get("money", 0)
+        current = agent.get("equipment", {}).get(slot)
+        current_type = current.get("type") if isinstance(current, dict) else None
+        upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
+        if upgrade_key is None:
+            return []
+        bought = _bot_buy_from_trader(agent_id, agent, frozenset([upgrade_key]), state, world_turn,
+                                      purchase_reason=f"апгрейд {slot}") or []
+        if bought:
+            equip_evs = _bot_equip_from_inventory(
+                agent_id, agent, frozenset([upgrade_key]), slot, state, world_turn,
+            )
+            return bought + equip_evs
+        return []
 
     # Bug fix: defensive guard — never buy equipment the agent already has equipped.
     eq = agent.get("equipment", {})
@@ -317,6 +344,10 @@ def _exec_consume(
         "emergency_heal": "consume_heal",
         "emergency_food": "consume_food",
         "emergency_drink": "consume_drink",
+        "prepare_sleep_food": "consume_food",
+        "prepare_sleep_drink": "consume_drink",
+        "opportunistic_food": "consume_food",
+        "opportunistic_drink": "consume_drink",
     }
     action_kind = action_kind_map.get(reason_key, "consume_heal")
     return _bot_consume(agent_id, agent, item, world_turn, state, action_kind) or []

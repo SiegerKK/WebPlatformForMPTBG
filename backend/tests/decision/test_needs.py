@@ -18,6 +18,26 @@ def _needs_for(agent_id="bot1", agent=None, state=None):
     return evaluate_needs(ctx, state)
 
 
+def _full_supplies():
+    """Inventory with all supplies at the minimum level for risk_tolerance=0.5.
+
+    Provides 3 ammo items, 2 food, 2 drink, 3 medicine so that
+    ``reload_or_rearm`` returns 0.0 for a weapon+armor equipped agent.
+    """
+    return [
+        {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+        {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
+        {"id": "ammo_2", "type": "ammo_9mm", "value": 60},
+        {"id": "food_0", "type": "bread", "value": 40},
+        {"id": "food_1", "type": "bread", "value": 40},
+        {"id": "drink_0", "type": "water", "value": 30},
+        {"id": "drink_1", "type": "water", "value": 30},
+        {"id": "med_0", "type": "bandage", "value": 50},
+        {"id": "med_1", "type": "bandage", "value": 50},
+        {"id": "med_2", "type": "bandage", "value": 50},
+    ]
+
+
 # ── survive_now ───────────────────────────────────────────────────────────────
 
 class TestSurviveNow:
@@ -131,8 +151,9 @@ class TestSleep:
 # ── reload_or_rearm ───────────────────────────────────────────────────────────
 
 class TestReloadOrRearm:
-    def test_no_weapon_is_1(self):
-        agent = make_agent(has_weapon=False, has_armor=False)
+    def test_no_weapon_only_armor_present_is_065(self):
+        """No weapon but armor is present → 0.65 (weapon gap drives score)."""
+        agent = make_agent(has_weapon=False, has_armor=True)
         needs = _needs_for(agent=agent)
         assert needs.reload_or_rearm == 0.65
 
@@ -142,19 +163,120 @@ class TestReloadOrRearm:
         assert abs(needs.reload_or_rearm - 0.7) < 1e-9
 
     def test_has_weapon_and_armor_and_no_ammo(self):
-        """With weapon=pistol+armor but 0 ammo → ammo_score=0 → reload_or_rearm > 0.5."""
+        """With weapon=pistol+armor but 0 ammo → ammo gap score ≈ 0.60 > 0.5."""
         agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
-        # Remove any ammo that was added by default (has_ammo defaults to True via make_agent
-        # when has_weapon is True, but here has_ammo=False so none is added)
         needs = _needs_for(agent=agent)
-        # pistol needs ammo_9mm, 0/20 = 0.0 < 0.5 → reload_or_rearm = clamp(1.0 - 0.0) = 1.0
         assert needs.reload_or_rearm > 0.5
 
-    def test_fully_equipped(self):
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=True)
+    def test_fully_equipped_and_stocked(self):
+        """weapon + armor + 3 ammo + 2 food + 2 drink + 3 medicine → 0.0."""
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = _full_supplies()
         needs = _needs_for(agent=agent)
-        # 20 ammo_9mm → ammo_score=1.0 → not < 0.5 → 0.0
         assert needs.reload_or_rearm == 0.0
+
+    def test_no_food_stock_triggers_resupply(self):
+        """Agent with weapon+armor+ammo but no food → reload_or_rearm = 0.55."""
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        # Only ammo and drink/medicine in inventory (no food)
+        agent["inventory"] = [
+            {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_2", "type": "ammo_9mm", "value": 60},
+            {"id": "drink_0", "type": "water", "value": 30},
+            {"id": "drink_1", "type": "water", "value": 30},
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},
+            {"id": "med_2", "type": "bandage", "value": 50},
+        ]
+        needs = _needs_for(agent=agent)
+        assert abs(needs.reload_or_rearm - 0.55) < 1e-9
+
+    def test_no_drink_stock_triggers_resupply(self):
+        """Agent with weapon+armor+ammo but no drink → reload_or_rearm = 0.55."""
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [
+            {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_2", "type": "ammo_9mm", "value": 60},
+            {"id": "food_0", "type": "bread", "value": 40},
+            {"id": "food_1", "type": "bread", "value": 40},
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},
+            {"id": "med_2", "type": "bandage", "value": 50},
+        ]
+        needs = _needs_for(agent=agent)
+        assert abs(needs.reload_or_rearm - 0.55) < 1e-9
+
+    def test_ammo_count_below_3_triggers_resupply(self):
+        """Agent with 1 ammo item (< DESIRED_AMMO_COUNT=3) → reload_or_rearm ≈ 0.40."""
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [
+            {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+            # Only 1 ammo item — also add food/drink/medicine to isolate ammo score
+            {"id": "food_0", "type": "bread", "value": 40},
+            {"id": "food_1", "type": "bread", "value": 40},
+            {"id": "drink_0", "type": "water", "value": 30},
+            {"id": "drink_1", "type": "water", "value": 30},
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},
+            {"id": "med_2", "type": "bandage", "value": 50},
+        ]
+        needs = _needs_for(agent=agent)
+        # ammo_count=1/3 → 0.60*(1-1/3) = 0.40
+        assert abs(needs.reload_or_rearm - 0.40) < 1e-9
+
+    def test_medicine_below_desired_triggers_resupply(self):
+        """Agent fully equipped (weapon+armor+3 ammo+2 food+2 drink) but no medicine → 0.45."""
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent["inventory"] = [
+            {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_2", "type": "ammo_9mm", "value": 60},
+            {"id": "food_0", "type": "bread", "value": 40},
+            {"id": "food_1", "type": "bread", "value": 40},
+            {"id": "drink_0", "type": "water", "value": 30},
+            {"id": "drink_1", "type": "water", "value": 30},
+        ]
+        needs = _needs_for(agent=agent)
+        assert abs(needs.reload_or_rearm - 0.45) < 1e-9
+
+    def test_risk_tolerance_affects_desired_food_count(self):
+        """Low risk tolerance (0.0) requires 3 food items; high (1.0) requires only 1."""
+        # Low risk tolerance: needs 3 food, has 2 → still below desired
+        agent_cautious = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent_cautious["risk_tolerance"] = 0.0
+        agent_cautious["inventory"] = [
+            {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_2", "type": "ammo_9mm", "value": 60},
+            {"id": "food_0", "type": "bread", "value": 40},
+            {"id": "food_1", "type": "bread", "value": 40},  # 2 food < 3 desired
+            {"id": "drink_0", "type": "water", "value": 30},
+            {"id": "drink_1", "type": "water", "value": 30},
+            {"id": "drink_2", "type": "water", "value": 30},
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},
+            {"id": "med_2", "type": "bandage", "value": 50},
+            {"id": "med_3", "type": "bandage", "value": 50},
+        ]
+        needs_cautious = _needs_for(agent=agent_cautious)
+        assert needs_cautious.reload_or_rearm > 0.0  # food gap
+
+        # High risk tolerance: needs only 1 food, has 2 → OK
+        agent_risky = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent_risky["risk_tolerance"] = 1.0
+        agent_risky["inventory"] = [
+            {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
+            {"id": "ammo_2", "type": "ammo_9mm", "value": 60},
+            {"id": "food_0", "type": "bread", "value": 40},  # 1 food == 1 desired
+            {"id": "drink_0", "type": "water", "value": 30},  # 1 drink == 1 desired
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},  # 2 med == 2 desired
+        ]
+        needs_risky = _needs_for(agent=agent_risky)
+        assert needs_risky.reload_or_rearm == 0.0  # all needs met for risk_tolerance=1.0
 
 
 # ── avoid_emission ────────────────────────────────────────────────────────────
@@ -185,16 +307,17 @@ class TestAvoidEmission:
 
 class TestGetRich:
     def test_zero_liquid_wealth_fully_equipped_max_score(self):
-        """Fully equipped agent with zero liquid wealth → get_rich = 0.70 (no suppression).
+        """Fully stocked agent with zero liquid wealth → get_rich = 0.70 (no suppression).
 
-        Ammo is present (reload_or_rearm=0) but given value=0 so that liquid
-        wealth stays at exactly 0 for a clean formula check.
+        All supplies at target: weapon+armor+3 ammo+2 food+2 drink+3 medicine.
+        Item values are set to 0 so that liquid wealth stays at exactly 0 for a
+        clean formula check.
         """
         agent = make_agent(money=0, material_threshold=3000,
                            has_weapon=True, has_armor=True, has_ammo=False)
-        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
+        agent["inventory"] = [{**i, "value": 0} for i in _full_supplies()]
         needs = _needs_for(agent=agent)
-        assert needs.reload_or_rearm == 0.0, "should be fully equipped"
+        assert needs.reload_or_rearm == 0.0, "should be fully stocked"
         assert abs(needs.get_rich - 0.70) < 1e-9
 
     def test_at_threshold_zero(self):
@@ -202,28 +325,34 @@ class TestGetRich:
         needs = _needs_for(agent=agent)
         assert needs.get_rich == 0.0
 
-    def test_half_threshold_fully_equipped(self):
-        # money=1500, ammo value=0, fully equipped → liquid_wealth=1500,
-        # ratio=0.5 → base=(1-0.5)*0.7=0.35; reload_or_rearm=0 → no suppression.
+    def test_half_threshold_fully_stocked(self):
+        """money=1500, fully stocked, upgrade available → get_rich suppressed by upgrade score."""
         agent = make_agent(money=1500, material_threshold=3000,
                            has_weapon=True, has_armor=True, has_ammo=False)
-        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
+        agent["inventory"] = [{**i, "value": 0} for i in _full_supplies()]
         needs = _needs_for(agent=agent)
-        assert needs.reload_or_rearm == 0.0, "should be fully equipped"
-        assert abs(needs.get_rich - 0.35) < 1e-9
+        # The agent can afford a weapon upgrade (pistol→shotgun at 1200 coins)
+        # so reload_or_rearm = 0.25 (upgrade score), which suppresses get_rich.
+        # get_rich = (1-0.5) * 0.70 * (1-reload_or_rearm)
+        expected_get_rich = 0.5 * 0.70 * (1.0 - needs.reload_or_rearm)
+        assert abs(needs.get_rich - expected_get_rich) < 1e-9
 
 
 # ── Equipment gate on get_rich ────────────────────────────────────────────────
 
 class TestEquipmentGateOnGetRich:
     def test_no_weapon_suppresses_get_rich(self):
-        """Missing weapon (reload_or_rearm=0.65) suppresses get_rich below resupply score."""
+        """Missing weapon (reload_or_rearm=0.65) suppresses get_rich below resupply score.
+
+        Agent has armor but no weapon.  The weapon gap (0.65) drives the score.
+        """
         agent = make_agent(money=0, material_threshold=3000,
-                           has_weapon=False, has_armor=False, has_ammo=False)
+                           has_weapon=False, has_armor=True, has_ammo=False)
         needs = _needs_for(agent=agent)
-        # base get_rich = 0.70; suppression factor = (1 - 0.65) = 0.35
+        # reload_or_rearm = 0.65 (weapon gap); suppression = (1 - 0.65) = 0.35
+        assert abs(needs.reload_or_rearm - 0.65) < 1e-9
+        # base get_rich = 0.70; suppressed: 0.70 * 0.35 = 0.245
         assert abs(needs.get_rich - 0.70 * 0.35) < 1e-9
-        # Critically: suppressed get_rich < reload_or_rearm
         assert needs.get_rich < needs.reload_or_rearm
 
     def test_no_armor_suppresses_get_rich(self):
@@ -245,11 +374,11 @@ class TestEquipmentGateOnGetRich:
         assert abs(needs.get_rich - 0.70 * 0.40) < 1e-9
         assert needs.get_rich < needs.reload_or_rearm
 
-    def test_fully_equipped_no_suppression(self):
-        """Fully equipped agent → reload_or_rearm=0 → get_rich is not suppressed."""
+    def test_fully_stocked_no_suppression(self):
+        """Fully stocked agent → reload_or_rearm=0 → get_rich is not suppressed."""
         agent = make_agent(money=0, material_threshold=3000,
                            has_weapon=True, has_armor=True, has_ammo=False)
-        agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
+        agent["inventory"] = [{**i, "value": 0} for i in _full_supplies()]
         needs = _needs_for(agent=agent)
         assert needs.reload_or_rearm == 0.0
         assert abs(needs.get_rich - 0.70) < 1e-9
@@ -262,7 +391,7 @@ class TestEquipmentGateOnGetRich:
         agent = make_agent(money=0, material_threshold=3000,
                            has_weapon=True, has_armor=True, has_ammo=False)
         needs = _needs_for(agent=agent)
-        # reload_or_rearm=0.60, liquid_wealth=0 → base=0.70, suppressed: 0.70*0.40=0.28
+        # reload_or_rearm=0.60 (ammo gap), liquid_wealth=0 → base=0.70, suppressed: 0.70*0.40=0.28
         assert abs(needs.get_rich - 0.70 * 0.40) < 1e-9
 
 

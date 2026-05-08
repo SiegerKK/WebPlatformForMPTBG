@@ -1,0 +1,28 @@
+"""Shared tick constants for Zone Stalkers world simulation."""
+
+from __future__ import annotations
+
+HUNGER_INCREASE_PER_HOUR = 3
+THIRST_INCREASE_PER_HOUR = 5
+SLEEPINESS_INCREASE_PER_HOUR = 4
+
+CRITICAL_THIRST_THRESHOLD = 80
+CRITICAL_HUNGER_THRESHOLD = 80
+CRITICAL_HP_THRESHOLD = 30
+
+HP_DAMAGE_PER_HOUR_CRITICAL_THIRST = 2
+HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER = 1
+
+BRAIN_TRACE_MAX_EVENTS = 5
+
+# Sleep interval mechanics
+# Effects are applied every 30 in-game minutes of sleep.
+SLEEP_EFFECT_INTERVAL_TURNS = 30
+
+SLEEPINESS_RECOVERY_PER_SLEEP_INTERVAL = 10
+HUNGER_INCREASE_PER_SLEEP_INTERVAL = 1
+THIRST_INCREASE_PER_SLEEP_INTERVAL = 2
+
+# Thresholds above which sleep preconditions require consuming food/water first.
+SLEEP_SAFE_HUNGER_THRESHOLD = 70
+SLEEP_SAFE_THIRST_THRESHOLD = 70

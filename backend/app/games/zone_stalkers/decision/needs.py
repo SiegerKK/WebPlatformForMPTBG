@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .constants import EMISSION_DANGEROUS_TERRAIN
+from .constants import EMISSION_DANGEROUS_TERRAIN, DESIRED_AMMO_COUNT
 from .models.agent_context import AgentContext
 from .models.need_scores import NeedScores
 
@@ -27,7 +27,7 @@ _HP_HEAL_SELF_UPPER = 50             # hp above this → heal_self = 0.0
 
 _SLEEP_HIGH = 75                     # sleepiness threshold from tick_rules
 
-_DESIRED_AMMO_RESERVE = 20           # target ammo count for full reload_or_rearm score
+_DESIRED_AMMO_RESERVE = 20           # kept for backwards-compat imports; see DESIRED_AMMO_COUNT
 
 _GET_RICH_WEIGHT = 0.70              # weight for the get_rich material drive formula
 
@@ -153,35 +153,131 @@ def _score_heal_self(hp: int) -> float:
     return _clamp((_HP_HEAL_SELF_UPPER - hp) / (_HP_HEAL_SELF_UPPER - _HP_HEAL_SELF_THRESHOLD))
 
 
+def _desired_supply_count(risk_tolerance: float, min_count: int, max_count: int) -> int:
+    """Desired inventory count for a supply category based on risk tolerance.
+
+    More risk-averse agents (low ``risk_tolerance``) want larger stocks; agents
+    with a higher risk tolerance can get by with the minimum.
+
+    Examples (min=1, max=3):
+        risk_tolerance=0.0 → 3
+        risk_tolerance=0.5 → 2
+        risk_tolerance=1.0 → 1
+    """
+    return min_count + round((1.0 - risk_tolerance) * (max_count - min_count))
+
+
 def _score_reload_or_rearm(agent: dict[str, Any]) -> float:
-    """Pressure to acquire weapon / armor / ammo."""
+    """Pressure to resupply consumables, equipment, and upgrades.
+
+    Priority order (mirrored in planner._plan_resupply):
+      1. Food / drink stock below desired level   → 0.55
+      2. No armor                                  → 0.70
+      3. No weapon                                 → 0.65
+      4. Ammo count below DESIRED_AMMO_COUNT       → up to 0.60 (scaled)
+      5. Medicine stock below desired level        → 0.45
+      6. Upgrade available for weapon or armor     → 0.25
+
+    Returns the maximum urgency score across all detected gaps.
+    Money is NOT checked here — the NPC should always want proper equipment
+    regardless of wealth (the material_threshold gate is only for get_rich).
+    """
+    from app.games.zone_stalkers.balance.items import (
+        AMMO_FOR_WEAPON, FOOD_ITEM_TYPES, DRINK_ITEM_TYPES, HEAL_ITEM_TYPES,
+        WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES,
+    )
+
     equipment = agent.get("equipment", {})
     inventory = agent.get("inventory", [])
+    risk_tolerance = float(agent.get("risk_tolerance", 0.5))
+
+    # Desired supply counts based on risk tolerance
+    desired_food = _desired_supply_count(risk_tolerance, 1, 3)
+    desired_drink = _desired_supply_count(risk_tolerance, 1, 3)
+    desired_medicine = _desired_supply_count(risk_tolerance, 2, 4)
+
+    # Count current inventory by category
+    food_count = sum(1 for i in inventory if i.get("type") in FOOD_ITEM_TYPES)
+    drink_count = sum(1 for i in inventory if i.get("type") in DRINK_ITEM_TYPES)
+    medicine_count = sum(1 for i in inventory if i.get("type") in HEAL_ITEM_TYPES)
 
     has_weapon = equipment.get("weapon") is not None
     has_armor = equipment.get("armor") is not None
 
-    if not has_weapon:
-        # 0.65 — serious but below emergency survival thresholds (heal ≥0.8,
-        # eat/drink at 75% ≈ 0.75).  Equipment is also handled pre-pipeline
-        # by _pre_decision_equipment_maintenance.
-        return 0.65
-    if not has_armor:
-        return 0.7
+    score = 0.0
 
-    # Check ammo for equipped weapon
-    from app.games.zone_stalkers.balance.items import AMMO_FOR_WEAPON
-    weapon_type: str | None = None
-    w = equipment.get("weapon")
-    if w and isinstance(w, dict):
-        weapon_type = w.get("type")
-    required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
-    if required_ammo:
-        # Each ammo item in inventory is a full box — check for PRESENCE, not quantity.
-        # (The game does not track individual bullet counts via the 'quantity' field.)
-        has_ammo = any(i.get("type") == required_ammo for i in inventory)
-        if not has_ammo:
-            return 0.6  # armed but out of ammo
+    # 1. Food / drink stock
+    if food_count < desired_food or drink_count < desired_drink:
+        score = max(score, 0.55)
+
+    # 2. Armor
+    if not has_armor:
+        score = max(score, 0.70)
+
+    # 3. Weapon
+    if not has_weapon:
+        score = max(score, 0.65)
+
+    # 4. Ammo (count-based: need DESIRED_AMMO_COUNT items)
+    if has_weapon:
+        weapon_type: str | None = None
+        w = equipment.get("weapon")
+        if w and isinstance(w, dict):
+            weapon_type = w.get("type")
+        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
+        if required_ammo:
+            ammo_count = sum(1 for i in inventory if i.get("type") == required_ammo)
+            if ammo_count < DESIRED_AMMO_COUNT:
+                # Score decreases as ammo count approaches the target
+                ammo_gap_score = 0.60 * (1.0 - ammo_count / DESIRED_AMMO_COUNT)
+                score = max(score, ammo_gap_score)
+
+    # 5. Medicine stock
+    if medicine_count < desired_medicine:
+        score = max(score, 0.45)
+
+    return score
+
+
+def _score_upgrade_opportunity(
+    equipment: dict[str, Any],
+    agent_money: int,
+    risk_tolerance: float,
+) -> float:
+    """Return 0.25 if an affordable upgrade exists for weapon or armor, else 0.0.
+
+    Checks whether any item in the same slot category offers a closer
+    ``risk_tolerance`` match to the agent AND has a higher base value (higher
+    tier), AND is affordable at trader price (base × 1.5).
+    """
+    from app.games.zone_stalkers.balance.items import (
+        ITEM_TYPES, WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES,
+    )
+    for slot, item_types in [("weapon", WEAPON_ITEM_TYPES), ("armor", ARMOR_ITEM_TYPES)]:
+        current = equipment.get(slot)
+        if not isinstance(current, dict):
+            continue
+        current_type = current.get("type")
+        current_info = ITEM_TYPES.get(current_type or "", {})
+        current_rt = float(current_info.get("risk_tolerance", 0.5))
+        current_dist = abs(current_rt - risk_tolerance)
+        current_value = int(current_info.get("value", 0))
+        for k in item_types:
+            if k == current_type:
+                continue
+            info = ITEM_TYPES.get(k)
+            if info is None:
+                continue
+            dist = abs(float(info.get("risk_tolerance", 0.5)) - risk_tolerance)
+            value = int(info.get("value", 0))
+            if dist > current_dist:
+                continue
+            if value <= current_value:
+                continue
+            buy_price = int(value * 1.5)
+            if agent_money < buy_price:
+                continue
+            return 0.25
     return 0.0
 
 

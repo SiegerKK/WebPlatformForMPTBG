@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from app.games.zone_stalkers.decision.plan_monitor import assess_scheduled_action_v3, is_v3_monitored_bot
+
+
+def _base_agent() -> dict:
+    return {
+        "archetype": "stalker_agent",
+        "controller": {"kind": "bot"},
+        "is_alive": True,
+        "has_left_zone": False,
+        "hp": 100,
+        "hunger": 0,
+        "thirst": 0,
+    }
+
+
+def _base_state() -> dict:
+    return {"world_minute": 0}
+
+
+def test_is_v3_monitored_bot_true_for_alive_stalker_bot() -> None:
+    assert is_v3_monitored_bot(_base_agent()) is True
+
+
+def test_is_v3_monitored_bot_false_for_human() -> None:
+    agent = _base_agent()
+    agent["controller"] = {"kind": "human"}
+    assert is_v3_monitored_bot(agent) is False
+
+
+def test_assess_aborts_on_critical_thirst() -> None:
+    agent = _base_agent()
+    agent["thirst"] = 96
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "travel", "turns_remaining": 5},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "abort"
+    assert result.reason == "critical_thirst"
+    assert result.dominant_pressure == "thirst"
+
+
+def test_assess_continues_emergency_flee() -> None:
+    agent = _base_agent()
+    agent["thirst"] = 99
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "travel", "turns_remaining": 5, "emergency_flee": True},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "continue"
+    assert result.interruptible is False
+
+
+def test_assess_projects_hour_boundary_values() -> None:
+    agent = _base_agent()
+    agent["thirst"] = 76
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "explore_anomaly_location", "turns_remaining": 10},
+        state={"world_minute": 59},
+        world_turn=100,
+    )
+    assert result.decision == "abort"
+    assert result.reason == "critical_thirst"
