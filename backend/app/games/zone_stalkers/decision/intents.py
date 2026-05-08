@@ -84,6 +84,10 @@ _HARD_INTERRUPT_SURVIVE_NOW = 0.70
 _HARD_INTERRUPT_EMISSION = 0.80
 _HARD_INTERRUPT_HEAL = 0.80
 
+# Soft consume thresholds to avoid non-critical seek_* -> wait loops.
+_SOFT_CONSUME_FOOD_THRESHOLD = 50
+_SOFT_CONSUME_DRINK_THRESHOLD = 40
+
 
 # ── Priority-ordered mapping: drive name → (intent_kind, reason_template) ─────
 #
@@ -236,7 +240,23 @@ def select_intent(
     best_intent: Optional[Intent] = None
     best_score: float = _NEGLIGIBLE_THRESHOLD  # anything below this is ignored
 
+    has_food_immediate = False
+    has_drink_immediate = False
+    if need_result is not None:
+        has_food_immediate = any(
+            n.key == "eat_now" and n.trigger_context in ("survival", "rest_preparation")
+            for n in need_result.immediate_needs
+        )
+        has_drink_immediate = any(
+            n.key == "drink_now" and n.trigger_context in ("survival", "rest_preparation")
+            for n in need_result.immediate_needs
+        )
+
     for drive_attr, intent_kind, reason_tmpl in _PRIORITY_MAP:
+        if drive_attr == "eat" and not has_food_immediate and int(agent.get("hunger", 0)) < _SOFT_CONSUME_FOOD_THRESHOLD:
+            continue
+        if drive_attr == "drink" and not has_drink_immediate and int(agent.get("thirst", 0)) < _SOFT_CONSUME_DRINK_THRESHOLD:
+            continue
         score: float = getattr(needs, drive_attr, 0.0)
         if score > best_score:
             best_score = score

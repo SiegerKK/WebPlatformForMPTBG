@@ -215,3 +215,99 @@ def test_v3_transient_flags_are_removed_after_tick() -> None:
     new_state, _ = tick_zone_map(state)
     new_bot = new_state["agents"]["bot1"]
     assert not any(k.startswith("_v3_") for k in new_bot.keys())
+
+
+def test_decision_pipeline_uses_memory_v3_trader_lookup_and_writes_memory_used() -> None:
+    from app.games.zone_stalkers.memory.models import MemoryRecord
+    from app.games.zone_stalkers.memory.store import add_memory_record
+
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    # Artifact in inventory triggers sell_artifacts/get_rich branch.
+    bot["inventory"].append({"id": "art1", "type": "soul", "value": 1000})
+    # No live traders in state -> planner must rely on memory_v3 fallback.
+    state["traders"] = {}
+
+    add_memory_record(
+        bot,
+        MemoryRecord(
+            id="mem_trader_1",
+            agent_id="bot1",
+            layer="semantic",
+            kind="trader_location_known",
+            created_turn=90,
+            last_accessed_turn=None,
+            summary="Торговец в Локации Б",
+            details={"trader_id": "trader_1"},
+            location_id="loc_b",
+            tags=("trader", "trade"),
+            confidence=0.9,
+            importance=0.8,
+        ),
+    )
+
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+    bot_new = new_state["agents"]["bot1"]
+
+    # Memory-backed trader lookup should create a travel decision toward loc_b.
+    sched = bot_new.get("scheduled_action") or {}
+    assert sched.get("target_id") == "loc_b"
+
+    decision_events = [ev for ev in bot_new.get("brain_trace", {}).get("events", []) if ev.get("mode") == "decision"]
+    assert decision_events
+    mem_used = decision_events[-1].get("memory_used", [])
+    assert any(mu.get("used_for") in ("find_trader", "sell_artifacts") for mu in mem_used)
+
+
+def test_decision_pipeline_uses_memory_v3_water_source_when_no_trader_path() -> None:
+    from app.games.zone_stalkers.memory.models import MemoryRecord
+    from app.games.zone_stalkers.memory.store import add_memory_record
+
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["thirst"] = 60
+    bot["hunger"] = 5
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["inventory"] = []  # no water in inventory
+    state["traders"] = {}  # no trader path available
+
+    add_memory_record(
+        bot,
+        MemoryRecord(
+            id="mem_water_1",
+            agent_id="bot1",
+            layer="spatial",
+            kind="water_source_known",
+            created_turn=95,
+            last_accessed_turn=None,
+            summary="В Локации Б есть вода",
+            details={},
+            location_id="loc_b",
+            item_types=("water",),
+            tags=("water", "drink", "item"),
+            confidence=0.8,
+            importance=0.7,
+        ),
+    )
+
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+    bot_new = new_state["agents"]["bot1"]
+
+    sched = bot_new.get("scheduled_action") or {}
+    assert sched.get("target_id") == "loc_b"
+
+    decision_events = [ev for ev in bot_new.get("brain_trace", {}).get("events", []) if ev.get("mode") == "decision"]
+    assert decision_events
+    mem_used = decision_events[-1].get("memory_used", [])
+    assert any(mu.get("used_for") == "find_water" for mu in mem_used)

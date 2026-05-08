@@ -1235,6 +1235,7 @@ def _add_memory(
     *call_args: Any,
     reason: str = "",
     summary: str = "",
+    agent_id: str | None = None,
 ) -> None:
     """Append a memory entry to an agent.
 
@@ -1295,9 +1296,27 @@ def _add_memory(
     if len(mem) > MAX_AGENT_MEMORY:
         agent["memory"] = mem[-MAX_AGENT_MEMORY:]
 
-    # PR 3: bridge this entry into memory_v3.
+    # PR 3: bridge this entry into memory_v3 using stable agent id.
     from app.games.zone_stalkers.memory.legacy_bridge import bridge_legacy_entry_to_memory_v3  # noqa: PLC0415
-    bridge_legacy_entry_to_memory_v3(agent, memory_entry, world_turn)
+
+    resolved_agent_id = agent_id
+    if not resolved_agent_id:
+        resolved_agent_id = agent.get("agent_id")
+    if not resolved_agent_id:
+        # Best effort: find actual key in state["agents"] by object identity.
+        for _aid, _a in state.get("agents", {}).items():
+            if _a is agent:
+                resolved_agent_id = _aid
+                break
+    if not resolved_agent_id:
+        resolved_agent_id = agent.get("id") or agent.get("name") or "unknown"
+
+    bridge_legacy_entry_to_memory_v3(
+        agent_id=str(resolved_agent_id),
+        agent=agent,
+        legacy_entry=memory_entry,
+        world_turn=world_turn,
+    )
 
 
 def should_write_plan_monitor_memory_event(
@@ -4081,9 +4100,26 @@ def _run_bot_decision_v2_inner(
     # ── V2 pipeline ────────────────────────────────────────────────────────
     ctx = build_agent_context(agent_id, agent, state)
 
-    # PR 3: build BeliefState adapter for memory-enriched lookups.
-    from app.games.zone_stalkers.decision.beliefs import build_belief_state  # noqa: PLC0415
+    # PR 3: build BeliefState adapter and compute memory-backed lookup hints.
+    from app.games.zone_stalkers.decision.beliefs import (  # noqa: PLC0415
+        build_belief_state,
+        find_trader_memory_candidate_from_beliefs,
+        find_food_memory_candidate_from_beliefs,
+        find_water_memory_candidate_from_beliefs,
+    )
     belief = build_belief_state(ctx, agent, world_turn)
+
+    _memory_hints: dict[str, dict[str, Any]] = {}
+    _trader_mem = find_trader_memory_candidate_from_beliefs(belief, agent, world_turn)
+    if _trader_mem:
+        _memory_hints["trader"] = _trader_mem
+    _food_mem = find_food_memory_candidate_from_beliefs(belief, agent, world_turn)
+    if _food_mem:
+        _memory_hints["food"] = _food_mem
+    _water_mem = find_water_memory_candidate_from_beliefs(belief, agent, world_turn)
+    if _water_mem:
+        _memory_hints["water"] = _water_mem
+    agent["_belief_memory_hints"] = _memory_hints
 
     need_result = evaluate_need_result(ctx, state)
     needs = need_result.scores
@@ -4151,8 +4187,9 @@ def _run_bot_decision_v2_inner(
             ),
         )
 
-    # PR 3: collect memory_used from BeliefState for brain trace.
-    _memory_used_payload: list[dict] = [
+    # PR 3: collect concrete memory-backed lookup usages from planner first.
+    _planner_memory_used = list(agent.get("_memory_used_decision", []))
+    _context_memory_used = [
         {
             "id": mem["id"],
             "kind": mem["kind"],
@@ -4161,7 +4198,8 @@ def _run_bot_decision_v2_inner(
             "used_for": "general_context",
         }
         for mem in belief.relevant_memories
-    ][:5]
+    ]
+    _memory_used_payload: list[dict] = (_planner_memory_used + _context_memory_used)[:5]
 
     write_decision_brain_trace_from_v2(
         agent,
@@ -4174,7 +4212,11 @@ def _run_bot_decision_v2_inner(
         memory_used=_memory_used_payload if _memory_used_payload else None,
     )
 
-    return execute_plan_step(ctx, plan, state, world_turn)
+    result = execute_plan_step(ctx, plan, state, world_turn)
+    # Transient PR3 hint/debug fields should not leak between ticks.
+    agent.pop("_belief_memory_hints", None)
+    agent.pop("_memory_used_decision", None)
+    return result
 
 
 def _check_global_goal_completion(

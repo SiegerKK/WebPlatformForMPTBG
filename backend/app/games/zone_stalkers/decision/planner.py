@@ -642,6 +642,36 @@ def _plan_seek_consumable(
             confidence=0.7,
             created_turn=world_turn,
         )
+
+    # No trader path: use remembered source from BeliefState hints as safe fallback.
+    hint_key = "food" if is_food else "water"
+    mem_hint = _memory_hint(agent, hint_key)
+    mem_loc = mem_hint.get("location_id") if isinstance(mem_hint, dict) else None
+    if mem_loc:
+        _record_memory_used(agent, mem_hint, used_for=("find_food" if is_food else "find_water"))
+        if mem_loc == agent_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    STEP_EXPLORE_LOCATION,
+                    {"reason": f"check_{category}_source_memory"},
+                    interruptible=True,
+                    expected_duration_ticks=1,
+                )],
+                confidence=0.55,
+                created_turn=world_turn,
+            )
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": mem_loc, "reason": f"find_{category}_from_memory"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+            )],
+            confidence=0.55,
+            created_turn=world_turn,
+        )
+
     return None
 
 
@@ -1033,7 +1063,7 @@ def _plan_sell_artifacts(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
-    trader_loc = _nearest_trader_location(ctx, state)
+    trader_loc = _nearest_trader_location(ctx, state, used_for="sell_artifacts")
     agent_loc = ctx.self_state.get("location_id")
     if trader_loc == agent_loc:
         return Plan(
@@ -1390,17 +1420,56 @@ def _idle_plan(intent: Intent, world_turn: int) -> Plan:
 
 # ── Location helpers ──────────────────────────────────────────────────────────
 
+def _record_memory_used(
+    agent: dict[str, Any],
+    candidate: dict[str, Any] | None,
+    *,
+    used_for: str,
+) -> None:
+    """Store transient memory usage for brain_trace in this tick."""
+    if not candidate:
+        return
+    memory_id = candidate.get("memory_id") or candidate.get("id")
+    if not memory_id:
+        return
+    payload = {
+        "id": memory_id,
+        "kind": candidate.get("kind", "memory"),
+        "summary": candidate.get("summary", ""),
+        "confidence": round(float(candidate.get("confidence", 0.0)), 3),
+        "used_for": used_for,
+    }
+    used_list = agent.setdefault("_memory_used_decision", [])
+    if not any(u.get("id") == payload["id"] and u.get("used_for") == payload["used_for"] for u in used_list):
+        used_list.append(payload)
+    if len(used_list) > 5:
+        agent["_memory_used_decision"] = used_list[:5]
+
+
+def _memory_hint(agent: dict[str, Any], key: str) -> dict[str, Any] | None:
+    hints = agent.get("_belief_memory_hints")
+    if isinstance(hints, dict):
+        value = hints.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def _nearest_trader_location(
     ctx: AgentContext,
     state: dict[str, Any],
+    *,
+    used_for: str = "find_trader",
 ) -> Optional[str]:
-    """Return the location_id of the nearest known trader, or None.
+    """Return nearest trader location; prefer memory-backed BeliefState hints."""
+    agent = ctx.self_state
+    hint = _memory_hint(agent, "trader")
+    if hint and hint.get("location_id"):
+        _record_memory_used(agent, hint, used_for=used_for)
+        return str(hint["location_id"])
 
-    Delegates to the tick_rules helper during the migration period.
-    Phase 5+ can promote this to a standalone utility in a shared module.
-    """
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
-    agent_loc = ctx.self_state.get("location_id", "")
+    agent_loc = agent.get("location_id", "")
     return _find_nearest_trader_location(agent_loc, state)
 
 

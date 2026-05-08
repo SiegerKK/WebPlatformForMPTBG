@@ -115,7 +115,15 @@ def retrieve_memory(
         scored.append((-score, -record.created_turn, record.id, record))
 
     scored.sort(key=lambda t: (t[0], t[1], t[2]))
-    return [t[3] for t in scored[:cap]]
+    selected = scored[:cap]
+
+    # Update last_accessed_turn for selected records.
+    for _, _, rid, _ in selected:
+        raw = records_raw.get(rid)
+        if isinstance(raw, dict):
+            raw["last_accessed_turn"] = world_turn
+
+    return [MemoryRecord.from_dict(records_raw[rid]) for _, _, rid, _ in selected if rid in records_raw]
 
 
 def _score_record(

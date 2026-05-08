@@ -128,3 +128,10 @@ def test_retrieval_max_cap_global_hard_limit() -> None:
         world_turn=60,
     )
     assert len(results) <= MEMORY_V3_RETRIEVAL_MAX_RESULTS
+
+
+def test_retrieve_memory_updates_last_accessed_turn() -> None:
+    agent: dict = {}
+    _add(agent, "m1", tags=("trader",), last_accessed_turn=None)
+    _ = retrieve_memory(agent, MemoryQuery(purpose="p", tags=("trader",)), world_turn=123)
+    assert agent["memory_v3"]["records"]["m1"]["last_accessed_turn"] == 123

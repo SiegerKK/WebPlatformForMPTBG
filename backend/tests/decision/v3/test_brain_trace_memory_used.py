@@ -109,3 +109,36 @@ def test_memory_used_contains_required_fields() -> None:
     assert mu["summary"] == "Опасность выброса"
     assert mu["confidence"] == 0.95
     assert mu["used_for"] == "avoid_threat"
+
+
+def test_brain_trace_memory_used_accepts_target_used_for_values() -> None:
+    agent: dict = {}
+    target_values = [
+        "locate_target",
+        "track_target",
+        "prepare_for_hunt",
+        "engage_target",
+        "confirm_kill",
+    ]
+    mem_used = [
+        {
+            "id": f"mem_t_{i}",
+            "kind": "target_seen",
+            "summary": "Цель замечена",
+            "confidence": 0.8,
+            "used_for": used_for,
+        }
+        for i, used_for in enumerate(target_values)
+    ]
+
+    append_brain_trace_event(
+        agent,
+        world_turn=200,
+        mode="decision",
+        decision="new_intent",
+        summary="hunt",
+        memory_used=mem_used,
+    )
+
+    stored = agent["brain_trace"]["events"][-1]["memory_used"]
+    assert [m["used_for"] for m in stored] == target_values

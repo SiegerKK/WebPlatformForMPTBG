@@ -219,19 +219,47 @@ def _build_relevant_memories(
     )
 
 
+def find_trader_memory_candidate_from_beliefs(
+    belief: BeliefState,
+    agent: dict[str, Any],
+    world_turn: int,
+) -> dict[str, Any] | None:
+    """Return best memory-backed trader candidate with metadata for brain_trace."""
+    records = retrieve_memory(
+        agent,
+        MemoryQuery(
+            purpose="find_trader",
+            layers=("semantic", "spatial", "episodic"),
+            tags=("trader", "trade"),
+            max_results=5,
+        ),
+        world_turn,
+    )
+    for rec in records:
+        if rec.location_id:
+            return {
+                "location_id": rec.location_id,
+                "memory_id": rec.id,
+                "kind": rec.kind,
+                "summary": rec.summary,
+                "confidence": rec.confidence,
+                "used_for": "find_trader",
+            }
+    return None
+
+
 def find_trader_location_from_beliefs(
     belief: BeliefState,
     agent: dict[str, Any],
     world_turn: int,
 ) -> str | None:
-    """Return the location_id of the best-known trader from BeliefState, or None.
+    """Return the location_id of the best-known trader, or None."""
+    candidate = find_trader_memory_candidate_from_beliefs(belief, agent, world_turn)
+    if candidate:
+        return candidate.get("location_id")
 
-    Prefers traders with higher confidence.  Falls back to any known trader.
-    """
     if not belief.known_traders:
         return None
-
-    # Sort by confidence descending, then pick the first that has a location.
     sorted_traders = sorted(
         belief.known_traders,
         key=lambda t: float(t.get("confidence", 0.0)),
@@ -244,14 +272,13 @@ def find_trader_location_from_beliefs(
     return None
 
 
-def find_water_source_from_beliefs(
+def find_water_memory_candidate_from_beliefs(
     belief: BeliefState,
     agent: dict[str, Any],
     world_turn: int,
-) -> str | None:
-    """Return a location_id with known water/drink from memory_v3, or None."""
+) -> dict[str, Any] | None:
+    """Return memory-backed water source candidate with metadata."""
     from app.games.zone_stalkers.balance.items import DRINK_ITEM_TYPES
-    drink_set = set(DRINK_ITEM_TYPES)
     records = retrieve_memory(
         agent,
         MemoryQuery(
@@ -265,16 +292,33 @@ def find_water_source_from_beliefs(
     )
     for rec in records:
         if rec.location_id:
-            return rec.location_id
+            return {
+                "location_id": rec.location_id,
+                "memory_id": rec.id,
+                "kind": rec.kind,
+                "summary": rec.summary,
+                "confidence": rec.confidence,
+                "used_for": "find_water",
+            }
     return None
 
 
-def find_food_source_from_beliefs(
+def find_water_source_from_beliefs(
     belief: BeliefState,
     agent: dict[str, Any],
     world_turn: int,
 ) -> str | None:
-    """Return a location_id with known food from memory_v3, or None."""
+    """Return location_id with known water/drink from memory_v3, or None."""
+    candidate = find_water_memory_candidate_from_beliefs(belief, agent, world_turn)
+    return candidate.get("location_id") if candidate else None
+
+
+def find_food_memory_candidate_from_beliefs(
+    belief: BeliefState,
+    agent: dict[str, Any],
+    world_turn: int,
+) -> dict[str, Any] | None:
+    """Return memory-backed food source candidate with metadata."""
     from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES
     records = retrieve_memory(
         agent,
@@ -289,5 +333,22 @@ def find_food_source_from_beliefs(
     )
     for rec in records:
         if rec.location_id:
-            return rec.location_id
+            return {
+                "location_id": rec.location_id,
+                "memory_id": rec.id,
+                "kind": rec.kind,
+                "summary": rec.summary,
+                "confidence": rec.confidence,
+                "used_for": "find_food",
+            }
     return None
+
+
+def find_food_source_from_beliefs(
+    belief: BeliefState,
+    agent: dict[str, Any],
+    world_turn: int,
+) -> str | None:
+    """Return location_id with known food from memory_v3, or None."""
+    candidate = find_food_memory_candidate_from_beliefs(belief, agent, world_turn)
+    return candidate.get("location_id") if candidate else None
