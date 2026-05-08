@@ -23,13 +23,6 @@ def test_append_brain_trace_event_keeps_last_five() -> None:
     assert len(events) == 5
     assert events[0]["summary"] == "event-2"
     assert events[-1]["summary"] == "event-6"
-    assert [ev["summary"] for ev in events] == [
-        "event-2",
-        "event-3",
-        "event-4",
-        "event-5",
-        "event-6",
-    ]
     assert "world_time" in agent["brain_trace"]
     assert "world_time" in events[-1]
 

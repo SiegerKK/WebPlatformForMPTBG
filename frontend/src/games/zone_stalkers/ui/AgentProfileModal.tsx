@@ -181,8 +181,8 @@ const traceTimeLabel = (
   worldTurn: number,
   worldTime?: { world_day: number; world_hour: number; world_minute: number },
 ): string => {
-  const t = worldTime ?? turnToTime(worldTurn);
-  return `День ${t.world_day} · ${TIME_LABEL(t.world_hour, t.world_minute)}`;
+  const worldTimeData = worldTime ?? turnToTime(worldTurn);
+  return `День ${worldTimeData.world_day} · ${TIME_LABEL(worldTimeData.world_hour, worldTimeData.world_minute)}`;
 };
 
 /**
@@ -732,9 +732,9 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                           Действие: {ev.scheduled_action_type}
                         </div>
                       )}
-                      {(ev.intent_kind || ev.intent_score != null) && (
+                      {ev.intent_kind && (
                         <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
-                          Intent: {ev.intent_kind ?? 'unknown'}
+                          Intent: {ev.intent_kind}
                           {typeof ev.intent_score === 'number' ? ` (${Math.round(ev.intent_score * 100)}%)` : ''}
                         </div>
                       )}

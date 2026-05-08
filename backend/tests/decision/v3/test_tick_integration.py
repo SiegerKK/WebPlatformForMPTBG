@@ -67,7 +67,7 @@ def _bot_agent() -> dict:
             {"id": "med3", "type": "bandage", "value": 0},
         ],
         "memory": [],
-        "action_queue": [{"type": "sleep", "turns_remaining": 2, "turns_total": 2, "target_id": "loc_a"}],
+        "action_queue": [],
         "scheduled_action": {
             "type": "travel",
             "turns_remaining": 5,
@@ -81,7 +81,9 @@ def _bot_agent() -> dict:
 
 def test_plan_monitor_abort_emits_event_and_clears_action_queue() -> None:
     state = _make_base_state()
-    state["agents"]["bot1"] = _bot_agent()
+    bot = _bot_agent()
+    bot["action_queue"] = [{"type": "sleep", "turns_remaining": 2, "turns_total": 2, "target_id": "loc_a"}]
+    state["agents"]["bot1"] = bot
     state["locations"]["loc_a"]["agents"] = ["bot1"]
 
     new_state, events = tick_zone_map(state)
