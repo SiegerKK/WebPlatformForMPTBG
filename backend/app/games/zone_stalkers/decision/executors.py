@@ -307,6 +307,22 @@ def _exec_trade_buy(
         if not affordable:
             return []
         item_types = frozenset([affordable[0]])
+    elif buy_mode == "reserve_basic":
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+
+        preferred = step.payload.get("preferred_item_types") or []
+        preferred_set = frozenset(str(t) for t in preferred if str(t) in item_types)
+        candidate_pool = preferred_set or item_types
+        affordable = sorted(
+            (
+                t for t in candidate_pool
+                if t in ITEM_TYPES and agent.get("money", 0) >= int(ITEM_TYPES[t].get("value", 0) * 1.5)
+            ),
+            key=lambda t: (int(ITEM_TYPES[t].get("value", 0) * 1.5), t),
+        )
+        if not affordable:
+            return []
+        item_types = frozenset([affordable[0]])
 
     reason = step.payload.get("reason", f"buy_{category}")
     return _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,

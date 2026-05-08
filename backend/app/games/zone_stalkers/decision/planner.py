@@ -63,6 +63,9 @@ from .models.plan import (
     STEP_LEGACY_SCHEDULED_ACTION,
 )
 
+_SOFT_CONSUME_THRESHOLD_FOOD = 50
+_SOFT_CONSUME_THRESHOLD_DRINK = 40
+
 
 def build_plan(
     ctx: AgentContext,
@@ -426,17 +429,36 @@ def _plan_seek_consumable(
         item = next((i for i in inventory if i.get("type") in item_types), None)
 
     if item:
-        reason = f"emergency_{category}" if immediate_need and immediate_need.trigger_context in ("survival", "healing") else f"need_{category}"
-        return Plan(
-            intent_kind=intent.kind,
-            steps=[PlanStep(
-                kind=STEP_CONSUME_ITEM,
-                payload={"item_type": item.get("type"), "reason": reason},
-                interruptible=False,
-                expected_duration_ticks=1,
-            )],
-            interruptible=False, confidence=1.0, created_turn=world_turn,
+        is_critical_consume = bool(
+            immediate_need and immediate_need.trigger_context in ("survival", "healing")
         )
+        is_rest_preparation = bool(
+            immediate_need and immediate_need.trigger_context == "rest_preparation"
+        )
+        current_need_value = int(agent.get("hunger" if is_food else "thirst", 0))
+        soft_threshold = (
+            _SOFT_CONSUME_THRESHOLD_FOOD if is_food else _SOFT_CONSUME_THRESHOLD_DRINK
+        )
+        allow_soft_consume = current_need_value >= soft_threshold
+
+        if is_critical_consume or is_rest_preparation or allow_soft_consume:
+            reason = (
+                f"emergency_{category}"
+                if is_critical_consume
+                else (f"prepare_sleep_{category}" if is_rest_preparation else f"need_{category}")
+            )
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    kind=STEP_CONSUME_ITEM,
+                    payload={"item_type": item.get("type"), "reason": reason},
+                    interruptible=False,
+                    expected_duration_ticks=1,
+                )],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
+        # Non-critical/low need: avoid spending inventory consumables.
+        return None
 
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id")
@@ -563,17 +585,29 @@ def _plan_seek_consumable(
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
 
     if trader_loc and trader_loc == agent_loc:
+        buy_payload: dict[str, Any] = {"item_category": category, "reason": f"buy_{category}_stock"}
+        if category in ("food", "drink"):
+            buy_payload["buy_mode"] = "reserve_basic"
+            buy_payload["preferred_item_types"] = (
+                ["bread", "canned_food"] if category == "food" else ["water", "purified_water"]
+            )
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
                 STEP_TRADE_BUY_ITEM,
-                {"item_category": category, "reason": f"buy_{category}_stock"},
+                buy_payload,
                 interruptible=False,
             )],
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
 
     if trader_loc and trader_loc != agent_loc:
+        buy_payload: dict[str, Any] = {"item_category": category, "reason": f"buy_{category}_stock"}
+        if category in ("food", "drink"):
+            buy_payload["buy_mode"] = "reserve_basic"
+            buy_payload["preferred_item_types"] = (
+                ["bread", "canned_food"] if category == "food" else ["water", "purified_water"]
+            )
         return Plan(
             intent_kind=intent.kind,
             steps=[
@@ -584,7 +618,7 @@ def _plan_seek_consumable(
                 ),
                 PlanStep(
                     STEP_TRADE_BUY_ITEM,
-                    {"item_category": category, "reason": f"buy_{category}_stock"},
+                    buy_payload,
                     interruptible=False,
                 ),
             ],
@@ -776,7 +810,10 @@ def _plan_resupply(
 
             get_rich_intent = Intent(
                 kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
-                reason="Resupply fallback — no trader known, gather resources",
+                reason=(
+                    "Нужен resupply, но покупка сейчас невозможна/нецелесообразна. "
+                    "Перехожу к fallback_get_money через поиск артефактов."
+                ),
                 created_turn=world_turn,
             )
             return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
@@ -825,16 +862,22 @@ def _plan_resupply(
     )
 
     if trader_loc == agent_loc:
+        buy_payload: dict[str, Any] = {
+            "item_category": buy_category,
+            "reason": f"buy_{buy_category}_resupply",
+            "required_price": affordability.required_price,
+        }
+        if dominant.key in ("food", "drink") and dominant.missing_count > 0:
+            buy_payload["buy_mode"] = "reserve_basic"
+            buy_payload["preferred_item_types"] = (
+                ["bread", "canned_food"] if dominant.key == "food" else ["water", "purified_water"]
+            )
         if affordability.can_buy_now:
             return Plan(
                 intent_kind=intent.kind,
                 steps=[PlanStep(
                     STEP_TRADE_BUY_ITEM,
-                    {
-                        "item_category": buy_category,
-                        "reason": f"buy_{buy_category}_resupply",
-                        "required_price": affordability.required_price,
-                    },
+                    buy_payload,
                     interruptible=False,
                 )],
                 confidence=0.8,
@@ -865,11 +908,7 @@ def _plan_resupply(
                     ),
                     PlanStep(
                         STEP_TRADE_BUY_ITEM,
-                        {
-                            "item_category": buy_category,
-                            "reason": f"buy_{buy_category}_resupply",
-                            "required_price": affordability.required_price,
-                        },
+                        buy_payload,
                         interruptible=False,
                     ),
                 ],
@@ -878,6 +917,16 @@ def _plan_resupply(
             )
 
     if trader_loc and trader_loc != agent_loc:
+        buy_payload: dict[str, Any] = {
+            "item_category": buy_category,
+            "reason": f"buy_{buy_category}_resupply",
+            "required_price": affordability.required_price,
+        }
+        if dominant.key in ("food", "drink") and dominant.missing_count > 0:
+            buy_payload["buy_mode"] = "reserve_basic"
+            buy_payload["preferred_item_types"] = (
+                ["bread", "canned_food"] if dominant.key == "food" else ["water", "purified_water"]
+            )
         steps = [
             PlanStep(
                 STEP_TRAVEL_TO_LOCATION,
@@ -888,11 +937,7 @@ def _plan_resupply(
         if affordability.can_buy_now:
             steps.append(PlanStep(
                 STEP_TRADE_BUY_ITEM,
-                {
-                    "item_category": buy_category,
-                    "reason": f"buy_{buy_category}_resupply",
-                    "required_price": affordability.required_price,
-                },
+                buy_payload,
                 interruptible=False,
             ))
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
@@ -902,7 +947,10 @@ def _plan_resupply(
         kind=INTENT_GET_RICH,
         score=0.5,
         source_goal="get_rich",
-        reason="Resupply fallback — gather money/resources",
+        reason=(
+            "Нужен resupply, но покупка сейчас невозможна/нецелесообразна. "
+            "Перехожу к fallback_get_money через поиск артефактов."
+        ),
         created_turn=world_turn,
     )
     return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
@@ -1016,22 +1064,36 @@ def _plan_get_rich(
     has_artifacts = any(i.get("type") in artifact_types for i in inventory)
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id", "")
+    fallback_reason = (
+        intent.reason
+        if isinstance(intent.reason, str) and "fallback_get_money" in intent.reason
+        else None
+    )
 
     # 1. Sell artifacts
     if has_artifacts and trader_loc:
+        sell_payload: dict[str, Any] = {"item_category": "artifact"}
+        if fallback_reason:
+            sell_payload["fallback_reason"] = fallback_reason
         if trader_loc == agent_loc:
             return Plan(
                 intent_kind=intent.kind,
-                steps=[PlanStep(STEP_TRADE_SELL_ITEM, {"item_category": "artifact"})],
+                steps=[PlanStep(STEP_TRADE_SELL_ITEM, sell_payload)],
                 confidence=1.0, created_turn=world_turn,
             )
+        travel_payload: dict[str, Any] = {
+            "target_id": trader_loc,
+            "reason": "sell_artifacts_get_rich",
+        }
+        if fallback_reason:
+            travel_payload["fallback_reason"] = fallback_reason
         return Plan(
             intent_kind=intent.kind,
             steps=[
                 PlanStep(STEP_TRAVEL_TO_LOCATION,
-                         {"target_id": trader_loc, "reason": "sell_artifacts_get_rich"},
+                         travel_payload,
                          expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
-                PlanStep(STEP_TRADE_SELL_ITEM, {"item_category": "artifact"}),
+                PlanStep(STEP_TRADE_SELL_ITEM, sell_payload),
             ],
             confidence=0.7, created_turn=world_turn,
         )
@@ -1040,11 +1102,17 @@ def _plan_get_rich(
     confirmed_empty = _confirmed_empty_locations(agent)
     loc = ctx.location_state
     if loc.get("anomaly_activity", 0) > 0 and agent_loc not in confirmed_empty:
+        explore_payload: dict[str, Any] = {
+            "target_id": agent_loc,
+            "reason": "get_rich_explore_here",
+        }
+        if fallback_reason:
+            explore_payload["fallback_reason"] = fallback_reason
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
                 STEP_EXPLORE_LOCATION,
-                {"target_id": agent_loc, "reason": "get_rich_explore_here"},
+                explore_payload,
                 expected_duration_ticks=30,
             )],
             confidence=0.8, created_turn=world_turn,
@@ -1074,11 +1142,17 @@ def _plan_get_rich(
             best_loc = cand_id
 
     if best_loc:
+        travel_payload: dict[str, Any] = {
+            "target_id": best_loc,
+            "reason": "get_rich_travel_to_anomaly",
+        }
+        if fallback_reason:
+            travel_payload["fallback_reason"] = fallback_reason
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
                 STEP_TRAVEL_TO_LOCATION,
-                {"target_id": best_loc, "reason": "get_rich_travel_to_anomaly"},
+                travel_payload,
                 expected_duration_ticks=_estimate_travel_ticks(ctx, best_loc, state),
             )],
             confidence=0.6, created_turn=world_turn,

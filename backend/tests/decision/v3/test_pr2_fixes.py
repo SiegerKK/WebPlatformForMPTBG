@@ -20,6 +20,7 @@ from app.games.zone_stalkers.decision.debug.brain_trace import write_decision_br
 from app.games.zone_stalkers.decision.executors import execute_plan_step
 from app.games.zone_stalkers.decision.intents import select_intent
 from app.games.zone_stalkers.decision.models.intent import (
+    INTENT_GET_RICH,
     INTENT_HEAL_SELF,
     INTENT_RESUPPLY,
     INTENT_REST,
@@ -661,3 +662,153 @@ def test_critical_hunger_no_weapon_intent_is_seek_food_not_resupply() -> None:
     assert intent.kind == INTENT_SEEK_FOOD, (
         f"Critical hunger (85) must override resupply; got {intent.kind}"
     )
+
+
+def test_noncritical_seek_water_reason_is_not_critical_text() -> None:
+    """Non-critical thirst should use non-critical reason template."""
+    agent = make_agent(
+        thirst=45,
+        hunger=0,
+        money=9000,
+        material_threshold=3000,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
+    assert intent.kind == INTENT_SEEK_WATER
+    assert "Критическая жажда" not in (intent.reason or "")
+    assert "Жажда растёт" in (intent.reason or "")
+
+
+def test_noncritical_seek_food_reason_is_not_critical_text() -> None:
+    """Non-critical hunger should use non-critical reason template."""
+    agent = make_agent(
+        hunger=45,
+        thirst=0,
+        money=9000,
+        material_threshold=3000,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
+    assert intent.kind == INTENT_SEEK_FOOD
+    assert "Критический голод" not in (intent.reason or "")
+    assert "Голод растёт" in (intent.reason or "")
+
+
+def test_noncritical_seek_water_low_thirst_does_not_consume_inventory_item() -> None:
+    """Low non-critical thirst should not spend a drink item from inventory."""
+    agent = make_agent(
+        thirst=10,
+        inventory=[{"id": "w0", "type": "energy_drink", "value": 80}],
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = _make_intent(INTENT_SEEK_WATER)
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    assert all(step.kind != STEP_CONSUME_ITEM for step in plan.steps), (
+        f"Low thirst should not trigger consume step, got {[s.kind for s in plan.steps]}"
+    )
+
+
+def test_noncritical_seek_food_low_hunger_does_not_consume_inventory_item() -> None:
+    """Low non-critical hunger should not spend a food item from inventory."""
+    agent = make_agent(
+        hunger=10,
+        inventory=[{"id": "f0", "type": "glucose", "value": 120}],
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = _make_intent(INTENT_SEEK_FOOD)
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    assert all(step.kind != STEP_CONSUME_ITEM for step in plan.steps), (
+        f"Low hunger should not trigger consume step, got {[s.kind for s in plan.steps]}"
+    )
+
+
+def test_resupply_reason_uses_dominant_item_need_instead_of_generic_text() -> None:
+    """Resupply reason should reflect dominant item need (drink stock)."""
+    agent = make_agent(
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+        inventory=[
+            {"id": "f0", "type": "bread", "value": 20},
+            {"id": "m0", "type": "bandage", "value": 50},
+            {"id": "m1", "type": "bandage", "value": 50},
+        ],
+    )
+    state = make_minimal_state(agent=agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
+    assert intent.kind == INTENT_RESUPPLY
+    assert "Недостаточный запас воды" in (intent.reason or "")
+    assert "Не хватает снаряжения" not in (intent.reason or "")
+
+
+def test_resupply_drink_stock_uses_reserve_basic_buy_mode() -> None:
+    """Drink stock resupply should use reserve_basic mode and choose basic drink."""
+    agent = make_agent(
+        money=500,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+        inventory=[
+            {"id": "f0", "type": "bread", "value": 20},
+            {"id": "m0", "type": "bandage", "value": 50},
+            {"id": "m1", "type": "bandage", "value": 50},
+        ],
+    )
+    agent["risk_tolerance"] = 0.9
+    state = make_state_with_trader(agent=agent, trader_at="loc_a")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = _make_intent(INTENT_RESUPPLY)
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    buy_step = next((s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM), None)
+    assert buy_step is not None
+    assert buy_step.payload.get("buy_mode") == "reserve_basic"
+    assert buy_step.payload.get("preferred_item_types") == ["water", "purified_water"]
+    execute_plan_step(ctx, plan, state, 100)
+    bought_types = [i.get("type") for i in agent.get("inventory", [])]
+    assert "water" in bought_types, (
+        f"Reserve-basic drink buy should pick water first, got inventory={bought_types}"
+    )
+
+
+def test_resupply_fallback_get_money_reason_is_explicit_in_step_payload() -> None:
+    """Resupply fallback to get_rich should carry explicit fallback reason in payload."""
+    agent = make_agent(
+        has_weapon=False,
+        has_armor=True,
+        has_ammo=False,
+        money=0,
+        inventory=[],
+    )
+    state = make_minimal_state(agent=agent)
+    state["traders"] = {}
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = _make_intent(INTENT_RESUPPLY)
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    assert plan.intent_kind == INTENT_GET_RICH
+    first_payload = plan.steps[0].payload
+    assert "fallback_reason" in first_payload, (
+        f"Fallback plan step must include fallback_reason for traceability, got {first_payload}"
+    )
+    assert "Перехожу к fallback_get_money через поиск артефактов" in first_payload["fallback_reason"]
