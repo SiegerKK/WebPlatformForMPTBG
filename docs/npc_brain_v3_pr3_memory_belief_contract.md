@@ -163,6 +163,7 @@ class MemoryRecord:
     status: str = "active"  # active, stale, contradicted, archived
     source: str = "observed" # observed, inferred, heard, legacy_import
     evidence_refs: tuple[str, ...] = ()
+    world_time: dict | None = None
 ```
 
 ---
@@ -345,6 +346,30 @@ legacy type decision    → layer episodic
 legacy type action      → layer episodic
 ```
 
+Дополнительные обязательные маппинги sleep-событий:
+
+```text
+action_kind = sleep_completed
+→ layer = episodic
+→ kind = sleep_completed
+→ tags = ["sleep", "rest", "recovery"]
+→ details include:
+   sleep_intervals_applied
+   turns_total / turns_slept / hours_slept
+   wake_due_to_rested (if available)
+   sleepiness_after (if available)
+
+action_kind = plan_monitor_abort + scheduled_action_type = sleep
+→ layer = episodic
+→ kind = sleep_interrupted
+→ tags = ["sleep", "rest", "plan_monitor", reason]
+→ details include:
+   sleep_intervals_applied
+   sleep_progress_turns
+   dominant_pressure
+   sleepiness_after
+```
+
 Examples:
 
 ```text
@@ -360,6 +385,35 @@ action_kind = emission_imminent
 → layer = threat
 → kind = emission_warning
 → tags = ["emission", "danger"]
+```
+
+### Keep legacy merge semantics
+
+Bridge должен сохранять семантику merge повторяющихся наблюдений. Если в legacy записи есть:
+
+```text
+first_seen_turn
+last_seen_turn
+times_seen
+```
+
+эти поля должны попадать в `MemoryRecord.details`.
+
+### Sleep interval events are not long-term memory by default
+
+Инвариант:
+
+```text
+Do not convert every sleep_interval_applied event into a MemoryRecord.
+Sleep interval progress is action/state progress; memory-worthy outcomes are final.
+```
+
+Разрешённые outcome-записи для сна:
+
+```text
+sleep_completed
+sleep_interrupted
+sleep_aborted_by_emergency
 ```
 
 ### Do not fully migrate historical memory in PR 3
@@ -520,6 +574,15 @@ delete/archive lowest-score records first
 but never delete high-importance threat/goal/semantic records
 ```
 
+### Sleep-related retention guidance
+
+```text
+sleep_completed -> medium retention
+sleep_interrupted by hunger/thirst -> medium retention
+sleep_interrupted by emission/combat -> high retention
+death/combat/emission threat -> high retention
+```
+
 ---
 
 ## 14. Memory consolidation
@@ -557,11 +620,14 @@ Add optional field:
       "id": "mem_123",
       "kind": "trader_location_known",
       "summary": "Гнидорович обычно находится в Бункере торговца",
-      "confidence": 0.92
+      "confidence": 0.92,
+      "used_for": "find_trader"
     }
   ]
 }
 ```
+
+`used_for` должен фиксировать целевой retrieval контекст (например: `find_trader`, `find_food`, `find_water`, `avoid_threat`, `sell_artifacts`).
 
 Limit:
 
@@ -671,6 +737,9 @@ results are deterministic
 _add_memory trade_buy creates legacy memory and memory_v3 record
 _add_memory emission_imminent creates threat record
 plan_monitor_abort creates memory_v3 record with tags
+sleep_completed maps to episodic sleep_completed memory
+plan_monitor_abort for sleep maps to sleep_interrupted memory
+sleep_interval_applied is not stored as standalone long-term memory
 ```
 
 ### Decay
@@ -702,6 +771,7 @@ avoid threat can use threat memory
 ```text
 brain_trace.memory_used length <= 5
 memory_used contains summary/confidence/kind
+memory_used contains used_for
 ```
 
 ---
@@ -714,12 +784,15 @@ PR 3 is done when:
 - [ ] `MemoryRecord` and `MemoryQuery` models exist.
 - [ ] Memory indexes work for layer/kind/location/entity/item/tag.
 - [ ] Legacy `_add_memory` writes or bridges into `memory_v3`.
+- [ ] Sleep completed/interrupted events are mapped into memory_v3 via legacy bridge.
+- [ ] `sleep_interval_applied` is not persisted as standalone long-term memory.
 - [ ] Retrieval top-N is deterministic and capped.
 - [ ] Basic decay/archive works.
 - [ ] Minimal consolidation for repeated trader/location facts exists.
 - [ ] `BeliefState` adapter exists.
 - [ ] Planner uses MemoryStore for at least trader/item/threat lookups.
 - [ ] `brain_trace.memory_used` shows used memories.
+- [ ] `brain_trace.memory_used` includes `used_for` context.
 - [ ] Frontend displays memory-used summary.
 - [ ] Old `agent["memory"]` still works.
 - [ ] No Redis/PostgreSQL dependency is introduced.
@@ -785,125 +858,3 @@ PR 5: active plan ownership
 ```
 
 After PR 3 we should stop adding special cases and move to `Objective` as the central decision model.
-
----
-
-## 22. Addendum merge: обязательные уточнения к PR 3
-
-Этот раздел консолидирует обязательные дополнения из `npc_brain_v3_pr2_pr3_contract_addendum.md`.
-
-### 22.1 Sleep mapping в legacy bridge
-
-Legacy bridge обязан явно маппить sleep-события PR 1 в `memory_v3`.
-
-`sleep_completed`:
-
-```text
-layer = episodic
-kind = sleep_completed
-tags = ["sleep", "rest", "recovery"]
-details include:
-  sleep_intervals_applied
-  turns_total
-  turns_slept
-  hours_slept
-  wake_due_to_rested (if available)
-  sleepiness_after (if available)
-```
-
-`plan_monitor_abort` при `scheduled_action_type=sleep`:
-
-```text
-layer = episodic
-kind = sleep_interrupted
-tags = ["sleep", "rest", "plan_monitor", reason]
-details include:
-  sleep_intervals_applied
-  sleep_progress_turns
-  dominant_pressure
-  sleepiness_after
-  wake_due_to_rested=false
-```
-
-### 22.2 Не сохранять каждый `sleep_interval_applied` в память
-
-Явный инвариант:
-
-```text
-Do not convert every sleep_interval_applied event into a MemoryRecord.
-```
-
-Разрешённые sleep memory outcomes:
-
-```text
-sleep_completed
-sleep_interrupted
-sleep_aborted_by_emergency
-```
-
-### 22.3 Retention rules для sleep-related памяти
-
-```text
-sleep_completed -> medium retention
-sleep_interrupted by hunger/thirst -> medium retention
-sleep_interrupted by emission/combat -> high retention
-death/combat/emission threat -> high retention
-```
-
-### 22.4 Сохранение merge-семантики legacy memory
-
-PR 3 обязан сохранить текущую merge-семантику повторяющихся наблюдений.
-
-Если в legacy записи есть:
-
-```text
-first_seen_turn
-last_seen_turn
-times_seen
-```
-
-bridge обязан переносить это в `MemoryRecord.details`.
-
-### 22.5 Optional `world_time` в `MemoryRecord`
-
-Разрешён optional-параметр:
-
-```python
-world_time: dict | None = None
-```
-
-Это debug/frontend-friendly и не меняет core decision rules.
-
-### 22.6 `used_for` в `brain_trace.memory_used`
-
-`memory_used` должен уметь показывать цель использования памяти:
-
-```json
-{
-  "id": "mem_trader_bunker",
-  "kind": "trader_location_known",
-  "summary": "Гнидорович обычно находится в Бункере торговца",
-  "confidence": 0.92,
-  "used_for": "find_trader"
-}
-```
-
-Примеры `used_for`:
-
-```text
-find_trader
-find_food
-find_water
-find_ammo
-avoid_threat
-sell_artifacts
-hunt_target
-search_information
-```
-
-### 22.7 Инвариант: связь сна и памяти
-
-```text
-Sleep interval progress is state/action progress, not long-term memory.
-Sleep completion/interruption is memory-worthy.
-```

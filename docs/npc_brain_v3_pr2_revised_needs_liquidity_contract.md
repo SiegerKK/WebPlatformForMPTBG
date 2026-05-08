@@ -109,6 +109,8 @@ class ImmediateNeed:
     urgency: float                   # 0..1
     current_value: float             # thirst/hunger/hp
     threshold: float
+    trigger_context: str = "survival"  # survival | rest_preparation | healing
+    blocks_intents: frozenset[str] = field(default_factory=frozenset)
     available_inventory_item_types: frozenset[str] = field(default_factory=frozenset)
     selected_item_id: str | None = None
     selected_item_type: str | None = None
@@ -152,6 +154,8 @@ class ItemNeed:
     reason: str = ""
     priority: int = 100
     source_factors: tuple[dict[str, Any], ...] = ()
+    expected_min_price: int | None = None
+    affordability_hint: str | None = None  # affordable | unaffordable | unknown
 ```
 
 Допустимые `key`:
@@ -203,6 +207,26 @@ class LiquidityOption:
     estimated_sell_value: int
     safety: str                 # safe, risky, emergency_only, forbidden
     reason: str
+```
+
+### 4.5. `NeedEvaluationResult`
+
+Чтобы не пересчитывать и не рассинхронизировать `ImmediateNeed`/`ItemNeed` между `needs`, planner и `brain_trace`, вводим общий контейнер:
+
+```python
+@dataclass(frozen=True)
+class NeedEvaluationResult:
+    scores: NeedScores
+    immediate_needs: tuple[ImmediateNeed, ...]
+    item_needs: tuple[ItemNeed, ...]
+    liquidity_summary: dict | None = None
+```
+
+Инвариант:
+
+```text
+planner и brain_trace должны использовать один и тот же NeedEvaluationResult,
+а не пересчитывать item/immediate needs локально повторно.
 ```
 
 ---
@@ -288,6 +312,28 @@ def find_liquidity_options(
 
 ## 6. ImmediateNeed rules
 
+### 6.0. Context rules
+
+`trigger_context` определяет область действия `ImmediateNeed`:
+
+```text
+trigger_context = "survival":
+  глобально блокирующая срочная нужда.
+
+trigger_context = "rest_preparation":
+  влияет только на планирование сна/отдыха.
+
+trigger_context = "healing":
+  срочная потребность лечения.
+```
+
+Ключевой инвариант:
+
+```text
+critical immediate needs affect intent selection;
+rest-preparation immediate needs affect only rest planning.
+```
+
 ### 6.1. Drink now
 
 ```text
@@ -297,11 +343,12 @@ if thirst >= CRITICAL_THIRST_THRESHOLD:
         selected item = best available drink
 ```
 
-Если `thirst` ниже critical, но выше safe sleep threshold, эта immediate need может быть создана с меньшей urgency для подготовки ко сну.
+Если `thirst` ниже critical, но выше safe sleep threshold, эта need создаётся как rest-preparation:
 
 ```text
 if thirst >= SLEEP_SAFE_THIRST_THRESHOLD:
     urgency = 0.70–0.79
+    trigger_context = "rest_preparation"
 ```
 
 ### 6.2. Eat now
@@ -343,6 +390,24 @@ eat_now should prefer bread unless glucose is explicitly better for emergency.
 ---
 
 ## 7. ItemNeed rules
+
+### 7.0. Dominant ItemNeed selection
+
+`ItemNeed` должен выбираться по score (`urgency`), а не по фиксированной очереди категорий.
+
+```python
+candidate_item_needs = [n for n in item_needs if n.urgency > 0 and n.key != "upgrade"]
+candidate_item_needs.sort(key=lambda n: (-n.urgency, n.priority, n.key))
+dominant = candidate_item_needs[0] if candidate_item_needs else None
+```
+
+Инвариант:
+
+```text
+ImmediateNeed first.
+Then ItemNeed by urgency score.
+Priority is deterministic tie-breaker only.
+```
 
 ### 7.1. Food stock
 
@@ -460,12 +525,7 @@ ImmediateNeed:
   heal_now
 
 ItemNeed:
-  food stock
-  drink stock
-  armor
-  weapon
-  ammo
-  medicine
+  dominant item need by urgency score (priority only tie-breaker)
 ```
 
 ### 10.2. `seek_water`
@@ -501,6 +561,8 @@ plan = consume_item(selected_item_id)
 ```python
 dominant = choose_dominant_item_need(item_needs)
 ```
+
+`choose_dominant_item_need(...)` должен использовать score-first семантику из раздела 7.0.
 
 Если dominant — `weapon`, но есть критический `ImmediateNeed`, значит до resupply planner вообще не должен дойти.
 
@@ -568,9 +630,10 @@ buy_food_stock
 buy_drink_stock
 buy_food_survival
 buy_drink_survival
-buy_weapon
-buy_armor
-buy_ammo
+buy_weapon_resupply
+buy_armor_resupply
+buy_ammo_resupply
+buy_medical_resupply
 ```
 
 ---
@@ -600,6 +663,26 @@ money < required_price
 2. если есть safe option → sell → buy;
 3. если нет safe option, но need critical → emergency_only sale allowed;
 4. если ничего нельзя продать → fallback to search/loot/get_rich.
+```
+
+### 12.4. Запрет unaffordable buy loop
+
+Planner не должен повторять один и тот же неисполняемый buy-план без изменения условий:
+
+```text
+trade_buy_item weapon
+trade_buy_item weapon
+trade_buy_item weapon
+...
+```
+
+При `money < cheapest_viable_item_price` следующий шаг должен быть ликвидностью/фолбэком:
+
+```text
+sell safe item
+fallback_get_money
+fallback_search_item
+fallback_wait_no_action (только если нет actionable альтернатив)
 ```
 
 ### 12.3. Что можно продавать
@@ -784,6 +867,7 @@ critical thirst + water affordable + energy drink affordable → buy water
 money < cheapest food price + artifact in inventory → sell artifact then buy food
 money < price + only last water at high thirst → do not sell last water
 money > price → buy directly
+no repeated unaffordable trade_buy_item under unchanged conditions
 ```
 
 ### Planner
@@ -792,6 +876,9 @@ money > price → buy directly
 seek_food with inventory food → consume, not buy
 seek_water with inventory water → consume, not buy
 resupply uses ItemNeed dominant need
+rest-preparation immediate needs affect only rest plan
+critical immediate needs still beat sleep/resupply
+sleep behavior from PR1 remains unchanged (dynamic duration + early wake)
 ```
 
 ### BrainTrace
@@ -821,7 +908,7 @@ PR 2 is done when:
 
 ---
 
-## 18. Canonical regression case: `Поцик 1`
+## 18. Canonical regression cases: `Поцик 1`
 
 Given:
 
@@ -835,7 +922,7 @@ armor = leather_jacket
 inventory = bread, glucose, energy_drink, water, bandage, medkit
 ```
 
-Expected behavior after PR 2:
+Expected behavior after PR 2 (critical survival case):
 
 ```text
 1. drink_now selected because thirst=80 and water exists;
@@ -846,6 +933,34 @@ Expected behavior after PR 2:
 6. after rest, resupply weapon becomes relevant;
 7. if buying weapon is impossible, planner does not loop on unaffordable buy;
 8. brain_trace clearly explains this sequence.
+```
+
+### 18.1. Stabilized post-PR1 case
+
+Given:
+
+```text
+hunger = 50
+thirst = 57
+sleepiness = 46
+money = 29
+weapon = null
+armor = leather_jacket
+inventory = bread, bandage, medkit
+scheduled_action = null
+current_goal = resupply
+```
+
+Expected behavior:
+
+```text
+1. No critical ImmediateNeed is active.
+2. ItemNeed.weapon can dominate food stock by urgency score.
+3. Planner tries to resolve weapon need.
+4. If no affordable weapon exists:
+   - planner does not loop on unaffordable buy;
+   - planner switches to liquidity/fallback path.
+5. Last bread is not sold when it violates survival reserve.
 ```
 
 ---
@@ -864,233 +979,4 @@ Reason:
 
 ```text
 Once needs and liquidity are explicit, NPC needs better memory retrieval to choose where to buy/find/sell.
-```
-
----
-
-## 20. Addendum merge: уточнения после финализации PR 1
-
-Этот раздел фиксирует обязательные уточнения, перенесённые из `npc_brain_v3_pr2_pr3_contract_addendum.md`.
-
-### 20.1 `ImmediateNeed.trigger_context`
-
-Модель `ImmediateNeed` должна быть расширена:
-
-```python
-@dataclass(frozen=True)
-class ImmediateNeed:
-    key: str
-    urgency: float
-    current_value: float
-    threshold: float
-    trigger_context: str = "survival"  # survival | rest_preparation | healing
-    blocks_intents: frozenset[str] = field(default_factory=frozenset)
-    available_inventory_item_types: frozenset[str] = field(default_factory=frozenset)
-    selected_item_id: str | None = None
-    selected_item_type: str | None = None
-    reason: str = ""
-    source_factors: tuple[dict[str, Any], ...] = ()
-```
-
-Семантика:
-
-```text
-trigger_context="survival":
-  глобально блокирует выбор intent (critical hunger/thirst).
-
-trigger_context="rest_preparation":
-  влияет только на rest planning (подготовка перед сном).
-
-trigger_context="healing":
-  контекст для срочного лечения.
-```
-
-### 20.2 Контекстные правила ImmediateNeed
-
-Инвариант:
-
-```text
-Critical immediate needs affect intent selection.
-Rest-preparation immediate needs affect only rest planning.
-```
-
-Пример:
-
-```text
-thirst=80 -> seek_water must beat rest/resupply/get_rich.
-thirst=72 -> не должен глобально перебить все intents,
-             но при планировании rest должен вставить prepare_sleep_drink.
-```
-
-### 20.3 `NeedEvaluationResult` как единый контейнер расчёта
-
-Добавить явный контейнер:
-
-```python
-@dataclass(frozen=True)
-class NeedEvaluationResult:
-    scores: NeedScores
-    immediate_needs: tuple[ImmediateNeed, ...]
-    item_needs: tuple[ItemNeed, ...]
-    liquidity_summary: dict | None = None
-```
-
-Правило:
-
-```text
-Planner and brain_trace must use the same NeedEvaluationResult.
-Do not recompute immediate_needs/item_needs independently in planner.
-```
-
-Transition-compatible API допустим:
-
-```python
-def evaluate_needs(ctx, state) -> NeedScores:
-    result = evaluate_needs_v3(ctx, state)
-    ctx.evaluated_needs_v3 = result
-    return result.scores
-```
-
-### 20.4 Выбор dominant ItemNeed: score-first, не fixed-order
-
-Старая фиксированная очередь не должна быть абсолютной.
-
-Обязательная семантика:
-
-```text
-ImmediateNeed first.
-Then ItemNeed by urgency score.
-Priority is deterministic tie-breaker only.
-```
-
-Рекомендуемый шаблон:
-
-```python
-candidate_item_needs = [n for n in item_needs if n.urgency > 0 and n.key != "upgrade"]
-candidate_item_needs.sort(key=lambda n: (-n.urgency, n.priority, n.key))
-dominant = candidate_item_needs[0] if candidate_item_needs else None
-```
-
-### 20.5 `ItemNeed.affordability_hint` (debug/planner hint)
-
-`ItemNeed` расширяется optional-полями:
-
-```python
-expected_min_price: int | None = None
-affordability_hint: str | None = None  # affordable | unaffordable | unknown
-```
-
-Это не заменяет `AffordabilityResult`, а добавляет explainability для planner/trace.
-
-### 20.6 Инвариант: запрет unaffordable buy loop
-
-Обязательное правило:
-
-```text
-Planner must not repeatedly create the same unaffordable buy plan without changing conditions.
-```
-
-Если `money < cheapest_viable_item_price`, следующий шаг должен быть одним из:
-
-```text
-sell safe item
-earn money / get_rich fallback
-search remembered item
-wait only if no actionable alternative exists
-```
-
-Нельзя:
-
-```text
-trade_buy_item weapon
-trade_buy_item weapon
-trade_buy_item weapon
-...
-```
-
-### 20.7 Усиленная политика продаж survival-резерва
-
-Дополнительный инвариант:
-
-```text
-Never sell below desired survival reserve unless sale is required
-to resolve a higher-priority immediate survival need.
-```
-
-### 20.8 Пост-PR1 регрессионный кейс (`Поцик 1`, стабилизированная версия)
-
-Добавить canonical case:
-
-```text
-hunger = 50
-thirst = 57
-sleepiness = 46
-money = 29
-weapon = null
-armor = leather_jacket
-inventory = bread, bandage, medkit
-scheduled_action = null
-current_goal = resupply
-```
-
-Ожидания:
-
-```text
-1) No critical ImmediateNeed is active.
-2) ItemNeed.weapon urgency ~0.65 can dominate food stock urgency ~0.55.
-3) Planner tries weapon path.
-4) If unaffordable:
-   - no repeated unaffordable buy loop;
-   - liquidity/fallback path is selected.
-5) Last bread is not sold when it violates survival reserve policy.
-```
-
-### 20.9 Обязательное сохранение PR1 sleep semantics
-
-PR 2 может рефакторить rest через `ImmediateNeed`, но обязан сохранить поведение PR 1:
-
-```text
-- dynamic sleep duration derived from sleepiness;
-- sleep duration capped by DEFAULT_SLEEP_HOURS;
-- sleep effects every SLEEP_EFFECT_INTERVAL_TURNS;
-- early wake-up when sleepiness reaches 0;
-- prepare_sleep_food / prepare_sleep_drink action kinds remain valid;
-- critical hunger/thirst still beat sleepiness.
-```
-
-### 20.10 Дополнение к тест-плану PR 2
-
-Добавить обязательные проверки:
-
-```text
-- low sleepiness schedules shorter sleep than high sleepiness;
-- sleep wakes early when sleepiness reaches 0;
-- immediate-need-based rest keeps prepare_sleep_food/drink semantics;
-- no unaffordable buy loop under unchanged conditions;
-- PR1 sleep_effects tests remain green.
-```
-
-### 20.11 Единая таксономия reason codes
-
-Зафиксировать reason strings для planner/trace/tests:
-
-```text
-immediate_drink_inventory
-immediate_food_inventory
-immediate_heal_inventory
-prepare_sleep_drink
-prepare_sleep_food
-buy_food_survival
-buy_drink_survival
-buy_food_stock
-buy_drink_stock
-buy_weapon_resupply
-buy_armor_resupply
-buy_ammo_resupply
-buy_medical_resupply
-sell_for_survival
-sell_for_resupply
-fallback_get_money
-fallback_search_item
-fallback_wait_no_action
 ```
