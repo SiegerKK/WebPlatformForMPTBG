@@ -63,8 +63,8 @@ from .models.plan import (
     STEP_LEGACY_SCHEDULED_ACTION,
 )
 
-_SOFT_CONSUME_THRESHOLD_FOOD = 50
-_SOFT_CONSUME_THRESHOLD_DRINK = 40
+_MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD = 50
+_MIN_NONCRITICAL_CONSUME_THRESHOLD_DRINK = 40
 
 
 def build_plan(
@@ -269,7 +269,7 @@ def _plan_heal_or_flee(
         # (they're risky or emergency_only per liquidity policy).
         # KNOWN LIMITATION (PR2): emergency heal may still use risky liquidity
         # through this fallback path.
-        # TODO(PR3 spec): replace this with a proper "can I trade-sell this tick?"
+        # TODO(future liquidity refinement): replace this with a proper "can I trade-sell this tick?"
         # affordability gate so that risky items (e.g. spare weapon) are also
         # protected when the agent's survival needs change before the sell executes.
         legacy_sellable = next((o for o in liquidity_options if o.safety in ("safe", "risky")), None)
@@ -436,7 +436,9 @@ def _plan_seek_consumable(
         )
         current_need_value = int(agent.get("hunger" if is_food else "thirst", 0))
         soft_threshold = (
-            _SOFT_CONSUME_THRESHOLD_FOOD if is_food else _SOFT_CONSUME_THRESHOLD_DRINK
+            _MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD
+            if is_food
+            else _MIN_NONCRITICAL_CONSUME_THRESHOLD_DRINK
         )
         allow_soft_consume = current_need_value >= soft_threshold
 

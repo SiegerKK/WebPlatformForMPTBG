@@ -89,6 +89,8 @@ _HARD_INTERRUPT_HEAL = 0.80
 #
 # The list is ordered by tie-break priority (highest first).
 # Each entry: (drive_attr, intent_kind, reason_template)
+# NOTE: drink/eat templates below are non-critical baseline reasons.
+# Critical hunger/thirst reasons are handled earlier via ImmediateNeed/hard-threshold logic.
 # P5 fix: maintain_group → INTENT_MAINTAIN_GROUP (was erroneously INTENT_FOLLOW_GROUP_PLAN)
 _PRIORITY_MAP: list[tuple[str, str, str]] = [
     ("survive_now",        INTENT_ESCAPE_DANGER,      "HP критически низкий"),
