@@ -785,3 +785,125 @@ PR 5: active plan ownership
 ```
 
 After PR 3 we should stop adding special cases and move to `Objective` as the central decision model.
+
+---
+
+## 22. Addendum merge: обязательные уточнения к PR 3
+
+Этот раздел консолидирует обязательные дополнения из `npc_brain_v3_pr2_pr3_contract_addendum.md`.
+
+### 22.1 Sleep mapping в legacy bridge
+
+Legacy bridge обязан явно маппить sleep-события PR 1 в `memory_v3`.
+
+`sleep_completed`:
+
+```text
+layer = episodic
+kind = sleep_completed
+tags = ["sleep", "rest", "recovery"]
+details include:
+  sleep_intervals_applied
+  turns_total
+  turns_slept
+  hours_slept
+  wake_due_to_rested (if available)
+  sleepiness_after (if available)
+```
+
+`plan_monitor_abort` при `scheduled_action_type=sleep`:
+
+```text
+layer = episodic
+kind = sleep_interrupted
+tags = ["sleep", "rest", "plan_monitor", reason]
+details include:
+  sleep_intervals_applied
+  sleep_progress_turns
+  dominant_pressure
+  sleepiness_after
+  wake_due_to_rested=false
+```
+
+### 22.2 Не сохранять каждый `sleep_interval_applied` в память
+
+Явный инвариант:
+
+```text
+Do not convert every sleep_interval_applied event into a MemoryRecord.
+```
+
+Разрешённые sleep memory outcomes:
+
+```text
+sleep_completed
+sleep_interrupted
+sleep_aborted_by_emergency
+```
+
+### 22.3 Retention rules для sleep-related памяти
+
+```text
+sleep_completed -> medium retention
+sleep_interrupted by hunger/thirst -> medium retention
+sleep_interrupted by emission/combat -> high retention
+death/combat/emission threat -> high retention
+```
+
+### 22.4 Сохранение merge-семантики legacy memory
+
+PR 3 обязан сохранить текущую merge-семантику повторяющихся наблюдений.
+
+Если в legacy записи есть:
+
+```text
+first_seen_turn
+last_seen_turn
+times_seen
+```
+
+bridge обязан переносить это в `MemoryRecord.details`.
+
+### 22.5 Optional `world_time` в `MemoryRecord`
+
+Разрешён optional-параметр:
+
+```python
+world_time: dict | None = None
+```
+
+Это debug/frontend-friendly и не меняет core decision rules.
+
+### 22.6 `used_for` в `brain_trace.memory_used`
+
+`memory_used` должен уметь показывать цель использования памяти:
+
+```json
+{
+  "id": "mem_trader_bunker",
+  "kind": "trader_location_known",
+  "summary": "Гнидорович обычно находится в Бункере торговца",
+  "confidence": 0.92,
+  "used_for": "find_trader"
+}
+```
+
+Примеры `used_for`:
+
+```text
+find_trader
+find_food
+find_water
+find_ammo
+avoid_threat
+sell_artifacts
+hunt_target
+search_information
+```
+
+### 22.7 Инвариант: связь сна и памяти
+
+```text
+Sleep interval progress is state/action progress, not long-term memory.
+Sleep completion/interruption is memory-worthy.
+```

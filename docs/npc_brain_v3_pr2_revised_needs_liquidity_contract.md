@@ -865,3 +865,232 @@ Reason:
 ```text
 Once needs and liquidity are explicit, NPC needs better memory retrieval to choose where to buy/find/sell.
 ```
+
+---
+
+## 20. Addendum merge: уточнения после финализации PR 1
+
+Этот раздел фиксирует обязательные уточнения, перенесённые из `npc_brain_v3_pr2_pr3_contract_addendum.md`.
+
+### 20.1 `ImmediateNeed.trigger_context`
+
+Модель `ImmediateNeed` должна быть расширена:
+
+```python
+@dataclass(frozen=True)
+class ImmediateNeed:
+    key: str
+    urgency: float
+    current_value: float
+    threshold: float
+    trigger_context: str = "survival"  # survival | rest_preparation | healing
+    blocks_intents: frozenset[str] = field(default_factory=frozenset)
+    available_inventory_item_types: frozenset[str] = field(default_factory=frozenset)
+    selected_item_id: str | None = None
+    selected_item_type: str | None = None
+    reason: str = ""
+    source_factors: tuple[dict[str, Any], ...] = ()
+```
+
+Семантика:
+
+```text
+trigger_context="survival":
+  глобально блокирует выбор intent (critical hunger/thirst).
+
+trigger_context="rest_preparation":
+  влияет только на rest planning (подготовка перед сном).
+
+trigger_context="healing":
+  контекст для срочного лечения.
+```
+
+### 20.2 Контекстные правила ImmediateNeed
+
+Инвариант:
+
+```text
+Critical immediate needs affect intent selection.
+Rest-preparation immediate needs affect only rest planning.
+```
+
+Пример:
+
+```text
+thirst=80 -> seek_water must beat rest/resupply/get_rich.
+thirst=72 -> не должен глобально перебить все intents,
+             но при планировании rest должен вставить prepare_sleep_drink.
+```
+
+### 20.3 `NeedEvaluationResult` как единый контейнер расчёта
+
+Добавить явный контейнер:
+
+```python
+@dataclass(frozen=True)
+class NeedEvaluationResult:
+    scores: NeedScores
+    immediate_needs: tuple[ImmediateNeed, ...]
+    item_needs: tuple[ItemNeed, ...]
+    liquidity_summary: dict | None = None
+```
+
+Правило:
+
+```text
+Planner and brain_trace must use the same NeedEvaluationResult.
+Do not recompute immediate_needs/item_needs independently in planner.
+```
+
+Transition-compatible API допустим:
+
+```python
+def evaluate_needs(ctx, state) -> NeedScores:
+    result = evaluate_needs_v3(ctx, state)
+    ctx.evaluated_needs_v3 = result
+    return result.scores
+```
+
+### 20.4 Выбор dominant ItemNeed: score-first, не fixed-order
+
+Старая фиксированная очередь не должна быть абсолютной.
+
+Обязательная семантика:
+
+```text
+ImmediateNeed first.
+Then ItemNeed by urgency score.
+Priority is deterministic tie-breaker only.
+```
+
+Рекомендуемый шаблон:
+
+```python
+candidate_item_needs = [n for n in item_needs if n.urgency > 0 and n.key != "upgrade"]
+candidate_item_needs.sort(key=lambda n: (-n.urgency, n.priority, n.key))
+dominant = candidate_item_needs[0] if candidate_item_needs else None
+```
+
+### 20.5 `ItemNeed.affordability_hint` (debug/planner hint)
+
+`ItemNeed` расширяется optional-полями:
+
+```python
+expected_min_price: int | None = None
+affordability_hint: str | None = None  # affordable | unaffordable | unknown
+```
+
+Это не заменяет `AffordabilityResult`, а добавляет explainability для planner/trace.
+
+### 20.6 Инвариант: запрет unaffordable buy loop
+
+Обязательное правило:
+
+```text
+Planner must not repeatedly create the same unaffordable buy plan without changing conditions.
+```
+
+Если `money < cheapest_viable_item_price`, следующий шаг должен быть одним из:
+
+```text
+sell safe item
+earn money / get_rich fallback
+search remembered item
+wait only if no actionable alternative exists
+```
+
+Нельзя:
+
+```text
+trade_buy_item weapon
+trade_buy_item weapon
+trade_buy_item weapon
+...
+```
+
+### 20.7 Усиленная политика продаж survival-резерва
+
+Дополнительный инвариант:
+
+```text
+Never sell below desired survival reserve unless sale is required
+to resolve a higher-priority immediate survival need.
+```
+
+### 20.8 Пост-PR1 регрессионный кейс (`Поцик 1`, стабилизированная версия)
+
+Добавить canonical case:
+
+```text
+hunger = 50
+thirst = 57
+sleepiness = 46
+money = 29
+weapon = null
+armor = leather_jacket
+inventory = bread, bandage, medkit
+scheduled_action = null
+current_goal = resupply
+```
+
+Ожидания:
+
+```text
+1) No critical ImmediateNeed is active.
+2) ItemNeed.weapon urgency ~0.65 can dominate food stock urgency ~0.55.
+3) Planner tries weapon path.
+4) If unaffordable:
+   - no repeated unaffordable buy loop;
+   - liquidity/fallback path is selected.
+5) Last bread is not sold when it violates survival reserve policy.
+```
+
+### 20.9 Обязательное сохранение PR1 sleep semantics
+
+PR 2 может рефакторить rest через `ImmediateNeed`, но обязан сохранить поведение PR 1:
+
+```text
+- dynamic sleep duration derived from sleepiness;
+- sleep duration capped by DEFAULT_SLEEP_HOURS;
+- sleep effects every SLEEP_EFFECT_INTERVAL_TURNS;
+- early wake-up when sleepiness reaches 0;
+- prepare_sleep_food / prepare_sleep_drink action kinds remain valid;
+- critical hunger/thirst still beat sleepiness.
+```
+
+### 20.10 Дополнение к тест-плану PR 2
+
+Добавить обязательные проверки:
+
+```text
+- low sleepiness schedules shorter sleep than high sleepiness;
+- sleep wakes early when sleepiness reaches 0;
+- immediate-need-based rest keeps prepare_sleep_food/drink semantics;
+- no unaffordable buy loop under unchanged conditions;
+- PR1 sleep_effects tests remain green.
+```
+
+### 20.11 Единая таксономия reason codes
+
+Зафиксировать reason strings для planner/trace/tests:
+
+```text
+immediate_drink_inventory
+immediate_food_inventory
+immediate_heal_inventory
+prepare_sleep_drink
+prepare_sleep_food
+buy_food_survival
+buy_drink_survival
+buy_food_stock
+buy_drink_stock
+buy_weapon_resupply
+buy_armor_resupply
+buy_ammo_resupply
+buy_medical_resupply
+sell_for_survival
+sell_for_resupply
+fallback_get_money
+fallback_search_item
+fallback_wait_no_action
+```
