@@ -28,6 +28,14 @@ type BrainTraceNeed = {
   reason?: string;
 };
 
+type BrainTraceMemoryUsed = {
+  id: string;
+  kind: string;
+  summary: string;
+  confidence: number;
+  used_for: string;
+};
+
 type BrainTraceEvent = {
   turn: number;
   world_time?: { world_day: number; world_hour: number; world_minute: number };
@@ -42,6 +50,7 @@ type BrainTraceEvent = {
   immediate_needs?: BrainTraceNeed[];
   item_needs?: BrainTraceNeed[];
   liquidity?: { safe_sale_options?: number; risky_sale_options?: number; emergency_sale_options?: number; money_missing?: number } | null;
+  memory_used?: BrainTraceMemoryUsed[];
 };
 
 type BrainTrace = {
@@ -106,6 +115,10 @@ export interface AgentForProfile {
   }>;
   brain_trace?: BrainTrace | null;
   active_plan_v3?: unknown;
+  memory_v3?: {
+    schema_version?: number;
+    stats?: { records_count?: number; active?: number; stale?: number; archived?: number };
+  } | null;
 }
 
 interface Props {
@@ -783,10 +796,30 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                           </div>
                         </div>
                       )}
+                      {ev.memory_used && ev.memory_used.length > 0 && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Память, использованная решением:</strong>
+                          {ev.memory_used.map((mu, mi) => (
+                            <div key={`mu-${mu.id}-${mi}`} style={{ color: '#94a3b8' }}>
+                              • {mu.summary} ({Math.round((mu.confidence ?? 0) * 100)}%)
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
               )}
+            </div>
+          </Section>
+        )}
+        {agent.memory_v3 && agent.memory_v3.stats && (
+          <Section label="🗂️ Память v3 (статистика)">
+            <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+              <div>Всего записей: {agent.memory_v3.stats.records_count ?? 0}</div>
+              <div>Активных: {agent.memory_v3.stats.active ?? 0}</div>
+              <div>Устаревших: {agent.memory_v3.stats.stale ?? 0}</div>
+              <div>Архивированных: {agent.memory_v3.stats.archived ?? 0}</div>
             </div>
           </Section>
         )}

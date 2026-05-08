@@ -182,6 +182,16 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _agent.setdefault("active_plan_v3", None)
         _agent.setdefault("memory_v3", None)
 
+    # PR 3: ensure memory_v3 structure exists, lazy-import legacy memory, run decay.
+    from app.games.zone_stalkers.memory.store import ensure_memory_v3 as _ensure_mem_v3  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.legacy_bridge import import_legacy_memory as _import_legacy  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.decay import decay_memory as _decay_mem  # noqa: PLC0415
+    for _pr3_agent_id, _pr3_agent in state.get("agents", {}).items():
+        _ensure_mem_v3(_pr3_agent)
+        if not _pr3_agent.get("memory_v3", {}).get("records"):
+            _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)
+        _decay_mem(_pr3_agent, world_turn)
+
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
     if not state.get("_terrain_migrated_v3"):
@@ -1284,6 +1294,10 @@ def _add_memory(
     # Keep only the last MAX_AGENT_MEMORY memory entries
     if len(mem) > MAX_AGENT_MEMORY:
         agent["memory"] = mem[-MAX_AGENT_MEMORY:]
+
+    # PR 3: bridge this entry into memory_v3.
+    from app.games.zone_stalkers.memory.legacy_bridge import bridge_legacy_entry_to_memory_v3  # noqa: PLC0415
+    bridge_legacy_entry_to_memory_v3(agent, memory_entry, world_turn)
 
 
 def should_write_plan_monitor_memory_event(
@@ -4066,6 +4080,11 @@ def _run_bot_decision_v2_inner(
 
     # ── V2 pipeline ────────────────────────────────────────────────────────
     ctx = build_agent_context(agent_id, agent, state)
+
+    # PR 3: build BeliefState adapter for memory-enriched lookups.
+    from app.games.zone_stalkers.decision.beliefs import build_belief_state  # noqa: PLC0415
+    belief = build_belief_state(ctx, agent, world_turn)
+
     need_result = evaluate_need_result(ctx, state)
     needs = need_result.scores
     intent = select_intent(ctx, needs, world_turn, need_result=need_result)
@@ -4132,6 +4151,18 @@ def _run_bot_decision_v2_inner(
             ),
         )
 
+    # PR 3: collect memory_used from BeliefState for brain trace.
+    _memory_used_payload: list[dict] = [
+        {
+            "id": mem["id"],
+            "kind": mem["kind"],
+            "summary": mem["summary"],
+            "confidence": round(float(mem.get("confidence", 0.0)), 3),
+            "used_for": "general_context",
+        }
+        for mem in belief.relevant_memories
+    ][:5]
+
     write_decision_brain_trace_from_v2(
         agent,
         world_turn=world_turn,
@@ -4140,6 +4171,7 @@ def _run_bot_decision_v2_inner(
         reason=intent.reason,
         state=state,
         need_result=need_result,
+        memory_used=_memory_used_payload if _memory_used_payload else None,
     )
 
     return execute_plan_step(ctx, plan, state, world_turn)

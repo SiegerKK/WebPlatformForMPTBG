@@ -73,6 +73,7 @@ def append_brain_trace_event(
     item_needs: list[dict[str, Any]] | None = None,
     liquidity: dict[str, Any] | None = None,
     combat_readiness: dict[str, Any] | None = None,
+    memory_used: list[dict[str, Any]] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     trace = agent.get("brain_trace")
@@ -102,6 +103,9 @@ def append_brain_trace_event(
         event["liquidity"] = liquidity
     if combat_readiness is not None:
         event["combat_readiness"] = combat_readiness
+    if memory_used:
+        # Cap at 5 entries (section 15).
+        event["memory_used"] = memory_used[:5]
 
     if not isinstance(trace, dict):
         thought = summary
@@ -163,6 +167,7 @@ def write_decision_brain_trace_from_v2(
     reason: str | None,
     state: dict[str, Any] | None = None,
     need_result: NeedEvaluationResult | None = None,
+    memory_used: list[dict[str, Any]] | None = None,
 ) -> None:
     thought = f"Выбран intent {intent_kind} ({round(intent_score * 100)}%)."
     if reason:
@@ -210,6 +215,7 @@ def write_decision_brain_trace_from_v2(
         item_needs=item_payload,
         liquidity=liquidity_payload,
         combat_readiness=combat_readiness_payload,
+        memory_used=memory_used,
         state=state,
     )
 
