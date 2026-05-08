@@ -347,9 +347,6 @@ def _plan_seek_consumable(
     item_types = FOOD_ITEM_TYPES if is_food else DRINK_ITEM_TYPES
     category = "food" if is_food else "drink"
 
-    immediate_key = "eat_now" if is_food else "drink_now"
-    immediate_need = _find_immediate_need(need_result, immediate_key)
-
     # Legacy compatibility path (used by existing tests / v2 callers):
     # keep opportunistic consume and sell-before-buy behavior from PR1.
     if need_result is None:
@@ -412,6 +409,8 @@ def _plan_seek_consumable(
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
         return None
 
+    immediate_key = "eat_now" if is_food else "drink_now"
+    immediate_need = _find_immediate_need(need_result, immediate_key)
     selected_item_type = immediate_need.selected_item_type if immediate_need else None
     selected_item_id = immediate_need.selected_item_id if immediate_need else None
 
@@ -585,12 +584,20 @@ def _plan_seek_consumable(
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
 
     if trader_loc and trader_loc == agent_loc:
-        buy_payload: dict[str, Any] = {"item_category": category, "reason": f"buy_{category}_stock"}
-        if category in ("food", "drink"):
-            buy_payload["buy_mode"] = "reserve_basic"
-            buy_payload["preferred_item_types"] = (
-                ["bread", "canned_food"] if category == "food" else ["water", "purified_water"]
-            )
+        buy_payload: dict[str, Any] = {
+            "item_category": category,
+            "reason": f"buy_{category}_stock",
+            **(
+                {
+                    "buy_mode": "reserve_basic",
+                    "preferred_item_types": (
+                        ["bread", "canned_food"] if category == "food" else ["water", "purified_water"]
+                    ),
+                }
+                if category in ("food", "drink")
+                else {}
+            ),
+        }
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
@@ -602,12 +609,20 @@ def _plan_seek_consumable(
         )
 
     if trader_loc and trader_loc != agent_loc:
-        buy_payload: dict[str, Any] = {"item_category": category, "reason": f"buy_{category}_stock"}
-        if category in ("food", "drink"):
-            buy_payload["buy_mode"] = "reserve_basic"
-            buy_payload["preferred_item_types"] = (
-                ["bread", "canned_food"] if category == "food" else ["water", "purified_water"]
-            )
+        buy_payload: dict[str, Any] = {
+            "item_category": category,
+            "reason": f"buy_{category}_stock",
+            **(
+                {
+                    "buy_mode": "reserve_basic",
+                    "preferred_item_types": (
+                        ["bread", "canned_food"] if category == "food" else ["water", "purified_water"]
+                    ),
+                }
+                if category in ("food", "drink")
+                else {}
+            ),
+        }
         return Plan(
             intent_kind=intent.kind,
             steps=[
