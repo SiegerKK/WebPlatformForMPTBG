@@ -31,6 +31,7 @@ def test_minor_resupply_does_not_interrupt_current_travel() -> None:
         switch_threshold=0.10,
     )
     assert decision.selected.key == "CONTINUE_CURRENT_PLAN"
+    assert decision.switch_decision == "continue_current"
 
 
 def test_critical_thirst_interrupts_current_plan() -> None:
@@ -43,3 +44,4 @@ def test_critical_thirst_interrupts_current_plan() -> None:
         switch_threshold=0.10,
     )
     assert decision.selected.key == "RESTORE_WATER"
+    assert decision.switch_decision == "switch"

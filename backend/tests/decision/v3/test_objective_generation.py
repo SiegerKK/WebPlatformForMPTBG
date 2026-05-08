@@ -13,8 +13,12 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_REACH_SAFE_SHELTER,
     OBJECTIVE_RESTORE_WATER,
     OBJECTIVE_RESUPPLY_WEAPON,
+    OBJECTIVE_SELL_ARTIFACTS,
     generate_objectives,
 )
+from app.games.zone_stalkers.decision.objectives.selection import choose_objective
+from app.games.zone_stalkers.memory.models import MemoryRecord
+from app.games.zone_stalkers.memory.store import add_memory_record
 from tests.decision.conftest import make_agent, make_minimal_state
 
 
@@ -87,3 +91,59 @@ def test_generate_continue_current_plan_when_scheduled_action_present() -> None:
     keys = {obj.key for obj in objectives}
 
     assert OBJECTIVE_CONTINUE_CURRENT_PLAN in keys
+
+
+def test_unaffordable_resupply_weapon_prefers_get_money_objective() -> None:
+    agent = make_agent(
+        has_weapon=False,
+        money=0,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    decision = choose_objective(objectives, personality=agent)
+
+    assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
+
+
+def test_artifact_in_inventory_generates_sell_artifacts_objective() -> None:
+    agent = make_agent(global_goal="get_rich")
+    agent["inventory"].append({"id": "art1", "type": "soul", "value": 1500})
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    objective_keys = {obj.key for obj in objectives}
+
+    assert OBJECTIVE_SELL_ARTIFACTS in objective_keys
+
+
+def test_memory_backed_water_objective_has_memory_source_refs_and_confidence() -> None:
+    agent = make_agent(thirst=65, hunger=5)
+    agent["inventory"] = [i for i in agent["inventory"] if i.get("type") not in {"water", "purified_water", "energy_drink"}]
+    state = make_minimal_state(agent=agent)
+
+    add_memory_record(
+        agent,
+        MemoryRecord(
+            id="mem_water_known_1",
+            agent_id="bot1",
+            layer="spatial",
+            kind="water_source_known",
+            created_turn=95,
+            last_accessed_turn=None,
+            summary="Поблизости есть источник воды",
+            details={},
+            location_id="loc_b",
+            item_types=("water",),
+            tags=("water", "drink", "item"),
+            confidence=0.9,
+            importance=0.7,
+        ),
+    )
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    restore_water = next(obj for obj in objectives if obj.key == OBJECTIVE_RESTORE_WATER)
+
+    assert restore_water.memory_confidence > 0.5
+    assert any(ref.startswith("memory:") for ref in restore_water.source_refs)

@@ -22,3 +22,20 @@
 Блокирующих вопросов к реализации PR 4 нет.
 
 Реализация PR 4 и PR4-части из `npc_brain_v3_pre_pr5_hunt_prerequisites.md` может быть начата сразу.
+
+
+## Явная фиксация границы PR 4 по hunt-objectives
+
+В PR 4 hunt-objectives реализуются только как **reserved/prepared слой** для objective-generation/scoring/trace:
+
+- `LOCATE_TARGET`
+- `PREPARE_FOR_HUNT`
+- `TRACK_TARGET`
+- `INTERCEPT_TARGET`
+- `AMBUSH_TARGET`
+- `ENGAGE_TARGET`
+- `CONFIRM_KILL`
+- `RETREAT_FROM_TARGET`
+- `RECOVER_AFTER_COMBAT`
+
+Полноценная системная охота (`kill_stalker` operation с декомпозицией, tracking/repair lifecycle, execution semantics) остаётся **post-PR5** и реализуется по документу `npc_brain_v3_post_pr5_kill_stalker_operation.md`.

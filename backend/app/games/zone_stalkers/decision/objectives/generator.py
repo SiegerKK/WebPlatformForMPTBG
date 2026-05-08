@@ -108,12 +108,36 @@ def _append_unique(result: list[Objective], objective: Objective) -> None:
     result.append(objective)
 
 
+def _item_memory_refs(ctx: ObjectiveGenerationContext, item_category: str) -> tuple[str, ...]:
+    if item_category == "drink":
+        from app.games.zone_stalkers.balance.items import DRINK_ITEM_TYPES
+        match_types = set(DRINK_ITEM_TYPES)
+    elif item_category == "food":
+        from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES
+        match_types = set(FOOD_ITEM_TYPES)
+    else:
+        match_types = set()
+
+    refs: list[str] = []
+    for known in ctx.belief_state.known_items:
+        item_types = set(known.get("item_types") or [])
+        memory_id = known.get("memory_id")
+        if not memory_id:
+            continue
+        if item_types & match_types:
+            refs.append(f"memory:{memory_id}")
+
+    return tuple(refs[:2])
+
+
 def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     """Generate objective candidates from need_result, environment, goals and active plan."""
     result: list[Objective] = []
     agent = ctx.personality
     need_result = ctx.need_result
     memory_conf = _memory_confidence(ctx)
+    liquidity = need_result.liquidity_summary or {}
+    money_missing = int(liquidity.get("money_missing") or 0)
 
     for immediate in need_result.immediate_needs:
         key = None
@@ -156,6 +180,10 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
 
 
     if not any(o.key == OBJECTIVE_RESTORE_WATER for o in result) and float(need_result.scores.drink) > 0.05:
+        drink_memory_refs = _item_memory_refs(ctx, "drink")
+        drink_reasons = ["Жажда растёт"]
+        if drink_memory_refs:
+            drink_reasons.append("По памяти известен источник воды")
         _append_unique(
             result,
             Objective(
@@ -169,13 +197,17 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 confidence=0.9,
                 goal_alignment=0.8,
                 memory_confidence=memory_conf,
-                reasons=("Жажда растёт",),
-                source_refs=("need:drink",),
+                reasons=tuple(drink_reasons),
+                source_refs=("need:drink",) + drink_memory_refs,
                 metadata={"is_blocking": float(need_result.scores.drink) >= 0.8, "critical": float(need_result.scores.drink) >= 0.8},
             ),
         )
 
     if not any(o.key == OBJECTIVE_RESTORE_FOOD for o in result) and float(need_result.scores.eat) > 0.05:
+        food_memory_refs = _item_memory_refs(ctx, "food")
+        food_reasons = ["Голод растёт"]
+        if food_memory_refs:
+            food_reasons.append("По памяти известен источник еды")
         _append_unique(
             result,
             Objective(
@@ -189,8 +221,8 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 confidence=0.9,
                 goal_alignment=0.75,
                 memory_confidence=memory_conf,
-                reasons=("Голод растёт",),
-                source_refs=("need:eat",),
+                reasons=tuple(food_reasons),
+                source_refs=("need:eat",) + food_memory_refs,
                 metadata={"is_blocking": float(need_result.scores.eat) >= 0.8, "critical": float(need_result.scores.eat) >= 0.8},
             ),
         )
@@ -223,6 +255,23 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             continue
         dominant_item_urgency = max(dominant_item_urgency, float(item_need.urgency))
 
+        _metadata = {
+            "is_blocking": False,
+            "item_need_key": item_need.key,
+            "missing_count": item_need.missing_count,
+            "blockers": [],
+        }
+        _reasons = [item_need.reason] if item_need.reason else []
+        if money_missing > 0:
+            _penalty = 0.6 if objective_key == OBJECTIVE_RESUPPLY_WEAPON else 0.4
+            _metadata["blockers"].append({
+                "key": "insufficient_money",
+                "reason": "Недостаточно денег для покупки",
+                "blocked": True,
+                "penalty": _penalty,
+            })
+            _reasons.append("Покупка недоступна без дополнительных денег")
+
         _append_unique(
             result,
             Objective(
@@ -236,14 +285,13 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 confidence=0.85,
                 goal_alignment=0.8,
                 memory_confidence=memory_conf,
-                reasons=(item_need.reason,) if item_need.reason else (),
+                reasons=tuple(_reasons),
                 source_refs=(f"item_need:{item_need.key}",),
-                metadata={"is_blocking": False, "item_need_key": item_need.key, "missing_count": item_need.missing_count},
+                metadata=_metadata,
             ),
         )
 
-    liquidity = need_result.liquidity_summary or {}
-    if dominant_item_urgency > 0 and int(liquidity.get("money_missing") or 0) > 0:
+    if dominant_item_urgency > 0 and money_missing > 0:
         _append_unique(
             result,
             Objective(
@@ -259,7 +307,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 memory_confidence=memory_conf,
                 reasons=("Не хватает денег для обязательного пополнения",),
                 source_refs=("liquidity:money_missing",),
-                metadata={"is_blocking": False, "money_missing": int(liquidity.get("money_missing") or 0)},
+                metadata={"is_blocking": False, "money_missing": money_missing},
             ),
         )
 
@@ -354,24 +402,28 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     )
 
     if global_goal == "get_rich":
-        _append_unique(
-            result,
-            Objective(
-                key=OBJECTIVE_SELL_ARTIFACTS,
-                source="global_goal",
-                urgency=max(0.1, float(need_result.scores.trade)),
-                expected_value=0.75,
-                risk=0.2,
-                time_cost=0.4,
-                resource_cost=0.0,
-                confidence=0.75,
-                goal_alignment=0.95,
-                memory_confidence=memory_conf,
-                reasons=("Продажа артефактов ускоряет накопление денег",),
-                source_refs=("global_goal:get_rich",),
-                metadata={"is_blocking": False},
-            ),
-        )
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        artifact_types = frozenset(ARTIFACT_TYPES.keys())
+        has_artifact = any(i.get("type") in artifact_types for i in agent.get("inventory", []))
+        if has_artifact:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_SELL_ARTIFACTS,
+                    source="global_goal",
+                    urgency=max(0.2, float(need_result.scores.trade)),
+                    expected_value=0.9,
+                    risk=0.15,
+                    time_cost=0.25,
+                    resource_cost=0.0,
+                    confidence=0.85,
+                    goal_alignment=0.98,
+                    memory_confidence=memory_conf,
+                    reasons=("В инвентаре есть артефакт для продажи",),
+                    source_refs=("global_goal:get_rich", "inventory:artifact"),
+                    metadata={"is_blocking": False},
+                ),
+            )
 
     if global_goal == "kill_stalker":
         readiness = need_result.combat_readiness or {}

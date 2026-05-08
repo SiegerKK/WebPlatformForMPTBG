@@ -311,3 +311,32 @@ def test_decision_pipeline_uses_memory_v3_water_source_when_no_trader_path() -> 
     assert decision_events
     mem_used = decision_events[-1].get("memory_used", [])
     assert any(mu.get("used_for") == "find_water" for mu in mem_used)
+
+
+def test_tick_objective_pipeline_writes_real_objective_trace_fields() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["thirst"] = 20
+    bot["hunger"] = 20
+    bot["money"] = 0
+    bot["equipment"]["weapon"] = None
+    bot["inventory"] = []
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+    new_bot = new_state["agents"]["bot1"]
+
+    decision_events = [ev for ev in new_bot.get("brain_trace", {}).get("events", []) if ev.get("mode") == "decision"]
+    assert decision_events
+    decision_ev = decision_events[-1]
+
+    assert decision_ev.get("active_objective")
+    assert decision_ev["active_objective"].get("key") == "GET_MONEY_FOR_RESUPPLY"
+    assert decision_ev.get("objective_scores")
+    assert decision_ev.get("alternatives") is not None
+
+    ctx = new_bot.get("_v2_context", {})
+    assert ctx.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
