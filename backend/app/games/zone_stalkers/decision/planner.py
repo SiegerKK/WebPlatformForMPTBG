@@ -22,6 +22,8 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
+from .item_needs import choose_dominant_item_need, evaluate_item_needs
+from .liquidity import evaluate_affordability, find_liquidity_options
 from .models.agent_context import AgentContext
 from .models.intent import (
     Intent,
@@ -46,6 +48,8 @@ from .models.intent import (
     INTENT_ASSIST_ALLY,
 )
 from .constants import DESIRED_AMMO_COUNT
+from .models.immediate_need import ImmediateNeed
+from .models.need_evaluation import NeedEvaluationResult
 from .models.plan import (
     Plan, PlanStep,
     STEP_TRAVEL_TO_LOCATION,
@@ -65,6 +69,7 @@ def build_plan(
     intent: Intent,
     state: dict[str, Any],
     world_turn: int,
+    need_result: NeedEvaluationResult | None = None,
 ) -> Plan:
     """Build a short Plan for the given Intent.
 
@@ -110,7 +115,7 @@ def build_plan(
 
     builder = builder_map.get(kind)
     if builder is not None:
-        plan = builder(ctx, intent, state, world_turn)
+        plan = builder(ctx, intent, state, world_turn, need_result)
         if plan is not None:
             return plan
 
@@ -121,7 +126,8 @@ def build_plan(
 # ── Plan builders ─────────────────────────────────────────────────────────────
 
 def _plan_flee_emission(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     target_loc = intent.target_location_id
     if not target_loc:
@@ -158,7 +164,8 @@ def _plan_flee_emission(
 
 
 def _plan_wait_in_shelter(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Plan:
     step = PlanStep(
         kind=STEP_WAIT,
@@ -176,7 +183,8 @@ def _plan_wait_in_shelter(
 
 
 def _plan_heal_or_flee(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     agent = ctx.self_state
     inventory = agent.get("inventory", [])
@@ -263,111 +271,173 @@ def _plan_heal_or_flee(
 
 
 def _plan_seek_consumable(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
+
     agent = ctx.self_state
     inventory = agent.get("inventory", [])
     is_food = intent.kind == INTENT_SEEK_FOOD
     item_types = FOOD_ITEM_TYPES if is_food else DRINK_ITEM_TYPES
     category = "food" if is_food else "drink"
-    item = next((i for i in inventory if i.get("type") in item_types), None)
+
+    immediate_key = "eat_now" if is_food else "drink_now"
+    immediate_need = _find_immediate_need(need_result, immediate_key)
+
+    selected_item_type = immediate_need.selected_item_type if immediate_need else None
+    selected_item_id = immediate_need.selected_item_id if immediate_need else None
+
+    item = None
+    if selected_item_type is not None:
+        item = next(
+            (
+                i for i in inventory
+                if i.get("type") == selected_item_type
+                and (selected_item_id is None or i.get("id") == selected_item_id)
+            ),
+            None,
+        )
+    if item is None:
+        item = next((i for i in inventory if i.get("type") in item_types), None)
+
     if item:
+        reason = f"emergency_{category}" if immediate_need and immediate_need.trigger_context in ("survival", "healing") else f"need_{category}"
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
                 kind=STEP_CONSUME_ITEM,
-                payload={"item_type": item.get("type"), "reason": f"emergency_{category}"},
+                payload={"item_type": item.get("type"), "reason": reason},
                 interruptible=False,
                 expected_duration_ticks=1,
             )],
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
+
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id")
-    if trader_loc and trader_loc == agent_loc:
-        # If the agent has no money but holds sellable items, sell first this turn
-        # so the next tick can afford the consumable.
-        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
-            return Plan(
-                intent_kind=intent.kind,
-                steps=[
-                    PlanStep(STEP_TRADE_SELL_ITEM,
-                             {"item_category": "any_sellable", "reason": "fund_consumable"},
-                             interruptible=False),
-                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
-                             interruptible=False),
-                ],
-                interruptible=False, confidence=1.0, created_turn=world_turn,
+
+    # Immediate survival mode: cheapest affordable viable item + liquidity fallback.
+    if immediate_need and immediate_need.trigger_context in ("survival", "healing"):
+        compatible_types = set(item_types)
+        if trader_loc and trader_loc == agent_loc:
+            afford = evaluate_affordability(
+                agent=agent,
+                trader={},
+                category=category,
+                compatible_item_types=compatible_types,
             )
-        # Already co-located with the trader — buy immediately (no travel needed).
+            if afford.can_buy_now:
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[PlanStep(
+                        STEP_TRADE_BUY_ITEM,
+                        {
+                            "item_category": category,
+                            "reason": f"buy_{category}_survival",
+                            "buy_mode": "survival_cheapest",
+                            "compatible_item_types": sorted(compatible_types),
+                            "required_price": afford.required_price,
+                        },
+                        interruptible=False,
+                    )],
+                    interruptible=False, confidence=1.0, created_turn=world_turn,
+                )
+
+            liquidity_options = find_liquidity_options(
+                agent=agent,
+                immediate_needs=list(need_result.immediate_needs) if need_result else [],
+                item_needs=list(need_result.item_needs) if need_result else evaluate_item_needs(ctx, state),
+            )
+            sellable = next((o for o in liquidity_options if o.safety in ("safe", "emergency_only")), None)
+            if sellable:
+                steps = [
+                    PlanStep(
+                        STEP_TRADE_SELL_ITEM,
+                        {
+                            "item_category": "any_sellable",
+                            "reason": f"fund_{category}",
+                            "required_price": afford.required_price,
+                        },
+                        interruptible=False,
+                    ),
+                    PlanStep(
+                        STEP_TRADE_BUY_ITEM,
+                        {
+                            "item_category": category,
+                            "reason": f"buy_{category}_survival",
+                            "buy_mode": "survival_cheapest",
+                            "compatible_item_types": sorted(compatible_types),
+                            "required_price": afford.required_price,
+                        },
+                        interruptible=False,
+                    ),
+                ]
+                return Plan(intent_kind=intent.kind, steps=steps, interruptible=False, confidence=1.0, created_turn=world_turn)
+
+        if trader_loc and trader_loc != agent_loc:
+            steps = [
+                PlanStep(STEP_TRAVEL_TO_LOCATION,
+                         {"target_id": trader_loc, "reason": f"buy_{category}_survival"},
+                         expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+                PlanStep(STEP_TRADE_BUY_ITEM,
+                         {
+                             "item_category": category,
+                             "reason": f"buy_{category}_survival",
+                             "buy_mode": "survival_cheapest",
+                             "compatible_item_types": sorted(compatible_types),
+                         },
+                         interruptible=False),
+            ]
+            return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
+
+    if trader_loc and trader_loc == agent_loc:
         return Plan(
             intent_kind=intent.kind,
-            steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
-                            interruptible=False)],
+            steps=[PlanStep(
+                STEP_TRADE_BUY_ITEM,
+                {"item_category": category, "reason": f"buy_{category}_stock"},
+                interruptible=False,
+            )],
             interruptible=False, confidence=1.0, created_turn=world_turn,
         )
+
     if trader_loc and trader_loc != agent_loc:
-        steps = [
-            PlanStep(STEP_TRAVEL_TO_LOCATION,
-                     {"target_id": trader_loc, "reason": f"buy_{category}"},
-                     expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
-        ]
-        # Opportunistic: if the agent has the complementary consumable in inventory
-        # and the secondary need is non-negligible (≥ 25%), consume it immediately
-        # before traveling.  Example: seeking water but hungry with food → eat first.
-        _OPPORTUNISTIC_THRESHOLD = 25
-        other_types = DRINK_ITEM_TYPES if is_food else FOOD_ITEM_TYPES
-        other_attr = "thirst" if is_food else "hunger"
-        other_item = next((i for i in inventory if i.get("type") in other_types), None)
-        if other_item and agent.get(other_attr, 0) >= _OPPORTUNISTIC_THRESHOLD:
-            other_category = "drink" if is_food else "food"
-            steps.insert(0, PlanStep(
-                kind=STEP_CONSUME_ITEM,
-                payload={"item_type": other_item.get("type"),
-                         "reason": f"opportunistic_{other_category}"},
-                interruptible=False,
-                expected_duration_ticks=1,
-            ))
-        # If the agent has no money but holds sellable items, sell upon arrival so
-        # the next step (buy) can be fulfilled.
-        if agent.get("money", 0) == 0 and _has_sellable_items(agent):
-            steps.append(PlanStep(STEP_TRADE_SELL_ITEM,
-                                  {"item_category": "any_sellable", "reason": "fund_consumable"},
-                                  interruptible=False))
-        steps.append(PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category},
-                              interruptible=False))
-        return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": trader_loc, "reason": f"buy_{category}_stock"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+                ),
+                PlanStep(
+                    STEP_TRADE_BUY_ITEM,
+                    {"item_category": category, "reason": f"buy_{category}_stock"},
+                    interruptible=False,
+                ),
+            ],
+            confidence=0.7,
+            created_turn=world_turn,
+        )
     return None
 
 
 def _build_sleep_preparation_steps(
     ctx: AgentContext,
     world_turn: int,
+    need_result: NeedEvaluationResult | None = None,
 ) -> list[PlanStep]:
-    """Return consume steps for food/drink that should precede sleep.
-
-    Only inserts steps for items already in inventory; does not plan purchases.
-    """
-    from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
-    from app.games.zone_stalkers.rules.tick_constants import (
-        SLEEP_SAFE_HUNGER_THRESHOLD,
-        SLEEP_SAFE_THIRST_THRESHOLD,
-    )
+    """Return consume steps for food/drink that should precede sleep."""
     from app.games.zone_stalkers.rules.tick_rules import DEFAULT_SLEEP_HOURS
 
     agent = ctx.self_state
     inventory = agent.get("inventory", [])
     steps: list[PlanStep] = []
-    # Basic sleep duration policy:
-    # linearly map sleepiness 0..100 -> 1..DEFAULT_SLEEP_HOURS.
-    sleepiness = max(0, int(agent.get("sleepiness", 0)))
-    sleepiness_per_hour = max(1, math.ceil(100 / DEFAULT_SLEEP_HOURS))
-    estimated_hours = max(1, math.ceil(sleepiness / sleepiness_per_hour))
-    sleep_hours = min(DEFAULT_SLEEP_HOURS, estimated_hours)
 
-    if agent.get("thirst", 0) >= SLEEP_SAFE_THIRST_THRESHOLD:
-        drink = next((i for i in inventory if i.get("type") in DRINK_ITEM_TYPES), None)
+    drink_need = _find_immediate_need(need_result, "drink_now", trigger_context="rest_preparation")
+    if drink_need and drink_need.selected_item_type:
+        drink = next((i for i in inventory if i.get("type") == drink_need.selected_item_type), None)
         if drink:
             steps.append(PlanStep(
                 kind=STEP_CONSUME_ITEM,
@@ -376,8 +446,9 @@ def _build_sleep_preparation_steps(
                 expected_duration_ticks=1,
             ))
 
-    if agent.get("hunger", 0) >= SLEEP_SAFE_HUNGER_THRESHOLD:
-        food = next((i for i in inventory if i.get("type") in FOOD_ITEM_TYPES), None)
+    food_need = _find_immediate_need(need_result, "eat_now", trigger_context="rest_preparation")
+    if food_need and food_need.selected_item_type:
+        food = next((i for i in inventory if i.get("type") == food_need.selected_item_type), None)
         if food:
             steps.append(PlanStep(
                 kind=STEP_CONSUME_ITEM,
@@ -385,6 +456,13 @@ def _build_sleep_preparation_steps(
                 interruptible=False,
                 expected_duration_ticks=1,
             ))
+
+    # Basic sleep duration policy:
+    # linearly map sleepiness 0..100 -> 1..DEFAULT_SLEEP_HOURS.
+    sleepiness = max(0, int(agent.get("sleepiness", 0)))
+    sleepiness_per_hour = max(1, math.ceil(100 / DEFAULT_SLEEP_HOURS))
+    estimated_hours = max(1, math.ceil(sleepiness / sleepiness_per_hour))
+    sleep_hours = min(DEFAULT_SLEEP_HOURS, estimated_hours)
 
     steps.append(PlanStep(
         kind=STEP_SLEEP_FOR_HOURS,
@@ -396,19 +474,33 @@ def _build_sleep_preparation_steps(
 
 
 def _plan_rest(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Plan:
-    steps = _build_sleep_preparation_steps(ctx, world_turn)
-    reason = intent.reason or ""
-    if len(steps) > 1:
-        # At least one preparation step was inserted
-        reason = "rest_preparation_required"
+    del state
+    steps = _build_sleep_preparation_steps(ctx, world_turn, need_result)
     return Plan(
         intent_kind=intent.kind,
         steps=steps,
         confidence=1.0,
         created_turn=world_turn,
     )
+
+
+def _find_immediate_need(
+    need_result: NeedEvaluationResult | None,
+    key: str,
+    trigger_context: str | None = None,
+) -> ImmediateNeed | None:
+    if need_result is None:
+        return None
+    for need in need_result.immediate_needs:
+        if need.key != key:
+            continue
+        if trigger_context is not None and need.trigger_context != trigger_context:
+            continue
+        return need
+    return None
 
 
 def _desired_supply_count(risk_tolerance: float, min_count: int, max_count: int) -> int:
@@ -421,130 +513,140 @@ def _desired_supply_count(risk_tolerance: float, min_count: int, max_count: int)
 
 
 def _plan_resupply(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
-    """Plan to resupply consumables, equipment, and upgrades.
-
-    Priority order (no money gate — the NPC always seeks proper equipment
-    regardless of wealth; the material_threshold gate remains ONLY for get_rich):
-      1. Food stock below desired count (based on risk_tolerance)
-      2. Drink stock below desired count (based on risk_tolerance)
-      3. No armor equipped
-      4. No weapon equipped
-      5. Ammo count below DESIRED_AMMO_COUNT (3 boxes)
-      6. Medicine stock below desired count (based on risk_tolerance)
-      7. Equipment upgrade available (weapon or armor, closer risk_tolerance + higher tier)
-
-    For each gap:
-      a. Travel to remembered item location (ground pickup)
-      b. Buy from nearest trader (travel there if needed)
-      c. Fallback: gather resources (get_rich behaviour)
-    """
-    from app.games.zone_stalkers.balance.items import (
-        WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, AMMO_FOR_WEAPON,
-        FOOD_ITEM_TYPES, DRINK_ITEM_TYPES, HEAL_ITEM_TYPES,
-    )
+    """Plan resupply using PR2 ItemNeed dominant-urgency semantics."""
     from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
 
     agent = ctx.self_state
-    eq = agent.get("equipment", {})
-    inventory = agent.get("inventory", [])
     agent_loc = agent.get("location_id", "")
-    risk_tolerance = float(agent.get("risk_tolerance", 0.5))
 
-    # Desired supply counts based on risk tolerance
-    desired_food = _desired_supply_count(risk_tolerance, 1, 3)
-    desired_drink = _desired_supply_count(risk_tolerance, 1, 3)
-    desired_medicine = _desired_supply_count(risk_tolerance, 2, 4)
+    item_needs = list(need_result.item_needs) if need_result is not None else evaluate_item_needs(ctx, state)
+    dominant = choose_dominant_item_need(item_needs)
+    if dominant is None:
+        return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
 
-    # Count current inventory by category
-    food_count = sum(1 for i in inventory if i.get("type") in FOOD_ITEM_TYPES)
-    drink_count = sum(1 for i in inventory if i.get("type") in DRINK_ITEM_TYPES)
-    medicine_count = sum(1 for i in inventory if i.get("type") in HEAL_ITEM_TYPES)
+    category_map = {
+        "food": "food",
+        "drink": "drink",
+        "medicine": "medical",
+        "weapon": "weapon",
+        "armor": "armor",
+        "ammo": "ammo",
+    }
+    buy_category = category_map.get(dominant.key)
+    need_types = dominant.compatible_item_types
 
-    has_weapon = eq.get("weapon") is not None
-    has_armor = eq.get("armor") is not None
+    if not buy_category:
+        return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
 
-    # Determine highest-priority gap in the stated priority order
-    need_types: Optional["frozenset[str]"] = None
-    _buy_category: Optional[str] = None
+    # a) Try memory pickup first
+    mem_loc = _find_item_memory_location(agent, need_types, state) if need_types else None
+    if mem_loc and mem_loc != agent_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": mem_loc, "reason": "seek_item_from_memory"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+            )],
+            confidence=0.85,
+            created_turn=world_turn,
+        )
 
-    if food_count < desired_food:
-        need_types = FOOD_ITEM_TYPES
-        _buy_category = "food"
-    elif drink_count < desired_drink:
-        need_types = DRINK_ITEM_TYPES
-        _buy_category = "drink"
-    elif not has_armor:
-        need_types = ARMOR_ITEM_TYPES
-        _buy_category = "armor"
-    elif not has_weapon:
-        need_types = WEAPON_ITEM_TYPES
-        _buy_category = "weapon"
-    else:
-        # Check ammo (need DESIRED_AMMO_COUNT items)
-        weapon_type = eq["weapon"].get("type") if isinstance(eq.get("weapon"), dict) else None
-        required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
-        if required_ammo:
-            ammo_count = sum(1 for i in inventory if i.get("type") == required_ammo)
-            if ammo_count < DESIRED_AMMO_COUNT:
-                need_types = frozenset([required_ammo])
-                _buy_category = "ammo"
+    trader_loc = _nearest_trader_location(ctx, state)
+    affordability = evaluate_affordability(
+        agent=agent,
+        trader={},
+        category=buy_category,
+        compatible_item_types=set(need_types) if need_types else None,
+    )
 
-        if need_types is None and medicine_count < desired_medicine:
-            need_types = HEAL_ITEM_TYPES
-            _buy_category = "medical"
-
-    if need_types is not None:
-        # a. Memory-based travel (pick up from ground)
-        mem_loc = _find_item_memory_location(agent, need_types, state)
-        if mem_loc and mem_loc != agent_loc:
+    if trader_loc == agent_loc:
+        if affordability.can_buy_now:
             return Plan(
                 intent_kind=intent.kind,
                 steps=[PlanStep(
-                    STEP_TRAVEL_TO_LOCATION,
-                    {"target_id": mem_loc, "reason": "seek_item_from_memory"},
-                    expected_duration_ticks=_estimate_travel_ticks(ctx, mem_loc, state),
+                    STEP_TRADE_BUY_ITEM,
+                    {
+                        "item_category": buy_category,
+                        "reason": f"buy_{buy_category}_resupply",
+                        "required_price": affordability.required_price,
+                    },
+                    interruptible=False,
                 )],
-                confidence=0.85, created_turn=world_turn,
+                confidence=0.8,
+                created_turn=world_turn,
             )
 
-        # b. Buy from trader
-        trader_loc = _nearest_trader_location(ctx, state)
-        if trader_loc and trader_loc != agent_loc:
+        liquidity_options = find_liquidity_options(
+            agent=agent,
+            immediate_needs=list(need_result.immediate_needs) if need_result else [],
+            item_needs=item_needs,
+        )
+        sellable = next((o for o in liquidity_options if o.safety in ("safe", "risky")), None)
+        if sellable is not None:
             return Plan(
                 intent_kind=intent.kind,
                 steps=[
-                    PlanStep(STEP_TRAVEL_TO_LOCATION,
-                             {"target_id": trader_loc, "reason": "resupply"},
-                             expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
-                    PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": _buy_category},
-                             interruptible=False),
+                    PlanStep(
+                        STEP_TRADE_SELL_ITEM,
+                        {
+                            "item_category": "any_sellable",
+                            "reason": "fund_resupply",
+                            "required_price": affordability.required_price,
+                        },
+                        interruptible=False,
+                    ),
+                    PlanStep(
+                        STEP_TRADE_BUY_ITEM,
+                        {
+                            "item_category": buy_category,
+                            "reason": f"buy_{buy_category}_resupply",
+                            "required_price": affordability.required_price,
+                        },
+                        interruptible=False,
+                    ),
                 ],
-                confidence=0.6, created_turn=world_turn,
-            )
-        if trader_loc == agent_loc:
-            return Plan(
-                intent_kind=intent.kind,
-                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": _buy_category},
-                                interruptible=False)],
-                confidence=0.8, created_turn=world_turn,
+                confidence=0.75,
+                created_turn=world_turn,
             )
 
-        # c. No trader known → fallback to resource-gathering
-        get_rich_intent = Intent(
-            kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
-            reason="Resupply fallback — no trader known, gather resources",
-            created_turn=world_turn,
-        )
-        return _plan_get_rich(ctx, get_rich_intent, state, world_turn)
+    if trader_loc and trader_loc != agent_loc:
+        steps = [
+            PlanStep(
+                STEP_TRAVEL_TO_LOCATION,
+                {"target_id": trader_loc, "reason": "resupply"},
+                expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+            )
+        ]
+        if affordability.can_buy_now:
+            steps.append(PlanStep(
+                STEP_TRADE_BUY_ITEM,
+                {
+                    "item_category": buy_category,
+                    "reason": f"buy_{buy_category}_resupply",
+                    "required_price": affordability.required_price,
+                },
+                interruptible=False,
+            ))
+            return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
 
-    # All basic needs met — check for equipment upgrades
-    return _plan_resupply_upgrade(ctx, intent, state, world_turn)
+    # No trader known or cannot afford and no liquidity.
+    get_rich_intent = Intent(
+        kind=INTENT_GET_RICH,
+        score=0.5,
+        source_goal="get_rich",
+        reason="Resupply fallback — gather money/resources",
+        created_turn=world_turn,
+    )
+    return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
 
 
 def _plan_resupply_upgrade(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     """Plan an equipment upgrade when all basic resupply needs are met.
 
@@ -599,7 +701,8 @@ def _plan_resupply_upgrade(
 
 
 def _plan_sell_artifacts(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = ctx.self_state.get("location_id")
@@ -626,7 +729,8 @@ def _plan_sell_artifacts(
 
 
 def _plan_get_rich(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     """Build a plan for the get_rich intent.
 
@@ -725,7 +829,8 @@ def _plan_get_rich(
 
 
 def _plan_hunt_target(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     target_loc = intent.target_location_id
     if target_loc and target_loc != ctx.self_state.get("location_id"):
@@ -749,7 +854,8 @@ def _plan_hunt_target(
 
 
 def _plan_search_information(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Plan:
     """Build a plan for the search_information intent (unravel_zone_mystery goal).
 
@@ -845,7 +951,8 @@ def _plan_search_information(
 
 
 def _plan_leave_zone(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     # Find exit location
     exit_loc = _find_exit_location(ctx, state)
@@ -862,7 +969,8 @@ def _plan_leave_zone(
 
 
 def _plan_upgrade_equipment(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Plan:
     # TODO(Phase 5): implement real equipment upgrade planning when equipment
     # upgrade mechanics are fully defined.  For now, fall back to legacy logic.
@@ -876,7 +984,8 @@ def _plan_upgrade_equipment(
 
 
 def _plan_explore(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     loc_id = ctx.self_state.get("location_id", "")
     return Plan(
@@ -889,7 +998,8 @@ def _plan_explore(
 
 
 def _plan_follow_group(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Plan:
     # TODO(Phase 7): implement group-following logic.
     return Plan(
@@ -902,7 +1012,8 @@ def _plan_follow_group(
 
 
 def _plan_assist_ally(
-    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
 ) -> Plan:
     # TODO(Phase 6): implement ally-assistance logic.
     return Plan(

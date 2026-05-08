@@ -288,6 +288,26 @@ def _exec_trade_buy(
         }
         item_types = type_map.get(category, HEAL_ITEM_TYPES)
 
+    # PR2 survival mode: force cheapest affordable viable item.
+    buy_mode = step.payload.get("buy_mode")
+    compatible_item_types = step.payload.get("compatible_item_types")
+    if isinstance(compatible_item_types, list) and compatible_item_types:
+        item_types = frozenset(str(t) for t in compatible_item_types)
+
+    if buy_mode == "survival_cheapest":
+        from app.games.zone_stalkers.balance.items import ITEM_TYPES
+
+        affordable = sorted(
+            (
+                t for t in item_types
+                if t in ITEM_TYPES and agent.get("money", 0) >= int(ITEM_TYPES[t].get("value", 0) * 1.5)
+            ),
+            key=lambda t: (int(ITEM_TYPES[t].get("value", 0) * 1.5), t),
+        )
+        if not affordable:
+            return []
+        item_types = frozenset([affordable[0]])
+
     reason = step.payload.get("reason", f"buy_{category}")
     return _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                 purchase_reason=reason) or []

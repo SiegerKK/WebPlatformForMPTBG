@@ -20,6 +20,14 @@ interface AgentInventoryItem {
 type BrainTraceMode = 'plan_monitor' | 'decision' | 'system';
 type BrainTraceDecision = 'continue' | 'abort' | 'new_intent' | 'no_op';
 
+type BrainTraceNeed = {
+  key: string;
+  urgency: number;
+  selected_item_type?: string | null;
+  missing_count?: number;
+  reason?: string;
+};
+
 type BrainTraceEvent = {
   turn: number;
   world_time?: { world_day: number; world_hour: number; world_minute: number };
@@ -31,6 +39,9 @@ type BrainTraceEvent = {
   intent_kind?: string | null;
   intent_score?: number | null;
   dominant_pressure?: { key: string; value: number } | null;
+  immediate_needs?: BrainTraceNeed[];
+  item_needs?: BrainTraceNeed[];
+  liquidity?: { safe_sale_options?: number; risky_sale_options?: number; emergency_sale_options?: number; money_missing?: number } | null;
 };
 
 type BrainTrace = {
@@ -741,6 +752,35 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                       {ev.dominant_pressure && (
                         <div style={{ color: '#94a3b8', fontSize: '0.72rem' }}>
                           Pressure: {ev.dominant_pressure.key} = {Math.round(ev.dominant_pressure.value)}
+                        </div>
+                      )}
+                      {ev.immediate_needs && ev.immediate_needs.length > 0 && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Срочные нужды:</strong>
+                          {ev.immediate_needs.map((n, i) => (
+                            <div key={`im-${n.key}-${i}`} style={{ color: '#94a3b8' }}>
+                              • {n.key} ({Math.round((n.urgency ?? 0) * 100)}%){n.selected_item_type ? ` → ${n.selected_item_type}` : ''}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ev.item_needs && ev.item_needs.length > 0 && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Запасы/снаряжение:</strong>
+                          {ev.item_needs.map((n, i) => (
+                            <div key={`it-${n.key}-${i}`} style={{ color: '#94a3b8' }}>
+                              • {n.key} ({Math.round((n.urgency ?? 0) * 100)}%){typeof n.missing_count === 'number' ? `, не хватает: ${n.missing_count}` : ''}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ev.liquidity && (
+                        <div style={{ color: '#cbd5e1', fontSize: '0.72rem', marginTop: 4 }}>
+                          <strong>Деньги/ликвидность:</strong>
+                          <div style={{ color: '#94a3b8' }}>
+                            safe: {ev.liquidity.safe_sale_options ?? 0}, risky: {ev.liquidity.risky_sale_options ?? 0}, emergency: {ev.liquidity.emergency_sale_options ?? 0}
+                            {typeof ev.liquidity.money_missing === 'number' ? `, не хватает: ${ev.liquidity.money_missing}` : ''}
+                          </div>
                         </div>
                       )}
                     </div>

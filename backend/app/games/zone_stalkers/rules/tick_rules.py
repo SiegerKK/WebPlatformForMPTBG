@@ -3982,7 +3982,7 @@ def _run_bot_decision_v2_inner(
 ) -> List[Dict[str, Any]]:
     """Core V2 decision pipeline: Context → Needs → Intent → Plan → Execute."""
     from app.games.zone_stalkers.decision.context_builder import build_agent_context
-    from app.games.zone_stalkers.decision.needs import evaluate_needs
+    from app.games.zone_stalkers.decision.needs import evaluate_need_result
     from app.games.zone_stalkers.decision.intents import select_intent
     from app.games.zone_stalkers.decision.planner import build_plan
     from app.games.zone_stalkers.decision.executors import execute_plan_step
@@ -4014,9 +4014,10 @@ def _run_bot_decision_v2_inner(
 
     # ── V2 pipeline ────────────────────────────────────────────────────────
     ctx = build_agent_context(agent_id, agent, state)
-    needs = evaluate_needs(ctx, state)
-    intent = select_intent(ctx, needs, world_turn)
-    plan = build_plan(ctx, intent, state, world_turn)
+    need_result = evaluate_need_result(ctx, state)
+    needs = need_result.scores
+    intent = select_intent(ctx, needs, world_turn, need_result=need_result)
+    plan = build_plan(ctx, intent, state, world_turn, need_result=need_result)
 
     # Compute needs dict once (reused below)
     _needs_dict = asdict(needs)
@@ -4086,6 +4087,7 @@ def _run_bot_decision_v2_inner(
         intent_score=float(intent.score),
         reason=intent.reason,
         state=state,
+        need_result=need_result,
     )
 
     return execute_plan_step(ctx, plan, state, world_turn)
@@ -4284,7 +4286,7 @@ def _describe_bot_decision_tree(
 ) -> Dict[str, Any]:
     """Backwards-compat stub returning a minimal decision tree structure."""
     from app.games.zone_stalkers.decision.context_builder import build_agent_context
-    from app.games.zone_stalkers.decision.needs import evaluate_needs
+    from app.games.zone_stalkers.decision.needs import evaluate_need_result
     from app.games.zone_stalkers.decision.intents import select_intent
     world_turn = state.get("world_turn", 0)
     agent_id = agent.get("id") or next(
@@ -4292,8 +4294,9 @@ def _describe_bot_decision_tree(
     )
     try:
         ctx = build_agent_context(agent_id, agent, state)
-        needs = evaluate_needs(ctx, state)
-        intent = select_intent(ctx, needs, world_turn)
+        need_result = evaluate_need_result(ctx, state)
+        needs = need_result.scores
+        intent = select_intent(ctx, needs, world_turn, need_result=need_result)
         goal = intent.source_goal or intent.kind
         action = intent.kind
         reason = intent.reason or ""

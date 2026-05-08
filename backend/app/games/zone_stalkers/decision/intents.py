@@ -47,6 +47,7 @@ from typing import Any, Optional
 
 from .constants import EMISSION_DANGEROUS_TERRAIN
 from .models.agent_context import AgentContext
+from .models.need_evaluation import NeedEvaluationResult
 from .models.need_scores import NeedScores
 from .models.intent import (
     Intent,
@@ -113,6 +114,7 @@ def select_intent(
     ctx: AgentContext,
     needs: NeedScores,
     world_turn: int,
+    need_result: NeedEvaluationResult | None = None,
 ) -> Intent:
     """Choose the dominant Intent for this tick.
 
@@ -133,6 +135,38 @@ def select_intent(
     agent = ctx.self_state
     global_goal: str = agent.get("global_goal", "get_rich")
     kill_target_id: Optional[str] = agent.get("kill_target_id")
+
+    # ── PR2 immediate needs: critical survival/healing first ──────────────────
+    if need_result is not None:
+        immediate = [n for n in need_result.immediate_needs if n.trigger_context in ("survival", "healing")]
+        drink_now = next((n for n in immediate if n.key == "drink_now"), None)
+        eat_now = next((n for n in immediate if n.key == "eat_now"), None)
+        heal_now = next((n for n in immediate if n.key == "heal_now"), None)
+
+        if drink_now and drink_now.urgency >= CRITICAL_THIRST_THRESHOLD / 100.0:
+            return _make_intent(
+                INTENT_SEEK_WATER,
+                float(drink_now.urgency),
+                source_goal=None,
+                reason=drink_now.reason or f"Критическая жажда — срочный поиск воды (жажда {agent.get('thirst', 0)}%)",
+                created_turn=world_turn,
+            )
+        if eat_now and eat_now.urgency >= CRITICAL_HUNGER_THRESHOLD / 100.0:
+            return _make_intent(
+                INTENT_SEEK_FOOD,
+                float(eat_now.urgency),
+                source_goal=None,
+                reason=eat_now.reason or f"Критический голод — срочный поиск еды (голод {agent.get('hunger', 0)}%)",
+                created_turn=world_turn,
+            )
+        if heal_now and heal_now.urgency >= _HARD_INTERRUPT_HEAL:
+            return _make_intent(
+                INTENT_HEAL_SELF,
+                float(heal_now.urgency),
+                source_goal=None,
+                reason=heal_now.reason or f"HP опасно низкий — срочное лечение (HP={agent.get('hp', '?')})",
+                created_turn=world_turn,
+            )
 
     # ── Special case: emission threat (always overrides equipment/resource needs) ──
     # Emission is a life-threatening event — it must override reload_or_rearm (1.0)
