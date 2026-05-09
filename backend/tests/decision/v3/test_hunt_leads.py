@@ -12,7 +12,7 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     generate_objectives,
 )
 from app.games.zone_stalkers.decision.target_beliefs import build_target_belief
-from app.games.zone_stalkers.memory.models import MemoryRecord
+from app.games.zone_stalkers.memory.models import MemoryRecord, LAYER_SOCIAL
 from app.games.zone_stalkers.memory.store import add_memory_record, ensure_memory_v3
 from tests.decision.conftest import make_agent, make_minimal_state
 
@@ -189,6 +189,84 @@ def test_track_target_uses_best_non_exhausted_location() -> None:
     track = next(obj for obj in objectives if obj.key == OBJECTIVE_TRACK_TARGET)
 
     assert track.target == {"target_id": "target_1", "location_id": "loc_c"}
+
+
+def test_trader_intel_creates_medium_confidence_location_hypothesis() -> None:
+    """Trader intel (0.70) should produce a medium-confidence hypothesis,
+    strictly higher than stalker intel (0.55) but lower than direct observation (0.95+).
+    """
+    agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
+    state = _make_state(agent)
+
+    # Trader intel record — simulates what _bot_buy_hunt_intel_from_trader writes.
+    ensure_memory_v3(agent)
+    add_memory_record(
+        agent,
+        MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer=LAYER_SOCIAL,
+            kind="target_intel",
+            created_turn=99,
+            last_accessed_turn=None,
+            summary="Купил разведданные у торговца",
+            details={
+                "action_kind": "intel_from_trader",
+                "observed": "agent_location",
+                "target_agent_id": "target_1",
+                "location_id": "loc_target",
+                "confidence": 0.70,
+            },
+            location_id="loc_target",
+            confidence=0.70,
+            tags=("target", "intel", "social", "trader"),
+        ),
+    )
+    # Stalker intel record — simulates what _bot_ask_colocated_stalkers_about_agent writes.
+    add_memory_record(
+        agent,
+        MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer=LAYER_SOCIAL,
+            kind="target_intel",
+            created_turn=98,
+            last_accessed_turn=None,
+            summary="Разведданные от сталкера",
+            details={
+                "action_kind": "intel_from_stalker",
+                "observed": "agent_location",
+                "target_agent_id": "target_1",
+                "location_id": "loc_other",
+                "confidence": 0.55,
+            },
+            location_id="loc_other",
+            confidence=0.55,
+            tags=("target", "intel", "social", "stalker"),
+        ),
+    )
+
+    ctx = build_agent_context("bot1", agent, state)
+    belief_state = build_belief_state(ctx, agent, state["world_turn"])
+    belief = build_target_belief(
+        agent_id="bot1",
+        agent=agent,
+        state=state,
+        world_turn=state["world_turn"],
+        belief_state=belief_state,
+    )
+
+    # Trader location should have higher confidence than stalker location.
+    loc_hypotheses = {h.location_id: h for h in belief.possible_locations}
+    assert "loc_target" in loc_hypotheses, "Trader intel should produce a location hypothesis"
+    assert "loc_other" in loc_hypotheses, "Stalker intel should produce a location hypothesis"
+    trader_conf = loc_hypotheses["loc_target"].confidence
+    stalker_conf = loc_hypotheses["loc_other"].confidence
+    # Trader (0.70) > stalker (0.55) but both < direct observation (0.95+)
+    assert trader_conf > stalker_conf, (
+        f"Trader intel ({trader_conf:.2f}) should have higher confidence than stalker intel ({stalker_conf:.2f})"
+    )
+    assert trader_conf < 0.95, f"Trader intel confidence ({trader_conf:.2f}) should be below direct-observation tier"
 
 
 def test_no_leads_generates_gather_intel() -> None:

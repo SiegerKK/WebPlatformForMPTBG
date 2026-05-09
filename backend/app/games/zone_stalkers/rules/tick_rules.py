@@ -3599,6 +3599,8 @@ def _bot_ask_colocated_stalkers_about_agent(
                     "source_agent_id": other_id,
                     "source_agent_name": other_name,
                     "obs_world_turn": obs_turn,
+                    # Stalker witnesses are less reliable than trader network intel.
+                    "confidence": 0.55,
                 },
                 summary=(
                     f"{other_name} рассказал, что видел «{target_agent_name}» "
@@ -3685,6 +3687,8 @@ def _bot_buy_hunt_intel_from_trader(
             "source_agent_id": trader.get("id", ""),
             "source_agent_name": trader_name,
             "price_paid": _HUNT_INTEL_PRICE,
+            # Trader network intel is more reliable than stalker word-of-mouth.
+            "confidence": 0.70,
         },
         summary=(
             f"Я купил у торговца «{trader_name}» информацию о местонахождении "
