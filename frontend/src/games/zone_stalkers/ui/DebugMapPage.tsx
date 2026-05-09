@@ -61,9 +61,13 @@ function getRegionColors(
 export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
-  const [mapOverlayMode, setMapOverlayMode] = useState<'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes'>('default');
+  const [mapOverlayMode, setMapOverlayMode] = useState<'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes' | 'combat_hunt_events'>('default');
   const [huntDebugHunterId, setHuntDebugHunterId] = useState<string | null>(null);
+  const [huntDebugTargetId, setHuntDebugTargetId] = useState<string | null>(null);
   const [huntMinConfidence, setHuntMinConfidence] = useState(0.2);
+  const [huntFreshnessWindow, setHuntFreshnessWindow] = useState(2000);
+  const [showActualTargetLocation, setShowActualTargetLocation] = useState(false);
+  const [showHuntRoutes, setShowHuntRoutes] = useState(true);
 
   // ── Agent profile modal (click stalker in location detail panel) ──────────
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
@@ -1132,12 +1136,10 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     persistMap(effectivePosRef.current, localConnsRef.current, next);
   }, [persistMap]);
 
+  const huntSearchByAgent = zoneState.debug?.hunt_search_by_agent ?? {};
   const huntOverlayCandidates = useMemo(
-    () =>
-      Object.values(zoneState.agents).filter(
-        (agent) => !!agent.brain_v3_context?.hunt_target_belief?.target_id,
-      ),
-    [zoneState.agents],
+    () => Object.values(huntSearchByAgent),
+    [huntSearchByAgent],
   );
 
   useEffect(() => {
@@ -1145,17 +1147,32 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       setHuntDebugHunterId(null);
       return;
     }
-    if (huntDebugHunterId && zoneState.agents[huntDebugHunterId]) return;
-    setHuntDebugHunterId(huntOverlayCandidates[0]?.id ?? null);
-  }, [huntOverlayCandidates, huntDebugHunterId, zoneState.agents]);
+    if (huntDebugHunterId && huntSearchByAgent[huntDebugHunterId]) return;
+    setHuntDebugHunterId(huntOverlayCandidates[0]?.hunter_id ?? null);
+  }, [huntOverlayCandidates, huntDebugHunterId, huntSearchByAgent]);
 
-  const selectedHuntBelief = huntDebugHunterId
-    ? zoneState.agents[huntDebugHunterId]?.brain_v3_context?.hunt_target_belief ?? null
+  const selectedHuntDebug = huntDebugHunterId
+    ? huntSearchByAgent[huntDebugHunterId] ?? null
     : null;
+  useEffect(() => {
+    if (!selectedHuntDebug?.target_id) {
+      setHuntDebugTargetId(null);
+      return;
+    }
+    if (huntDebugTargetId) return;
+    setHuntDebugTargetId(selectedHuntDebug.target_id);
+  }, [selectedHuntDebug, huntDebugTargetId]);
+
+  const freshnessFloor = useMemo(() => {
+    const maxWindow = 2000;
+    const ratio = Math.max(0, Math.min(1, huntFreshnessWindow / maxWindow));
+    return 1 - ratio;
+  }, [huntFreshnessWindow]);
   const possibleLocationMap = useMemo(() => {
     const m = new Map<string, { confidence: number; freshness: number; reason: string; probability: number }>();
-    for (const hypothesis of selectedHuntBelief?.possible_locations ?? []) {
+    for (const hypothesis of selectedHuntDebug?.possible_locations ?? []) {
       if ((hypothesis.confidence ?? 0) < huntMinConfidence) continue;
+      if ((hypothesis.freshness ?? 0) < freshnessFloor) continue;
       m.set(hypothesis.location_id, {
         confidence: hypothesis.confidence,
         freshness: hypothesis.freshness,
@@ -1164,19 +1181,36 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       });
     }
     return m;
-  }, [selectedHuntBelief, huntMinConfidence]);
+  }, [selectedHuntDebug, huntMinConfidence, freshnessFloor]);
   const exhaustedLocationSet = useMemo(
-    () => new Set(selectedHuntBelief?.exhausted_locations ?? []),
-    [selectedHuntBelief],
+    () => new Set(selectedHuntDebug?.exhausted_locations ?? []),
+    [selectedHuntDebug],
   );
   const huntRouteList = useMemo(
     () =>
-      (selectedHuntBelief?.likely_routes ?? []).filter(
+      (selectedHuntDebug?.likely_routes ?? []).filter(
         (route) =>
-          !!route.to_location_id && route.confidence >= huntMinConfidence,
+          !!route.to_location_id
+          && route.confidence >= huntMinConfidence
+          && (route.freshness ?? 0) >= freshnessFloor,
       ),
-    [selectedHuntBelief, huntMinConfidence],
+    [selectedHuntDebug, huntMinConfidence, freshnessFloor],
   );
+  const combatEventLocations = useMemo(() => {
+    const traces = zoneState.debug?.location_hunt_traces ?? {};
+    const entries = Object.entries(traces);
+    const ids = new Set<string>();
+    for (const [locId, trace] of entries) {
+      const events = trace.combat_hunt_events ?? [];
+      const matched = events.some((event) => !huntDebugTargetId || event.target_id === huntDebugTargetId);
+      if (matched) ids.add(locId);
+    }
+    return ids;
+  }, [zoneState.debug?.location_hunt_traces, huntDebugTargetId]);
+  const actualTargetLocationId = useMemo(() => {
+    if (!huntDebugTargetId || !showActualTargetLocation) return null;
+    return zoneState.agents[huntDebugTargetId]?.location_id ?? null;
+  }, [huntDebugTargetId, showActualTargetLocation, zoneState.agents]);
 
   return (
     <div
@@ -1363,7 +1397,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               <span style={{ color: '#64748b', fontSize: '0.7rem' }}>Overlay</span>
               <select
                 value={mapOverlayMode}
-                onChange={(e) => setMapOverlayMode(e.target.value as 'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes')}
+                onChange={(e) => setMapOverlayMode(e.target.value as 'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes' | 'combat_hunt_events')}
                 style={{ background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 6, fontSize: '0.72rem', padding: '0.2rem 0.3rem' }}
               >
                 <option value="default">Default</option>
@@ -1371,6 +1405,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 <option value="target_search">Target Search</option>
                 <option value="exhausted_locations">Exhausted Locations</option>
                 <option value="target_routes">Target Routes</option>
+                <option value="combat_hunt_events">Combat/Hunt Events</option>
               </select>
               <select
                 value={huntDebugHunterId ?? ''}
@@ -1379,10 +1414,24 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               >
                 <option value="">Hunter: —</option>
                 {huntOverlayCandidates.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
+                  <option key={agent.hunter_id} value={agent.hunter_id}>
+                    {agent.hunter_name}
                   </option>
                 ))}
+              </select>
+              <select
+                value={huntDebugTargetId ?? ''}
+                onChange={(e) => setHuntDebugTargetId(e.target.value || null)}
+                style={{ background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 6, fontSize: '0.72rem', padding: '0.2rem 0.3rem', minWidth: 130 }}
+              >
+                <option value="">Target: —</option>
+                {Object.values(zoneState.agents)
+                  .filter((agent) => agent.is_alive)
+                  .map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
               </select>
               <label style={{ color: '#64748b', fontSize: '0.7rem' }}>
                 min conf
@@ -1395,6 +1444,34 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   onChange={(e) => setHuntMinConfidence(Math.max(0, Math.min(1, Number(e.target.value))))}
                   style={{ marginLeft: 4, width: 55, background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 4, fontSize: '0.7rem', padding: '0.15rem 0.25rem' }}
                 />
+              </label>
+              <label style={{ color: '#64748b', fontSize: '0.7rem' }}>
+                fresh
+                <input
+                  type="number"
+                  min={100}
+                  max={5000}
+                  step={100}
+                  value={huntFreshnessWindow}
+                  onChange={(e) => setHuntFreshnessWindow(Math.max(100, Math.min(5000, Number(e.target.value))))}
+                  style={{ marginLeft: 4, width: 62, background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 4, fontSize: '0.7rem', padding: '0.15rem 0.25rem' }}
+                />
+              </label>
+              <label style={{ color: '#64748b', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={showHuntRoutes}
+                  onChange={(e) => setShowHuntRoutes(e.target.checked)}
+                />
+                routes
+              </label>
+              <label style={{ color: '#64748b', fontSize: '0.7rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={showActualTargetLocation}
+                  onChange={(e) => setShowActualTargetLocation(e.target.checked)}
+                />
+                actual target
               </label>
             </div>
           </div>
@@ -1475,7 +1552,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   </g>
                 );
               })}
-              {(mapOverlayMode === 'target_routes' || mapOverlayMode === 'target_search') && huntRouteList.length > 0 && (
+              {showHuntRoutes && (mapOverlayMode === 'target_routes' || mapOverlayMode === 'target_search') && huntRouteList.length > 0 && (
                 <g pointerEvents="none">
                   {huntRouteList.map((route, idx) => {
                     const fromId = route.from_location_id ?? '';
@@ -1589,8 +1666,10 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   ? (localConns[linkSource] ?? []).some((c) => c.to === id)
                   : false;
               const huntHypothesis = possibleLocationMap.get(id);
-              const isHuntBest = selectedHuntBelief?.best_location_id === id;
+              const isHuntBest = selectedHuntDebug?.best_location_id === id;
               const isHuntExhausted = exhaustedLocationSet.has(id);
+              const isCombatEventLoc = combatEventLocations.has(id);
+              const isActualTargetLoc = actualTargetLocationId === id;
 
               const aliveAgents = loc.agents.filter(
                 (aid) => zoneState.agents[aid]?.is_alive,
@@ -1627,6 +1706,12 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               }
               if ((mapOverlayMode === 'exhausted_locations' || mapOverlayMode === 'target_search') && isHuntExhausted) {
                 huntOverlayShadow = '0 0 0 2px #ef4444, 0 0 12px rgba(239,68,68,0.32)';
+              }
+              if (mapOverlayMode === 'combat_hunt_events' && isCombatEventLoc) {
+                huntOverlayShadow = '0 0 0 2px #f59e0b, 0 0 12px rgba(245,158,11,0.28)';
+              }
+              if (mapOverlayMode === 'target_search' && isActualTargetLoc) {
+                huntOverlayShadow = '0 0 0 2px #a855f7, 0 0 12px rgba(168,85,247,0.32)';
               }
 
               return (
@@ -1712,6 +1797,12 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                     )}
                     {(mapOverlayMode === 'target_search') && isHuntBest && (
                       <Badge bg="#155e75" color="#a5f3fc">⭐ best</Badge>
+                    )}
+                    {(mapOverlayMode === 'target_search') && isActualTargetLoc && showActualTargetLocation && (
+                      <Badge bg="#581c87" color="#e9d5ff">🎯 actual</Badge>
+                    )}
+                    {(mapOverlayMode === 'combat_hunt_events') && isCombatEventLoc && (
+                      <Badge bg="#78350f" color="#fde68a">⚔ hunt-event</Badge>
                     )}
                   </div>
                 </div>

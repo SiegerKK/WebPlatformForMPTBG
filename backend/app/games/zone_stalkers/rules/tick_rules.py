@@ -634,6 +634,16 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             "world_day": world_day,
         },
     })
+    try:
+        from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload  # noqa: PLC0415
+
+        debug_payload = build_hunt_debug_payload(
+            state=state,
+            world_turn=state["world_turn"],
+        )
+        state.setdefault("debug", {}).update(debug_payload)
+    except Exception:
+        state.setdefault("debug", {})
     return state, events
 
 
