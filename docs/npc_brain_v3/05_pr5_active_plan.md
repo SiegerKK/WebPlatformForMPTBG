@@ -98,6 +98,7 @@ Important repair cases:
 - `target_location_empty` → do not retry the same broken target forever; re-evaluate or replace target;
 - `trader_unavailable` → pick alternative trader if possible, otherwise abort/re-evaluate;
 - `supplies_consumed_mid_plan` → insert restore/resupply or abort/re-evaluate.
+- `hunt_intel_no_progress` → do not allow `LOCATE_TARGET → ask_for_intel` to complete repeatedly without producing usable target location evidence.
 
 ## Memory and evidence integration
 
@@ -128,6 +129,21 @@ PR5 acceptance should cover:
 - frontend/profile/export show v3-first fields.
 
 > Full kill-stalker operation logic is documented separately in post-PR5 material.
+
+## Hunt-specific ActivePlan invariant
+
+For `LOCATE_TARGET`, `ask_for_intel` is only meaningful if it produces usable hunt evidence.
+
+Required postcondition:
+
+- after intel collection, target reasoning must have either:
+  - `TargetBelief.last_known_location_id != null`, or
+  - canonical location evidence for the target in memory (`target_intel`, `target_last_known_location`, `target_seen`).
+
+If that postcondition is not met:
+
+- the plan must not silently count this as successful progress forever;
+- repair / re-evaluation should prevent one-step loops against the same stale source.
 
 ## Final runtime additions after PR5
 

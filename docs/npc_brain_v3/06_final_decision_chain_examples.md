@@ -51,4 +51,9 @@ Long artifact plan:
 
 ## 8) Full E2E chain — kill_stalker (unknown target)
 
-`spawn` without target memory → `LOCATE_TARGET` → `ask_for_intel` (`intel_from_trader`/target location evidence) → `TRACK_TARGET` → `ENGAGE_TARGET` → `CONFIRM_KILL` → `LEAVE_ZONE`.
+`spawn` without target memory → `LOCATE_TARGET` → `ask_for_intel` (`intel_from_trader`/`intel_from_stalker` bridged to canonical `target_intel`) → `TRACK_TARGET` → `ENGAGE_TARGET` → `CONFIRM_KILL` → `LEAVE_ZONE`.
+
+Important invariant:
+
+- once intel resolves target location, the next tick must prefer `TRACK_TARGET`;
+- the runtime must not fall back into `LOCATE_TARGET → ask_for_intel` every tick for the same resolved hunt.

@@ -66,6 +66,31 @@
 
 - `TargetBelief` is built in runtime and passed into objective generation.
 - Memory bridge maps hunt events to `memory_v3` (`target_seen`, `target_not_found`, `target_moved`, `target_death_confirmed`) with entity/location indexes.
+- Social hunt intel is canonicalized into `target_intel`:
+  - `intel_from_trader` → `target_intel`
+  - `intel_from_stalker` → `target_intel`
+- `TargetBelief` must reconstruct `last_known_location_id` from canonical hunt intel so bought/received intel becomes actionable on the next tick.
 - `kill_stalker` completion requires confirmed evidence (`target_death_confirmed`) and dead target state.
 - `ENGAGE_TARGET` uses combat monitor stage (`start_combat` → `monitor_combat` → `confirm_kill`) to avoid premature confirmation.
 - After goal completion, objective flow transitions to `LEAVE_ZONE`.
+
+## Hunt intel loop regression rule
+
+The hunt pipeline must not get stuck in:
+
+- `LOCATE_TARGET`
+- `ask_for_intel`
+- ActivePlan completed
+- `LOCATE_TARGET`
+- `ask_for_intel`
+- ...
+
+Correct flow after useful intel:
+
+1. trader/stalker provides target location intel;
+2. memory bridge stores canonical `target_intel`;
+3. `TargetBelief.last_known_location_id` becomes known on the next tick;
+4. objective generation selects `TRACK_TARGET`;
+5. ActivePlan becomes `travel_to_location` → `search_target`.
+
+If useful intel was not produced, runtime/repair logic should avoid repeating the same no-progress intel step forever.
