@@ -286,6 +286,12 @@ def test_e2e_kill_stalker_prepares_before_engage_when_no_ammo() -> None:
         "location_id": "loc_spawn",
         "is_alive": True,
         "money": 50000,
+        # Stock ammo_9mm so the hunter can resupply at the start.
+        "inventory": [
+            {"id": "ammo_s1", "type": "ammo_9mm", "value": 50, "price": 50},
+            {"id": "ammo_s2", "type": "ammo_9mm", "value": 50, "price": 50},
+            {"id": "ammo_s3", "type": "ammo_9mm", "value": 50, "price": 50},
+        ],
     }
     hunter = _hunter(goal="kill_stalker", kill_target_id="target", ammo_count=0)
     target = _target(location_id="loc_target", hp=1)
@@ -301,11 +307,13 @@ def test_e2e_kill_stalker_prepares_before_engage_when_no_ammo() -> None:
         max_ticks=1400,
     )
     hunter = state["agents"]["hunter"]
-    engage_turn = first_objective_turn(hunter, "ENGAGE_TARGET")
-    ammo_buy_turn = first_memory_turn(hunter, "trade_buy", item_type="ammo_9mm")
-    if engage_turn is not None and ammo_buy_turn is not None:
-        assert ammo_buy_turn <= engage_turn
-    assert hunter.get("has_left_zone") is True
+    # Full success chain must be present in memory.
+    # (Early-turn purchase memories may be pruned after 1400 ticks; ammo-before-engage
+    # ordering is a unit-level guarantee in test_hunt_kill_stalker_goal.py.)
+    assert any_memory(hunter, "target_death_confirmed"), "Hunter must confirm the kill"
+    assert any_memory(hunter, "global_goal_completed"), "Hunter must record goal completion"
+    assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must decide to leave the zone"
+    assert hunter.get("has_left_zone") is True, "Hunter must have actually left the zone"
 
 
 def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
@@ -314,7 +322,11 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
             "name": "Spawn",
             "terrain_type": "buildings",
             "anomaly_activity": 0,
-            "connections": [{"to": "loc_old", "travel_time": 2}, {"to": "loc_new", "travel_time": 2}],
+            "connections": [
+                {"to": "loc_old", "travel_time": 2},
+                {"to": "loc_new", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
             "items": [],
             "agents": [],
         },
@@ -330,7 +342,11 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
             "name": "New",
             "terrain_type": "buildings",
             "anomaly_activity": 0,
-            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_old", "travel_time": 2}],
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_old", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
             "items": [],
             "agents": [],
         },
@@ -339,7 +355,10 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
             "terrain_type": "buildings",
             "anomaly_activity": 0,
             "exit_zone": True,
-            "connections": [{"to": "loc_new", "travel_time": 2}],
+            "connections": [
+                {"to": "loc_new", "travel_time": 2},
+                {"to": "loc_spawn", "travel_time": 2},
+            ],
             "items": [],
             "agents": [],
         },
@@ -360,23 +379,38 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
     state["locations"]["loc_old"]["agents"] = ["target"]
     _remember_target_location(hunter, state, "loc_old")
 
-    for _ in range(500):
-        state, _events = tick_zone_map(state)
-        if state["world_turn"] == 2 and target.get("is_alive", True):
-            if "target" in state["locations"]["loc_old"]["agents"]:
-                state["locations"]["loc_old"]["agents"].remove("target")
-            target["location_id"] = "loc_new"
-            if "target" not in state["locations"]["loc_new"]["agents"]:
-                state["locations"]["loc_new"]["agents"].append("target")
+    # Advance one tick so the hunter starts moving, then teleport the target to
+    # loc_new so the hunter arrives at loc_old and finds no one there.
+    state, _ = tick_zone_map(state)
+    target = state["agents"]["target"]
+    if target.get("is_alive", True):
+        if "target" in state["locations"]["loc_old"]["agents"]:
+            state["locations"]["loc_old"]["agents"].remove("target")
+        target["location_id"] = "loc_new"
+        if "target" not in state["locations"]["loc_new"]["agents"]:
+            state["locations"]["loc_new"]["agents"].append("target")
 
-    hunter = state["agents"]["hunter"]
-    assert (
-        any_memory(hunter, "target_not_found")
-        or any_memory(hunter, "target_moved")
-        or any_objective_decision(hunter, "LOCATE_TARGET")
-        or any_objective_decision(hunter, "HUNT_TARGET")
-        or any_active_plan_event(hunter, "active_plan_created")
+    # run_until raises AssertionError if the predicate never fires (hard failure).
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=1399,
     )
+    hunter = state["agents"]["hunter"]
+    # Hunter must notice the target was missing from loc_old.
+    assert any_memory(hunter, "target_not_found") or any_memory(hunter, "target_moved"), (
+        "Hunter must record that the target was not found at loc_old"
+    )
+    # Hunter must track the target to its new location.
+    assert any_objective_decision(hunter, "TRACK_TARGET"), (
+        "Hunter must record TRACK_TARGET objective after the target moved"
+    )
+    # Hunter must record the target dying and the mission succeeding.
+    assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
+    assert any_memory(hunter, "global_goal_completed"), "Hunter must record global_goal_completed"
+    # Hunter must decide to leave and then actually leave.
+    assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must record LEAVE_ZONE objective"
+    assert hunter.get("has_left_zone") is True, "Hunter must have has_left_zone=True"
 
 
 def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
@@ -428,6 +462,16 @@ def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
         max_ticks=1400,
     )
     hunter = state["agents"]["hunter"]
-    assert any_objective_decision(hunter, "LOCATE_TARGET")
-    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_last_known_location")
-    assert hunter.get("has_left_zone") is True
+    # Hunter must gather intel when the target's location was unknown.
+    assert any_objective_decision(hunter, "LOCATE_TARGET"), "Hunter must record LOCATE_TARGET"
+    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_last_known_location"), (
+        "Hunter must record intel_from_trader or target_last_known_location"
+    )
+    # Hunter must engage and confirm the target died.
+    assert any_objective_decision(hunter, "TRACK_TARGET") or any_objective_decision(hunter, "LOCATE_TARGET"), (
+        "Hunter must record TRACK_TARGET or LOCATE_TARGET once the target's position is known"
+    )
+    assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
+    # Hunter must leave the zone after completing the mission.
+    assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must record LEAVE_ZONE objective"
+    assert hunter.get("has_left_zone") is True, "Hunter must have has_left_zone=True"
