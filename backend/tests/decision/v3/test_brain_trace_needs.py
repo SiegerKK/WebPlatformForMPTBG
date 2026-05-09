@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.games.zone_stalkers.decision.context_builder import build_agent_context
-from app.games.zone_stalkers.decision.debug.brain_trace import write_decision_brain_trace_from_v2
+from app.games.zone_stalkers.decision.debug.brain_trace import write_npc_brain_v3_decision_trace
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from tests.decision.conftest import make_agent, make_minimal_state
 
@@ -20,7 +20,7 @@ def test_brain_trace_decision_contains_immediate_item_liquidity_blocks() -> None
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
 
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=state["world_turn"],
         intent_kind="seek_water",

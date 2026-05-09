@@ -525,7 +525,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         )}
 
         {/* ── 8. Goals ── */}
-        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind || agent._v2_context?.intent_kind) && (
+        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind) && (
           <Section label="🎯 Цели">
             {agent.global_goal && (
               <div style={s.goalRow}>
@@ -550,15 +550,14 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 </span>
               </div>
             )}
-            {(latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind || agent._v2_context?.intent_kind) && (
+            {(latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind) && (
               <div style={s.goalRow}>
                 <span style={s.goalLabel}>Исполнительный adapter:</span>
                 <span style={{ ...s.goalVal, color: '#818cf8' }}>
                   {latestDecisionEvent?.adapter_intent?.kind
                     ?? latestDecisionEvent?.intent_kind
                     ?? agent.brain_v3_context?.adapter_intent?.kind
-                    ?? agent.brain_v3_context?.intent_kind
-                    ?? agent._v2_context?.intent_kind}
+                    ?? agent.brain_v3_context?.intent_kind}
                 </span>
               </div>
             )}

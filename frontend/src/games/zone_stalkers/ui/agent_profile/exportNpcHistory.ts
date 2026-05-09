@@ -47,6 +47,7 @@ export type CompactNpcHistoryExport = {
     scheduled_action?: unknown;
     active_plan_v3?: unknown;
     brain_v3_context?: AgentForProfile['brain_v3_context'];
+    legacy_context_used?: boolean;
   };
 
   equipment: Record<string, AgentInventoryItem | null>;
@@ -75,8 +76,9 @@ export type CompactNpcHistoryExport = {
     } | null;
     current_objective?: BrainTraceObjectiveInfo | null;
     current_runtime?: {
-      mode: 'scheduled_action' | 'idle';
+      mode: 'active_plan' | 'scheduled_action' | 'idle';
       scheduled_action?: unknown;
+      active_plan_v3?: unknown;
       latest_plan_monitor?: BrainTraceEvent | null;
     };
     recent_trace_events: BrainTraceEvent[];
@@ -297,10 +299,13 @@ export const getCurrentObjectiveFromAgent = (
   agent: AgentForProfile,
   latestDecision: BrainTraceEvent | null,
   storyTimeline: CompactTimelineEntry[],
+  options?: { includeLegacyContext?: boolean },
 ): BrainTraceObjectiveInfo | null => {
   if (latestDecision?.active_objective) return latestDecision.active_objective;
 
-  const brainContext = agent.brain_v3_context ?? agent._v2_context;
+  const brainContext = options?.includeLegacyContext
+    ? (agent.brain_v3_context ?? agent._v2_context)
+    : agent.brain_v3_context;
   const objectiveKey = brainContext?.objective_key;
   if (objectiveKey) {
     return {
@@ -374,18 +379,22 @@ export const buildCompactNpcHistoryExport = (
   const latestDecision = getLatestDecisionEvent(agent.brain_trace);
   const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
   const storyTimeline = displayMemory.slice(-120).map(toCompactTimelineEntry);
-  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline);
+  const legacyContextUsed = !agent.brain_v3_context && !!agent._v2_context;
+  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline, {
+    includeLegacyContext: legacyContextUsed,
+  });
   const latestPlanMonitor = latestEvent?.mode === 'active_plan_monitor' ? latestEvent : null;
+  const adapterContext = agent.brain_v3_context ?? (legacyContextUsed ? agent._v2_context : null);
   const adapterIntentKind = latestDecision?.adapter_intent?.kind
     ?? latestDecision?.intent_kind
     ?? agent.brain_v3_context?.adapter_intent?.kind
     ?? agent.brain_v3_context?.intent_kind
-    ?? agent._v2_context?.intent_kind;
+    ?? adapterContext?.intent_kind;
   const adapterIntentScore = latestDecision?.adapter_intent?.score
     ?? latestDecision?.intent_score
     ?? agent.brain_v3_context?.adapter_intent?.score
     ?? agent.brain_v3_context?.intent_score
-    ?? agent._v2_context?.intent_score;
+    ?? adapterContext?.intent_score;
 
   return {
     export_schema: 'npc_history_v1',
@@ -411,7 +420,8 @@ export const buildCompactNpcHistoryExport = (
         : null,
       scheduled_action: agent.scheduled_action,
       active_plan_v3: agent.active_plan_v3,
-      brain_v3_context: agent.brain_v3_context ?? agent._v2_context ?? null,
+      brain_v3_context: agent.brain_v3_context ?? (legacyContextUsed ? agent._v2_context ?? null : null),
+      legacy_context_used: legacyContextUsed,
     },
     equipment: agent.equipment,
     inventory_summary: summarizeInventory(agent.inventory),
@@ -441,6 +451,12 @@ export const buildCompactNpcHistoryExport = (
         ? {
             mode: 'scheduled_action',
             scheduled_action: agent.scheduled_action,
+            latest_plan_monitor: latestPlanMonitor,
+          }
+        : agent.active_plan_v3 != null
+        ? {
+            mode: 'active_plan',
+            active_plan_v3: agent.active_plan_v3,
             latest_plan_monitor: latestPlanMonitor,
           }
         : {

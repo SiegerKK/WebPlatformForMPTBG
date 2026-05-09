@@ -367,6 +367,40 @@ def test_tick_emission_interrupt_repairs_active_plan() -> None:
     assert new_plan["repair_count"] == 1
     assert new_bot["scheduled_action"]["type"] == "travel"
     assert new_bot["scheduled_action"]["active_plan_id"] == active_plan.id
+    active_plan_events = [
+        ev for ev in new_bot["brain_trace"]["events"]
+        if ev.get("mode") == "active_plan"
+    ]
+    assert any(ev.get("decision") == "active_plan_step_failed" for ev in active_plan_events)
+    assert any(ev.get("decision") == "active_plan_repair_requested" for ev in active_plan_events)
+    assert any(ev.get("decision") == "active_plan_repaired" for ev in active_plan_events)
+
+
+def test_tick_monitor_abort_routes_untagged_runtime_into_active_plan_repair() -> None:
+    state = _make_base_state()
+    state["emission_active"] = True
+    state["emission_ends_turn"] = 200
+    state["locations"]["loc_a"]["terrain_type"] = "plain"
+    bot = _bot_agent()
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    plan = Plan(intent_kind="explore", steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc_a"})])
+    active_plan = create_active_plan(_decision(), world_turn=100, plan=plan)
+    bot["active_plan_v3"] = active_plan.to_dict()
+    bot["scheduled_action"] = {
+        "type": "explore_anomaly_location",
+        "target_id": "loc_a",
+        "turns_remaining": 2,
+        "turns_total": 2,
+    }
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    new_bot = new_state["agents"]["bot1"]
+    assert new_bot["active_plan_v3"]["repair_count"] == 1
+    assert new_bot["scheduled_action"]["active_plan_id"] == active_plan.id
 
 
 def test_dead_npc_clears_active_plan_v3() -> None:

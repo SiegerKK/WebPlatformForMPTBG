@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.games.zone_stalkers.decision.debug.brain_trace import (
     append_brain_trace_event,
     ensure_brain_trace_for_tick,
-    write_decision_brain_trace_from_v2,
+    write_npc_brain_v3_decision_trace,
 )
 
 
@@ -39,9 +39,9 @@ def test_ensure_brain_trace_for_tick_creates_default_trace() -> None:
     assert trace["events"][-1]["mode"] == "system"
 
 
-def test_write_decision_brain_trace_from_v2_writes_decision_event() -> None:
+def test_write_npc_brain_v3_decision_trace_writes_decision_event() -> None:
     agent: dict = {}
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=77,
         intent_kind="seek_water",

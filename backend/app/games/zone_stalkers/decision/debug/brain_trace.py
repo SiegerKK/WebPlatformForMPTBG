@@ -148,7 +148,7 @@ def append_brain_trace_event(
             existing
             for existing in reversed(events)
             if existing.get("turn") == world_turn
-            and existing.get("mode") == "plan_monitor"
+            and existing.get("mode") in {"plan_monitor", "active_plan_monitor"}
             and existing.get("decision") == "abort"
         ),
         None,
@@ -285,7 +285,7 @@ def write_decision_brain_trace_from_v2(
     alternatives: list[dict[str, Any]] | None = None,
     active_plan_runtime: dict[str, Any] | None = None,
 ) -> None:
-    """Compatibility wrapper for older callers."""
+    """Compatibility wrapper for older callers. TODO: remove after migration."""
     write_npc_brain_v3_decision_trace(
         agent,
         world_turn=world_turn,

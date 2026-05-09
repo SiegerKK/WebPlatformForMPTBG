@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from app.games.zone_stalkers.decision.debug.brain_trace import (
     append_brain_trace_event,
-    write_decision_brain_trace_from_v2,
+    write_npc_brain_v3_decision_trace,
 )
 
 
@@ -71,7 +71,7 @@ def test_memory_used_not_added_when_empty() -> None:
 def test_write_decision_brain_trace_passes_memory_used() -> None:
     agent: dict = {}
     mem_used = _make_memory_used(2)
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=50,
         intent_kind="seek_water",

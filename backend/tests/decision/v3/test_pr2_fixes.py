@@ -16,7 +16,7 @@ Covers:
 from __future__ import annotations
 
 from app.games.zone_stalkers.decision.context_builder import build_agent_context
-from app.games.zone_stalkers.decision.debug.brain_trace import write_decision_brain_trace_from_v2
+from app.games.zone_stalkers.decision.debug.brain_trace import write_npc_brain_v3_decision_trace
 from app.games.zone_stalkers.decision.executors import execute_plan_step
 from app.games.zone_stalkers.decision.intents import select_intent
 from app.games.zone_stalkers.decision.models.intent import (
@@ -91,7 +91,7 @@ def test_decision_pipeline_passes_need_result_to_planner_and_trace() -> None:
         f"Expected consume water step, got {plan.steps[0].kind}"
     )
 
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=100,
         intent_kind=intent.kind,
@@ -446,7 +446,7 @@ def test_brain_trace_liquidity_summary_has_enriched_fields() -> None:
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
 
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=100,
         intent_kind=INTENT_RESUPPLY,
@@ -490,7 +490,7 @@ def test_brain_trace_liquidity_decision_affordable() -> None:
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
 
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=100,
         intent_kind=INTENT_RESUPPLY,
@@ -521,7 +521,7 @@ def test_brain_trace_liquidity_risky_available_but_not_planner_allowed() -> None
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
 
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=100,
         intent_kind=INTENT_RESUPPLY,

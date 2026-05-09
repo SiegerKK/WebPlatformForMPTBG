@@ -389,15 +389,15 @@ def test_combat_readiness_zeros_when_fully_equipped() -> None:
 
 
 def test_combat_readiness_in_brain_trace_event() -> None:
-    """write_decision_brain_trace_from_v2 passes combat_readiness into the trace event."""
-    from app.games.zone_stalkers.decision.debug.brain_trace import write_decision_brain_trace_from_v2
+    """write_npc_brain_v3_decision_trace passes combat_readiness into the trace event."""
+    from app.games.zone_stalkers.decision.debug.brain_trace import write_npc_brain_v3_decision_trace
 
     agent = _make_agent(has_weapon=False, ammo_count=0, med_count=0, global_goal="kill_stalker")
     state = _make_state(agent)
     ctx = _ctx(agent, state)
     result = evaluate_need_result(ctx, state)
 
-    write_decision_brain_trace_from_v2(
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=100,
         intent_kind="resupply",
