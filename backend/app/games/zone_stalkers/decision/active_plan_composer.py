@@ -41,7 +41,7 @@ def compose_active_plan_steps(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[PlanStep]:
-    del agent, state, world_turn
+    del state, world_turn
     steps = [_clone_step(step) for step in base_plan.steps]
     if objective_key not in _STRATEGIC_COMPOSE_KEYS or not steps:
         return steps

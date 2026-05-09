@@ -133,6 +133,10 @@ _OBJECTIVE_TO_GOAL: Dict[str, str] = {
     "WAIT_IN_SHELTER": "emergency_shelter",
     "HUNT_TARGET": "kill_stalker",
     "PREPARE_FOR_HUNT": "prepare_for_hunt",
+    "LOCATE_TARGET": "kill_stalker",
+    "TRACK_TARGET": "kill_stalker",
+    "ENGAGE_TARGET": "kill_stalker",
+    "CONFIRM_KILL": "kill_stalker",
     "IDLE": "idle",
 }
 
@@ -154,7 +158,11 @@ _OBJECTIVE_MEMORY_USED_FOR: Dict[str, str] = {
 
 _WAIT_ALLOWED_OBJECTIVES: frozenset[str] = frozenset({"IDLE", "WAIT_IN_SHELTER"})
 _NON_WAIT_ACTIONABLE_OBJECTIVES: frozenset[str] = frozenset(
-    {"RESTORE_FOOD", "RESTORE_WATER", "GET_MONEY_FOR_RESUPPLY", "SELL_ARTIFACTS"}
+    {
+        "RESTORE_FOOD", "RESTORE_WATER", "GET_MONEY_FOR_RESUPPLY", "SELL_ARTIFACTS",
+        # Hunt objectives that always have a concrete next step
+        "LOCATE_TARGET", "TRACK_TARGET", "ENGAGE_TARGET", "CONFIRM_KILL",
+    }
 )
 
 # Default risk_tolerance used when an agent or item does not specify one.

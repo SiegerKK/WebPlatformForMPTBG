@@ -152,6 +152,24 @@ interface StalkerAgent {
     plan_confidence: number;
     /** Kind of the first plan step (e.g. "travel_to_location"). */
     plan_step_0: string | null;
+    objective_key?: string | null;
+    objective_score?: number | null;
+    objective_reason?: string | null;
+    hunt_target_belief?: {
+      target_id: string;
+      is_known: boolean;
+      is_alive: boolean | null;
+      last_known_location_id: string | null;
+      location_confidence: number;
+      last_seen_turn: number | null;
+      visible_now: boolean;
+      co_located: boolean;
+      equipment_known: boolean;
+      combat_strength: number | null;
+      combat_strength_confidence: number;
+      route_hints: string[];
+      source_refs: string[];
+    } | null;
   };
   _v2_context?: {
     need_scores: Record<string, number>;
@@ -1212,8 +1230,33 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                     <div style={styles.profileGoal}>
                       🎯 Goal: <strong>{stalker.global_goal}</strong>
                       {stalker.current_goal && <span style={styles.profileSubgoal}> → {stalker.current_goal}</span>}
+                      {stalker.kill_target_id && (
+                        <span style={{...styles.profileSubgoal, color: '#e55', marginLeft: 6}}>
+                          🎯 target: {stalker.kill_target_id}
+                        </span>
+                      )}
                     </div>
                   )}
+                  {stalker.brain_v3_context?.objective_key && (
+                    <div style={{fontSize: 11, color: '#aaa', marginTop: 2}}>
+                      Objective: <strong style={{color: '#ccc'}}>{stalker.brain_v3_context.objective_key}</strong>
+                      {stalker.brain_v3_context.objective_score != null && (
+                        <span style={{color: '#888', marginLeft: 4}}>
+                          ({(stalker.brain_v3_context.objective_score * 100).toFixed(0)}%)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {stalker.brain_v3_context?.hunt_target_belief && (() => {
+                    const tb = stalker.brain_v3_context!.hunt_target_belief!;
+                    return (
+                      <div style={{fontSize: 11, color: '#cca', marginTop: 3, background: '#1a1800', borderRadius: 4, padding: '3px 6px'}}>
+                        🎯 Hunt: {tb.co_located ? '🔴 со-лоц' : tb.last_known_location_id ? `📍 ${tb.last_known_location_id} (${(tb.location_confidence * 100).toFixed(0)}%)` : '❓ локация неизв.'}
+                        {tb.is_alive === false && <span style={{color: '#5f5', marginLeft: 4}}>✅ ликвидирован</span>}
+                        {tb.combat_strength != null && <span style={{color: '#f88', marginLeft: 4}}>💪 {(tb.combat_strength * 100).toFixed(0)}%</span>}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 

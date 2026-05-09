@@ -752,6 +752,25 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     target={"target_id": target_id} if target_id else None,
                 ),
             )
+            if blockers:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_PREPARE_FOR_HUNT,
+                        source="global_goal",
+                        urgency=0.70,
+                        expected_value=0.80,
+                        risk=0.20,
+                        time_cost=0.45,
+                        resource_cost=0.25,
+                        confidence=0.8,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_PREPARE_FOR_HUNT)[1],
+                        reasons=tuple(prepare_reasons),
+                        source_refs=("global_goal:kill_stalker",),
+                        metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "prepare"},
+                    ),
+                )
 
     if ctx.active_plan_summary:
         continue_refs, continue_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONTINUE_CURRENT_PLAN)
