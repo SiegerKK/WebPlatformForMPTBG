@@ -181,7 +181,11 @@ def write_decision_brain_trace_from_v2(
     objective_scores: list[dict[str, Any]] | None = None,
     alternatives: list[dict[str, Any]] | None = None,
 ) -> None:
-    thought = f"Выбран intent {intent_kind} ({round(intent_score * 100)}%)."
+    if active_objective and isinstance(active_objective, dict) and active_objective.get("key"):
+        objective_key = active_objective["key"]
+        thought = f"Выбрана цель {objective_key} ({round(intent_score * 100)}%). Адаптер intent: {intent_kind}."
+    else:
+        thought = f"Выбран intent {intent_kind} ({round(intent_score * 100)}%)."
     if reason:
         thought += f" {reason}"
 
