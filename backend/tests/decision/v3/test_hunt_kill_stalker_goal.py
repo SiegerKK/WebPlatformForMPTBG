@@ -22,7 +22,9 @@ from app.games.zone_stalkers.decision.models.plan import (
     PlanStep,
     STEP_ASK_FOR_INTEL,
     STEP_CONFIRM_KILL,
+    STEP_LOOK_FOR_TRACKS,
     STEP_MONITOR_COMBAT,
+    STEP_QUESTION_WITNESSES,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_TRAVEL_TO_LOCATION,
@@ -32,10 +34,12 @@ from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_CONFIRM_KILL,
     OBJECTIVE_ENGAGE_TARGET,
+    OBJECTIVE_GATHER_INTEL,
     OBJECTIVE_HUNT_TARGET,
     OBJECTIVE_LOCATE_TARGET,
     OBJECTIVE_PREPARE_FOR_HUNT,
     OBJECTIVE_TRACK_TARGET,
+    OBJECTIVE_VERIFY_LEAD,
     generate_objectives,
 )
 from app.games.zone_stalkers.decision.objectives.selection import choose_objective
@@ -316,6 +320,7 @@ class TestHuntObjectiveGeneration:
         objectives = generate_objectives(_make_ctx(agent, state))
         keys = {o.key for o in objectives}
         assert OBJECTIVE_LOCATE_TARGET in keys
+        assert OBJECTIVE_GATHER_INTEL in keys
         assert OBJECTIVE_HUNT_TARGET in keys
 
     def test_locate_stage_generates_prepare_when_no_weapon(self) -> None:
@@ -335,6 +340,7 @@ class TestHuntObjectiveGeneration:
         _remember_target_location(agent, state, target_id="target_1", location_id="loc_b")
         objectives = generate_objectives(_make_ctx(agent, state))
         keys = {o.key for o in objectives}
+        assert OBJECTIVE_VERIFY_LEAD in keys
         assert OBJECTIVE_TRACK_TARGET in keys
 
     def test_after_buying_intel_next_objective_is_track_target(self) -> None:
@@ -359,9 +365,10 @@ class TestHuntObjectiveGeneration:
 
         objectives = generate_objectives(_make_ctx(agent, state))
         objective_keys = {objective.key for objective in objectives}
+        assert OBJECTIVE_VERIFY_LEAD in objective_keys
         assert OBJECTIVE_TRACK_TARGET in objective_keys
         decision = choose_objective(objectives, personality=agent)
-        assert decision.selected.key == OBJECTIVE_TRACK_TARGET
+        assert decision.selected.key in {OBJECTIVE_VERIFY_LEAD, OBJECTIVE_TRACK_TARGET}
 
     def test_track_stage_hunt_stage_metadata(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
@@ -470,7 +477,7 @@ class TestHuntPlannerSteps:
         plan = self._build_hunt_plan("LOCATE_TARGET", agent, state)
         assert plan is not None
         step_kinds = [s.kind for s in plan.steps]
-        assert STEP_ASK_FOR_INTEL in step_kinds
+        assert STEP_QUESTION_WITNESSES in step_kinds or STEP_ASK_FOR_INTEL in step_kinds
 
     def test_track_plan_with_known_location_includes_travel_and_search(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
@@ -480,6 +487,7 @@ class TestHuntPlannerSteps:
         step_kinds = [s.kind for s in plan.steps]
         assert STEP_TRAVEL_TO_LOCATION in step_kinds
         assert STEP_SEARCH_TARGET in step_kinds
+        assert STEP_LOOK_FOR_TRACKS in step_kinds
 
     def test_engage_plan_at_target_location_includes_combat_monitor_confirm(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")

@@ -8,7 +8,9 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_ASK_FOR_INTEL,
     STEP_CONFIRM_KILL,
     STEP_EXPLORE_LOCATION,
+    STEP_LOOK_FOR_TRACKS,
     STEP_MONITOR_COMBAT,
+    STEP_QUESTION_WITNESSES,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_TRAVEL_TO_LOCATION,
@@ -18,7 +20,9 @@ from app.games.zone_stalkers.decision.models.plan import (
 _STRATEGIC_COMPOSE_KEYS: frozenset[str] = frozenset({
     "FIND_ARTIFACTS",
     "GET_MONEY_FOR_RESUPPLY",
+    "GATHER_INTEL",
     "LOCATE_TARGET",
+    "VERIFY_LEAD",
     "TRACK_TARGET",
     "ENGAGE_TARGET",
     "CONFIRM_KILL",
@@ -88,10 +92,12 @@ def compose_active_plan_steps(
     if target_id is None:
         return steps
 
-    if objective_key == "LOCATE_TARGET" and not any(s.kind == STEP_ASK_FOR_INTEL for s in steps):
+    if objective_key in {"GATHER_INTEL", "LOCATE_TARGET"} and not any(
+        s.kind in {STEP_ASK_FOR_INTEL, STEP_QUESTION_WITNESSES} for s in steps
+    ):
         steps.append(
             PlanStep(
-                kind=STEP_ASK_FOR_INTEL,
+                kind=STEP_QUESTION_WITNESSES,
                 payload={
                     "target_id": agent.get("kill_target_id"),
                     "reason": "active_plan_composed_locate_after_travel",
@@ -102,6 +108,42 @@ def compose_active_plan_steps(
         )
         return steps
 
+    if objective_key == "VERIFY_LEAD" and not any(
+        s.kind in {STEP_SEARCH_TARGET, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES} for s in steps
+    ):
+        steps.extend([
+            PlanStep(
+                kind=STEP_SEARCH_TARGET,
+                payload={
+                    "target_id": agent.get("kill_target_id"),
+                    "target_location_id": target_id,
+                    "reason": "active_plan_composed_verify_search_after_travel",
+                },
+                interruptible=True,
+                expected_duration_ticks=1,
+            ),
+            PlanStep(
+                kind=STEP_LOOK_FOR_TRACKS,
+                payload={
+                    "target_id": agent.get("kill_target_id"),
+                    "target_location_id": target_id,
+                    "reason": "active_plan_composed_verify_tracks_after_search",
+                },
+                interruptible=True,
+                expected_duration_ticks=1,
+            ),
+            PlanStep(
+                kind=STEP_QUESTION_WITNESSES,
+                payload={
+                    "target_id": agent.get("kill_target_id"),
+                    "reason": "active_plan_composed_verify_witnesses_after_tracks",
+                },
+                interruptible=True,
+                expected_duration_ticks=1,
+            ),
+        ])
+        return steps
+
     if objective_key == "TRACK_TARGET" and not any(s.kind == STEP_SEARCH_TARGET for s in steps):
         steps.append(
             PlanStep(
@@ -110,6 +152,18 @@ def compose_active_plan_steps(
                     "target_id": agent.get("kill_target_id"),
                     "target_location_id": target_id,
                     "reason": "active_plan_composed_search_after_travel",
+                },
+                interruptible=True,
+                expected_duration_ticks=1,
+            )
+        )
+        steps.append(
+            PlanStep(
+                kind=STEP_LOOK_FOR_TRACKS,
+                payload={
+                    "target_id": agent.get("kill_target_id"),
+                    "target_location_id": target_id,
+                    "reason": "active_plan_composed_tracks_after_search",
                 },
                 interruptible=True,
                 expected_duration_ticks=1,

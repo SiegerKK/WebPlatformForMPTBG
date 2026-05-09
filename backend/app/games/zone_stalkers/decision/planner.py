@@ -59,6 +59,8 @@ from .models.plan import (
     STEP_TRADE_SELL_ITEM,
     STEP_CONSUME_ITEM,
     STEP_ASK_FOR_INTEL,
+    STEP_LOOK_FOR_TRACKS,
+    STEP_QUESTION_WITNESSES,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_MONITOR_COMBAT,
@@ -1311,6 +1313,40 @@ def _plan_hunt_target(
             created_turn=world_turn,
         )
 
+    if objective_key == "VERIFY_LEAD":
+        verify_steps: list[PlanStep] = []
+        if target_loc and target_loc != agent_loc:
+            verify_steps.append(
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": target_loc, "reason": "verify_lead"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, target_loc, state),
+                )
+            )
+        verify_steps.extend([
+            PlanStep(
+                STEP_SEARCH_TARGET,
+                {"target_id": target_id, "target_location_id": target_loc or agent_loc, "reason": "verify_lead"},
+                expected_duration_ticks=1,
+            ),
+            PlanStep(
+                STEP_LOOK_FOR_TRACKS,
+                {"target_id": target_id, "target_location_id": target_loc or agent_loc, "reason": "verify_lead"},
+                expected_duration_ticks=1,
+            ),
+            PlanStep(
+                STEP_QUESTION_WITNESSES,
+                {"target_id": target_id, "reason": "verify_lead"},
+                expected_duration_ticks=1,
+            ),
+        ])
+        return Plan(
+            intent_kind=intent.kind,
+            steps=verify_steps,
+            confidence=0.76,
+            created_turn=world_turn,
+        )
+
     if objective_key == "TRACK_TARGET":
         if target_loc and target_loc != agent_loc:
             return Plan(
@@ -1326,6 +1362,11 @@ def _plan_hunt_target(
                         {"target_id": target_id, "target_location_id": target_loc, "reason": "track_target"},
                         expected_duration_ticks=1,
                     ),
+                    PlanStep(
+                        STEP_LOOK_FOR_TRACKS,
+                        {"target_id": target_id, "target_location_id": target_loc, "reason": "track_target"},
+                        expected_duration_ticks=1,
+                    ),
                 ],
                 confidence=0.75,
                 created_turn=world_turn,
@@ -1337,7 +1378,12 @@ def _plan_hunt_target(
                     STEP_SEARCH_TARGET,
                     {"target_id": target_id, "target_location_id": agent_loc, "reason": "track_target"},
                     expected_duration_ticks=1,
-                )
+                ),
+                PlanStep(
+                    STEP_LOOK_FOR_TRACKS,
+                    {"target_id": target_id, "target_location_id": agent_loc, "reason": "track_target"},
+                    expected_duration_ticks=1,
+                ),
             ],
             confidence=0.7,
             created_turn=world_turn,
@@ -1377,7 +1423,7 @@ def _plan_hunt_target(
             created_turn=world_turn,
         )
 
-    # LOCATE_TARGET / fallback hunt behavior.
+    # GATHER_INTEL / LOCATE_TARGET fallback hunt behavior.
     trader_loc = _nearest_trader_location(ctx, state, used_for="find_trader")
     if trader_loc and trader_loc != agent_loc:
         return Plan(
@@ -1389,7 +1435,7 @@ def _plan_hunt_target(
                     expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
                 ),
                 PlanStep(
-                    STEP_ASK_FOR_INTEL,
+                    STEP_QUESTION_WITNESSES,
                     {"target_id": target_id, "reason": "hunt_intel"},
                     expected_duration_ticks=1,
                 ),
@@ -1401,7 +1447,7 @@ def _plan_hunt_target(
         intent_kind=intent.kind,
         steps=[
             PlanStep(
-                STEP_ASK_FOR_INTEL,
+                STEP_QUESTION_WITNESSES,
                 {"target_id": target_id, "reason": "hunt_intel"},
                 expected_duration_ticks=1,
             )

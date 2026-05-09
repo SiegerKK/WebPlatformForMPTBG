@@ -30,6 +30,8 @@ from .models.plan import (
     STEP_EQUIP_ITEM,
     STEP_PICKUP_ITEM,
     STEP_ASK_FOR_INTEL,
+    STEP_LOOK_FOR_TRACKS,
+    STEP_QUESTION_WITNESSES,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_MONITOR_COMBAT,
@@ -39,6 +41,9 @@ from .models.plan import (
     STEP_LEGACY_SCHEDULED_ACTION,
     STEP_HEAL_SELF,
 )
+
+_SEARCH_EXHAUSTION_THRESHOLD = 3
+_SEARCH_LOCATION_COOLDOWN_TURNS = 300
 
 
 def execute_plan_step(
@@ -86,6 +91,8 @@ def execute_plan_step(
         STEP_PICKUP_ITEM:          _exec_pickup,
         STEP_HEAL_SELF:            _exec_consume,   # same as consume
         STEP_ASK_FOR_INTEL:        _exec_ask_for_intel,
+        STEP_LOOK_FOR_TRACKS:      _exec_look_for_tracks,
+        STEP_QUESTION_WITNESSES:   _exec_question_witnesses,
         STEP_SEARCH_TARGET:        _exec_search_target,
         STEP_START_COMBAT:         _exec_start_combat,
         STEP_MONITOR_COMBAT:       _exec_monitor_combat,
@@ -103,7 +110,8 @@ def execute_plan_step(
     if step.kind in (
         STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM,
         STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM, STEP_TRADE_SELL_ITEM,
-        STEP_ASK_FOR_INTEL, STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
+        STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
+        STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
     ):
         plan.advance()
     elif step.kind == STEP_MONITOR_COMBAT and bool(step.payload.get("_monitor_complete")):
@@ -485,6 +493,108 @@ def _exec_ask_for_intel(
     return []
 
 
+def _exec_question_witnesses(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    return _exec_ask_for_intel(agent_id, agent, step, ctx, state, world_turn)
+
+
+def _count_target_not_found_failures(
+    agent: dict[str, Any],
+    *,
+    target_id: str,
+    location_id: str,
+) -> int:
+    count = 0
+    for memory in agent.get("memory", []):
+        if not isinstance(memory, dict):
+            continue
+        effects = memory.get("effects")
+        if not isinstance(effects, dict):
+            continue
+        if effects.get("action_kind") != "target_not_found":
+            continue
+        if str(effects.get("target_id") or "") != target_id:
+            continue
+        if str(effects.get("location_id") or "") != location_id:
+            continue
+        count += 1
+    return count
+
+
+def _exec_look_for_tracks(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
+    if not target_id:
+        agent["action_used"] = True
+        return []
+
+    target = state.get("agents", {}).get(target_id)
+    current_loc = str(agent.get("location_id") or "")
+    target_loc = str(target.get("location_id") or "") if isinstance(target, dict) else ""
+
+    if isinstance(target, dict) and target.get("is_alive", True) and target_loc and target_loc != current_loc:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "👣 Обнаружены следы цели",
+            {
+                "action_kind": "target_route_observed",
+                "target_id": target_id,
+                "location_id": target_loc,
+                "from_location_id": current_loc,
+                "to_location_id": target_loc,
+            },
+            summary="Нашёл свежие следы и предполагаемый маршрут цели.",
+        )
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "🧭 Цель сместилась по следам",
+            {
+                "action_kind": "target_moved",
+                "target_id": target_id,
+                "location_id": target_loc,
+                "from_location_id": current_loc,
+                "to_location_id": target_loc,
+            },
+            summary="Следы указывают, куда ушла цель.",
+        )
+    else:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "👣 Следы цели не найдены",
+            {
+                "action_kind": "no_tracks_found",
+                "target_id": target_id,
+                "location_id": current_loc,
+            },
+            summary="Следов цели в текущей локации не найдено.",
+        )
+    agent["action_used"] = True
+    return []
+
+
 def _exec_search_target(
     agent_id: str,
     agent: dict[str, Any],
@@ -569,6 +679,16 @@ def _exec_search_target(
             )
     else:
         expected_loc = step.payload.get("target_location_id") or current_loc
+        failed_search_count = _count_target_not_found_failures(
+            agent,
+            target_id=target_id,
+            location_id=str(expected_loc),
+        ) + 1
+        cooldown_until_turn = (
+            world_turn + _SEARCH_LOCATION_COOLDOWN_TURNS
+            if failed_search_count >= _SEARCH_EXHAUSTION_THRESHOLD
+            else None
+        )
         _add_memory(
             agent,
             world_turn,
@@ -580,6 +700,8 @@ def _exec_search_target(
                 "target_id": target_id,
                 "location_id": expected_loc,
                 "confirmed_empty": True,
+                "failed_search_count": failed_search_count,
+                "cooldown_until_turn": cooldown_until_turn,
             },
             summary="Цель отсутствует в проверенной локации.",
         )

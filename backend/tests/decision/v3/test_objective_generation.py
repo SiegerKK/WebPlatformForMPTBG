@@ -7,6 +7,7 @@ from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_CONTINUE_CURRENT_PLAN,
     OBJECTIVE_FIND_ARTIFACTS,
+    OBJECTIVE_GATHER_INTEL,
     OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
     OBJECTIVE_HUNT_TARGET,
     OBJECTIVE_LEAVE_ZONE,
@@ -77,6 +78,7 @@ def test_generate_hunt_objectives_without_forcing_immediate_engage() -> None:
     assert OBJECTIVE_HUNT_TARGET in objective_map
     assert OBJECTIVE_PREPARE_FOR_HUNT in objective_map
     assert OBJECTIVE_LOCATE_TARGET in objective_map
+    assert OBJECTIVE_GATHER_INTEL in objective_map
     prepare = objective_map[OBJECTIVE_PREPARE_FOR_HUNT]
     assert prepare.metadata.get("blockers")
 

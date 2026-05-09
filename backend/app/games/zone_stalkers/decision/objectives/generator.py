@@ -39,8 +39,10 @@ OBJECTIVE_IDLE = "IDLE"
 OBJECTIVE_CONTINUE_CURRENT_PLAN = "CONTINUE_CURRENT_PLAN"
 
 # Reserved hunt decomposition keys (pre-PR5 prerequisite).
+OBJECTIVE_GATHER_INTEL = "GATHER_INTEL"
 OBJECTIVE_LOCATE_TARGET = "LOCATE_TARGET"
 OBJECTIVE_PREPARE_FOR_HUNT = "PREPARE_FOR_HUNT"
+OBJECTIVE_VERIFY_LEAD = "VERIFY_LEAD"
 OBJECTIVE_TRACK_TARGET = "TRACK_TARGET"
 OBJECTIVE_INTERCEPT_TARGET = "INTERCEPT_TARGET"
 OBJECTIVE_AMBUSH_TARGET = "AMBUSH_TARGET"
@@ -50,8 +52,10 @@ OBJECTIVE_RETREAT_FROM_TARGET = "RETREAT_FROM_TARGET"
 OBJECTIVE_RECOVER_AFTER_COMBAT = "RECOVER_AFTER_COMBAT"
 
 HUNT_OBJECTIVE_KEYS: tuple[str, ...] = (
+    OBJECTIVE_GATHER_INTEL,
     OBJECTIVE_LOCATE_TARGET,
     OBJECTIVE_PREPARE_FOR_HUNT,
+    OBJECTIVE_VERIFY_LEAD,
     OBJECTIVE_TRACK_TARGET,
     OBJECTIVE_INTERCEPT_TARGET,
     OBJECTIVE_AMBUSH_TARGET,
@@ -617,10 +621,13 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             prepare_reasons.append("Цель слишком сильная для текущего состояния")
 
         target_id = str(agent.get("kill_target_id") or "")
-        target_loc = target_belief.last_known_location_id if target_belief else None
+        best_target_loc = target_belief.best_location_id if target_belief else None
+        target_loc = best_target_loc or (target_belief.last_known_location_id if target_belief else None)
         target_visible_now = bool(target_belief.visible_now) if target_belief else False
         target_co_located = bool(target_belief.co_located) if target_belief else False
         target_alive = target_belief.is_alive if target_belief else None
+        exhausted_locations = set(target_belief.exhausted_locations) if target_belief else set()
+        route_hypothesis = target_belief.likely_routes[0] if target_belief and target_belief.likely_routes else None
 
         if target_alive is False:
             _append_unique(
@@ -688,6 +695,33 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     ),
                 )
         elif target_loc:
+            best_is_exhausted = target_loc in exhausted_locations
+            if not best_is_exhausted:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_VERIFY_LEAD,
+                        source="global_goal",
+                        urgency=0.8,
+                        expected_value=0.88,
+                        risk=0.28,
+                        time_cost=0.45,
+                        resource_cost=0.08,
+                        confidence=max(0.5, float(target_belief.best_location_confidence) if target_belief else 0.65),
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_VERIFY_LEAD)[1],
+                        reasons=("Есть рабочая версия местоположения цели — нужно проверить зацепку",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_VERIFY_LEAD)[0],
+                        metadata={
+                            "is_blocking": False,
+                            "hunt_stage": "verify",
+                            "target_id": target_id,
+                            "target_location_id": target_loc,
+                            "target_location_confidence": float(target_belief.best_location_confidence) if target_belief else 0.65,
+                        },
+                        target={"target_id": target_id, "location_id": target_loc} if target_id else None,
+                    ),
+                )
             _append_unique(
                 result,
                 Objective(
@@ -698,21 +732,52 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     risk=0.35,
                     time_cost=0.5,
                     resource_cost=0.1,
-                    confidence=max(0.5, float(target_belief.location_confidence) if target_belief else 0.6),
+                    confidence=max(0.45, float(target_belief.best_location_confidence) if target_belief else 0.6),
                     goal_alignment=1.0,
                     memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_TRACK_TARGET)[1],
-                    reasons=("Есть последнее известное местоположение цели — начинаю преследование",),
+                    reasons=(
+                        "Есть лучшее непустое предположение о местоположении цели — начинаю преследование"
+                        if not best_is_exhausted
+                        else "Основная локация уже исчерпана — переключаюсь на следующую зацепку",
+                    ),
                     source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_TRACK_TARGET)[0],
                     metadata={
                         "is_blocking": False,
                         "hunt_stage": "track",
                         "target_id": target_id,
                         "target_location_id": target_loc,
-                        "target_location_confidence": float(target_belief.location_confidence) if target_belief else 0.6,
+                        "target_location_confidence": float(target_belief.best_location_confidence) if target_belief else 0.6,
+                        "exhausted_locations": sorted(exhausted_locations),
                     },
                     target={"target_id": target_id, "location_id": target_loc} if target_id else None,
                 ),
             )
+            if route_hypothesis and route_hypothesis.to_location_id:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_INTERCEPT_TARGET,
+                        source="global_goal",
+                        urgency=0.62,
+                        expected_value=0.72,
+                        risk=0.38,
+                        time_cost=0.52,
+                        resource_cost=0.1,
+                        confidence=max(0.4, float(route_hypothesis.confidence)),
+                        goal_alignment=0.9,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_INTERCEPT_TARGET)[1],
+                        reasons=("Есть вероятный маршрут цели — можно попробовать перехват",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_INTERCEPT_TARGET)[0],
+                        metadata={
+                            "is_blocking": False,
+                            "hunt_stage": "intercept",
+                            "target_id": target_id,
+                            "target_location_id": route_hypothesis.to_location_id,
+                            "route_from_id": route_hypothesis.from_location_id,
+                        },
+                        target={"target_id": target_id, "location_id": route_hypothesis.to_location_id} if target_id else None,
+                    ),
+                )
             if blockers:
                 _append_unique(
                     result,
@@ -733,6 +798,25 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     ),
                 )
         else:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_GATHER_INTEL,
+                    source="global_goal",
+                    urgency=0.84,
+                    expected_value=0.82,
+                    risk=0.18,
+                    time_cost=0.48,
+                    resource_cost=0.08,
+                    confidence=0.76,
+                    goal_alignment=1.0,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[1],
+                    reasons=("Полезных зацепок нет — собираю новые разведданные",),
+                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[0],
+                    metadata={"is_blocking": False, "hunt_stage": "gather_intel", "target_id": target_id},
+                    target={"target_id": target_id} if target_id else None,
+                ),
+            )
             _append_unique(
                 result,
                 Objective(
