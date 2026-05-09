@@ -501,7 +501,46 @@ def _exec_question_witnesses(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    return _exec_ask_for_intel(agent_id, agent, step, ctx, state, world_turn)
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _add_memory,
+        _bot_ask_colocated_stalkers_about_agent,
+        _bot_buy_hunt_intel_from_trader,
+    )
+
+    target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
+    if not target_id:
+        agent["action_used"] = True
+        return []
+
+    target = state.get("agents", {}).get(target_id, {})
+    target_name = target.get("name", target_id) if isinstance(target, dict) else target_id
+    intel_loc = _bot_ask_colocated_stalkers_about_agent(
+        agent_id, agent, target_id, target_name, state, world_turn
+    )
+    if not intel_loc:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "🕵️ Свидетелей не найдено",
+            {
+                "action_kind": "no_witnesses",
+                "target_id": target_id,
+                "location_id": str(agent.get("location_id") or ""),
+            },
+            summary="В этой локации нет свидетелей, которые могут указать след цели.",
+        )
+        _bot_buy_hunt_intel_from_trader(
+            agent_id,
+            agent,
+            target_id,
+            target_name,
+            state,
+            world_turn,
+        )
+    agent["action_used"] = True
+    return []
 
 
 def _count_target_not_found_failures(
@@ -527,6 +566,71 @@ def _count_target_not_found_failures(
     return count
 
 
+def _resolve_track_destination_from_known_leads(
+    *,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    target_id: str,
+    current_loc: str,
+) -> str | None:
+    target = state.get("agents", {}).get(target_id)
+    if (
+        bool(state.get("debug_omniscient_targets"))
+        and isinstance(target, dict)
+        and target.get("is_alive", True)
+    ):
+        target_loc = str(target.get("location_id") or "")
+        if target_loc and target_loc != current_loc:
+            return target_loc
+
+    for mem in reversed(agent.get("memory", [])):
+        if not isinstance(mem, dict):
+            continue
+        effects = mem.get("effects")
+        if not isinstance(effects, dict):
+            continue
+        action_kind = str(effects.get("action_kind") or "")
+        loc: str | None = None
+        if action_kind in {"target_moved", "target_route_observed"}:
+            if str(effects.get("target_id") or "") != target_id:
+                continue
+            loc = str(effects.get("to_location_id") or effects.get("location_id") or "")
+        elif action_kind in {"intel_from_stalker", "intel_from_trader", "target_intel"}:
+            if str(effects.get("target_agent_id") or effects.get("target_id") or "") != target_id:
+                continue
+            observed = str(effects.get("observed") or "")
+            if action_kind != "target_intel" and observed != "agent_location":
+                continue
+            loc = str(effects.get("location_id") or "")
+        elif action_kind == "target_last_known_location":
+            if str(effects.get("target_id") or "") != target_id:
+                continue
+            loc = str(effects.get("location_id") or "")
+        if loc and loc != current_loc:
+            return loc
+
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+    rec_items = [rec for rec in records.values() if isinstance(rec, dict)]
+    rec_items.sort(key=lambda rec: int(rec.get("created_turn") or 0), reverse=True)
+    for rec in rec_items:
+        details = rec.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        rec_target_id = str(details.get("target_id") or details.get("target_agent_id") or "")
+        if rec_target_id != target_id and target_id not in {str(v) for v in rec.get("entity_ids", [])}:
+            continue
+        kind = str(rec.get("kind") or "")
+        loc: str | None = None
+        if kind in {"target_moved", "target_route_observed"}:
+            loc = str(details.get("to_location_id") or rec.get("location_id") or "")
+        elif kind in {"target_intel", "target_last_known_location"}:
+            loc = str(rec.get("location_id") or details.get("location_id") or "")
+        if loc and loc != current_loc:
+            return loc
+    return None
+
+
 def _exec_look_for_tracks(
     agent_id: str,
     agent: dict[str, Any],
@@ -542,14 +646,15 @@ def _exec_look_for_tracks(
         agent["action_used"] = True
         return []
 
-    target = state.get("agents", {}).get(target_id)
     current_loc = str(agent.get("location_id") or "")
-    # MVP: the game resolves track-finding by consulting the authoritative target
-    # location in the game state.  This is intentionally simplified — a richer
-    # simulation would limit information to what the hunter can actually observe.
-    target_loc = str(target.get("location_id") or "") if isinstance(target, dict) else ""
+    target_loc = _resolve_track_destination_from_known_leads(
+        agent=agent,
+        state=state,
+        target_id=target_id,
+        current_loc=current_loc,
+    )
 
-    if isinstance(target, dict) and target.get("is_alive", True) and target_loc and target_loc != current_loc:
+    if target_loc:
         _add_memory(
             agent,
             world_turn,

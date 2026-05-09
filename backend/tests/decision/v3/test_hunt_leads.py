@@ -11,7 +11,7 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_TRACK_TARGET,
     generate_objectives,
 )
-from app.games.zone_stalkers.decision.target_beliefs import build_target_belief
+from app.games.zone_stalkers.decision.target_beliefs import build_target_belief, _record_to_hunt_lead
 from app.games.zone_stalkers.memory.models import MemoryRecord, LAYER_SOCIAL
 from app.games.zone_stalkers.memory.store import add_memory_record, ensure_memory_v3
 from tests.decision.conftest import make_agent, make_minimal_state
@@ -105,16 +105,18 @@ def test_target_seen_creates_high_confidence_location_hypothesis() -> None:
 
 
 def test_target_not_found_suppresses_old_location() -> None:
-    """A single target_not_found with higher confidence than the positive lead
-    should push the net score negative, eliminating loc_b from usable hypotheses.
-    (With typical default confidence 0.75 the net stays positive; this test uses
-    an explicit confidence of 0.9 to model a high-certainty negative observation.)
+    """One miss should strongly suppress a lead but keep it non-zero.
+
+    PR6 staged suppression uses multiplicative factors:
+    - 1 miss: * 0.45
+    - 2 miss: * 0.20
+    - 3 miss: exhausted
     """
     agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
     state = _make_state(agent)
-    # Positive lead: confidence 0.85, weight +1.0 → contribution +0.85
+    # Positive lead: 0.85
     _remember(agent, kind="target_last_known_location", created_turn=95, location_id="loc_b", confidence=0.85)
-    # Negative evidence: confidence 0.9, weight -1.0 → contribution -0.90 (net < 0, display 0)
+    # Miss at same location: should apply staged suppression, not hard deletion.
     _remember(agent, kind="target_not_found", created_turn=99, location_id="loc_b", confidence=0.9)
     ctx = build_agent_context("bot1", agent, state)
     belief_state = build_belief_state(ctx, agent, state["world_turn"])
@@ -127,9 +129,8 @@ def test_target_not_found_suppresses_old_location() -> None:
         belief_state=belief_state,
     )
 
-    # Net score is negative (strong denial > positive lead), so no usable best location.
-    assert belief.best_location_id is None
-    assert belief.location_confidence == 0.0
+    assert belief.best_location_id == "loc_b"
+    assert 0.30 < belief.location_confidence < 0.45
 
 
 def test_target_not_found_reduces_but_not_eliminates_with_weak_negative() -> None:
@@ -310,6 +311,27 @@ def test_trader_intel_creates_medium_confidence_location_hypothesis() -> None:
         f"Trader intel ({trader_conf:.2f}) should have higher confidence than stalker intel ({stalker_conf:.2f})"
     )
     assert trader_conf < 0.95, f"Trader intel confidence ({trader_conf:.2f}) should be below direct-observation tier"
+
+
+def test_hunt_lead_source_agent_prefers_witness_or_trader_source() -> None:
+    lead = _record_to_hunt_lead(
+        {
+            "id": "mem_1",
+            "agent_id": "hunter_1",
+            "kind": "target_intel",
+            "created_turn": 100,
+            "location_id": "loc_a",
+            "details": {
+                "target_id": "target_1",
+                "source_agent_id": "witness_7",
+            },
+            "entity_ids": ["target_1"],
+        },
+        target_id="target_1",
+        world_turn=100,
+    )
+    assert lead is not None
+    assert lead.source_agent_id == "witness_7"
 
 
 def test_no_leads_generates_gather_intel() -> None:

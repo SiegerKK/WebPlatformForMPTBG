@@ -61,6 +61,9 @@ function getRegionColors(
 export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [mapOverlayMode, setMapOverlayMode] = useState<'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes'>('default');
+  const [huntDebugHunterId, setHuntDebugHunterId] = useState<string | null>(null);
+  const [huntMinConfidence, setHuntMinConfidence] = useState(0.2);
 
   // ── Agent profile modal (click stalker in location detail panel) ──────────
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
@@ -1129,6 +1132,52 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     persistMap(effectivePosRef.current, localConnsRef.current, next);
   }, [persistMap]);
 
+  const huntOverlayCandidates = useMemo(
+    () =>
+      Object.values(zoneState.agents).filter(
+        (agent) => !!agent.brain_v3_context?.hunt_target_belief?.target_id,
+      ),
+    [zoneState.agents],
+  );
+
+  useEffect(() => {
+    if (huntOverlayCandidates.length === 0) {
+      setHuntDebugHunterId(null);
+      return;
+    }
+    if (huntDebugHunterId && zoneState.agents[huntDebugHunterId]) return;
+    setHuntDebugHunterId(huntOverlayCandidates[0]?.id ?? null);
+  }, [huntOverlayCandidates, huntDebugHunterId, zoneState.agents]);
+
+  const selectedHuntBelief = huntDebugHunterId
+    ? zoneState.agents[huntDebugHunterId]?.brain_v3_context?.hunt_target_belief ?? null
+    : null;
+  const possibleLocationMap = useMemo(() => {
+    const m = new Map<string, { confidence: number; freshness: number; reason: string; probability: number }>();
+    for (const hypothesis of selectedHuntBelief?.possible_locations ?? []) {
+      if ((hypothesis.confidence ?? 0) < huntMinConfidence) continue;
+      m.set(hypothesis.location_id, {
+        confidence: hypothesis.confidence,
+        freshness: hypothesis.freshness,
+        reason: hypothesis.reason,
+        probability: hypothesis.probability,
+      });
+    }
+    return m;
+  }, [selectedHuntBelief, huntMinConfidence]);
+  const exhaustedLocationSet = useMemo(
+    () => new Set(selectedHuntBelief?.exhausted_locations ?? []),
+    [selectedHuntBelief],
+  );
+  const huntRouteList = useMemo(
+    () =>
+      (selectedHuntBelief?.likely_routes ?? []).filter(
+        (route) =>
+          !!route.to_location_id && route.confidence >= huntMinConfidence,
+      ),
+    [selectedHuntBelief, huntMinConfidence],
+  );
+
   return (
     <div
       ref={pageWrapRef}
@@ -1309,6 +1358,45 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 📥
               </button>
             </div>
+            <div style={s.toolbarSep} />
+            <div style={{ ...s.toolbarGroup, gap: 8, alignItems: 'center' }}>
+              <span style={{ color: '#64748b', fontSize: '0.7rem' }}>Overlay</span>
+              <select
+                value={mapOverlayMode}
+                onChange={(e) => setMapOverlayMode(e.target.value as 'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes')}
+                style={{ background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 6, fontSize: '0.72rem', padding: '0.2rem 0.3rem' }}
+              >
+                <option value="default">Default</option>
+                <option value="hunt_leads">Hunt Leads</option>
+                <option value="target_search">Target Search</option>
+                <option value="exhausted_locations">Exhausted Locations</option>
+                <option value="target_routes">Target Routes</option>
+              </select>
+              <select
+                value={huntDebugHunterId ?? ''}
+                onChange={(e) => setHuntDebugHunterId(e.target.value || null)}
+                style={{ background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 6, fontSize: '0.72rem', padding: '0.2rem 0.3rem', minWidth: 130 }}
+              >
+                <option value="">Hunter: —</option>
+                {huntOverlayCandidates.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+              <label style={{ color: '#64748b', fontSize: '0.7rem' }}>
+                min conf
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={huntMinConfidence}
+                  onChange={(e) => setHuntMinConfidence(Math.max(0, Math.min(1, Number(e.target.value))))}
+                  style={{ marginLeft: 4, width: 55, background: '#0f172a', color: '#cbd5e1', border: '1px solid #1e3a5f', borderRadius: 4, fontSize: '0.7rem', padding: '0.15rem 0.25rem' }}
+                />
+              </label>
+            </div>
           </div>
         </div>
 
@@ -1387,6 +1475,32 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   </g>
                 );
               })}
+              {(mapOverlayMode === 'target_routes' || mapOverlayMode === 'target_search') && huntRouteList.length > 0 && (
+                <g pointerEvents="none">
+                  {huntRouteList.map((route, idx) => {
+                    const fromId = route.from_location_id ?? '';
+                    const toId = route.to_location_id ?? '';
+                    const fromPos = effectivePos[fromId];
+                    const toPos = effectivePos[toId];
+                    if (!fromPos || !toPos) return null;
+                    const opacity = Math.max(0.25, Math.min(1, route.confidence));
+                    return (
+                      <g key={`hunt-route-${fromId}-${toId}-${idx}`}>
+                        <line
+                          x1={fromPos.x}
+                          y1={fromPos.y}
+                          x2={toPos.x}
+                          y2={toPos.y}
+                          stroke="#22d3ee"
+                          strokeWidth={1.5 + route.confidence * 2}
+                          strokeOpacity={opacity}
+                          strokeDasharray={route.reason === 'target_route_observed' ? '5 4' : undefined}
+                        />
+                      </g>
+                    );
+                  })}
+                </g>
+              )}
               {/* Draw connections from localConns */}
               <g pointerEvents="none">
               {Object.entries(localConns).flatMap(([locId, conns]) =>
@@ -1474,6 +1588,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 linkSource && linkSource !== id
                   ? (localConns[linkSource] ?? []).some((c) => c.to === id)
                   : false;
+              const huntHypothesis = possibleLocationMap.get(id);
+              const isHuntBest = selectedHuntBelief?.best_location_id === id;
+              const isHuntExhausted = exhaustedLocationSet.has(id);
 
               const aliveAgents = loc.agents.filter(
                 (aid) => zoneState.agents[aid]?.is_alive,
@@ -1497,6 +1614,20 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 ? '#22c55e'
                 : '#1e293b';
               const stripColor = TERRAIN_TYPE_COLOR[loc.terrain_type ?? ''] ?? '#334155';
+              let huntOverlayShadow: string | undefined;
+              if (mapOverlayMode === 'hunt_leads' || mapOverlayMode === 'target_search') {
+                if (isHuntBest) {
+                  huntOverlayShadow = '0 0 0 2px #22d3ee, 0 0 14px rgba(34,211,238,0.35)';
+                } else if (huntHypothesis) {
+                  const alpha = Math.max(0.22, Math.min(0.9, huntHypothesis.confidence));
+                  huntOverlayShadow = `0 0 0 2px rgba(56,189,248,${alpha})`;
+                } else if (mapOverlayMode === 'target_search') {
+                  huntOverlayShadow = '0 0 0 1px rgba(30,41,59,0.8)';
+                }
+              }
+              if ((mapOverlayMode === 'exhausted_locations' || mapOverlayMode === 'target_search') && isHuntExhausted) {
+                huntOverlayShadow = '0 0 0 2px #ef4444, 0 0 12px rgba(239,68,68,0.32)';
+              }
 
               return (
                 <div
@@ -1524,7 +1655,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                       ? '0 0 0 2px #3b82f6'
                       : isCurrent
                       ? '0 0 0 1px #22c55e44'
-                      : 'none',
+                      : huntOverlayShadow ?? 'none',
                     transition: 'box-shadow 0.15s',
                     zIndex: isSelected || isLinkSrc ? 10 : 1,
                     userSelect: 'none',
@@ -1570,6 +1701,17 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                     )}
                     {loc.items.length > 0 && (
                       <Badge bg="#1c1917" color="#78716c">📦 {loc.items.length}</Badge>
+                    )}
+                    {(mapOverlayMode === 'hunt_leads' || mapOverlayMode === 'target_search') && huntHypothesis && (
+                      <Badge bg="#0c4a6e" color="#67e8f9">
+                        🔎 {Math.round(huntHypothesis.confidence * 100)}%
+                      </Badge>
+                    )}
+                    {(mapOverlayMode === 'target_search' || mapOverlayMode === 'exhausted_locations') && isHuntExhausted && (
+                      <Badge bg="#7f1d1d" color="#fca5a5">⛔ exhausted</Badge>
+                    )}
+                    {(mapOverlayMode === 'target_search') && isHuntBest && (
+                      <Badge bg="#155e75" color="#a5f3fc">⭐ best</Badge>
                     )}
                   </div>
                 </div>
@@ -1717,4 +1859,3 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     </div>
   );
 }
-

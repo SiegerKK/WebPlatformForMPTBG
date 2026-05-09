@@ -175,6 +175,41 @@ export interface AgentForProfile {
     intent_score?: number | null;
     intent_reason?: string | null;
     adapter_intent?: { kind?: string | null; score?: number | null; reason?: string | null } | null;
+    hunt_target_belief?: {
+      target_id: string;
+      is_known: boolean;
+      is_alive: boolean | null;
+      last_known_location_id: string | null;
+      location_confidence: number;
+      best_location_id: string | null;
+      best_location_confidence: number;
+      last_seen_turn: number | null;
+      visible_now: boolean;
+      co_located: boolean;
+      equipment_known: boolean;
+      combat_strength: number | null;
+      combat_strength_confidence: number;
+      possible_locations: Array<{
+        location_id: string;
+        probability: number;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      likely_routes: Array<{
+        from_location_id: string | null;
+        to_location_id: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      exhausted_locations: string[];
+      lead_count: number;
+      route_hints: string[];
+      source_refs: string[];
+    } | null;
   } | null;
   _v2_context?: {
     objective_key?: string | null;
@@ -492,6 +527,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               latestDecisionEvent={latestDecisionEvent}
               currentObjective={currentObjective}
               scheduledAction={agent.scheduled_action}
+              huntTargetBelief={agent.brain_v3_context?.hunt_target_belief ?? null}
             />
           </Section>
         )}

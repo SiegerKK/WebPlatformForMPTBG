@@ -80,6 +80,59 @@ export function LocationDetailPanel({
   const mutants = loc.agents.map((id) => zoneState.mutants[id]).filter(Boolean);
   const aliveMutants = mutants.filter((m) => m.is_alive);
   const deadMutants = mutants.filter((m) => !m.is_alive);
+  const huntBeliefs = Object.values(zoneState.agents)
+    .map((a) => ({
+      hunter_id: a.id,
+      hunter_name: a.name,
+      objective_key: a.brain_v3_context?.objective_key ?? null,
+      belief: a.brain_v3_context?.hunt_target_belief ?? null,
+    }))
+    .filter((entry) => !!entry.belief?.target_id);
+  const positiveLeads = huntBeliefs
+    .map((entry) => {
+      const hypothesis = entry.belief?.possible_locations?.find((h) => h.location_id === loc.id);
+      if (!hypothesis) return null;
+      return {
+        hunter_id: entry.hunter_id,
+        hunter_name: entry.hunter_name,
+        target_id: entry.belief!.target_id,
+        reason: hypothesis.reason,
+        confidence: hypothesis.confidence,
+        freshness: hypothesis.freshness,
+        is_best: entry.belief?.best_location_id === loc.id,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item != null);
+  const exhaustedFor = huntBeliefs
+    .filter((entry) => entry.belief?.exhausted_locations?.includes(loc.id))
+    .map((entry) => ({
+      hunter_id: entry.hunter_id,
+      hunter_name: entry.hunter_name,
+      target_id: entry.belief!.target_id,
+      lead_count: entry.belief?.lead_count ?? 0,
+    }));
+  const routesIn = huntBeliefs
+    .flatMap((entry) => (entry.belief?.likely_routes ?? []).map((route) => ({ entry, route })))
+    .filter(({ route }) => route.to_location_id === loc.id)
+    .map(({ entry, route }) => ({
+      hunter_id: entry.hunter_id,
+      hunter_name: entry.hunter_name,
+      target_id: entry.belief!.target_id,
+      from_location_id: route.from_location_id,
+      confidence: route.confidence,
+      reason: route.reason,
+    }));
+  const routesOut = huntBeliefs
+    .flatMap((entry) => (entry.belief?.likely_routes ?? []).map((route) => ({ entry, route })))
+    .filter(({ route }) => route.from_location_id === loc.id)
+    .map(({ entry, route }) => ({
+      hunter_id: entry.hunter_id,
+      hunter_name: entry.hunter_name,
+      target_id: entry.belief!.target_id,
+      to_location_id: route.to_location_id,
+      confidence: route.confidence,
+      reason: route.reason,
+    }));
 
   return (
     <div style={s.detail}>
@@ -223,6 +276,67 @@ export function LocationDetailPanel({
               </DetailRow>
             );
           })
+        )}
+      </Section>
+
+      <Section label="🕵️ Следы / Hunt Traces">
+        {(positiveLeads.length === 0 && exhaustedFor.length === 0 && routesIn.length === 0 && routesOut.length === 0) ? (
+          <EmptyRow />
+        ) : (
+          <>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Положительные</span>
+              <span style={{ color: '#67e8f9', fontSize: '0.78rem' }}>{positiveLeads.length}</span>
+            </DetailRow>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Exhausted для</span>
+              <span style={{ color: '#fda4af', fontSize: '0.78rem' }}>{exhaustedFor.length}</span>
+            </DetailRow>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Routes in / out</span>
+              <span style={{ color: '#a5b4fc', fontSize: '0.78rem' }}>{routesIn.length} / {routesOut.length}</span>
+            </DetailRow>
+
+            {positiveLeads.slice(0, 8).map((lead) => (
+              <DetailRow key={`lead-${lead.hunter_id}-${lead.target_id}-${lead.reason}`}>
+                <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1 }}>
+                  {lead.is_best ? '⭐ ' : ''}{lead.reason} · {Math.round(lead.confidence * 100)}%
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                  {lead.hunter_name} → {lead.target_id}
+                </span>
+              </DetailRow>
+            ))}
+
+            {exhaustedFor.slice(0, 8).map((item) => (
+              <DetailRow key={`exh-${item.hunter_id}-${item.target_id}`}>
+                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1 }}>
+                  ⛔ exhausted ({item.lead_count} leads)
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                  {item.hunter_name} → {item.target_id}
+                </span>
+              </DetailRow>
+            ))}
+
+            {routesIn.slice(0, 8).map((route) => (
+              <DetailRow key={`in-${route.hunter_id}-${route.target_id}-${route.from_location_id ?? 'unknown'}`}>
+                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1 }}>
+                  ← {route.from_location_id ?? 'unknown'} · {Math.round(route.confidence * 100)}% · {route.reason}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{route.hunter_name}</span>
+              </DetailRow>
+            ))}
+
+            {routesOut.slice(0, 8).map((route) => (
+              <DetailRow key={`out-${route.hunter_id}-${route.target_id}-${route.to_location_id ?? 'unknown'}`}>
+                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1 }}>
+                  → {route.to_location_id ?? 'unknown'} · {Math.round(route.confidence * 100)}% · {route.reason}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{route.hunter_name}</span>
+              </DetailRow>
+            ))}
+          </>
         )}
       </Section>
 

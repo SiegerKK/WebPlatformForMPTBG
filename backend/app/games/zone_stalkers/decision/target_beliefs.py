@@ -39,7 +39,8 @@ _LEAD_WEIGHTS: dict[str, float] = {
     "target_intel": 1.0,
     "target_moved": 1.0,
     "target_route_observed": 1.0,
-    "target_not_found": -1.0,
+    # target_not_found is applied as staged multiplicative suppression below.
+    "target_not_found": 0.0,
     "target_combat_noise": 1.0,
     "target_wounded": 0.8,
 }
@@ -51,6 +52,10 @@ _KIND_ALIASES: dict[str, str] = {
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
 _SEARCH_LOCATION_COOLDOWN_TURNS = 300
+_MISS_SCORE_MULTIPLIERS: dict[int, float] = {
+    1: 0.45,
+    2: 0.20,
+}
 
 
 def _iter_memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
@@ -174,7 +179,17 @@ def _record_to_hunt_lead(record: dict[str, Any], *, target_id: str, world_turn: 
         freshness=freshness,
         source=_record_source(record),
         source_ref=f"memory:{record.get('id')}" if record.get("id") else None,
-        source_agent_id=str(record.get("agent_id") or "") or None,
+        source_agent_id=(
+            str(
+                details.get("source_agent_id")
+                or details.get("witness_id")
+                or details.get("trader_id")
+                or record.get("source_agent_id")
+                or record.get("agent_id")
+                or ""
+            )
+            or None
+        ),
         expires_turn=expires_turn,
         details=details,
     )
@@ -307,6 +322,16 @@ def _aggregate_location_hypotheses(
             prev_route_reason = route_reasons.get(route_key)
             if prev_route_reason is None or effective > prev_route_reason[0]:
                 route_reasons[route_key] = (effective, lead.kind)
+
+    for location_id, score in list(location_scores.items()):
+        miss_count = int(failed_counts.get(location_id, 0))
+        if miss_count <= 0:
+            continue
+        if miss_count >= _SEARCH_EXHAUSTION_THRESHOLD:
+            multiplier = 0.0
+        else:
+            multiplier = _MISS_SCORE_MULTIPLIERS.get(miss_count, _MISS_SCORE_MULTIPLIERS[2])
+        location_scores[location_id] = score * multiplier
 
     display_scores = {
         location_id: max(0.0, score)

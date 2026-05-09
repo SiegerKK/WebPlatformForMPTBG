@@ -37,6 +37,44 @@ export interface StalkerAgent {
     target_id?: string;
     turns_remaining?: number;
   } | null;
+  brain_v3_context?: {
+    objective_key?: string | null;
+    hunt_target_belief?: {
+      target_id: string;
+      best_location_id: string | null;
+      best_location_confidence: number;
+      possible_locations: Array<{
+        location_id: string;
+        probability: number;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      likely_routes: Array<{
+        from_location_id: string | null;
+        to_location_id: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      exhausted_locations: string[];
+      lead_count: number;
+    } | null;
+  } | null;
+  memory_v3?: {
+    records?: Record<string, {
+      id: string;
+      kind: string;
+      layer: string;
+      summary: string;
+      details?: Record<string, unknown>;
+      location_id?: string | null;
+      confidence?: number;
+      created_turn?: number;
+    }>;
+  } | null;
 }
 
 export interface ZoneMapState {
