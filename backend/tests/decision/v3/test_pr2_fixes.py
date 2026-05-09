@@ -759,6 +759,113 @@ def test_resupply_reason_uses_dominant_item_need_instead_of_generic_text() -> No
     assert "Не хватает снаряжения" not in (intent.reason or "")
 
 
+def test_resupply_food_objective_forces_food_purchase() -> None:
+    agent = make_agent(
+        hunger=70,
+        thirst=70,
+        money=500,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+        inventory=[],
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_a")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = Intent(
+        kind=INTENT_RESUPPLY,
+        score=0.8,
+        created_turn=100,
+        metadata={"forced_resupply_category": "food"},
+    )
+
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    buy_step = next((s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM), None)
+    assert buy_step is not None, "RESUPPLY_FOOD should produce trade_buy_item step"
+    assert buy_step.payload.get("item_category") == "food"
+
+
+def test_resupply_drink_objective_forces_drink_purchase() -> None:
+    agent = make_agent(
+        hunger=70,
+        thirst=70,
+        money=500,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+        inventory=[],
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_a")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = Intent(
+        kind=INTENT_RESUPPLY,
+        score=0.8,
+        created_turn=100,
+        metadata={"forced_resupply_category": "drink"},
+    )
+
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    buy_step = next((s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM), None)
+    assert buy_step is not None, "RESUPPLY_DRINK should produce trade_buy_item step"
+    assert buy_step.payload.get("item_category") == "drink"
+
+
+def test_resupply_ammo_objective_forces_ammo_purchase() -> None:
+    agent = make_agent(
+        money=500,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=False,
+        inventory=[],
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_a")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = Intent(
+        kind=INTENT_RESUPPLY,
+        score=0.8,
+        created_turn=100,
+        metadata={"forced_resupply_category": "ammo"},
+    )
+
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    buy_step = next((s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM), None)
+    assert buy_step is not None, "RESUPPLY_AMMO should produce trade_buy_item step"
+    assert buy_step.payload.get("item_category") == "ammo"
+
+
+def test_forced_resupply_category_unavailable_falls_back_without_wrong_category_buy() -> None:
+    agent = make_agent(
+        hunger=70,
+        thirst=70,
+        money=0,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=True,
+        inventory=[],
+    )
+    state = make_minimal_state(agent=agent)
+    state["traders"] = {}
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = Intent(
+        kind=INTENT_RESUPPLY,
+        score=0.8,
+        created_turn=100,
+        metadata={"forced_resupply_category": "food"},
+    )
+
+    plan = build_plan(ctx, intent, state, 100, need_result=need_result)
+    assert plan is not None
+    assert plan.intent_kind == INTENT_GET_RICH
+    buy_steps = [s for s in plan.steps if s.kind == STEP_TRADE_BUY_ITEM]
+    assert all(s.payload.get("item_category") != "drink" for s in buy_steps)
+
+
 def test_resupply_drink_stock_uses_reserve_basic_buy_mode() -> None:
     """Drink stock resupply should use reserve_basic mode and choose basic drink."""
     agent = make_agent(

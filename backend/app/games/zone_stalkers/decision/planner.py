@@ -868,7 +868,33 @@ def _plan_resupply(
         return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
 
     item_needs = list(need_result.item_needs) if need_result is not None else evaluate_item_needs(ctx, state)
-    dominant = choose_dominant_item_need(item_needs)
+    forced_category_raw = (
+        intent.metadata.get("forced_resupply_category")
+        if isinstance(intent.metadata, dict)
+        else None
+    )
+    forced_category = str(forced_category_raw).strip().lower() if forced_category_raw else None
+    forced_category_aliases = {"medical": "medicine"}
+    if forced_category in forced_category_aliases:
+        forced_category = forced_category_aliases[forced_category]
+
+    if forced_category is not None:
+        dominant = next((need for need in item_needs if need.key == forced_category), None)
+        if dominant is None or float(dominant.urgency) <= 0:
+            fallback_reason = (
+                f"forced_resupply_category={forced_category} недоступна сейчас. "
+                "Перехожу к fallback_get_money."
+            )
+            get_rich_intent = Intent(
+                kind=INTENT_GET_RICH,
+                score=0.5,
+                source_goal="get_rich",
+                reason=fallback_reason,
+                created_turn=world_turn,
+            )
+            return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+    else:
+        dominant = choose_dominant_item_need(item_needs)
     if dominant is None:
         return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
 

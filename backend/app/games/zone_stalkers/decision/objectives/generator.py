@@ -1,0 +1,693 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.games.zone_stalkers.decision.constants import (
+    CRITICAL_REST_THRESHOLD,
+    EMISSION_DANGEROUS_TERRAIN,
+    SOFT_RESTORE_DRINK_THRESHOLD,
+    SOFT_RESTORE_FOOD_THRESHOLD,
+    SOFT_REST_THRESHOLD,
+)
+from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext
+
+
+OBJECTIVE_RESTORE_WATER = "RESTORE_WATER"
+OBJECTIVE_RESTORE_FOOD = "RESTORE_FOOD"
+OBJECTIVE_HEAL_SELF = "HEAL_SELF"
+OBJECTIVE_REST = "REST"
+
+OBJECTIVE_RESUPPLY_FOOD = "RESUPPLY_FOOD"
+OBJECTIVE_RESUPPLY_DRINK = "RESUPPLY_DRINK"
+OBJECTIVE_RESUPPLY_MEDICINE = "RESUPPLY_MEDICINE"
+OBJECTIVE_RESUPPLY_WEAPON = "RESUPPLY_WEAPON"
+OBJECTIVE_RESUPPLY_ARMOR = "RESUPPLY_ARMOR"
+OBJECTIVE_RESUPPLY_AMMO = "RESUPPLY_AMMO"
+OBJECTIVE_GET_MONEY_FOR_RESUPPLY = "GET_MONEY_FOR_RESUPPLY"
+
+OBJECTIVE_REACH_SAFE_SHELTER = "REACH_SAFE_SHELTER"
+OBJECTIVE_WAIT_IN_SHELTER = "WAIT_IN_SHELTER"
+OBJECTIVE_ESCAPE_DANGER = "ESCAPE_DANGER"
+
+OBJECTIVE_FIND_ARTIFACTS = "FIND_ARTIFACTS"
+OBJECTIVE_SELL_ARTIFACTS = "SELL_ARTIFACTS"
+OBJECTIVE_HUNT_TARGET = "HUNT_TARGET"
+OBJECTIVE_SEARCH_INFORMATION = "SEARCH_INFORMATION"
+OBJECTIVE_LEAVE_ZONE = "LEAVE_ZONE"
+OBJECTIVE_IDLE = "IDLE"
+
+OBJECTIVE_CONTINUE_CURRENT_PLAN = "CONTINUE_CURRENT_PLAN"
+
+# Reserved hunt decomposition keys (pre-PR5 prerequisite).
+OBJECTIVE_LOCATE_TARGET = "LOCATE_TARGET"
+OBJECTIVE_PREPARE_FOR_HUNT = "PREPARE_FOR_HUNT"
+OBJECTIVE_TRACK_TARGET = "TRACK_TARGET"
+OBJECTIVE_INTERCEPT_TARGET = "INTERCEPT_TARGET"
+OBJECTIVE_AMBUSH_TARGET = "AMBUSH_TARGET"
+OBJECTIVE_ENGAGE_TARGET = "ENGAGE_TARGET"
+OBJECTIVE_CONFIRM_KILL = "CONFIRM_KILL"
+OBJECTIVE_RETREAT_FROM_TARGET = "RETREAT_FROM_TARGET"
+OBJECTIVE_RECOVER_AFTER_COMBAT = "RECOVER_AFTER_COMBAT"
+
+HUNT_OBJECTIVE_KEYS: tuple[str, ...] = (
+    OBJECTIVE_LOCATE_TARGET,
+    OBJECTIVE_PREPARE_FOR_HUNT,
+    OBJECTIVE_TRACK_TARGET,
+    OBJECTIVE_INTERCEPT_TARGET,
+    OBJECTIVE_AMBUSH_TARGET,
+    OBJECTIVE_ENGAGE_TARGET,
+    OBJECTIVE_CONFIRM_KILL,
+    OBJECTIVE_RETREAT_FROM_TARGET,
+    OBJECTIVE_RECOVER_AFTER_COMBAT,
+)
+
+BLOCKING_OBJECTIVE_KEYS: tuple[str, ...] = (
+    OBJECTIVE_RESTORE_WATER,
+    OBJECTIVE_RESTORE_FOOD,
+    OBJECTIVE_HEAL_SELF,
+    OBJECTIVE_REACH_SAFE_SHELTER,
+    OBJECTIVE_ESCAPE_DANGER,
+)
+
+ITEM_NEED_TO_OBJECTIVE = {
+    "weapon": OBJECTIVE_RESUPPLY_WEAPON,
+    "armor": OBJECTIVE_RESUPPLY_ARMOR,
+    "ammo": OBJECTIVE_RESUPPLY_AMMO,
+    "food": OBJECTIVE_RESUPPLY_FOOD,
+    "drink": OBJECTIVE_RESUPPLY_DRINK,
+    "medicine": OBJECTIVE_RESUPPLY_MEDICINE,
+}
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _soft_need_value(value: int, threshold: int) -> float:
+    if value < threshold:
+        return 0.0
+    return min(0.85, 0.35 + ((value - threshold) / max(1, 100 - threshold)) * 0.50)
+
+
+def _memory_ref(memory_id: str) -> str:
+    return f"memory:{memory_id}"
+
+
+def _is_semantic_decision_memory(kind: str) -> bool:
+    return kind in {"semantic_v2_decision", "v2_decision"}
+
+
+def _objective_memory_refs_and_confidence(
+    ctx: ObjectiveGenerationContext,
+    objective_key: str,
+    category: str | None = None,
+) -> tuple[tuple[str, ...], float]:
+    from app.games.zone_stalkers.balance.items import DRINK_ITEM_TYPES, FOOD_ITEM_TYPES
+
+    refs: list[str] = []
+    confidences: list[float] = []
+    relevant = tuple(
+        mem
+        for mem in ctx.belief_state.relevant_memories
+        if not _is_semantic_decision_memory(str(mem.get("kind") or ""))
+    )
+
+    def _append(memory_id: str | None, confidence: float | None) -> None:
+        if not memory_id:
+            return
+        ref = _memory_ref(str(memory_id))
+        if ref in refs:
+            return
+        refs.append(ref)
+        if confidence is not None:
+            confidences.append(_clamp01(float(confidence)))
+
+    def _relevant_summary_tokens(mem: dict[str, Any], tokens: tuple[str, ...]) -> bool:
+        summary = str(mem.get("summary") or "").lower()
+        return any(token in summary for token in tokens)
+
+    if category in {"drink", "food"}:
+        match_types = set(DRINK_ITEM_TYPES if category == "drink" else FOOD_ITEM_TYPES)
+        for known in ctx.belief_state.known_items:
+            item_types = set(known.get("item_types") or [])
+            if item_types & match_types:
+                _append(known.get("memory_id"), known.get("confidence"))
+
+    if objective_key == OBJECTIVE_RESTORE_WATER:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"water_source_known", "item_bought", "trader_location_known"} or _relevant_summary_tokens(
+                mem,
+                ("вода", "water", "drink", "жажд"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+    elif objective_key == OBJECTIVE_RESTORE_FOOD:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"food_source_known", "item_bought", "trader_location_known"} or _relevant_summary_tokens(
+                mem,
+                ("еда", "food", "bread", "голод"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+    elif objective_key in {OBJECTIVE_GET_MONEY_FOR_RESUPPLY, OBJECTIVE_FIND_ARTIFACTS}:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"artifact_source_known", "trader_location_known", "trader_buys_artifacts", "artifact_sale"} or _relevant_summary_tokens(
+                mem,
+                ("artifact", "артеф", "sell", "продаж", "trader", "торгов"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+        for trader in ctx.belief_state.known_traders:
+            _append(trader.get("memory_id"), trader.get("confidence"))
+    elif objective_key == OBJECTIVE_SELL_ARTIFACTS:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"trader_location_known", "trader_buys_artifacts", "artifact_sale"} or _relevant_summary_tokens(
+                mem,
+                ("sell", "продаж", "artifact", "артеф", "trader", "торгов"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+        for trader in ctx.belief_state.known_traders:
+            _append(trader.get("memory_id"), trader.get("confidence"))
+    else:
+        for mem in relevant:
+            _append(mem.get("id"), mem.get("confidence"))
+
+    refs = refs[:3]
+    if not confidences:
+        return tuple(refs), 0.5
+    return tuple(refs), _clamp01(sum(confidences) / len(confidences))
+
+
+def _global_goal_objective(goal: str) -> str:
+    if goal == "get_rich":
+        return OBJECTIVE_FIND_ARTIFACTS
+    if goal == "kill_stalker":
+        return OBJECTIVE_HUNT_TARGET
+    if goal == "unravel_zone_mystery":
+        return OBJECTIVE_SEARCH_INFORMATION
+    if goal == "leave_zone":
+        return OBJECTIVE_LEAVE_ZONE
+    return OBJECTIVE_IDLE
+
+
+def _is_critical_need(key: str, urgency: float) -> bool:
+    if key in {"drink_now", "eat_now", "heal_now"} and urgency >= 0.8:
+        return True
+    return False
+
+
+def _append_unique(result: list[Objective], objective: Objective) -> None:
+    if any(existing.key == objective.key for existing in result):
+        return
+    result.append(objective)
+
+
+def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
+    """Generate objective candidates from need_result, environment, goals and active plan."""
+    result: list[Objective] = []
+    agent = ctx.personality
+    need_result = ctx.need_result
+    hunger = int(agent.get("hunger") or 0)
+    thirst = int(agent.get("thirst") or 0)
+    liquidity = need_result.liquidity_summary or {}
+    money_missing = int(liquidity.get("money_missing") or 0)
+
+    for immediate in need_result.immediate_needs:
+        key = None
+        if immediate.key == "drink_now":
+            key = OBJECTIVE_RESTORE_WATER
+        elif immediate.key == "eat_now":
+            key = OBJECTIVE_RESTORE_FOOD
+        elif immediate.key == "heal_now":
+            key = OBJECTIVE_HEAL_SELF
+        if key is None or immediate.urgency <= 0:
+            continue
+
+        immediate_refs, immediate_mem_conf = _objective_memory_refs_and_confidence(ctx, key)
+        reasons = [immediate.reason] if immediate.reason else []
+        metadata: dict[str, Any] = {
+            "is_blocking": _is_critical_need(immediate.key, float(immediate.urgency)),
+            "critical": float(immediate.urgency) >= 0.8,
+        }
+        if immediate.selected_item_type:
+            metadata["selected_item_type"] = immediate.selected_item_type
+            metadata["has_inventory_solution"] = True
+
+        _append_unique(
+            result,
+            Objective(
+                key=key,
+                source="immediate_need",
+                urgency=_clamp01(immediate.urgency),
+                expected_value=1.0,
+                risk=0.05,
+                time_cost=0.05 if immediate.selected_item_type else 0.25,
+                resource_cost=0.0,
+                confidence=1.0,
+                goal_alignment=0.9,
+                memory_confidence=immediate_mem_conf,
+                reasons=tuple(reasons),
+                source_refs=(f"immediate:{immediate.key}",) + immediate_refs,
+                metadata=metadata,
+            ),
+        )
+
+
+    can_generate_soft_water_restore = thirst >= SOFT_RESTORE_DRINK_THRESHOLD
+    if not any(o.key == OBJECTIVE_RESTORE_WATER for o in result) and can_generate_soft_water_restore:
+        drink_memory_refs, drink_memory_conf = _objective_memory_refs_and_confidence(
+            ctx,
+            OBJECTIVE_RESTORE_WATER,
+            category="drink",
+        )
+        drink_reasons = ["Жажда растёт"]
+        if drink_memory_refs:
+            drink_reasons.append("По памяти известен источник воды")
+        soft_drink_value = _soft_need_value(thirst, SOFT_RESTORE_DRINK_THRESHOLD)
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_RESTORE_WATER,
+                source="soft_need",
+                urgency=_clamp01(need_result.scores.drink),
+                expected_value=soft_drink_value,
+                risk=0.1,
+                time_cost=0.3,
+                resource_cost=0.1,
+                confidence=0.9,
+                goal_alignment=0.8,
+                memory_confidence=drink_memory_conf,
+                reasons=tuple(drink_reasons),
+                source_refs=("need:drink",) + drink_memory_refs,
+                metadata={
+                    "is_blocking": float(need_result.scores.drink) >= 0.8,
+                    "critical": float(need_result.scores.drink) >= 0.8,
+                    "soft_threshold": SOFT_RESTORE_DRINK_THRESHOLD,
+                },
+            ),
+        )
+
+    can_generate_soft_food_restore = hunger >= SOFT_RESTORE_FOOD_THRESHOLD
+    if not any(o.key == OBJECTIVE_RESTORE_FOOD for o in result) and can_generate_soft_food_restore:
+        food_memory_refs, food_memory_conf = _objective_memory_refs_and_confidence(
+            ctx,
+            OBJECTIVE_RESTORE_FOOD,
+            category="food",
+        )
+        food_reasons = ["Голод растёт"]
+        if food_memory_refs:
+            food_reasons.append("По памяти известен источник еды")
+        soft_food_value = _soft_need_value(hunger, SOFT_RESTORE_FOOD_THRESHOLD)
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_RESTORE_FOOD,
+                source="soft_need",
+                urgency=_clamp01(need_result.scores.eat),
+                expected_value=soft_food_value,
+                risk=0.1,
+                time_cost=0.3,
+                resource_cost=0.1,
+                confidence=0.9,
+                goal_alignment=0.75,
+                memory_confidence=food_memory_conf,
+                reasons=tuple(food_reasons),
+                source_refs=("need:eat",) + food_memory_refs,
+                metadata={
+                    "is_blocking": float(need_result.scores.eat) >= 0.8,
+                    "critical": float(need_result.scores.eat) >= 0.8,
+                    "soft_threshold": SOFT_RESTORE_FOOD_THRESHOLD,
+                },
+            ),
+        )
+
+    sleep_score = float(need_result.scores.sleep)
+    sleepiness = int(agent.get("sleepiness") or 0)
+    hp = int(agent.get("hp") or 100)
+    radiation = int(agent.get("radiation") or 0)
+    current_terrain = str(ctx.belief_state.current_location.get("terrain_type") or "")
+    is_safe_for_recovery = current_terrain not in EMISSION_DANGEROUS_TERRAIN
+    is_critical_rest = sleepiness >= CRITICAL_REST_THRESHOLD
+    is_soft_rest = SOFT_REST_THRESHOLD <= sleepiness < CRITICAL_REST_THRESHOLD
+    is_recovery_rest = is_safe_for_recovery and not is_critical_rest and (hp <= 45 or radiation >= 35)
+
+    if is_critical_rest or is_soft_rest or is_recovery_rest:
+        rest_refs, rest_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_REST)
+        if is_critical_rest:
+            rest_source = "immediate_need"
+            rest_reasons = ("Критическое истощение — нужен срочный отдых",)
+            rest_urgency = max(_clamp01(sleep_score), 0.8)
+            rest_expected_value = min(1.0, 0.55 + (_clamp01(rest_urgency) * 0.45))
+            rest_metadata: dict[str, Any] = {
+                "is_blocking": True,
+                "critical": True,
+                "soft_threshold": SOFT_REST_THRESHOLD,
+                "critical_threshold": CRITICAL_REST_THRESHOLD,
+            }
+        elif is_recovery_rest:
+            rest_source = "recovery_need"
+            rest_reasons = ("Восстановление после ранений / снятие радиации",)
+            recovery_pressure = max(
+                _clamp01((50 - hp) / 50.0),
+                _clamp01((radiation - 20) / 80.0),
+            )
+            rest_urgency = max(_clamp01(sleep_score), recovery_pressure)
+            rest_expected_value = min(0.9, 0.35 + (rest_urgency * 0.45))
+            rest_metadata = {
+                "is_blocking": False,
+                "critical": False,
+                "recovery_need": True,
+                "recovery_hp": hp,
+                "recovery_radiation": radiation,
+            }
+        else:
+            rest_source = "soft_need"
+            rest_reasons = ("Усталость растёт",)
+            rest_urgency = _clamp01(sleep_score)
+            rest_expected_value = min(0.85, 0.25 + (rest_urgency * 0.60))
+            rest_metadata = {
+                "is_blocking": False,
+                "critical": False,
+                "soft_threshold": SOFT_REST_THRESHOLD,
+                "critical_threshold": CRITICAL_REST_THRESHOLD,
+            }
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_REST,
+                source=rest_source,
+                urgency=rest_urgency,
+                expected_value=rest_expected_value,
+                risk=0.05,
+                time_cost=0.4,
+                resource_cost=0.0,
+                confidence=0.9,
+                goal_alignment=0.7,
+                memory_confidence=rest_memory_conf,
+                reasons=rest_reasons,
+                source_refs=("need:sleep",) + rest_refs,
+                metadata=rest_metadata,
+            ),
+        )
+
+    dominant_item_urgency = 0.0
+    for item_need in need_result.item_needs:
+        objective_key = ITEM_NEED_TO_OBJECTIVE.get(item_need.key)
+        if objective_key is None or item_need.urgency <= 0:
+            continue
+        dominant_item_urgency = max(dominant_item_urgency, float(item_need.urgency))
+
+        _metadata = {
+            "is_blocking": False,
+            "item_need_key": item_need.key,
+            "missing_count": item_need.missing_count,
+            "blockers": [],
+        }
+        _reasons = [item_need.reason] if item_need.reason else []
+        if money_missing > 0:
+            _penalty = 0.6 if objective_key == OBJECTIVE_RESUPPLY_WEAPON else 0.4
+            _metadata["blockers"].append({
+                "key": "insufficient_money",
+                "reason": "Недостаточно денег для покупки",
+                "blocked": True,
+                "penalty": _penalty,
+            })
+            _reasons.append("Покупка недоступна без дополнительных денег")
+
+        _append_unique(
+            result,
+            Objective(
+                key=objective_key,
+                source="item_need",
+                urgency=_clamp01(item_need.urgency),
+                expected_value=0.85,
+                risk=0.2,
+                time_cost=0.35,
+                resource_cost=0.4,
+                confidence=0.85,
+                goal_alignment=0.8,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, objective_key)[1],
+                reasons=tuple(_reasons),
+                source_refs=(f"item_need:{item_need.key}",),
+                metadata=_metadata,
+            ),
+        )
+
+    if dominant_item_urgency > 0 and money_missing > 0:
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+                source="item_need",
+                urgency=_clamp01(dominant_item_urgency),
+                expected_value=0.8,
+                risk=0.3,
+                time_cost=0.55,
+                resource_cost=0.1,
+                confidence=0.8,
+                goal_alignment=0.75,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[1],
+                reasons=("Не хватает денег для обязательного пополнения",),
+                source_refs=("liquidity:money_missing",) + _objective_memory_refs_and_confidence(
+                    ctx,
+                    OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+                )[0],
+                metadata={"is_blocking": False, "money_missing": money_missing},
+            ),
+        )
+
+    emission_pressure = float(need_result.scores.avoid_emission)
+    if emission_pressure > 0.05:
+        is_safe_terrain = ctx.belief_state.current_location.get("terrain_type") not in {
+            "plain", "hills", "swamp", "field_camp", "slag_heaps", "bridge",
+        }
+        if is_safe_terrain:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_WAIT_IN_SHELTER,
+                    source="environment",
+                    urgency=_clamp01(emission_pressure),
+                    expected_value=0.9,
+                    risk=0.02,
+                    time_cost=0.15,
+                    resource_cost=0.0,
+                    confidence=0.95,
+                    goal_alignment=0.85,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_WAIT_IN_SHELTER)[1],
+                    reasons=("Нахожусь в безопасном укрытии во время выброса",),
+                    source_refs=("need:avoid_emission",),
+                    metadata={"is_blocking": True},
+                ),
+            )
+        else:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_REACH_SAFE_SHELTER,
+                    source="environment",
+                    urgency=_clamp01(emission_pressure),
+                    expected_value=1.0,
+                    risk=0.1,
+                    time_cost=0.2,
+                    resource_cost=0.0,
+                    confidence=0.95,
+                    goal_alignment=0.9,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_REACH_SAFE_SHELTER)[1],
+                    reasons=("Выброс в опасной зоне — нужно укрытие",),
+                    source_refs=("need:avoid_emission",),
+                    metadata={"is_blocking": True},
+                ),
+            )
+
+    if float(need_result.scores.survive_now) >= 0.7:
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_ESCAPE_DANGER,
+                source="environment",
+                urgency=_clamp01(need_result.scores.survive_now),
+                expected_value=1.0,
+                risk=0.15,
+                time_cost=0.15,
+                resource_cost=0.0,
+                confidence=0.95,
+                goal_alignment=0.9,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ESCAPE_DANGER)[1],
+                reasons=("Критически низкий HP",),
+                source_refs=("need:survive_now",),
+                metadata={"is_blocking": True},
+            ),
+        )
+
+    global_goal = str(agent.get("global_goal") or "get_rich")
+    global_key = _global_goal_objective(global_goal)
+    global_refs, global_memory_conf = _objective_memory_refs_and_confidence(ctx, global_key)
+    _append_unique(
+        result,
+        Objective(
+            key=global_key,
+            source="global_goal",
+            urgency=max(0.1, float(getattr(need_result.scores, {
+                "get_rich": "get_rich",
+                "kill_stalker": "hunt_target",
+                "unravel_zone_mystery": "unravel_zone_mystery",
+                "leave_zone": "leave_zone",
+            }.get(global_goal, "get_rich"), 0.1))),
+            expected_value=0.7,
+            risk=0.35,
+            time_cost=0.6,
+            resource_cost=0.2,
+            confidence=0.7,
+            goal_alignment=1.0,
+            memory_confidence=global_memory_conf,
+            reasons=(f"Глобальная цель: {global_goal}",),
+            source_refs=(f"global_goal:{global_goal}",) + global_refs,
+            metadata={"is_blocking": False},
+        ),
+    )
+
+    if global_goal == "get_rich":
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        artifact_types = frozenset(ARTIFACT_TYPES.keys())
+        has_artifact = any(i.get("type") in artifact_types for i in agent.get("inventory", []))
+        if has_artifact:
+            sell_refs, sell_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_SELL_ARTIFACTS)
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_SELL_ARTIFACTS,
+                    source="global_goal",
+                    urgency=max(0.2, float(need_result.scores.trade)),
+                    expected_value=0.9,
+                    risk=0.15,
+                    time_cost=0.25,
+                    resource_cost=0.0,
+                    confidence=0.85,
+                    goal_alignment=0.98,
+                    memory_confidence=sell_memory_conf,
+                    reasons=("В инвентаре есть артефакт для продажи",),
+                    source_refs=("global_goal:get_rich", "inventory:artifact") + sell_refs,
+                    metadata={"is_blocking": False},
+                ),
+            )
+
+    if global_goal == "kill_stalker":
+        readiness = need_result.combat_readiness or {}
+        weapon_missing = int(readiness.get("weapon_missing") or 0)
+        ammo_missing = int(readiness.get("ammo_missing") or 0)
+        hp = int(agent.get("hp") or 100)
+
+        blockers: list[dict[str, Any]] = []
+        reasons: list[str] = ["Охота требует предварительной готовности"]
+        if weapon_missing > 0:
+            blockers.append({"key": "no_weapon", "reason": "Нет оружия", "blocked": True, "penalty": 0.55})
+            reasons.append("Нет оружия")
+        if ammo_missing > 0:
+            blockers.append({"key": "low_ammo", "reason": "Недостаточно патронов", "blocked": True, "penalty": 0.45})
+            reasons.append("Недостаточно патронов")
+        if hp <= 35:
+            blockers.append({"key": "hp_low", "reason": "HP слишком низкий", "blocked": True, "penalty": 0.5})
+            reasons.append("Нужно восстановить HP")
+
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_PREPARE_FOR_HUNT,
+                source="global_goal",
+                urgency=0.65 + (0.2 if blockers else 0.0),
+                expected_value=0.85,
+                risk=0.25,
+                time_cost=0.45,
+                resource_cost=0.25,
+                confidence=0.8,
+                goal_alignment=1.0,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_PREPARE_FOR_HUNT)[1],
+                reasons=tuple(reasons),
+                source_refs=("global_goal:kill_stalker",),
+                metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "prepare"},
+            ),
+        )
+
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_LOCATE_TARGET,
+                source="global_goal",
+                urgency=0.55,
+                expected_value=0.75,
+                risk=0.2,
+                time_cost=0.5,
+                resource_cost=0.1,
+                confidence=0.7,
+                goal_alignment=1.0,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[1],
+                reasons=("Нужно определить местоположение цели",),
+                source_refs=("global_goal:kill_stalker",),
+                metadata={"is_blocking": False, "hunt_stage": "locate"},
+            ),
+        )
+
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_ENGAGE_TARGET,
+                source="global_goal",
+                urgency=0.5,
+                expected_value=0.9,
+                risk=0.8,
+                time_cost=0.35,
+                resource_cost=0.2,
+                confidence=0.6,
+                goal_alignment=1.0,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
+                reasons=("Прямая атака возможна только при боевой готовности",),
+                source_refs=("global_goal:kill_stalker",),
+                metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "engage"},
+            ),
+        )
+
+    if ctx.active_plan_summary:
+        continue_refs, continue_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONTINUE_CURRENT_PLAN)
+        remaining_value = _clamp01(float(ctx.active_plan_summary.get("remaining_value", 0.6)))
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_CONTINUE_CURRENT_PLAN,
+                source="active_plan",
+                urgency=_clamp01(float(ctx.active_plan_summary.get("urgency", 0.5))),
+                expected_value=remaining_value,
+                risk=_clamp01(float(ctx.active_plan_summary.get("risk", 0.2))),
+                time_cost=_clamp01(float(ctx.active_plan_summary.get("remaining_time", 0.25))),
+                resource_cost=_clamp01(float(ctx.active_plan_summary.get("resource_cost", 0.0))),
+                confidence=_clamp01(float(ctx.active_plan_summary.get("confidence", 0.7))),
+                goal_alignment=_clamp01(float(ctx.active_plan_summary.get("goal_alignment", 0.8))),
+                memory_confidence=continue_memory_conf,
+                reasons=("Текущий план ещё актуален",),
+                source_refs=("active_plan",) + continue_refs,
+                metadata={"is_blocking": False},
+            ),
+        )
+
+    if not result:
+        idle_refs, idle_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_IDLE)
+        result.append(
+            Objective(
+                key=OBJECTIVE_IDLE,
+                source="global_goal",
+                urgency=0.1,
+                expected_value=0.2,
+                risk=0.0,
+                time_cost=0.0,
+                resource_cost=0.0,
+                confidence=1.0,
+                goal_alignment=0.2,
+                memory_confidence=idle_memory_conf,
+                reasons=("Нет более приоритетной цели",),
+                source_refs=("fallback",) + idle_refs,
+                metadata={"is_blocking": False},
+            )
+        )
+
+    return result

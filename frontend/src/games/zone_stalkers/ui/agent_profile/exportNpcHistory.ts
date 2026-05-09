@@ -1,0 +1,455 @@
+/**
+ * exportNpcHistory.ts
+ *
+ * Shared utilities, constants and export helpers for the NPC Brain v3 profile UX.
+ * Imported by AgentProfileModal.tsx and all agent_profile/ sub-components.
+ */
+
+import type {
+  AgentForProfile,
+  BrainTrace,
+  BrainTraceEvent,
+  BrainTraceObjectiveInfo,
+  BrainTraceMemoryUsed,
+  BrainTraceNeed,
+  AgentInventoryItem,
+} from '../AgentProfileModal';
+
+// ─── Re-export types for sub-component convenience ───────────────────────────
+
+export type { BrainTrace, BrainTraceEvent, BrainTraceObjectiveInfo, BrainTraceMemoryUsed, BrainTraceNeed };
+
+export type MemEntry = NonNullable<AgentForProfile['memory']>[number];
+
+// ─── CompactNpcHistoryExport ─────────────────────────────────────────────────
+
+export type CompactNpcHistoryExport = {
+  export_schema: 'npc_history_v1';
+  exported_at: string;
+
+  agent: {
+    id: string;
+    name: string;
+    faction?: string;
+    is_alive: boolean;
+    location_id: string;
+    location_name?: string;
+    hp: number;
+    hunger: number;
+    thirst: number;
+    sleepiness: number;
+    radiation: number;
+    money: number;
+    global_goal?: string;
+    current_goal?: string | null;
+    active_objective?: BrainTraceObjectiveInfo | null;
+    adapter_intent?: { kind?: string | null; score?: number | null } | null;
+    scheduled_action?: unknown;
+    active_plan_v3?: unknown;
+  };
+
+  equipment: Record<string, AgentInventoryItem | null>;
+  inventory_summary: Array<{
+    type: string;
+    name: string;
+    count: number;
+    total_value: number;
+  }>;
+
+  npc_brain: {
+    current_thought?: string;
+    latest_event?: BrainTraceEvent | null;
+    latest_decision?: {
+      turn: number;
+      world_time?: string;
+      active_objective?: BrainTraceObjectiveInfo;
+      adapter_intent?: { kind?: string | null; score?: number | null };
+      objective_scores?: BrainTraceObjectiveInfo[];
+      alternatives?: BrainTraceObjectiveInfo[];
+      immediate_needs?: BrainTraceNeed[];
+      item_needs?: BrainTraceNeed[];
+      liquidity?: unknown;
+      memory_used?: BrainTraceMemoryUsed[];
+      summary: string;
+    } | null;
+    current_objective?: BrainTraceObjectiveInfo | null;
+    current_runtime?: {
+      mode: 'scheduled_action' | 'idle';
+      scheduled_action?: unknown;
+      latest_plan_monitor?: BrainTraceEvent | null;
+    };
+    recent_trace_events: BrainTraceEvent[];
+  };
+
+  story_timeline: CompactTimelineEntry[];
+
+  memory_v3_summary?: {
+    records_count?: number;
+    active?: number;
+    stale?: number;
+    archived?: number;
+    top_layers?: Array<{ layer: string; count: number }>;
+    top_kinds?: Array<{ kind: string; count: number }>;
+    recently_accessed?: Array<{
+      id: string;
+      kind: string;
+      layer: string;
+      summary: string;
+      confidence?: number;
+      last_accessed_turn?: number | null;
+    }>;
+  };
+};
+
+export type CompactTimelineEntry = {
+  turn: number;
+  time_label: string;
+  category: 'decision' | 'action' | 'observation' | 'system';
+  title: string;
+  summary?: string;
+  objective_key?: string;
+  adapter_intent_kind?: string;
+  action_kind?: string;
+  location_id?: string;
+  item_type?: string;
+  artifact_type?: string;
+  money_delta?: number;
+};
+
+// ─── Time helpers ─────────────────────────────────────────────────────────────
+
+export const MINUTES_PER_TURN = 1;
+export const TURNS_PER_HOUR = 60 / MINUTES_PER_TURN;
+
+export const TIME_LABEL = (h: number, m: number): string =>
+  `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+
+export const turnToTime = (
+  worldTurn: number,
+): { world_day: number; world_hour: number; world_minute: number } => {
+  const totalMinutes = 6 * 60 + (worldTurn - 1) * MINUTES_PER_TURN;
+  return {
+    world_day: 1 + Math.floor(totalMinutes / (24 * 60)),
+    world_hour: Math.floor(totalMinutes / 60) % 24,
+    world_minute: totalMinutes % 60,
+  };
+};
+
+export const traceTimeLabel = (
+  worldTurn: number,
+  worldTime?: { world_day: number; world_hour: number; world_minute: number },
+): string => {
+  const t = worldTime ?? turnToTime(worldTurn);
+  return `День ${t.world_day} · ${TIME_LABEL(t.world_hour, t.world_minute)}`;
+};
+
+export const schedRemaining = (type: string, turns: number): string => {
+  if (type === 'sleep') {
+    return `${Math.ceil(turns / TURNS_PER_HOUR)} ч осталось`;
+  }
+  return `${turns * MINUTES_PER_TURN} мин осталось`;
+};
+
+// ─── Display constants ────────────────────────────────────────────────────────
+
+export const SCHED_ICONS: Record<string, string> = {
+  travel: '🚶',
+  explore_anomaly_location: '🔍',
+  sleep: '😴',
+  event: '📖',
+};
+
+export const MEM_ICONS: Record<string, string> = {
+  decision: '🧠',
+  action: '⚡',
+  observation: '👁️',
+  travel: '🚶',
+  explore_anomaly_location: '🔍',
+  sleep: '😴',
+  pickup: '🎁',
+  trade_sell: '💰',
+};
+
+export const MEM_COLORS: Record<string, string> = {
+  decision: '#818cf8',
+  action: '#34d399',
+  observation: '#fbbf24',
+  travel: '#34d399',
+  explore_anomaly_location: '#34d399',
+  sleep: '#34d399',
+  pickup: '#34d399',
+  trade_sell: '#34d399',
+};
+
+export const CURRENT_GOAL_LABELS: Record<string, string> = {
+  gather_resources: 'Сбор ресурсов',
+  goal_get_rich: 'Нажива',
+  goal_get_rich_seek_artifacts: 'Ищу артефакты',
+  sell_artifacts: 'Продаю артефакты',
+  flee_to_safety: 'Бегство',
+  upgrade_equipment: 'Апгрейд снаряжения',
+  get_weapon: 'Ищу оружие',
+  get_armor: 'Ищу броню',
+  get_ammo: 'Ищу патроны',
+  flee_emission: 'Убегаю от выброса',
+};
+
+export const currentGoalLabel = (raw: string): string =>
+  CURRENT_GOAL_LABELS[raw] ?? raw.replace(/_/g, ' ');
+
+export const _INTENT_META: Record<string, { icon: string; label: string }> = {
+  escape_danger: { icon: '🚨', label: 'Бегство (критический HP)' },
+  heal_self: { icon: '💊', label: 'Срочное лечение' },
+  flee_emission: { icon: '⚡', label: 'Бегство от выброса' },
+  wait_in_shelter: { icon: '🏚️', label: 'Укрытие от выброса' },
+  seek_water: { icon: '💧', label: 'Поиск воды' },
+  seek_food: { icon: '🍖', label: 'Поиск еды' },
+  rest: { icon: '😴', label: 'Отдых (сон)' },
+  resupply: { icon: '🔫', label: 'Получить снаряжение' },
+  sell_artifacts: { icon: '💎', label: 'Продажа артефактов' },
+  trade: { icon: '🏪', label: 'Торговля' },
+  upgrade_equipment: { icon: '⬆️', label: 'Апгрейд снаряжения' },
+  loot: { icon: '🎁', label: 'Мародёрство' },
+  explore: { icon: '🔭', label: 'Исследование' },
+  get_rich: { icon: '💰', label: 'Накопление богатства' },
+  hunt_target: { icon: '🎯', label: 'Охота на цель' },
+  search_information: { icon: '📜', label: 'Поиск информации' },
+  leave_zone: { icon: '🚪', label: 'Покинуть Зону' },
+  negotiate: { icon: '🗣️', label: 'Переговоры' },
+  assist_ally: { icon: '🤝', label: 'Помощь союзнику' },
+  form_group: { icon: '👥', label: 'Создать группу' },
+  follow_group_plan: { icon: '📋', label: 'Следовать плану группы' },
+  maintain_group: { icon: '🔗', label: 'Сохранить группу' },
+  idle: { icon: '💤', label: 'Ожидание' },
+};
+
+// ─── Export helper functions ──────────────────────────────────────────────────
+
+export const getLatestTraceEvent = (trace?: BrainTrace | null): BrainTraceEvent | null => {
+  if (!trace?.events?.length) return null;
+  return trace.events[trace.events.length - 1] ?? null;
+};
+
+export const getLatestDecisionEvent = (trace?: BrainTrace | null): BrainTraceEvent | null => {
+  if (!trace?.events?.length) return null;
+  const decisions = trace.events.filter((ev) => ev.mode === 'decision');
+  return decisions.length ? decisions[decisions.length - 1] : null;
+};
+
+export const formatObjectiveKey = (key?: string | null): string => {
+  if (!key) return '—';
+  return key.replace(/_/g, ' ');
+};
+
+export const pct = (value?: number | null): string => {
+  if (value == null || Number.isNaN(value)) return '—';
+  return `${Math.round(value * 100)}%`;
+};
+
+export const summarizeInventory = (items: AgentInventoryItem[]) => {
+  const grouped = new Map<string, { type: string; name: string; count: number; total_value: number }>();
+  for (const item of items) {
+    const current = grouped.get(item.type) ?? {
+      type: item.type,
+      name: item.name,
+      count: 0,
+      total_value: 0,
+    };
+    current.count += 1;
+    current.total_value += item.value ?? 0;
+    grouped.set(item.type, current);
+  }
+  return [...grouped.values()].sort((a, b) => a.type.localeCompare(b.type));
+};
+
+export const toCompactTimelineEntry = (m: MemEntry) => {
+  const effects = m.effects ?? {};
+  const actionKind = typeof effects.action_kind === 'string' ? effects.action_kind : undefined;
+  return {
+    turn: m.world_turn,
+    time_label: traceTimeLabel(
+      m.world_turn,
+      m.world_day != null
+        ? { world_day: m.world_day, world_hour: m.world_hour ?? 0, world_minute: m.world_minute ?? 0 }
+        : undefined,
+    ),
+    category: m.type as 'decision' | 'action' | 'observation' | 'system',
+    title: m.title,
+    summary: m.summary,
+    action_kind: actionKind,
+    objective_key: typeof effects.objective_key === 'string' ? effects.objective_key : undefined,
+    adapter_intent_kind:
+      typeof effects.adapter_intent_kind === 'string' ? effects.adapter_intent_kind : undefined,
+    location_id:
+      typeof effects.location_id === 'string'
+        ? effects.location_id
+        : typeof effects.target_location_id === 'string'
+        ? effects.target_location_id
+        : undefined,
+    item_type: typeof effects.item_type === 'string' ? effects.item_type : undefined,
+    artifact_type: typeof effects.artifact_type === 'string' ? effects.artifact_type : undefined,
+    money_delta: typeof effects.money_gained === 'number' ? effects.money_gained : undefined,
+  };
+};
+
+export const getCurrentObjectiveFromAgent = (
+  agent: AgentForProfile,
+  latestDecision: BrainTraceEvent | null,
+  storyTimeline: CompactTimelineEntry[],
+): BrainTraceObjectiveInfo | null => {
+  if (latestDecision?.active_objective) return latestDecision.active_objective;
+
+  const v2ObjectiveKey = agent._v2_context?.objective_key;
+  if (v2ObjectiveKey) {
+    return {
+      key: v2ObjectiveKey,
+      score: agent._v2_context?.objective_score ?? agent._v2_context?.intent_score ?? 0,
+      source: 'current_context',
+      reason: agent._v2_context?.objective_reason ?? agent._v2_context?.intent_reason ?? undefined,
+    };
+  }
+
+  const lastObjectiveMemory = [...storyTimeline]
+    .reverse()
+    .find((entry) => entry.objective_key);
+
+  if (lastObjectiveMemory?.objective_key) {
+    return {
+      key: lastObjectiveMemory.objective_key,
+      score: 0,
+      source: 'last_objective_decision',
+      reason: lastObjectiveMemory.summary,
+    };
+  }
+
+  return null;
+};
+
+export const buildMemoryV3Summary = (memoryV3: AgentForProfile['memory_v3']) => {
+  if (!memoryV3) return undefined;
+  const stats = memoryV3.stats ?? {};
+  const records = memoryV3.records ? Object.values(memoryV3.records) : [];
+
+  const byLayer = new Map<string, number>();
+  const byKind = new Map<string, number>();
+
+  for (const rec of records) {
+    byLayer.set(rec.layer, (byLayer.get(rec.layer) ?? 0) + 1);
+    byKind.set(rec.kind, (byKind.get(rec.kind) ?? 0) + 1);
+  }
+
+  return {
+    ...stats,
+    top_layers: [...byLayer.entries()]
+      .map(([layer, count]) => ({ layer, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8),
+    top_kinds: [...byKind.entries()]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10),
+    recently_accessed: records
+      .filter((rec) => rec.last_accessed_turn != null)
+      .sort((a, b) => Number(b.last_accessed_turn ?? 0) - Number(a.last_accessed_turn ?? 0))
+      .slice(0, 10)
+      .map((rec) => ({
+        id: rec.id,
+        kind: rec.kind,
+        layer: rec.layer,
+        summary: rec.summary,
+        confidence: rec.confidence,
+        last_accessed_turn: rec.last_accessed_turn,
+      })),
+  };
+};
+
+export const buildCompactNpcHistoryExport = (
+  agent: AgentForProfile,
+  displayMemory: MemEntry[],
+  locationName: string,
+): CompactNpcHistoryExport => {
+  const latestEvent = getLatestTraceEvent(agent.brain_trace);
+  const latestDecision = getLatestDecisionEvent(agent.brain_trace);
+  const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
+  const storyTimeline = displayMemory.slice(-120).map(toCompactTimelineEntry);
+  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline);
+  const latestPlanMonitor = latestEvent?.mode === 'plan_monitor' ? latestEvent : null;
+  const adapterIntentKind = latestDecision?.intent_kind ?? agent._v2_context?.intent_kind;
+  const adapterIntentScore = latestDecision?.intent_score ?? agent._v2_context?.intent_score;
+
+  return {
+    export_schema: 'npc_history_v1',
+    exported_at: new Date().toISOString(),
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      faction: agent.faction,
+      is_alive: agent.is_alive,
+      location_id: agent.location_id,
+      location_name: locationName,
+      hp: agent.hp,
+      hunger: agent.hunger,
+      thirst: agent.thirst,
+      sleepiness: agent.sleepiness,
+      radiation: agent.radiation,
+      money: agent.money,
+      global_goal: agent.global_goal,
+      current_goal: agent.current_goal,
+      active_objective: currentObjective,
+      adapter_intent: adapterIntentKind != null
+        ? { kind: adapterIntentKind, score: adapterIntentScore }
+        : null,
+      scheduled_action: agent.scheduled_action,
+      active_plan_v3: agent.active_plan_v3,
+    },
+    equipment: agent.equipment,
+    inventory_summary: summarizeInventory(agent.inventory),
+    npc_brain: {
+      current_thought: agent.brain_trace?.current_thought,
+      latest_event: latestEvent,
+      latest_decision: latestDecision
+        ? {
+            turn: latestDecision.turn,
+            world_time: traceTimeLabel(latestDecision.turn, latestDecision.world_time),
+            active_objective: latestDecision.active_objective,
+            adapter_intent: {
+              kind: latestDecision.intent_kind,
+              score: latestDecision.intent_score,
+            },
+            objective_scores: latestDecision.objective_scores,
+            alternatives: latestDecision.alternatives,
+            immediate_needs: latestDecision.immediate_needs,
+            item_needs: latestDecision.item_needs,
+            liquidity: latestDecision.liquidity,
+            memory_used: latestDecision.memory_used,
+            summary: latestDecision.summary,
+          }
+        : null,
+      current_objective: currentObjective,
+      current_runtime: agent.scheduled_action != null
+        ? {
+            mode: 'scheduled_action',
+            scheduled_action: agent.scheduled_action,
+            latest_plan_monitor: latestPlanMonitor,
+          }
+        : {
+            mode: 'idle',
+            latest_plan_monitor: latestPlanMonitor,
+          },
+      recent_trace_events: recentTraceEvents,
+    },
+    story_timeline: storyTimeline,
+    memory_v3_summary: buildMemoryV3Summary(agent.memory_v3),
+  };
+};
+
+export const downloadJson = (filename: string, data: unknown): void => {
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};

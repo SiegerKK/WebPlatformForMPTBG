@@ -74,6 +74,9 @@ def append_brain_trace_event(
     liquidity: dict[str, Any] | None = None,
     combat_readiness: dict[str, Any] | None = None,
     memory_used: list[dict[str, Any]] | None = None,
+    active_objective: dict[str, Any] | None = None,
+    objective_scores: list[dict[str, Any]] | None = None,
+    alternatives: list[dict[str, Any]] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     trace = agent.get("brain_trace")
@@ -106,6 +109,12 @@ def append_brain_trace_event(
     if memory_used:
         # Cap at 5 entries (section 15).
         event["memory_used"] = memory_used[:5]
+    if active_objective is not None:
+        event["active_objective"] = active_objective
+    if objective_scores:
+        event["objective_scores"] = objective_scores[:5]
+    if alternatives:
+        event["alternatives"] = alternatives[:5]
 
     if not isinstance(trace, dict):
         thought = summary
@@ -168,8 +177,15 @@ def write_decision_brain_trace_from_v2(
     state: dict[str, Any] | None = None,
     need_result: NeedEvaluationResult | None = None,
     memory_used: list[dict[str, Any]] | None = None,
+    active_objective: dict[str, Any] | None = None,
+    objective_scores: list[dict[str, Any]] | None = None,
+    alternatives: list[dict[str, Any]] | None = None,
 ) -> None:
-    thought = f"Выбран intent {intent_kind} ({round(intent_score * 100)}%)."
+    if active_objective and isinstance(active_objective, dict) and active_objective.get("key"):
+        objective_key = active_objective["key"]
+        thought = f"Выбрана цель {objective_key} ({round(intent_score * 100)}%). Адаптер intent: {intent_kind}."
+    else:
+        thought = f"Выбран intent {intent_kind} ({round(intent_score * 100)}%)."
     if reason:
         thought += f" {reason}"
 
@@ -216,6 +232,9 @@ def write_decision_brain_trace_from_v2(
         liquidity=liquidity_payload,
         combat_readiness=combat_readiness_payload,
         memory_used=memory_used,
+        active_objective=active_objective,
+        objective_scores=objective_scores,
+        alternatives=alternatives,
         state=state,
     )
 
