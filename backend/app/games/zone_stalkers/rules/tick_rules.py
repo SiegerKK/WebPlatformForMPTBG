@@ -99,6 +99,37 @@ _INTENT_TO_GOAL: Dict[str, str] = {
     "idle":                "idle",
 }
 
+_OBJECTIVE_TO_GOAL: Dict[str, str] = {
+    "RESTORE_WATER": "restore_needs",
+    "RESTORE_FOOD": "restore_needs",
+    "HEAL_SELF": "emergency_heal",
+    "REST": "restore_needs",
+    "GET_MONEY_FOR_RESUPPLY": "get_money_for_resupply",
+    "FIND_ARTIFACTS": "get_rich",
+    "SELL_ARTIFACTS": "get_rich",
+    "RESUPPLY_WEAPON": "resupply",
+    "RESUPPLY_AMMO": "resupply",
+    "REACH_SAFE_SHELTER": "emergency_shelter",
+    "WAIT_IN_SHELTER": "emergency_shelter",
+    "HUNT_TARGET": "kill_stalker",
+    "PREPARE_FOR_HUNT": "prepare_for_hunt",
+    "IDLE": "idle",
+}
+
+_OBJECTIVE_MEMORY_USED_FOR: Dict[str, str] = {
+    "RESTORE_FOOD": "find_food",
+    "RESTORE_WATER": "find_water",
+    "SELL_ARTIFACTS": "sell_artifacts",
+    "GET_MONEY_FOR_RESUPPLY": "find_money_source",
+    "REACH_SAFE_SHELTER": "avoid_threat",
+    "WAIT_IN_SHELTER": "find_shelter",
+}
+
+_WAIT_ALLOWED_OBJECTIVES: frozenset[str] = frozenset({"IDLE", "WAIT_IN_SHELTER"})
+_NON_WAIT_ACTIONABLE_OBJECTIVES: frozenset[str] = frozenset(
+    {"RESTORE_FOOD", "RESTORE_WATER", "GET_MONEY_FOR_RESUPPLY", "SELL_ARTIFACTS"}
+)
+
 # Default risk_tolerance used when an agent or item does not specify one.
 DEFAULT_RISK_TOLERANCE = 0.5
 
@@ -4080,6 +4111,93 @@ def _build_active_plan_summary(agent: Dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _is_wait_only_plan(plan: Any) -> bool:
+    if not getattr(plan, "steps", None):
+        return True
+    first_step = plan.steps[0]
+    return str(getattr(first_step, "kind", "")) == "wait"
+
+
+def _objective_plan_is_meaningful(objective: Any, plan: Any) -> bool:
+    if not _is_wait_only_plan(plan):
+        return True
+    if objective.key in _WAIT_ALLOWED_OBJECTIVES:
+        return True
+    if bool((objective.metadata or {}).get("allows_wait")):
+        return True
+    if objective.key in _NON_WAIT_ACTIONABLE_OBJECTIVES:
+        return False
+    return not bool((objective.metadata or {}).get("is_blocking"))
+
+
+def _build_objective_memory_used_payload(
+    *,
+    selected_objective: Any | None,
+    planner_memory_used: list[dict[str, Any]],
+    belief: Any,
+) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for mem in planner_memory_used:
+        memory_id = str(mem.get("id") or "")
+        if memory_id:
+            by_id[memory_id] = dict(mem)
+
+    for mem in belief.relevant_memories:
+        kind = str(mem.get("kind") or "")
+        if kind in {"semantic_v2_decision", "v2_decision"}:
+            continue
+        memory_id = str(mem.get("id") or "")
+        if memory_id and memory_id not in by_id:
+            by_id[memory_id] = {
+                "id": memory_id,
+                "kind": kind or "memory",
+                "summary": mem.get("summary", ""),
+                "confidence": round(float(mem.get("confidence", 0.0)), 3),
+                "used_for": "general_context",
+            }
+
+    for known in list(getattr(belief, "known_items", ())) + list(getattr(belief, "known_traders", ())):
+        memory_id = str(known.get("memory_id") or "")
+        if memory_id and memory_id not in by_id:
+            by_id[memory_id] = {
+                "id": memory_id,
+                "kind": str(known.get("kind") or "memory"),
+                "summary": str(known.get("summary") or ""),
+                "confidence": round(float(known.get("confidence", 0.0)), 3),
+                "used_for": "general_context",
+            }
+
+    ordered: list[dict[str, Any]] = []
+    if selected_objective is not None:
+        selected_used_for = _OBJECTIVE_MEMORY_USED_FOR.get(selected_objective.key, "general_context")
+        selected_refs = tuple(
+            ref for ref in (selected_objective.source_refs or ()) if isinstance(ref, str) and ref.startswith("memory:")
+        )
+        for ref in selected_refs:
+            memory_id = ref.split("memory:", 1)[1]
+            payload = dict(by_id.get(memory_id) or {})
+            if not payload:
+                payload = {
+                    "id": memory_id,
+                    "kind": "memory",
+                    "summary": "",
+                    "confidence": 0.5,
+                }
+            payload["used_for"] = selected_used_for
+            if not any(existing.get("id") == payload["id"] for existing in ordered):
+                ordered.append(payload)
+
+    for mem in planner_memory_used:
+        if not any(existing.get("id") == mem.get("id") and existing.get("used_for") == mem.get("used_for") for existing in ordered):
+            ordered.append(mem)
+
+    for payload in by_id.values():
+        if not any(existing.get("id") == payload.get("id") and existing.get("used_for") == payload.get("used_for") for existing in ordered):
+            ordered.append(payload)
+
+    return ordered[:5]
+
+
 def _run_bot_decision_v2_inner(
     agent_id: str,
     agent: Dict[str, Any],
@@ -4092,7 +4210,7 @@ def _run_bot_decision_v2_inner(
     from app.games.zone_stalkers.decision.intents import select_intent
     from app.games.zone_stalkers.decision.planner import build_plan
     from app.games.zone_stalkers.decision.executors import execute_plan_step
-    from app.games.zone_stalkers.decision.models.objective import ObjectiveGenerationContext
+    from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext, ObjectiveScore
     from app.games.zone_stalkers.decision.objectives.generator import generate_objectives
     from app.games.zone_stalkers.decision.objectives.selection import choose_objective
     from app.games.zone_stalkers.decision.objectives.intent_adapter import objective_to_intent
@@ -4150,6 +4268,9 @@ def _run_bot_decision_v2_inner(
     needs = need_result.scores
 
     objective_decision = None
+    selected_objective = None
+    selected_objective_score = None
+    plan_unavailable_keys: set[str] = set()
     objective_pairs: list[tuple[Any, Any]] = []
     try:
         objective_ctx = ObjectiveGenerationContext(
@@ -4166,19 +4287,91 @@ def _run_bot_decision_v2_inner(
             personality=agent,
         )
         objective_pairs = [(objective_decision.selected, objective_decision.selected_score)] + list(objective_decision.alternatives)
-        intent = objective_to_intent(
-            objective_decision.selected,
-            objective_decision.selected_score,
-            world_turn=world_turn,
-            source_goal=agent.get("global_goal"),
-        )
+
+        for candidate_objective, candidate_score in objective_pairs:
+            candidate_intent = objective_to_intent(
+                candidate_objective,
+                candidate_score,
+                world_turn=world_turn,
+                source_goal=agent.get("global_goal"),
+            )
+            candidate_plan = build_plan(ctx, candidate_intent, state, world_turn, need_result=need_result)
+            if _objective_plan_is_meaningful(candidate_objective, candidate_plan):
+                selected_objective = candidate_objective
+                selected_objective_score = candidate_score
+                intent = candidate_intent
+                plan = candidate_plan
+                break
+            plan_unavailable_keys.add(candidate_objective.key)
+
+        if selected_objective is None:
+            selected_objective = Objective(
+                key="IDLE",
+                source="fallback",
+                urgency=0.1,
+                expected_value=0.1,
+                risk=0.0,
+                time_cost=0.0,
+                resource_cost=0.0,
+                confidence=1.0,
+                goal_alignment=0.1,
+                memory_confidence=0.5,
+                reasons=("Нет выполнимых целей",),
+                source_refs=("fallback",),
+                metadata={"is_blocking": False, "allows_wait": True},
+            )
+            selected_objective_score = ObjectiveScore(
+                objective_key="IDLE",
+                raw_score=0.0,
+                final_score=0.0,
+                factors=(),
+                penalties=(),
+                decision="selected",
+            )
+            intent = objective_to_intent(
+                selected_objective,
+                selected_objective_score,
+                world_turn=world_turn,
+                source_goal=agent.get("global_goal"),
+            )
+            plan = build_plan(ctx, intent, state, world_turn, need_result=need_result)
+            objective_pairs = objective_pairs + [(selected_objective, selected_objective_score)]
+
+        if plan_unavailable_keys:
+            objective_pairs = [
+                (
+                    _obj,
+                    ObjectiveScore(
+                        objective_key=_score.objective_key,
+                        raw_score=_score.raw_score,
+                        final_score=_score.final_score,
+                        factors=_score.factors,
+                        penalties=_score.penalties,
+                        decision=(
+                            "selected"
+                            if _obj.key == selected_objective.key
+                            else "rejected"
+                        ),
+                    ),
+                )
+                for _obj, _score in objective_pairs
+            ]
     except Exception:
         intent = select_intent(ctx, needs, world_turn, need_result=need_result)
-
-    plan = build_plan(ctx, intent, state, world_turn, need_result=need_result)
+        plan = build_plan(ctx, intent, state, world_turn, need_result=need_result)
 
     # Compute needs dict once (reused below)
     _needs_dict = asdict(needs)
+    _selected_objective_key = (
+        selected_objective.key
+        if selected_objective is not None
+        else ((intent.metadata or {}).get("objective_key") if isinstance(intent.metadata, dict) else None)
+    )
+    _selected_objective_score = (
+        round(float(selected_objective_score.final_score), 3)
+        if selected_objective_score is not None
+        else ((intent.metadata or {}).get("objective_score") if isinstance(intent.metadata, dict) else None)
+    )
 
     # Store context for observability / debug
     agent["_v2_context"] = {
@@ -4190,29 +4383,39 @@ def _run_bot_decision_v2_inner(
         "plan_steps": len(plan.steps),
         "plan_confidence": round(plan.confidence, 3),
         "plan_step_0": plan.steps[0].kind if plan.steps else None,
-        "objective_key": ((intent.metadata or {}).get("objective_key") if isinstance(intent.metadata, dict) else None),
-        "objective_score": ((intent.metadata or {}).get("objective_score") if isinstance(intent.metadata, dict) else None),
+        "objective_key": _selected_objective_key,
+        "objective_score": _selected_objective_score,
         "objective_switch_decision": objective_decision.switch_decision if objective_decision else None,
     }
 
-    # Update current_goal from intent BEFORE writing the decision memory entry
-    # so that memory accurately reflects the agent's new goal. (Fix 3)
-    agent["current_goal"] = _INTENT_TO_GOAL.get(intent.kind, agent.get("current_goal", "idle"))
+    # Update current_goal from objective first, with intent fallback.
+    if _selected_objective_key:
+        agent["current_goal"] = _OBJECTIVE_TO_GOAL.get(
+            str(_selected_objective_key),
+            _INTENT_TO_GOAL.get(intent.kind, agent.get("current_goal", "idle")),
+        )
+    else:
+        agent["current_goal"] = _INTENT_TO_GOAL.get(intent.kind, agent.get("current_goal", "idle"))
 
     # Write a decision memory entry when the intent kind changes.
     # We skip writing when intent is the same as the last decision entry to avoid
     # flooding the log with identical entries every tick.
-    # Only look at entries that are themselves v2_decision records; other
+    # Only look at entries that are themselves decision records; other
     # decision entries (e.g. wait_in_shelter, seek_item, …) do not carry an
-    # intent_kind field and would cause the dedup guard to fail every tick.
-    _prev_decision_intent = next(
-        (m.get("effects", {}).get("intent_kind")
-         for m in reversed(agent.get("memory", []))
-         if m.get("type") == "decision"
-         and m.get("effects", {}).get("action_kind") == "v2_decision"),
+    # objective/intent fields and would cause the dedup guard to fail every tick.
+    _prev_decision_key = next(
+        (
+            m.get("effects", {}).get("objective_key")
+            or m.get("effects", {}).get("adapter_intent_kind")
+            or m.get("effects", {}).get("intent_kind")
+            for m in reversed(agent.get("memory", []))
+            if m.get("type") == "decision"
+            and m.get("effects", {}).get("action_kind") in {"v2_decision", "objective_decision"}
+        ),
         None,
     )
-    if _prev_decision_intent != intent.kind:
+    _current_decision_key = str(_selected_objective_key or intent.kind)
+    if _prev_decision_key != _current_decision_key:
         _top_needs = sorted(
             ((k, v) for k, v in _needs_dict.items() if v > 0.05),
             key=lambda x: x[1],
@@ -4223,64 +4426,74 @@ def _run_bot_decision_v2_inner(
             or "нет"
         )
         _step0_kind = plan.steps[0].kind if plan.steps else "wait"
-        _intent_label = _INTENT_LABEL_RU.get(intent.kind, intent.kind)
+        _objective_label = str(_selected_objective_key or "UNKNOWN")
+        _objective_reason = "; ".join(selected_objective.reasons) if selected_objective and selected_objective.reasons else (intent.reason or "")
         _add_memory(
             agent, world_turn, state, "decision",
-            f"🧠 {_intent_label}",
+            f"🧠 Цель {_objective_label}",
             {
-                "action_kind": "v2_decision",
+                "action_kind": "objective_decision",
+                "objective_key": _objective_label,
+                "objective_score": _selected_objective_score if _selected_objective_score is not None else round(intent.score, 3),
+                "objective_source": selected_objective.source if selected_objective is not None else "legacy_intent",
+                "objective_reason": _objective_reason,
+                "adapter_intent_kind": intent.kind,
+                "adapter_intent_score": round(intent.score, 3),
+                # Legacy compatibility fields.
                 "intent_kind": intent.kind,
                 "intent_score": round(intent.score, 3),
                 "plan_step": _step0_kind,
                 "plan_steps_count": len(plan.steps),
             },
             summary=(
-                f"Намерение «{intent.kind}» ({round(intent.score * 100)}%)."
-                + (f" {intent.reason}." if intent.reason else "")
+                f"Выбрана цель «{_objective_label}» ({round(float(_selected_objective_score or intent.score) * 100)}%)."
+                + (f" {_objective_reason}." if _objective_reason else "")
+                + f" Адаптер intent: {intent.kind}."
                 + f" Топ потребности: {_needs_str}"
             ),
         )
 
     # PR 3: collect concrete memory-backed lookup usages from planner first.
     _planner_memory_used = list(agent.get("_memory_used_decision", []))
-    _context_memory_used = [
-        {
-            "id": mem["id"],
-            "kind": mem["kind"],
-            "summary": mem["summary"],
-            "confidence": round(float(mem.get("confidence", 0.0)), 3),
-            "used_for": "general_context",
-        }
-        for mem in belief.relevant_memories
-    ]
-    _memory_used_payload: list[dict] = (_planner_memory_used + _context_memory_used)[:5]
+    _memory_used_payload: list[dict] = _build_objective_memory_used_payload(
+        selected_objective=selected_objective,
+        planner_memory_used=_planner_memory_used,
+        belief=belief,
+    )
 
     _selected_objective_trace = None
     _objective_scores_trace = None
     _alternatives_trace = None
-    if objective_decision is not None:
+    if selected_objective is not None:
         _selected_objective_trace = {
-            "key": objective_decision.selected.key,
-            "score": round(float(objective_decision.selected_score.final_score), 3),
-            "source": objective_decision.selected.source,
-            "reason": "; ".join(objective_decision.selected.reasons) if objective_decision.selected.reasons else "",
+            "key": selected_objective.key,
+            "score": round(float(selected_objective_score.final_score), 3) if selected_objective_score else 0.0,
+            "source": selected_objective.source,
+            "reason": "; ".join(selected_objective.reasons) if selected_objective.reasons else "",
         }
         _objective_scores_trace = []
         for _obj, _score in objective_pairs[:5]:
+            _reason = "; ".join(_obj.reasons) if _obj.reasons else ""
+            if _obj.key in plan_unavailable_keys and _obj.key != selected_objective.key:
+                _reason = f"{_reason}; plan_unavailable" if _reason else "plan_unavailable"
             _objective_scores_trace.append({
                 "key": _obj.key,
                 "score": round(float(_score.final_score), 3),
-                "decision": _score.decision or ("selected" if _obj.key == objective_decision.selected.key else "rejected"),
-                "reason": "; ".join(_obj.reasons) if _obj.reasons else "",
+                "decision": _score.decision or ("selected" if _obj.key == selected_objective.key else "rejected"),
+                "reason": _reason,
             })
         _alternatives_trace = [
             {
                 "key": _obj.key,
                 "score": round(float(_score.final_score), 3),
                 "decision": _score.decision or "rejected",
-                "reason": "; ".join(_obj.reasons) if _obj.reasons else "",
+                "reason": (
+                    f"{'; '.join(_obj.reasons)}; plan_unavailable"
+                    if _obj.reasons and _obj.key in plan_unavailable_keys
+                    else ("plan_unavailable" if _obj.key in plan_unavailable_keys else ("; ".join(_obj.reasons) if _obj.reasons else ""))
+                ),
             }
-            for _obj, _score in objective_decision.alternatives[:5]
+            for _obj, _score in [pair for pair in objective_pairs if pair[0].key != selected_objective.key][:5]
         ]
 
     write_decision_brain_trace_from_v2(

@@ -47,3 +47,16 @@ def test_blocking_objective_overrides_switch_threshold() -> None:
 
     assert decision.selected.key == "RESTORE_WATER"
     assert decision.switch_decision == "switch"
+
+
+def test_noncritical_maintenance_yields_to_close_strategic_objective() -> None:
+    decision = choose_objective(
+        [
+            _objective("RESTORE_FOOD", 0.40, expected_value=0.80, blocking=False),
+            _objective("GET_MONEY_FOR_RESUPPLY", 0.78, expected_value=0.78, blocking=False),
+        ],
+        personality={"risk_tolerance": 0.5},
+        switch_threshold=0.10,
+    )
+
+    assert decision.selected.key == "GET_MONEY_FOR_RESUPPLY"

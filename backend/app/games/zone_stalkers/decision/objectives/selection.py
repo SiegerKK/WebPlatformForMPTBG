@@ -4,6 +4,25 @@ from app.games.zone_stalkers.decision.models.objective import Objective, Objecti
 from .generator import OBJECTIVE_CONTINUE_CURRENT_PLAN
 from .scoring import score_objectives
 
+_MAINTENANCE_OBJECTIVE_KEYS: set[str] = {
+    "RESTORE_FOOD",
+    "RESTORE_WATER",
+    "REST",
+}
+
+_STRATEGIC_OBJECTIVE_KEYS: set[str] = {
+    "GET_MONEY_FOR_RESUPPLY",
+    "FIND_ARTIFACTS",
+    "SELL_ARTIFACTS",
+    "RESUPPLY_WEAPON",
+    "RESUPPLY_AMMO",
+    "HUNT_TARGET",
+    "SEARCH_INFORMATION",
+    "LEAVE_ZONE",
+}
+
+_MAINTENANCE_REBALANCE_MARGIN = 0.10
+
 
 def _is_blocking(objective: Objective) -> bool:
     if not isinstance(objective.metadata, dict):
@@ -56,6 +75,23 @@ def choose_objective(
         reason = "Текущий план остаётся лучшим"
 
     selected_objective, selected_score = selected_pair
+    if (
+        selected_objective.key in _MAINTENANCE_OBJECTIVE_KEYS
+        and not _is_blocking(selected_objective)
+        and not bool((selected_objective.metadata or {}).get("critical"))
+        and float(selected_objective.urgency) < 0.5
+    ):
+        strategic_pair = next(
+            (pair for pair in scored_sorted if pair[0].key in _STRATEGIC_OBJECTIVE_KEYS),
+            None,
+        )
+        if strategic_pair is not None:
+            strategic_objective, strategic_score = strategic_pair
+            if (selected_score.final_score - strategic_score.final_score) < _MAINTENANCE_REBALANCE_MARGIN:
+                selected_objective, selected_score = strategic_objective, strategic_score
+                selected_pair = strategic_pair
+                switch_decision = "switch"
+                reason = "Стратегическая цель почти равна по скору и приоритетнее поддерживающей"
 
     alternatives = tuple(
         (objective, score)

@@ -10,6 +10,7 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_HUNT_TARGET,
     OBJECTIVE_LOCATE_TARGET,
     OBJECTIVE_PREPARE_FOR_HUNT,
+    OBJECTIVE_RESTORE_FOOD,
     OBJECTIVE_REACH_SAFE_SHELTER,
     OBJECTIVE_RESTORE_WATER,
     OBJECTIVE_RESUPPLY_WEAPON,
@@ -147,3 +148,28 @@ def test_memory_backed_water_objective_has_memory_source_refs_and_confidence() -
 
     assert restore_water.memory_confidence > 0.5
     assert any(ref.startswith("memory:") for ref in restore_water.source_refs)
+
+
+def test_soft_restore_objectives_are_not_generated_below_thresholds() -> None:
+    agent = make_agent(hunger=29, thirst=15, has_weapon=False, money=329, global_goal="get_rich")
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+
+    assert OBJECTIVE_RESTORE_FOOD not in keys
+    assert OBJECTIVE_RESTORE_WATER not in keys
+
+    decision = choose_objective(objectives, personality=agent)
+    assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
+
+
+def test_soft_restore_food_uses_soft_need_source_and_dynamic_expected_value() -> None:
+    agent = make_agent(hunger=55, thirst=0, global_goal="get_rich")
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    restore_food = next(obj for obj in objectives if obj.key == OBJECTIVE_RESTORE_FOOD)
+
+    assert restore_food.source == "soft_need"
+    assert 0.35 <= restore_food.expected_value <= 0.5

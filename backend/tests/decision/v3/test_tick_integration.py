@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
 
 
@@ -315,11 +317,13 @@ def test_decision_pipeline_uses_memory_v3_water_source_when_no_trader_path() -> 
 
 def test_tick_objective_pipeline_writes_real_objective_trace_fields() -> None:
     state = _make_base_state()
+    state["locations"]["loc_b"]["anomaly_activity"] = 12
     bot = _bot_agent()
     bot["scheduled_action"] = None
     bot["action_queue"] = []
     bot["thirst"] = 20
     bot["hunger"] = 20
+    bot["sleepiness"] = 0
     bot["money"] = 0
     bot["equipment"]["weapon"] = None
     bot["inventory"] = []
@@ -340,3 +344,77 @@ def test_tick_objective_pipeline_writes_real_objective_trace_fields() -> None:
 
     ctx = new_bot.get("_v2_context", {})
     assert ctx.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
+
+
+def test_tick_decision_memory_is_objective_first_and_updates_current_goal() -> None:
+    state = _make_base_state()
+    state["locations"]["loc_b"]["anomaly_activity"] = 12
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["thirst"] = 15
+    bot["hunger"] = 29
+    bot["sleepiness"] = 0
+    bot["money"] = 0
+    bot["equipment"]["weapon"] = None
+    bot["inventory"] = []
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+    new_bot = new_state["agents"]["bot1"]
+
+    decision_memories = [
+        m
+        for m in new_bot.get("memory", [])
+        if m.get("type") == "decision"
+        and m.get("effects", {}).get("action_kind") == "objective_decision"
+    ]
+    assert decision_memories
+    effects = decision_memories[-1]["effects"]
+    assert effects.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
+    assert effects.get("adapter_intent_kind")
+    assert new_bot.get("current_goal") == "get_money_for_resupply"
+
+
+def test_wait_only_restore_food_plan_falls_back_to_next_objective(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.games.zone_stalkers.decision import planner as planner_module
+    from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_WAIT
+
+    original_build_plan = planner_module.build_plan
+
+    def _patched_build_plan(ctx, intent, state, world_turn, need_result=None):
+        if intent.kind == "seek_food":
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(STEP_WAIT, {"reason": "forced_wait"})],
+                confidence=0.2,
+                created_turn=world_turn,
+            )
+        return original_build_plan(ctx, intent, state, world_turn, need_result=need_result)
+
+    monkeypatch.setattr(planner_module, "build_plan", _patched_build_plan)
+
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["hunger"] = 55
+    bot["thirst"] = 5
+    bot["money"] = 0
+    bot["equipment"]["weapon"] = None
+    bot["inventory"] = []
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+    new_bot = new_state["agents"]["bot1"]
+    decision_events = [ev for ev in new_bot.get("brain_trace", {}).get("events", []) if ev.get("mode") == "decision"]
+    assert decision_events
+    decision_ev = decision_events[-1]
+
+    assert decision_ev.get("active_objective", {}).get("key") != "RESTORE_FOOD"
+    assert any(
+        item.get("key") == "RESTORE_FOOD" and "plan_unavailable" in (item.get("reason") or "")
+        for item in decision_ev.get("objective_scores", [])
+    )

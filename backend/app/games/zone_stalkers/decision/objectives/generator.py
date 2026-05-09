@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.games.zone_stalkers.decision.constants import (
+    SOFT_RESTORE_DRINK_THRESHOLD,
+    SOFT_RESTORE_FOOD_THRESHOLD,
+)
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext
 
 
@@ -76,12 +80,100 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _memory_confidence(ctx: ObjectiveGenerationContext) -> float:
-    relevant = ctx.belief_state.relevant_memories
-    if not relevant:
-        return 0.5
-    total = sum(float(mem.get("confidence", 0.0)) for mem in relevant)
-    return _clamp01(total / max(1, len(relevant)))
+def _soft_need_value(value: int, threshold: int) -> float:
+    if value < threshold:
+        return 0.0
+    return min(0.85, 0.35 + ((value - threshold) / max(1, 100 - threshold)) * 0.50)
+
+
+def _memory_ref(memory_id: str) -> str:
+    return f"memory:{memory_id}"
+
+
+def _is_semantic_decision_memory(kind: str) -> bool:
+    return kind in {"semantic_v2_decision", "v2_decision"}
+
+
+def _objective_memory_refs_and_confidence(
+    ctx: ObjectiveGenerationContext,
+    objective_key: str,
+    category: str | None = None,
+) -> tuple[tuple[str, ...], float]:
+    from app.games.zone_stalkers.balance.items import DRINK_ITEM_TYPES, FOOD_ITEM_TYPES
+
+    refs: list[str] = []
+    confidences: list[float] = []
+    relevant = tuple(
+        mem
+        for mem in ctx.belief_state.relevant_memories
+        if not _is_semantic_decision_memory(str(mem.get("kind") or ""))
+    )
+
+    def _append(memory_id: str | None, confidence: float | None) -> None:
+        if not memory_id:
+            return
+        ref = _memory_ref(str(memory_id))
+        if ref in refs:
+            return
+        refs.append(ref)
+        if confidence is not None:
+            confidences.append(_clamp01(float(confidence)))
+
+    def _relevant_summary_tokens(mem: dict[str, Any], tokens: tuple[str, ...]) -> bool:
+        summary = str(mem.get("summary") or "").lower()
+        return any(token in summary for token in tokens)
+
+    if category in {"drink", "food"}:
+        match_types = set(DRINK_ITEM_TYPES if category == "drink" else FOOD_ITEM_TYPES)
+        for known in ctx.belief_state.known_items:
+            item_types = set(known.get("item_types") or [])
+            if item_types & match_types:
+                _append(known.get("memory_id"), known.get("confidence"))
+
+    if objective_key == OBJECTIVE_RESTORE_WATER:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"water_source_known", "item_bought", "trader_location_known"} or _relevant_summary_tokens(
+                mem,
+                ("вода", "water", "drink", "жажд"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+    elif objective_key == OBJECTIVE_RESTORE_FOOD:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"food_source_known", "item_bought", "trader_location_known"} or _relevant_summary_tokens(
+                mem,
+                ("еда", "food", "bread", "голод"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+    elif objective_key in {OBJECTIVE_GET_MONEY_FOR_RESUPPLY, OBJECTIVE_FIND_ARTIFACTS}:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"artifact_source_known", "trader_location_known", "trader_buys_artifacts", "artifact_sale"} or _relevant_summary_tokens(
+                mem,
+                ("artifact", "артеф", "sell", "продаж", "trader", "торгов"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+        for trader in ctx.belief_state.known_traders:
+            _append(trader.get("memory_id"), trader.get("confidence"))
+    elif objective_key == OBJECTIVE_SELL_ARTIFACTS:
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in {"trader_location_known", "trader_buys_artifacts", "artifact_sale"} or _relevant_summary_tokens(
+                mem,
+                ("sell", "продаж", "artifact", "артеф", "trader", "торгов"),
+            ):
+                _append(mem.get("id"), mem.get("confidence"))
+        for trader in ctx.belief_state.known_traders:
+            _append(trader.get("memory_id"), trader.get("confidence"))
+    else:
+        for mem in relevant:
+            _append(mem.get("id"), mem.get("confidence"))
+
+    refs = refs[:3]
+    if not confidences:
+        return tuple(refs), 0.5
+    return tuple(refs), _clamp01(sum(confidences) / len(confidences))
 
 
 def _global_goal_objective(goal: str) -> str:
@@ -108,34 +200,13 @@ def _append_unique(result: list[Objective], objective: Objective) -> None:
     result.append(objective)
 
 
-def _item_memory_refs(ctx: ObjectiveGenerationContext, item_category: str) -> tuple[str, ...]:
-    if item_category == "drink":
-        from app.games.zone_stalkers.balance.items import DRINK_ITEM_TYPES
-        match_types = set(DRINK_ITEM_TYPES)
-    elif item_category == "food":
-        from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES
-        match_types = set(FOOD_ITEM_TYPES)
-    else:
-        match_types = set()
-
-    refs: list[str] = []
-    for known in ctx.belief_state.known_items:
-        item_types = set(known.get("item_types") or [])
-        memory_id = known.get("memory_id")
-        if not memory_id:
-            continue
-        if item_types & match_types:
-            refs.append(f"memory:{memory_id}")
-
-    return tuple(refs[:2])
-
-
 def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     """Generate objective candidates from need_result, environment, goals and active plan."""
     result: list[Objective] = []
     agent = ctx.personality
     need_result = ctx.need_result
-    memory_conf = _memory_confidence(ctx)
+    hunger = int(agent.get("hunger") or 0)
+    thirst = int(agent.get("thirst") or 0)
     liquidity = need_result.liquidity_summary or {}
     money_missing = int(liquidity.get("money_missing") or 0)
 
@@ -150,6 +221,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         if key is None or immediate.urgency <= 0:
             continue
 
+        immediate_refs, immediate_mem_conf = _objective_memory_refs_and_confidence(ctx, key)
         reasons = [immediate.reason] if immediate.reason else []
         metadata: dict[str, Any] = {
             "is_blocking": _is_critical_need(immediate.key, float(immediate.urgency)),
@@ -171,79 +243,101 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.0,
                 confidence=1.0,
                 goal_alignment=0.9,
-                memory_confidence=memory_conf,
+                memory_confidence=immediate_mem_conf,
                 reasons=tuple(reasons),
-                source_refs=(f"immediate:{immediate.key}",),
+                source_refs=(f"immediate:{immediate.key}",) + immediate_refs,
                 metadata=metadata,
             ),
         )
 
 
-    if not any(o.key == OBJECTIVE_RESTORE_WATER for o in result) and float(need_result.scores.drink) > 0.05:
-        drink_memory_refs = _item_memory_refs(ctx, "drink")
+    can_generate_soft_water_restore = thirst >= SOFT_RESTORE_DRINK_THRESHOLD
+    if not any(o.key == OBJECTIVE_RESTORE_WATER for o in result) and can_generate_soft_water_restore:
+        drink_memory_refs, drink_memory_conf = _objective_memory_refs_and_confidence(
+            ctx,
+            OBJECTIVE_RESTORE_WATER,
+            category="drink",
+        )
         drink_reasons = ["Жажда растёт"]
         if drink_memory_refs:
             drink_reasons.append("По памяти известен источник воды")
+        soft_drink_value = _soft_need_value(thirst, SOFT_RESTORE_DRINK_THRESHOLD)
         _append_unique(
             result,
             Objective(
                 key=OBJECTIVE_RESTORE_WATER,
-                source="immediate_need",
+                source="soft_need",
                 urgency=_clamp01(need_result.scores.drink),
-                expected_value=0.85,
+                expected_value=soft_drink_value,
                 risk=0.1,
                 time_cost=0.3,
                 resource_cost=0.1,
                 confidence=0.9,
                 goal_alignment=0.8,
-                memory_confidence=memory_conf,
+                memory_confidence=drink_memory_conf,
                 reasons=tuple(drink_reasons),
                 source_refs=("need:drink",) + drink_memory_refs,
-                metadata={"is_blocking": float(need_result.scores.drink) >= 0.8, "critical": float(need_result.scores.drink) >= 0.8},
+                metadata={
+                    "is_blocking": float(need_result.scores.drink) >= 0.8,
+                    "critical": float(need_result.scores.drink) >= 0.8,
+                    "soft_threshold": SOFT_RESTORE_DRINK_THRESHOLD,
+                },
             ),
         )
 
-    if not any(o.key == OBJECTIVE_RESTORE_FOOD for o in result) and float(need_result.scores.eat) > 0.05:
-        food_memory_refs = _item_memory_refs(ctx, "food")
+    can_generate_soft_food_restore = hunger >= SOFT_RESTORE_FOOD_THRESHOLD
+    if not any(o.key == OBJECTIVE_RESTORE_FOOD for o in result) and can_generate_soft_food_restore:
+        food_memory_refs, food_memory_conf = _objective_memory_refs_and_confidence(
+            ctx,
+            OBJECTIVE_RESTORE_FOOD,
+            category="food",
+        )
         food_reasons = ["Голод растёт"]
         if food_memory_refs:
             food_reasons.append("По памяти известен источник еды")
+        soft_food_value = _soft_need_value(hunger, SOFT_RESTORE_FOOD_THRESHOLD)
         _append_unique(
             result,
             Objective(
                 key=OBJECTIVE_RESTORE_FOOD,
-                source="immediate_need",
+                source="soft_need",
                 urgency=_clamp01(need_result.scores.eat),
-                expected_value=0.8,
+                expected_value=soft_food_value,
                 risk=0.1,
                 time_cost=0.3,
                 resource_cost=0.1,
                 confidence=0.9,
                 goal_alignment=0.75,
-                memory_confidence=memory_conf,
+                memory_confidence=food_memory_conf,
                 reasons=tuple(food_reasons),
                 source_refs=("need:eat",) + food_memory_refs,
-                metadata={"is_blocking": float(need_result.scores.eat) >= 0.8, "critical": float(need_result.scores.eat) >= 0.8},
+                metadata={
+                    "is_blocking": float(need_result.scores.eat) >= 0.8,
+                    "critical": float(need_result.scores.eat) >= 0.8,
+                    "soft_threshold": SOFT_RESTORE_FOOD_THRESHOLD,
+                },
             ),
         )
 
     sleep_score = float(need_result.scores.sleep)
-    if sleep_score > 0.05:
+    if sleep_score > 0.10:
+        rest_refs, rest_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_REST)
+        rest_expected_value = min(0.85, 0.25 + (_clamp01(sleep_score) * 0.60))
         _append_unique(
             result,
             Objective(
                 key=OBJECTIVE_REST,
                 source="immediate_need",
                 urgency=_clamp01(sleep_score),
-                expected_value=0.75,
+                expected_value=rest_expected_value,
                 risk=0.05,
                 time_cost=0.4,
                 resource_cost=0.0,
                 confidence=0.9,
                 goal_alignment=0.7,
-                memory_confidence=memory_conf,
+                memory_confidence=rest_memory_conf,
                 reasons=("Усталость растёт",),
-                source_refs=("need:sleep",),
+                source_refs=("need:sleep",) + rest_refs,
                 metadata={"is_blocking": False},
             ),
         )
@@ -284,7 +378,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.4,
                 confidence=0.85,
                 goal_alignment=0.8,
-                memory_confidence=memory_conf,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, objective_key)[1],
                 reasons=tuple(_reasons),
                 source_refs=(f"item_need:{item_need.key}",),
                 metadata=_metadata,
@@ -304,9 +398,12 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.1,
                 confidence=0.8,
                 goal_alignment=0.75,
-                memory_confidence=memory_conf,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[1],
                 reasons=("Не хватает денег для обязательного пополнения",),
-                source_refs=("liquidity:money_missing",),
+                source_refs=("liquidity:money_missing",) + _objective_memory_refs_and_confidence(
+                    ctx,
+                    OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+                )[0],
                 metadata={"is_blocking": False, "money_missing": money_missing},
             ),
         )
@@ -329,7 +426,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     resource_cost=0.0,
                     confidence=0.95,
                     goal_alignment=0.85,
-                    memory_confidence=memory_conf,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_WAIT_IN_SHELTER)[1],
                     reasons=("Нахожусь в безопасном укрытии во время выброса",),
                     source_refs=("need:avoid_emission",),
                     metadata={"is_blocking": True},
@@ -348,7 +445,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     resource_cost=0.0,
                     confidence=0.95,
                     goal_alignment=0.9,
-                    memory_confidence=memory_conf,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_REACH_SAFE_SHELTER)[1],
                     reasons=("Выброс в опасной зоне — нужно укрытие",),
                     source_refs=("need:avoid_emission",),
                     metadata={"is_blocking": True},
@@ -368,7 +465,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.0,
                 confidence=0.95,
                 goal_alignment=0.9,
-                memory_confidence=memory_conf,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ESCAPE_DANGER)[1],
                 reasons=("Критически низкий HP",),
                 source_refs=("need:survive_now",),
                 metadata={"is_blocking": True},
@@ -377,6 +474,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
 
     global_goal = str(agent.get("global_goal") or "get_rich")
     global_key = _global_goal_objective(global_goal)
+    global_refs, global_memory_conf = _objective_memory_refs_and_confidence(ctx, global_key)
     _append_unique(
         result,
         Objective(
@@ -394,9 +492,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             resource_cost=0.2,
             confidence=0.7,
             goal_alignment=1.0,
-            memory_confidence=memory_conf,
+            memory_confidence=global_memory_conf,
             reasons=(f"Глобальная цель: {global_goal}",),
-            source_refs=(f"global_goal:{global_goal}",),
+            source_refs=(f"global_goal:{global_goal}",) + global_refs,
             metadata={"is_blocking": False},
         ),
     )
@@ -406,6 +504,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         artifact_types = frozenset(ARTIFACT_TYPES.keys())
         has_artifact = any(i.get("type") in artifact_types for i in agent.get("inventory", []))
         if has_artifact:
+            sell_refs, sell_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_SELL_ARTIFACTS)
             _append_unique(
                 result,
                 Objective(
@@ -418,9 +517,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     resource_cost=0.0,
                     confidence=0.85,
                     goal_alignment=0.98,
-                    memory_confidence=memory_conf,
+                    memory_confidence=sell_memory_conf,
                     reasons=("В инвентаре есть артефакт для продажи",),
-                    source_refs=("global_goal:get_rich", "inventory:artifact"),
+                    source_refs=("global_goal:get_rich", "inventory:artifact") + sell_refs,
                     metadata={"is_blocking": False},
                 ),
             )
@@ -455,7 +554,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.25,
                 confidence=0.8,
                 goal_alignment=1.0,
-                memory_confidence=memory_conf,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_PREPARE_FOR_HUNT)[1],
                 reasons=tuple(reasons),
                 source_refs=("global_goal:kill_stalker",),
                 metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "prepare"},
@@ -474,7 +573,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.1,
                 confidence=0.7,
                 goal_alignment=1.0,
-                memory_confidence=memory_conf,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[1],
                 reasons=("Нужно определить местоположение цели",),
                 source_refs=("global_goal:kill_stalker",),
                 metadata={"is_blocking": False, "hunt_stage": "locate"},
@@ -493,7 +592,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.2,
                 confidence=0.6,
                 goal_alignment=1.0,
-                memory_confidence=memory_conf,
+                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
                 reasons=("Прямая атака возможна только при боевой готовности",),
                 source_refs=("global_goal:kill_stalker",),
                 metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "engage"},
@@ -501,6 +600,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         )
 
     if ctx.active_plan_summary:
+        continue_refs, continue_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONTINUE_CURRENT_PLAN)
         remaining_value = _clamp01(float(ctx.active_plan_summary.get("remaining_value", 0.6)))
         _append_unique(
             result,
@@ -514,14 +614,15 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=_clamp01(float(ctx.active_plan_summary.get("resource_cost", 0.0))),
                 confidence=_clamp01(float(ctx.active_plan_summary.get("confidence", 0.7))),
                 goal_alignment=_clamp01(float(ctx.active_plan_summary.get("goal_alignment", 0.8))),
-                memory_confidence=memory_conf,
+                memory_confidence=continue_memory_conf,
                 reasons=("Текущий план ещё актуален",),
-                source_refs=("active_plan",),
+                source_refs=("active_plan",) + continue_refs,
                 metadata={"is_blocking": False},
             ),
         )
 
     if not result:
+        idle_refs, idle_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_IDLE)
         result.append(
             Objective(
                 key=OBJECTIVE_IDLE,
@@ -533,9 +634,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 resource_cost=0.0,
                 confidence=1.0,
                 goal_alignment=0.2,
-                memory_confidence=memory_conf,
+                memory_confidence=idle_memory_conf,
                 reasons=("Нет более приоритетной цели",),
-                source_refs=("fallback",),
+                source_refs=("fallback",) + idle_refs,
                 metadata={"is_blocking": False},
             )
         )
