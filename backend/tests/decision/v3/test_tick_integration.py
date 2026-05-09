@@ -164,7 +164,7 @@ def test_emergency_flee_is_not_aborted_by_plan_monitor() -> None:
     assert new_state["agents"]["bot1"].get("scheduled_action") is not None
 
 
-def test_continue_path_keeps_legacy_action_queue_progression() -> None:
+def test_v3_active_plan_owns_steps_and_action_queue_stays_empty() -> None:
     state = _make_base_state()
     bot = _bot_agent()
     bot["thirst"] = 10
@@ -186,8 +186,7 @@ def test_continue_path_keeps_legacy_action_queue_progression() -> None:
     new_state, _ = tick_zone_map(state)
 
     next_sched = new_state["agents"]["bot1"].get("scheduled_action")
-    assert next_sched is not None
-    assert next_sched.get("turns_remaining") == 2
+    assert next_sched is None
     assert new_state["agents"]["bot1"].get("action_queue") == []
 
 
@@ -240,7 +239,7 @@ def test_bot_decision_pipeline_writes_decision_brain_trace_event() -> None:
 
     trace = new_state["agents"]["bot1"]["brain_trace"]
     assert trace["turn"] == 100
-    assert any(ev.get("mode") == "decision" and ev.get("decision") == "new_intent" for ev in trace.get("events", []))
+    assert any(ev.get("mode") == "decision" and ev.get("decision") == "objective_decision" for ev in trace.get("events", []))
 
 
 def test_tick_objective_decision_creates_active_plan_v3() -> None:
@@ -528,7 +527,7 @@ def test_tick_objective_pipeline_writes_real_objective_trace_fields() -> None:
     assert decision_ev.get("objective_scores")
     assert decision_ev.get("alternatives") is not None
 
-    ctx = new_bot.get("_v2_context", {})
+    ctx = new_bot.get("brain_v3_context", {})
     assert ctx.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
 
 

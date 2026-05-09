@@ -97,11 +97,11 @@ class TestPreDecisionEquipmentMaintenance:
         assert any(i["type"] == "ammo_9mm" for i in agent["inventory"])
 
 
-class TestV2ContextWritten:
-    """_run_bot_decision_v2_inner populates agent['_v2_context'] after the pipeline."""
+class TestBrainV3ContextWritten:
+    """The NPC Brain decision pipeline populates agent['brain_v3_context'] after the pipeline."""
 
-    def test_v2_context_keys_present(self):
-        """After the v2 inner pipeline, agent._v2_context has all required keys."""
+    def test_brain_v3_context_keys_present(self):
+        """After the inner pipeline, agent.brain_v3_context has all required keys."""
         from app.games.zone_stalkers.rules.tick_rules import _run_bot_decision_v2_inner
         agent = make_agent(has_weapon=True, has_armor=True, has_ammo=True)
         # Add a heal item so equipment maintenance step 8 doesn't short-circuit
@@ -112,15 +112,15 @@ class TestV2ContextWritten:
 
         _run_bot_decision_v2_inner("bot1", agent, state, 100)
 
-        ctx = agent.get("_v2_context")
-        assert ctx is not None, "_v2_context must be written by the pipeline"
+        ctx = agent.get("brain_v3_context")
+        assert ctx is not None, "brain_v3_context must be written by the pipeline"
         assert "need_scores" in ctx
         assert "intent_kind" in ctx
         assert "intent_score" in ctx
         assert "intent_reason" in ctx
 
-    def test_v2_context_need_scores_is_dict(self):
-        """need_scores in _v2_context is a dict of float values."""
+    def test_brain_v3_context_need_scores_is_dict(self):
+        """need_scores in brain_v3_context is a dict of float values."""
         from app.games.zone_stalkers.rules.tick_rules import _run_bot_decision_v2_inner
         agent = make_agent(has_weapon=True, has_armor=True, has_ammo=True)
         from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES
@@ -130,12 +130,12 @@ class TestV2ContextWritten:
 
         _run_bot_decision_v2_inner("bot1", agent, state, 100)
 
-        scores = agent["_v2_context"]["need_scores"]
+        scores = agent["brain_v3_context"]["need_scores"]
         assert isinstance(scores, dict)
         assert all(isinstance(v, float) for v in scores.values())
 
-    def test_v2_context_intent_score_in_range(self):
-        """intent_score in _v2_context is a float in [0.0, 1.0]."""
+    def test_brain_v3_context_intent_score_in_range(self):
+        """intent_score in brain_v3_context is a float in [0.0, 1.0]."""
         from app.games.zone_stalkers.rules.tick_rules import _run_bot_decision_v2_inner
         agent = make_agent(has_weapon=True, has_armor=True, has_ammo=True)
         from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES
@@ -145,5 +145,5 @@ class TestV2ContextWritten:
 
         _run_bot_decision_v2_inner("bot1", agent, state, 100)
 
-        score = agent["_v2_context"]["intent_score"]
+        score = agent["brain_v3_context"]["intent_score"]
         assert 0.0 <= score <= 1.0

@@ -29,7 +29,7 @@ export function NpcBrainPanel({
 }: NpcBrainPanelProps) {
   if (!brainTrace) return null;
 
-  const isPlanMonitor = latestTraceEvent?.mode === 'plan_monitor';
+  const isPlanMonitor = latestTraceEvent?.mode === 'active_plan_monitor';
   const hasCurrentObjective = currentObjective != null;
   const isLegacyDecision = !hasCurrentObjective && latestTraceEvent?.mode === 'decision';
 
@@ -88,12 +88,19 @@ export function NpcBrainPanel({
           {/* Execution info (adapter + scheduled action) */}
           <div style={st.executionBlock}>
             <div style={st.execTitle}>Исполнение:</div>
-            {(latestDecisionEvent?.intent_kind || latestTraceEvent?.intent_kind) && (
+            {(latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || latestTraceEvent?.adapter_intent?.kind || latestTraceEvent?.intent_kind) && (
               <div style={st.execRow}>
                 <span style={st.execKey}>adapter intent:</span>
-                <span style={st.execVal}>{latestDecisionEvent?.intent_kind ?? latestTraceEvent?.intent_kind}</span>
-                {(latestDecisionEvent?.intent_score ?? latestTraceEvent?.intent_score) != null && (
-                  <span style={st.execScore}>{pct(latestDecisionEvent?.intent_score ?? latestTraceEvent?.intent_score)}</span>
+                <span style={st.execVal}>
+                  {latestDecisionEvent?.adapter_intent?.kind
+                    ?? latestDecisionEvent?.intent_kind
+                    ?? latestTraceEvent?.adapter_intent?.kind
+                    ?? latestTraceEvent?.intent_kind}
+                </span>
+                {(latestDecisionEvent?.adapter_intent?.score ?? latestDecisionEvent?.intent_score ?? latestTraceEvent?.adapter_intent?.score ?? latestTraceEvent?.intent_score) != null && (
+                  <span style={st.execScore}>
+                    {pct(latestDecisionEvent?.adapter_intent?.score ?? latestDecisionEvent?.intent_score ?? latestTraceEvent?.adapter_intent?.score ?? latestTraceEvent?.intent_score)}
+                  </span>
                 )}
               </div>
             )}

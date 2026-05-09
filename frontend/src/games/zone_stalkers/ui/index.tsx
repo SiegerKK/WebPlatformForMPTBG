@@ -141,8 +141,8 @@ interface StalkerAgent {
   has_left_zone?: boolean;
   wealth_goal_target?: number;
   kill_target_id?: string | null;
-  /** Output of the v2 decision pipeline. Populated on every tick. */
-  _v2_context?: {
+  /** Output of the NPC Brain v3 decision pipeline. Populated on every tick. */
+  brain_v3_context?: {
     need_scores: Record<string, number>;
     intent_kind: string;
     intent_score: number;
@@ -151,6 +151,16 @@ interface StalkerAgent {
     plan_steps: number;
     plan_confidence: number;
     /** Kind of the first plan step (e.g. "travel_to_location"). */
+    plan_step_0: string | null;
+  };
+  _v2_context?: {
+    need_scores: Record<string, number>;
+    intent_kind: string;
+    intent_score: number;
+    intent_reason: string | null;
+    plan_intent: string | null;
+    plan_steps: number;
+    plan_confidence: number;
     plan_step_0: string | null;
   };
 }
@@ -2580,4 +2590,3 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.78rem',
   },
 };
-

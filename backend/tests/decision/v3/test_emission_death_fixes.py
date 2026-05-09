@@ -141,9 +141,10 @@ def test_sleep_is_interrupted_by_emission_imminent_memory() -> None:
     new_state, events = tick_zone_map(state)
 
     bot_after = new_state["agents"][bot_id]
-    assert bot_after["scheduled_action"] is None, (
-        "Sleep must be interrupted when emission_imminent memory exists"
+    assert bot_after["scheduled_action"] is not None, (
+        "Sleep interrupt should be routed into ActivePlan repair/runtime continuation"
     )
+    assert bot_after["scheduled_action"]["active_plan_id"] == bot_after["active_plan_v3"]["id"]
     # PlanMonitor abort event should be emitted
     abort_events = [e for e in events if e.get("event_type") == "plan_monitor_aborted_action"]
     assert abort_events, "plan_monitor_aborted_action event must be emitted on sleep interrupt"
@@ -171,9 +172,10 @@ def test_sleep_is_interrupted_when_emission_active() -> None:
     new_state, events = tick_zone_map(state)
 
     bot_after = new_state["agents"][bot_id]
-    assert bot_after["scheduled_action"] is None, (
-        "Sleep must be interrupted when emission_active is true"
+    assert bot_after["scheduled_action"] is not None, (
+        "Sleep interrupt should be routed into ActivePlan repair/runtime continuation"
     )
+    assert bot_after["scheduled_action"]["active_plan_id"] == bot_after["active_plan_v3"]["id"]
     abort_events = [e for e in events if e.get("event_type") == "plan_monitor_aborted_action"]
     assert abort_events
     assert abort_events[0]["payload"]["reason"] == "emission_threat"

@@ -46,6 +46,7 @@ export type CompactNpcHistoryExport = {
     adapter_intent?: { kind?: string | null; score?: number | null } | null;
     scheduled_action?: unknown;
     active_plan_v3?: unknown;
+    brain_v3_context?: AgentForProfile['brain_v3_context'];
   };
 
   equipment: Record<string, AgentInventoryItem | null>;
@@ -299,13 +300,14 @@ export const getCurrentObjectiveFromAgent = (
 ): BrainTraceObjectiveInfo | null => {
   if (latestDecision?.active_objective) return latestDecision.active_objective;
 
-  const v2ObjectiveKey = agent._v2_context?.objective_key;
-  if (v2ObjectiveKey) {
+  const brainContext = agent.brain_v3_context ?? agent._v2_context;
+  const objectiveKey = brainContext?.objective_key;
+  if (objectiveKey) {
     return {
-      key: v2ObjectiveKey,
-      score: agent._v2_context?.objective_score ?? agent._v2_context?.intent_score ?? 0,
+      key: objectiveKey,
+      score: brainContext?.objective_score ?? brainContext?.intent_score ?? 0,
       source: 'current_context',
-      reason: agent._v2_context?.objective_reason ?? agent._v2_context?.intent_reason ?? undefined,
+      reason: brainContext?.objective_reason ?? brainContext?.intent_reason ?? undefined,
     };
   }
 
@@ -373,9 +375,17 @@ export const buildCompactNpcHistoryExport = (
   const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
   const storyTimeline = displayMemory.slice(-120).map(toCompactTimelineEntry);
   const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline);
-  const latestPlanMonitor = latestEvent?.mode === 'plan_monitor' ? latestEvent : null;
-  const adapterIntentKind = latestDecision?.intent_kind ?? agent._v2_context?.intent_kind;
-  const adapterIntentScore = latestDecision?.intent_score ?? agent._v2_context?.intent_score;
+  const latestPlanMonitor = latestEvent?.mode === 'active_plan_monitor' ? latestEvent : null;
+  const adapterIntentKind = latestDecision?.adapter_intent?.kind
+    ?? latestDecision?.intent_kind
+    ?? agent.brain_v3_context?.adapter_intent?.kind
+    ?? agent.brain_v3_context?.intent_kind
+    ?? agent._v2_context?.intent_kind;
+  const adapterIntentScore = latestDecision?.adapter_intent?.score
+    ?? latestDecision?.intent_score
+    ?? agent.brain_v3_context?.adapter_intent?.score
+    ?? agent.brain_v3_context?.intent_score
+    ?? agent._v2_context?.intent_score;
 
   return {
     export_schema: 'npc_history_v1',
@@ -401,6 +411,7 @@ export const buildCompactNpcHistoryExport = (
         : null,
       scheduled_action: agent.scheduled_action,
       active_plan_v3: agent.active_plan_v3,
+      brain_v3_context: agent.brain_v3_context ?? agent._v2_context ?? null,
     },
     equipment: agent.equipment,
     inventory_summary: summarizeInventory(agent.inventory),
@@ -413,8 +424,8 @@ export const buildCompactNpcHistoryExport = (
             world_time: traceTimeLabel(latestDecision.turn, latestDecision.world_time),
             active_objective: latestDecision.active_objective,
             adapter_intent: {
-              kind: latestDecision.intent_kind,
-              score: latestDecision.intent_score,
+              kind: latestDecision.adapter_intent?.kind ?? latestDecision.intent_kind,
+              score: latestDecision.adapter_intent?.score ?? latestDecision.intent_score,
             },
             objective_scores: latestDecision.objective_scores,
             alternatives: latestDecision.alternatives,

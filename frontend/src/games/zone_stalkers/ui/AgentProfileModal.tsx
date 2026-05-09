@@ -35,8 +35,21 @@ export interface AgentInventoryItem {
   value?: number;
 }
 
-export type BrainTraceMode = 'plan_monitor' | 'decision' | 'system';
-export type BrainTraceDecision = 'continue' | 'abort' | 'new_intent' | 'no_op';
+export type BrainTraceMode = 'active_plan_monitor' | 'active_plan' | 'decision' | 'system' | 'legacy_decision';
+export type BrainTraceDecision =
+  | 'continue'
+  | 'abort'
+  | 'objective_decision'
+  | 'legacy_new_intent'
+  | 'no_op'
+  | 'active_plan_created'
+  | 'active_plan_step_started'
+  | 'active_plan_step_completed'
+  | 'active_plan_step_failed'
+  | 'active_plan_repair_requested'
+  | 'active_plan_repaired'
+  | 'active_plan_aborted'
+  | 'active_plan_completed';
 
 export type BrainTraceNeed = {
   key: string;
@@ -80,6 +93,16 @@ export type BrainTraceEvent = {
   active_objective?: BrainTraceObjectiveInfo;
   objective_scores?: BrainTraceObjectiveInfo[];
   alternatives?: BrainTraceObjectiveInfo[];
+  adapter_intent?: { kind?: string | null; score?: number | null } | null;
+  active_plan_runtime?: {
+    active_plan_id?: string | null;
+    objective_key?: string | null;
+    status?: string | null;
+    current_step_index?: number | null;
+    current_step_kind?: string | null;
+    steps_count?: number | null;
+    repair_count?: number | null;
+  } | null;
 };
 
 export type BrainTrace = {
@@ -143,6 +166,15 @@ export interface AgentForProfile {
   }>;
   brain_trace?: BrainTrace | null;
   active_plan_v3?: unknown;
+  brain_v3_context?: {
+    objective_key?: string | null;
+    objective_score?: number | null;
+    objective_reason?: string | null;
+    intent_kind?: string | null;
+    intent_score?: number | null;
+    intent_reason?: string | null;
+    adapter_intent?: { kind?: string | null; score?: number | null; reason?: string | null } | null;
+  } | null;
   _v2_context?: {
     objective_key?: string | null;
     objective_score?: number | null;
@@ -493,7 +525,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         )}
 
         {/* ── 8. Goals ── */}
-        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.intent_kind || agent._v2_context?.intent_kind) && (
+        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind || agent._v2_context?.intent_kind) && (
           <Section label="🎯 Цели">
             {agent.global_goal && (
               <div style={s.goalRow}>
@@ -518,11 +550,15 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 </span>
               </div>
             )}
-            {(latestDecisionEvent?.intent_kind || agent._v2_context?.intent_kind) && (
+            {(latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind || agent._v2_context?.intent_kind) && (
               <div style={s.goalRow}>
-                <span style={s.goalLabel}>Исполнительный intent:</span>
+                <span style={s.goalLabel}>Исполнительный adapter:</span>
                 <span style={{ ...s.goalVal, color: '#818cf8' }}>
-                  {latestDecisionEvent?.intent_kind ?? agent._v2_context?.intent_kind}
+                  {latestDecisionEvent?.adapter_intent?.kind
+                    ?? latestDecisionEvent?.intent_kind
+                    ?? agent.brain_v3_context?.adapter_intent?.kind
+                    ?? agent.brain_v3_context?.intent_kind
+                    ?? agent._v2_context?.intent_kind}
                 </span>
               </div>
             )}

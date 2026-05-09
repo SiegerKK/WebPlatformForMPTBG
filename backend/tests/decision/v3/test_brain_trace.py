@@ -52,6 +52,7 @@ def test_write_decision_brain_trace_from_v2_writes_decision_event() -> None:
     assert trace["mode"] == "decision"
     assert trace["turn"] == 77
     assert trace["world_time"]["world_day"] >= 1
-    assert trace["events"][-1]["decision"] == "new_intent"
+    assert trace["events"][-1]["decision"] == "objective_decision"
     assert trace["events"][-1]["intent_kind"] == "seek_water"
+    assert trace["events"][-1]["adapter_intent"]["kind"] == "seek_water"
     assert "world_time" in trace["events"][-1]

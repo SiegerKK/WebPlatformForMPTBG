@@ -134,6 +134,51 @@ def _known_trader_locations(state: dict[str, Any]) -> set[str]:
     return trader_locations
 
 
+def _iter_memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
+    memory_v3 = agent.get("memory_v3")
+    if not isinstance(memory_v3, dict):
+        return []
+    records = memory_v3.get("records", {})
+    if not isinstance(records, dict):
+        return []
+    return [record for record in records.values() if isinstance(record, dict)]
+
+
+def _memory_v3_has_confirmed_empty(agent: dict[str, Any], location_id: str) -> bool:
+    for record in _iter_memory_v3_records(agent):
+        if record.get("status") in {"stale", "archived"}:
+            continue
+        kind = str(record.get("kind") or "")
+        if kind not in {"location_empty", "target_not_found", "confirmed_empty"}:
+            continue
+        record_location_id = record.get("location_id") or record.get("details", {}).get("location_id")
+        if record_location_id == location_id:
+            return True
+    return False
+
+
+def _memory_v3_marks_trader_unavailable(
+    agent: dict[str, Any],
+    *,
+    trader_id: str | None = None,
+    trader_location_id: str | None = None,
+) -> bool:
+    for record in _iter_memory_v3_records(agent):
+        if record.get("status") in {"stale", "archived"}:
+            continue
+        kind = str(record.get("kind") or "")
+        if kind not in {"trader_not_found", "trader_dead"}:
+            continue
+        details = record.get("details", {}) or {}
+        record_trader_id = details.get("trader_id")
+        record_location_id = record.get("location_id") or details.get("location_id")
+        if trader_id is not None and record_trader_id == trader_id:
+            return True
+        if trader_location_id is not None and record_location_id == trader_location_id:
+            return True
+    return False
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def create_active_plan(
@@ -258,11 +303,15 @@ def assess_active_plan_v3(
         trader_id = step.payload.get("trader_id")
         if trader_id is not None:
             trader_ids = _known_trader_ids(state)
-            if trader_id not in trader_ids:
+            if trader_id not in trader_ids or _memory_v3_marks_trader_unavailable(agent, trader_id=str(trader_id)):
                 return ("repair", "trader_unavailable")
         elif step.payload.get("trader_location_id") is not None:
             trader_locations = _known_trader_locations(state)
-            if str(step.payload["trader_location_id"]) not in trader_locations:
+            trader_location_id = str(step.payload["trader_location_id"])
+            if trader_location_id not in trader_locations or _memory_v3_marks_trader_unavailable(
+                agent,
+                trader_location_id=trader_location_id,
+            ):
                 return ("repair", "trader_unavailable")
 
         # Location empty: step payload has location_id and agent memory shows
@@ -273,6 +322,8 @@ def assess_active_plan_v3(
                 mem_loc = mem.get("location_id") or mem.get("effects", {}).get("location_id")
                 if mem_loc == location_id and mem.get("confirmed_empty", False):
                     return ("repair", "target_location_empty")
+            if _memory_v3_has_confirmed_empty(agent, location_id):
+                return ("repair", "target_location_empty")
 
         # Supply depletion mid-plan: step requires a supply item but inventory
         # is missing it.
@@ -358,6 +409,34 @@ def repair_active_plan(
         step.started_turn = None
         step.failure_reason = None
         active_plan.steps[active_plan.current_step_index:active_plan.current_step_index] = inserted_steps
+    elif repair_reason == "trader_unavailable" and step is not None and state is not None:
+        trader_locations = sorted(_known_trader_locations(state))
+        current_location_id = _step_location_id(step)
+        alternative_location = next(
+            (
+                location_id for location_id in trader_locations
+                if location_id != current_location_id
+            ),
+            None,
+        )
+        if alternative_location is None:
+            active_plan.abort("trader_unavailable_replan", world_turn)
+            return active_plan
+        step.payload["trader_location_id"] = alternative_location
+        step.payload["location_id"] = alternative_location
+        step.payload.pop("trader_id", None)
+        step.status = STEP_STATUS_PENDING
+        step.started_turn = None
+        step.failure_reason = None
+    elif repair_reason in {
+        "target_location_empty",
+        "supplies_consumed_mid_plan",
+        "critical_hp",
+        "critical_thirst",
+        "critical_hunger",
+    }:
+        active_plan.abort(f"{repair_reason}_replan", world_turn)
+        return active_plan
     elif step is not None:
         if step.status == STEP_STATUS_RUNNING:
             step.failure_reason = repair_reason
