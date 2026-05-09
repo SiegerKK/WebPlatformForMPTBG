@@ -118,16 +118,17 @@ def build_target_belief(
             target_alive_from_memory = False
             source_refs.append(f"memory:{rec.get('id')}")
 
-    # State lookup used as a controlled fallback, marked explicitly.
+    # State lookup is used for liveness checks and optional debug omniscience.
     target = state.get("agents", {}).get(target_id)
     target_alive_from_state: bool | None = None
+    omniscient_targets = bool(state.get("debug_omniscient_targets"))
     if isinstance(target, dict):
         target_alive_from_state = bool(target.get("is_alive", True))
-        if last_known_location_id is None and target.get("location_id"):
+        if omniscient_targets and last_known_location_id is None and target.get("location_id"):
             last_known_location_id = str(target.get("location_id"))
             location_confidence = max(location_confidence, 0.55)
             source_refs.append("state:target_location:omniscient_debug")
-        if combat_strength is None and target.get("hp") is not None:
+        if omniscient_targets and combat_strength is None and target.get("hp") is not None:
             try:
                 combat_strength = max(0.1, min(1.0, float(target.get("hp", 100)) / 100.0))
                 combat_strength_confidence = max(combat_strength_confidence, 0.45)

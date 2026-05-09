@@ -4716,17 +4716,42 @@ def _check_global_goal_completion(
         target_id = agent.get("kill_target_id")
         if target_id:
             target_agent = state.get("agents", {}).get(target_id, {})
-            # Goal achieved when the target is confirmed dead in the current game state.
-            # Checking is_alive directly (rather than memory) ensures old fake kill-stub
-            # entries from previous save states do not falsely complete the goal.
             target_is_dead = not target_agent.get("is_alive", True) if target_agent else False
-            if target_is_dead:
+
+            def _has_target_death_confirmed() -> bool:
+                for mem in reversed(agent.get("memory", [])):
+                    effects = mem.get("effects", {}) if isinstance(mem, dict) else {}
+                    if effects.get("action_kind") != "target_death_confirmed":
+                        continue
+                    if str(effects.get("target_id") or "") == str(target_id):
+                        return True
+                memory_v3 = agent.get("memory_v3", {}) if isinstance(agent.get("memory_v3"), dict) else {}
+                records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+                if not isinstance(records, dict):
+                    return False
+                for rec in records.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("status") in {"stale", "archived"}:
+                        continue
+                    if str(rec.get("kind") or "") != "target_death_confirmed":
+                        continue
+                    details = rec.get("details", {}) if isinstance(rec.get("details"), dict) else {}
+                    if str(details.get("target_id") or "") == str(target_id):
+                        return True
+                return False
+
+            if target_is_dead and _has_target_death_confirmed():
                 agent["global_goal_achieved"] = True
                 target_name = target_agent.get("name", target_id)
                 _add_memory(
                     agent, world_turn, state, "observation",
                     f"⚔️ Цель достигнута: «{target_name}» устранён!",
-                    {"action_kind": "goal_achieved", "goal": "kill_stalker", "target_id": target_id},
+                    {
+                        "action_kind": "global_goal_completed",
+                        "global_goal": "kill_stalker",
+                        "target_id": target_id,
+                    },
                     summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
                 )
 

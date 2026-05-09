@@ -149,10 +149,28 @@ def _memory_v3_has_confirmed_empty(agent: dict[str, Any], location_id: str) -> b
         if record.get("status") in {"stale", "archived"}:
             continue
         kind = str(record.get("kind") or "")
-        if kind not in {"location_empty", "target_not_found", "confirmed_empty"}:
+        if kind not in {"location_empty", "target_not_found", "target_moved", "confirmed_empty"}:
             continue
-        record_location_id = record.get("location_id") or record.get("details", {}).get("location_id")
+        details = record.get("details", {}) or {}
+        record_location_id = (
+            record.get("location_id")
+            or details.get("location_id")
+            or details.get("from_location_id")
+        )
         if record_location_id == location_id:
+            return True
+    return False
+
+
+def _memory_v3_has_target_moved(agent: dict[str, Any], location_id: str) -> bool:
+    for record in _iter_memory_v3_records(agent):
+        if record.get("status") in {"stale", "archived"}:
+            continue
+        if str(record.get("kind") or "") != "target_moved":
+            continue
+        details = record.get("details", {}) or {}
+        from_location_id = details.get("from_location_id") or record.get("location_id")
+        if from_location_id == location_id:
             return True
     return False
 
@@ -322,6 +340,8 @@ def assess_active_plan_v3(
                 mem_loc = mem.get("location_id") or mem.get("effects", {}).get("location_id")
                 if mem_loc == location_id and mem.get("confirmed_empty", False):
                     return ("repair", "target_location_empty")
+            if _memory_v3_has_target_moved(agent, location_id):
+                return ("repair", "target_moved")
             if _memory_v3_has_confirmed_empty(agent, location_id):
                 return ("repair", "target_location_empty")
 
@@ -430,6 +450,7 @@ def repair_active_plan(
         step.failure_reason = None
     elif repair_reason in {
         "target_location_empty",
+        "target_moved",
         "supplies_consumed_mid_plan",
         "critical_hp",
         "critical_thirst",

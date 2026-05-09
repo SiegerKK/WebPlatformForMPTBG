@@ -9,7 +9,7 @@ from app.games.zone_stalkers.decision.models.intent import (
 from app.games.zone_stalkers.decision.objectives.intent_adapter import objective_to_intent
 
 
-def _objective(key: str) -> Objective:
+def _objective(key: str, metadata: dict | None = None) -> Objective:
     return Objective(
         key=key,
         source="test",
@@ -22,7 +22,7 @@ def _objective(key: str) -> Objective:
         goal_alignment=0.9,
         memory_confidence=0.8,
         reasons=("reason",),
-        metadata={},
+        metadata=metadata or {},
     )
 
 
@@ -60,3 +60,17 @@ def test_resupply_food_maps_to_resupply_with_forced_food_category() -> None:
 def test_get_money_for_resupply_maps_to_get_rich() -> None:
     intent = objective_to_intent(_objective("GET_MONEY_FOR_RESUPPLY"), _score("GET_MONEY_FOR_RESUPPLY", 0.6), world_turn=100)
     assert intent.kind == INTENT_GET_RICH
+
+
+def test_prepare_for_hunt_no_ammo_forces_resupply_ammo_category() -> None:
+    objective = _objective("PREPARE_FOR_HUNT", metadata={"blockers": [{"key": "low_ammo", "blocked": True}]})
+    intent = objective_to_intent(objective, _score("PREPARE_FOR_HUNT", 0.75), world_turn=100)
+    assert intent.kind == INTENT_RESUPPLY
+    assert intent.metadata and intent.metadata.get("forced_resupply_category") == "ammo"
+
+
+def test_prepare_for_hunt_no_weapon_forces_resupply_weapon_category() -> None:
+    objective = _objective("PREPARE_FOR_HUNT", metadata={"blockers": [{"key": "no_weapon", "blocked": True}]})
+    intent = objective_to_intent(objective, _score("PREPARE_FOR_HUNT", 0.8), world_turn=100)
+    assert intent.kind == INTENT_RESUPPLY
+    assert intent.metadata and intent.metadata.get("forced_resupply_category") == "weapon"

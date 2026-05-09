@@ -56,6 +56,8 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_TRADE_BUY_ITEM,
     STEP_CONSUME_ITEM,
 )
+from app.games.zone_stalkers.memory.models import MemoryRecord
+from app.games.zone_stalkers.memory.store import add_memory_record
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -870,3 +872,26 @@ class TestConfirmedEmptyMemoryIntegration:
         # confirmed_empty is still a repair trigger regardless of age
         assert op == "repair"
         assert reason == "target_location_empty"
+
+    def test_target_moved_memory_triggers_target_moved_repair(self) -> None:
+        agent = _base_agent()
+        add_memory_record(
+            agent,
+            MemoryRecord(
+                id="mem_target_moved_1",
+                agent_id="bot1",
+                layer="spatial",
+                kind="target_moved",
+                created_turn=7,
+                last_accessed_turn=None,
+                summary="Цель сместилась",
+                details={"target_id": "target_1", "from_location_id": "loc-0", "to_location_id": "loc-1"},
+                location_id="loc-0",
+                confidence=0.8,
+            ),
+        )
+        ap = create_active_plan(_decision(), world_turn=1, plan=_plan(STEP_EXPLORE_LOCATION))
+        save_active_plan(agent, ap)
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=8)
+        assert op == "repair"
+        assert reason == "target_moved"

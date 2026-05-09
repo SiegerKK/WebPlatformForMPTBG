@@ -70,6 +70,7 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "target_seen": (LAYER_SOCIAL, "target_seen", ("target", "tracking", "social")),
     "target_last_known_location": (LAYER_SPATIAL, "target_last_known_location", ("target", "tracking", "spatial")),
     "target_not_found": (LAYER_SPATIAL, "target_not_found", ("target", "tracking", "negative_observation")),
+    "target_moved": (LAYER_SPATIAL, "target_moved", ("target", "tracking", "movement")),
     "target_route_observed": (LAYER_SPATIAL, "target_route_observed", ("target", "route", "tracking")),
     "target_equipment_seen": (LAYER_THREAT, "target_equipment_seen", ("target", "equipment", "combat")),
     "target_combat_strength_observed": (LAYER_THREAT, "target_combat_strength_observed", ("target", "combat", "threat")),
@@ -200,7 +201,7 @@ def _map_legacy_to_record(
     # Retention guidance for target-related memory kinds.
     if kind in {"target_equipment_seen", "target_combat_strength_observed", "target_death_confirmed"}:
         importance = max(importance, 0.85)
-    elif kind in {"target_seen", "target_not_found", "target_last_known_location", "target_route_observed"}:
+    elif kind in {"target_seen", "target_not_found", "target_moved", "target_last_known_location", "target_route_observed"}:
         importance = max(importance, 0.65)
 
     details: dict[str, Any] = dict(effects)

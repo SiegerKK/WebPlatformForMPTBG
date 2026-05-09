@@ -33,6 +33,7 @@ from .models.plan import (
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_CONFIRM_KILL,
+    STEP_LEAVE_ZONE,
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
     STEP_HEAL_SELF,
@@ -87,6 +88,7 @@ def execute_plan_step(
         STEP_SEARCH_TARGET:        _exec_search_target,
         STEP_START_COMBAT:         _exec_start_combat,
         STEP_CONFIRM_KILL:         _exec_confirm_kill,
+        STEP_LEAVE_ZONE:           _exec_leave_zone,
         STEP_WAIT:                 _exec_wait,
         STEP_LEGACY_SCHEDULED_ACTION: _exec_legacy_passthrough,
     }
@@ -602,6 +604,7 @@ def _exec_start_combat(
 
     current_loc = agent.get("location_id")
     if target.get("location_id") != current_loc:
+        target_loc = target.get("location_id")
         _add_memory(
             agent,
             world_turn,
@@ -609,12 +612,14 @@ def _exec_start_combat(
             "observation",
             "🎯 Цель сместилась перед боем",
             {
-                "action_kind": "target_not_found",
+                "action_kind": "target_moved",
                 "target_id": target_id,
                 "location_id": current_loc,
+                "from_location_id": current_loc,
+                "to_location_id": target_loc,
                 "confirmed_empty": True,
             },
-            summary="Не удалось начать бой: цель уже не в этой локации.",
+            summary="Не удалось начать бой: цель сместилась в другую локацию.",
         )
         agent["action_used"] = True
         return []
@@ -751,6 +756,23 @@ def _exec_unknown(
     """Fallback executor for unrecognised step kinds."""
     agent["action_used"] = True
     return []
+
+
+def _exec_leave_zone(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _execute_leave_zone, _bot_route_to_exit
+
+    loc_id = agent.get("location_id", "")
+    loc = (state.get("locations", {}) or {}).get(loc_id, {})
+    if not bool(loc.get("exit_zone")):
+        return _bot_route_to_exit(agent_id, agent, state, world_turn)
+    return _execute_leave_zone(agent_id, agent, state, world_turn)
 
 
 # ── Memory-write helpers used by executors ────────────────────────────────────

@@ -62,6 +62,7 @@ from .models.plan import (
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_CONFIRM_KILL,
+    STEP_LEAVE_ZONE,
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
 )
@@ -1267,12 +1268,6 @@ def _plan_hunt_target(
                         interruptible=False,
                         expected_duration_ticks=1,
                     ),
-                    PlanStep(
-                        STEP_CONFIRM_KILL,
-                        {"target_id": target_id, "reason": "confirm_after_engage"},
-                        interruptible=False,
-                        expected_duration_ticks=1,
-                    ),
                 ],
                 confidence=0.8,
                 created_turn=world_turn,
@@ -1283,12 +1278,6 @@ def _plan_hunt_target(
                 PlanStep(
                     STEP_START_COMBAT,
                     {"target_id": target_id, "reason": "engage_target"},
-                    interruptible=False,
-                    expected_duration_ticks=1,
-                ),
-                PlanStep(
-                    STEP_CONFIRM_KILL,
-                    {"target_id": target_id, "reason": "confirm_after_engage"},
                     interruptible=False,
                     expected_duration_ticks=1,
                 ),
@@ -1504,12 +1493,41 @@ def _plan_leave_zone(
     if exit_loc and exit_loc != agent_loc:
         return Plan(
             intent_kind=intent.kind,
-            steps=[PlanStep(STEP_TRAVEL_TO_LOCATION,
-                            {"target_id": exit_loc, "reason": "leave_zone"},
-                            expected_duration_ticks=_estimate_travel_ticks(ctx, exit_loc, state))],
+            steps=[
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": exit_loc, "reason": "leave_zone"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, exit_loc, state),
+                ),
+                PlanStep(
+                    STEP_LEAVE_ZONE,
+                    {"target_id": exit_loc, "reason": "leave_zone"},
+                    interruptible=False,
+                    expected_duration_ticks=1,
+                ),
+            ],
             interruptible=False, confidence=0.9, created_turn=world_turn,
         )
-    return None
+    if exit_loc and exit_loc == agent_loc:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(
+                STEP_LEAVE_ZONE,
+                {"target_id": exit_loc, "reason": "leave_zone"},
+                interruptible=False,
+                expected_duration_ticks=1,
+            )],
+            interruptible=False,
+            confidence=1.0,
+            created_turn=world_turn,
+        )
+    return Plan(
+        intent_kind=intent.kind,
+        steps=[PlanStep(STEP_WAIT, {"reason": "leave_zone_no_exit"})],
+        interruptible=False,
+        confidence=0.2,
+        created_turn=world_turn,
+    )
 
 
 def _plan_upgrade_equipment(

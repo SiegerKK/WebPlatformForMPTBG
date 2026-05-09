@@ -63,6 +63,29 @@ _RESUPPLY_OBJECTIVE_TO_CATEGORY: dict[str, str] = {
 }
 
 
+def _prepare_for_hunt_forced_category(objective: Objective) -> str | None:
+    if objective.key != "PREPARE_FOR_HUNT":
+        return None
+    metadata = objective.metadata if isinstance(objective.metadata, dict) else {}
+    blockers = metadata.get("blockers")
+    if not isinstance(blockers, list):
+        return None
+    blocker_keys = {
+        str(blocker.get("key"))
+        for blocker in blockers
+        if isinstance(blocker, dict) and blocker.get("key")
+    }
+    if "no_weapon" in blocker_keys:
+        return "weapon"
+    if "low_ammo" in blocker_keys:
+        return "ammo"
+    if "hp_low" in blocker_keys or "no_medicine" in blocker_keys:
+        return "medical"
+    if "target_too_strong" in blocker_keys:
+        return "armor"
+    return None
+
+
 def _objective_reason(objective: Objective) -> str:
     if objective.reasons:
         return "; ".join(str(r) for r in objective.reasons if r)
@@ -86,6 +109,8 @@ def objective_to_intent(
         "objective_blockers": objective.metadata.get("blockers") if isinstance(objective.metadata, dict) else None,
     }
     forced_resupply_category = _RESUPPLY_OBJECTIVE_TO_CATEGORY.get(objective.key)
+    if forced_resupply_category is None:
+        forced_resupply_category = _prepare_for_hunt_forced_category(objective)
     if forced_resupply_category is not None:
         metadata["forced_resupply_category"] = forced_resupply_category
     return Intent(

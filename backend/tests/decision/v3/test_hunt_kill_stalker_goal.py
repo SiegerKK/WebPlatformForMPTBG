@@ -107,6 +107,21 @@ def _make_ctx(agent: dict, state: dict, agent_id: str = "bot1") -> ObjectiveGene
     )
 
 
+def _remember_target_location(agent: dict, state: dict, *, target_id: str, location_id: str) -> None:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    _add_memory(
+        agent,
+        state["world_turn"],
+        state,
+        "observation",
+        "📍 Известна локация цели",
+        {"action_kind": "target_last_known_location", "target_id": target_id, "location_id": location_id},
+        summary=f"Цель замечена в {location_id}",
+        agent_id="bot1",
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TargetBelief construction
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +143,7 @@ class TestTargetBeliefConstruction:
     def test_target_in_different_location(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
+        state["debug_omniscient_targets"] = True
         ctx = build_agent_context("bot1", agent, state)
         belief_state = build_belief_state(ctx, agent, state["world_turn"])
         tb = build_target_belief(
@@ -139,6 +155,20 @@ class TestTargetBeliefConstruction:
         assert not tb.co_located
         assert tb.last_known_location_id == "loc_b"
         assert tb.is_alive is True
+
+    def test_target_unknown_without_visibility_or_memory_when_omniscience_disabled(self) -> None:
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = _make_state_with_target(agent=agent, target_location_id="loc_b")
+        state["debug_omniscient_targets"] = False
+        ctx = build_agent_context("bot1", agent, state)
+        belief_state = build_belief_state(ctx, agent, state["world_turn"])
+        tb = build_target_belief(
+            agent_id="bot1", agent=agent, state=state,
+            world_turn=state["world_turn"], belief_state=belief_state,
+        )
+        assert tb.visible_now is False
+        assert tb.co_located is False
+        assert tb.last_known_location_id is None
 
     def test_target_dead_in_state(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
@@ -241,6 +271,7 @@ class TestHuntObjectiveGeneration:
     def test_track_stage_when_location_known_but_not_co_located(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
+        _remember_target_location(agent, state, target_id="target_1", location_id="loc_b")
         objectives = generate_objectives(_make_ctx(agent, state))
         keys = {o.key for o in objectives}
         assert OBJECTIVE_TRACK_TARGET in keys
@@ -248,6 +279,7 @@ class TestHuntObjectiveGeneration:
     def test_track_stage_hunt_stage_metadata(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
+        _remember_target_location(agent, state, target_id="target_1", location_id="loc_b")
         objectives = generate_objectives(_make_ctx(agent, state))
         track_obj = next(o for o in objectives if o.key == OBJECTIVE_TRACK_TARGET)
         assert track_obj.metadata.get("hunt_stage") == "track"
@@ -299,6 +331,7 @@ class TestHuntObjectiveGeneration:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1",
                            location_id="loc_a", has_weapon=False)
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
+        _remember_target_location(agent, state, target_id="target_1", location_id="loc_b")
         objectives = generate_objectives(_make_ctx(agent, state))
         keys = {o.key for o in objectives}
         assert OBJECTIVE_TRACK_TARGET in keys
@@ -361,16 +394,16 @@ class TestHuntPlannerSteps:
         assert STEP_TRAVEL_TO_LOCATION in step_kinds
         assert STEP_SEARCH_TARGET in step_kinds
 
-    def test_engage_plan_at_target_location_includes_combat_and_confirm(self) -> None:
+    def test_engage_plan_at_target_location_includes_combat_only(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_a")
         plan = self._build_hunt_plan("ENGAGE_TARGET", agent, state, target_loc="loc_a")
         assert plan is not None
         step_kinds = [s.kind for s in plan.steps]
         assert STEP_START_COMBAT in step_kinds
-        assert STEP_CONFIRM_KILL in step_kinds
+        assert STEP_CONFIRM_KILL not in step_kinds
 
-    def test_engage_plan_remote_target_includes_travel_combat_confirm(self) -> None:
+    def test_engage_plan_remote_target_includes_travel_and_combat_only(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
         plan = self._build_hunt_plan("ENGAGE_TARGET", agent, state, target_loc="loc_b")
@@ -378,7 +411,7 @@ class TestHuntPlannerSteps:
         step_kinds = [s.kind for s in plan.steps]
         assert STEP_TRAVEL_TO_LOCATION in step_kinds
         assert STEP_START_COMBAT in step_kinds
-        assert STEP_CONFIRM_KILL in step_kinds
+        assert STEP_CONFIRM_KILL not in step_kinds
 
     def test_confirm_kill_plan_remote_target_includes_travel_and_confirm(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
@@ -474,7 +507,7 @@ class TestHuntExecutors:
         # Should skip: no weapon equipped
         assert len(state.get("combat_interactions", {})) == 0
 
-    def test_start_combat_target_not_colocated_writes_not_found(self) -> None:
+    def test_start_combat_target_not_colocated_writes_target_moved(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
         self._run_executor(
@@ -482,7 +515,7 @@ class TestHuntExecutors:
             agent, state,
         )
         memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
-        assert "target_not_found" in memory_kinds
+        assert "target_moved" in memory_kinds
 
     def test_confirm_kill_dead_target_writes_death_confirmed(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
@@ -525,11 +558,28 @@ class TestHuntExecutors:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestKillStalkerGoalCompletion:
-    def test_kill_target_sets_global_goal_achieved(self) -> None:
+    def test_kill_target_requires_death_confirmation_to_set_goal_achieved(self) -> None:
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
 
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
         state = _make_state_with_target(agent=agent, target_alive=False)
+        _check_global_goal_completion("bot1", agent, state, state["world_turn"])
+        assert agent.get("global_goal_achieved") is not True
+
+    def test_target_death_confirmed_sets_kill_goal_achieved(self) -> None:
+        from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion, _add_memory
+
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
+        state = _make_state_with_target(agent=agent, target_alive=False)
+        _add_memory(
+            agent,
+            state["world_turn"],
+            state,
+            "observation",
+            "✅ Подтверждена ликвидация цели",
+            {"action_kind": "target_death_confirmed", "target_id": "target_1"},
+            summary="Цель устранена и подтверждена.",
+        )
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
         assert agent.get("global_goal_achieved") is True
 
@@ -542,13 +592,22 @@ class TestKillStalkerGoalCompletion:
         assert not agent.get("global_goal_achieved", False)
 
     def test_kill_completion_writes_goal_achieved_memory(self) -> None:
-        from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
+        from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion, _add_memory
 
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
         state = _make_state_with_target(agent=agent, target_alive=False)
+        _add_memory(
+            agent,
+            state["world_turn"],
+            state,
+            "observation",
+            "✅ Подтверждена ликвидация цели",
+            {"action_kind": "target_death_confirmed", "target_id": "target_1"},
+            summary="Цель устранена и подтверждена.",
+        )
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
         memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
-        assert "goal_achieved" in memory_kinds
+        assert "global_goal_completed" in memory_kinds
 
     def test_objective_generation_confirms_kill_after_goal_achieved(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1",

@@ -177,6 +177,23 @@ def test_target_not_found_memory_kind_supported() -> None:
     assert "target" in rec["tags"]
 
 
+def test_target_moved_memory_kind_supported() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    entry = _make_entry(
+        action_kind="target_moved",
+        target_id="agent_target_1",
+        location_id="loc_a",
+        from_location_id="loc_a",
+        to_location_id="loc_c",
+    )
+    bridge_legacy_entry_to_memory_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+    rec = next(iter(ensure_memory_v3(agent)["records"].values()))
+    assert rec["kind"] == "target_moved"
+    assert rec["layer"] == "spatial"
+    assert rec["location_id"] == "loc_a"
+    assert "agent_target_1" in rec["entity_ids"]
+
+
 def test_target_death_confirmed_memory_kind_supported() -> None:
     agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
     entry = _make_entry(action_kind="target_death_confirmed", target_id="agent_target_1")

@@ -543,7 +543,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         )
 
     global_goal = str(agent.get("global_goal") or "get_rich")
-    global_key = _global_goal_objective(global_goal)
+    global_key = OBJECTIVE_LEAVE_ZONE if agent.get("global_goal_achieved") else _global_goal_objective(global_goal)
     global_refs, global_memory_conf = _objective_memory_refs_and_confidence(ctx, global_key)
     _append_unique(
         result,
@@ -594,7 +594,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 ),
             )
 
-    if global_goal == "kill_stalker":
+    if global_goal == "kill_stalker" and not agent.get("global_goal_achieved"):
         readiness = need_result.combat_readiness or {}
         weapon_missing = int(readiness.get("weapon_missing") or 0)
         ammo_missing = int(readiness.get("ammo_missing") or 0)
