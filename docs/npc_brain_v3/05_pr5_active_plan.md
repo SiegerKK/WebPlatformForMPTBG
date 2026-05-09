@@ -128,3 +128,14 @@ PR5 acceptance should cover:
 - frontend/profile/export show v3-first fields.
 
 > Full kill-stalker operation logic is documented separately in post-PR5 material.
+
+## Final runtime additions after PR5
+
+- `ENGAGE_TARGET` is executed as:
+  1. `start_combat`
+  2. `monitor_combat`
+  3. `confirm_kill`
+- `monitor_combat` blocks kill confirmation while combat is still active.
+- `LEAVE_ZONE` is now a first-class ActivePlan step:
+  - `travel_to_location` (exit) when needed,
+  - `leave_zone` terminal step (`has_left_zone = true`, runtime cleanup).

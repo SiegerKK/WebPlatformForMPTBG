@@ -61,3 +61,11 @@
 - PR3 keeps target-memory taxonomy prerequisites.
 - PR4 keeps hunt-objective placeholders.
 - Full hunt operation is canonical only in this document.
+
+## Implemented final mechanics
+
+- `TargetBelief` is built in runtime and passed into objective generation.
+- Memory bridge maps hunt events to `memory_v3` (`target_seen`, `target_not_found`, `target_moved`, `target_death_confirmed`) with entity/location indexes.
+- `kill_stalker` completion requires confirmed evidence (`target_death_confirmed`) and dead target state.
+- `ENGAGE_TARGET` uses combat monitor stage (`start_combat` → `monitor_combat` → `confirm_kill`) to avoid premature confirmation.
+- After goal completion, objective flow transitions to `LEAVE_ZONE`.

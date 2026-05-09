@@ -18,12 +18,16 @@ from app.games.zone_stalkers.decision.beliefs import build_belief_state
 from app.games.zone_stalkers.decision.context_builder import build_agent_context
 from app.games.zone_stalkers.decision.models.objective import ObjectiveGenerationContext
 from app.games.zone_stalkers.decision.models.plan import (
+    Plan,
+    PlanStep,
     STEP_ASK_FOR_INTEL,
     STEP_CONFIRM_KILL,
+    STEP_MONITOR_COMBAT,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_TRAVEL_TO_LOCATION,
 )
+from app.games.zone_stalkers.decision.executors import execute_plan_step
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_CONFIRM_KILL,
@@ -394,16 +398,17 @@ class TestHuntPlannerSteps:
         assert STEP_TRAVEL_TO_LOCATION in step_kinds
         assert STEP_SEARCH_TARGET in step_kinds
 
-    def test_engage_plan_at_target_location_includes_combat_only(self) -> None:
+    def test_engage_plan_at_target_location_includes_combat_monitor_confirm(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_a")
         plan = self._build_hunt_plan("ENGAGE_TARGET", agent, state, target_loc="loc_a")
         assert plan is not None
         step_kinds = [s.kind for s in plan.steps]
         assert STEP_START_COMBAT in step_kinds
-        assert STEP_CONFIRM_KILL not in step_kinds
+        assert STEP_MONITOR_COMBAT in step_kinds
+        assert STEP_CONFIRM_KILL in step_kinds
 
-    def test_engage_plan_remote_target_includes_travel_and_combat_only(self) -> None:
+    def test_engage_plan_remote_target_includes_travel_combat_monitor_confirm(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
         plan = self._build_hunt_plan("ENGAGE_TARGET", agent, state, target_loc="loc_b")
@@ -411,7 +416,8 @@ class TestHuntPlannerSteps:
         step_kinds = [s.kind for s in plan.steps]
         assert STEP_TRAVEL_TO_LOCATION in step_kinds
         assert STEP_START_COMBAT in step_kinds
-        assert STEP_CONFIRM_KILL not in step_kinds
+        assert STEP_MONITOR_COMBAT in step_kinds
+        assert STEP_CONFIRM_KILL in step_kinds
 
     def test_confirm_kill_plan_remote_target_includes_travel_and_confirm(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
@@ -516,6 +522,61 @@ class TestHuntExecutors:
         )
         memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
         assert "target_moved" in memory_kinds
+
+    def test_engage_target_does_not_confirm_before_combat_resolves(self) -> None:
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = _make_state_with_target(agent=agent, target_location_id="loc_a", target_alive=True, target_hp=100)
+        plan = Plan(
+            intent_kind="hunt_target",
+            steps=[
+                PlanStep(STEP_START_COMBAT, {"target_id": "target_1"}),
+                PlanStep(STEP_MONITOR_COMBAT, {"target_id": "target_1"}),
+                PlanStep(STEP_CONFIRM_KILL, {"target_id": "target_1"}),
+            ],
+        )
+        ctx = build_agent_context("bot1", agent, state)
+        _ = execute_plan_step(ctx, plan, state, state["world_turn"])
+        assert len(state.get("combat_interactions", {})) == 1
+        assert plan.current_step_index == 1
+
+        state["world_turn"] += 1
+        ctx = build_agent_context("bot1", agent, state)
+        _ = execute_plan_step(ctx, plan, state, state["world_turn"])
+
+        assert plan.current_step_index == 1
+        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        assert "target_death_confirmed" not in memory_kinds
+
+    def test_engage_target_confirms_after_combat_target_dead(self) -> None:
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = _make_state_with_target(agent=agent, target_location_id="loc_a", target_alive=True, target_hp=100)
+        plan = Plan(
+            intent_kind="hunt_target",
+            steps=[
+                PlanStep(STEP_START_COMBAT, {"target_id": "target_1"}),
+                PlanStep(STEP_MONITOR_COMBAT, {"target_id": "target_1"}),
+                PlanStep(STEP_CONFIRM_KILL, {"target_id": "target_1"}),
+            ],
+        )
+        ctx = build_agent_context("bot1", agent, state)
+        _ = execute_plan_step(ctx, plan, state, state["world_turn"])
+
+        target = state["agents"]["target_1"]
+        target["is_alive"] = False
+        for combat in state.get("combat_interactions", {}).values():
+            combat["ended"] = True
+            combat["ended_turn"] = state["world_turn"]
+
+        state["world_turn"] += 1
+        ctx = build_agent_context("bot1", agent, state)
+        _ = execute_plan_step(ctx, plan, state, state["world_turn"])
+        assert plan.current_step_index == 2
+
+        state["world_turn"] += 1
+        ctx = build_agent_context("bot1", agent, state)
+        _ = execute_plan_step(ctx, plan, state, state["world_turn"])
+        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        assert "target_death_confirmed" in memory_kinds
 
     def test_confirm_kill_dead_target_writes_death_confirmed(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")

@@ -8,6 +8,7 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_ASK_FOR_INTEL,
     STEP_CONFIRM_KILL,
     STEP_EXPLORE_LOCATION,
+    STEP_MONITOR_COMBAT,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_TRAVEL_TO_LOCATION,
@@ -123,6 +124,17 @@ def compose_active_plan_steps(
                 payload={
                     "target_id": agent.get("kill_target_id"),
                     "reason": "active_plan_composed_engage_after_travel",
+                },
+                interruptible=False,
+                expected_duration_ticks=1,
+            )
+        )
+        steps.append(
+            PlanStep(
+                kind=STEP_MONITOR_COMBAT,
+                payload={
+                    "target_id": agent.get("kill_target_id"),
+                    "reason": "active_plan_composed_monitor_after_combat_start",
                 },
                 interruptible=False,
                 expected_duration_ticks=1,

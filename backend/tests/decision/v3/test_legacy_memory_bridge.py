@@ -194,6 +194,46 @@ def test_target_moved_memory_kind_supported() -> None:
     assert "agent_target_1" in rec["entity_ids"]
 
 
+def test_target_seen_memory_bridges_to_memory_v3_with_entity_and_location() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    entry = _make_entry(action_kind="target_seen", target_id="agent_target_1", location_id="loc_a")
+    bridge_legacy_entry_to_memory_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+    mem_v3 = ensure_memory_v3(agent)
+    rec_id = next(iter(mem_v3["records"]))
+    rec = mem_v3["records"][rec_id]
+    assert rec["kind"] == "target_seen"
+    assert rec["location_id"] == "loc_a"
+    assert "agent_target_1" in rec["entity_ids"]
+    assert rec_id in mem_v3["indexes"]["by_entity"].get("agent_target_1", [])
+    assert rec_id in mem_v3["indexes"]["by_location"].get("loc_a", [])
+
+
+def test_target_not_found_memory_bridges_to_memory_v3_with_location() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    entry = _make_entry(action_kind="target_not_found", target_id="agent_target_1", location_id="loc_b")
+    bridge_legacy_entry_to_memory_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+    mem_v3 = ensure_memory_v3(agent)
+    rec_id = next(iter(mem_v3["records"]))
+    rec = mem_v3["records"][rec_id]
+    assert rec["kind"] == "target_not_found"
+    assert rec["location_id"] == "loc_b"
+    assert rec_id in mem_v3["indexes"]["by_location"].get("loc_b", [])
+
+
+def test_target_death_confirmed_memory_bridges_to_memory_v3_with_entity_id() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    entry = _make_entry(action_kind="target_death_confirmed", target_id="agent_target_1")
+    bridge_legacy_entry_to_memory_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+    mem_v3 = ensure_memory_v3(agent)
+    rec_id = next(iter(mem_v3["records"]))
+    rec = mem_v3["records"][rec_id]
+    assert rec["kind"] == "target_death_confirmed"
+    assert "agent_target_1" in rec["entity_ids"]
+    assert rec_id in mem_v3["indexes"]["by_entity"].get("agent_target_1", [])
+    assert "target" in rec["tags"]
+    assert "death" in rec["tags"]
+
+
 def test_target_death_confirmed_memory_kind_supported() -> None:
     agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
     entry = _make_entry(action_kind="target_death_confirmed", target_id="agent_target_1")

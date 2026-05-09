@@ -42,3 +42,49 @@ def any_objective_decision(agent: dict[str, Any], objective_key: str) -> bool:
         for mem in agent.get("memory", [])
         if isinstance(mem, dict)
     )
+
+
+def first_objective_turn(agent: dict[str, Any], objective_key: str) -> int | None:
+    for mem in agent.get("memory", []):
+        if not isinstance(mem, dict):
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") == "objective_decision" and effects.get("objective_key") == objective_key:
+            turn = mem.get("world_turn")
+            return int(turn) if isinstance(turn, int) else None
+    return None
+
+
+def first_memory_turn(agent: dict[str, Any], action_kind: str, **effect_filters: Any) -> int | None:
+    for mem in agent.get("memory", []):
+        if not isinstance(mem, dict):
+            continue
+        effects = mem.get("effects", {})
+        if effects.get("action_kind") != action_kind:
+            continue
+        if any(effects.get(key) != value for key, value in effect_filters.items()):
+            continue
+        turn = mem.get("world_turn")
+        return int(turn) if isinstance(turn, int) else None
+    return None
+
+
+def any_active_plan_event(agent: dict[str, Any], event_kind: str) -> bool:
+    events = (agent.get("brain_trace", {}) or {}).get("events", [])
+    return any(
+        isinstance(event, dict)
+        and event.get("mode") == "active_plan"
+        and event.get("decision") == event_kind
+        for event in events
+    )
+
+
+def any_active_plan_step(agent: dict[str, Any], step_kind: str) -> bool:
+    events = (agent.get("brain_trace", {}) or {}).get("events", [])
+    return any(
+        isinstance(event, dict)
+        and event.get("mode") == "active_plan"
+        and event.get("decision") == "active_plan_step_completed"
+        and event.get("active_plan", {}).get("completed_step_kind") == step_kind
+        for event in events
+    )

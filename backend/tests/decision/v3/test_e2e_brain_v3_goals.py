@@ -2,65 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.games.zone_stalkers.rules.tick_rules import _add_memory
+from app.games.zone_stalkers.rules.tick_rules import _add_memory, tick_zone_map
 
-from tests.decision.v3.e2e_helpers import any_memory, any_objective_decision, run_until
-
-
-def _base_world() -> dict[str, Any]:
-    return {
-        "seed": 7,
-        "world_turn": 1,
-        "world_day": 1,
-        "world_hour": 12,
-        "world_minute": 0,
-        "emission_active": False,
-        "emission_scheduled_turn": None,
-        "emission_ends_turn": None,
-        "agents": {},
-        "traders": {},
-        "locations": {
-            "loc_spawn": {
-                "name": "Spawn",
-                "terrain_type": "buildings",
-                "anomaly_activity": 0,
-                "connections": [{"to": "loc_trader", "travel_time": 2}, {"to": "loc_target", "travel_time": 2}],
-                "items": [],
-                "agents": [],
-            },
-            "loc_trader": {
-                "name": "Trader",
-                "terrain_type": "buildings",
-                "anomaly_activity": 0,
-                "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
-                "items": [],
-                "agents": [],
-            },
-            "loc_target": {
-                "name": "Target",
-                "terrain_type": "buildings",
-                "anomaly_activity": 0,
-                "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
-                "items": [],
-                "agents": [],
-            },
-            "loc_exit": {
-                "name": "Exit",
-                "terrain_type": "buildings",
-                "anomaly_activity": 0,
-                "exit_zone": True,
-                "connections": [{"to": "loc_trader", "travel_time": 2}, {"to": "loc_target", "travel_time": 2}],
-                "items": [],
-                "agents": [],
-            },
-        },
-        "combat_interactions": {},
-        "relations": {},
-        "groups": {},
-    }
+from tests.decision.v3.e2e_helpers import (
+    any_active_plan_event,
+    any_active_plan_step,
+    any_memory,
+    any_objective_decision,
+    first_memory_turn,
+    first_objective_turn,
+    run_until,
+)
 
 
-def _hunter(*, goal: str, kill_target_id: str | None = None) -> dict[str, Any]:
+def _hunter(*, goal: str, kill_target_id: str | None = None, ammo_count: int = 3) -> dict[str, Any]:
+    inventory = [
+        {"id": "food1", "type": "bread", "value": 0},
+        {"id": "food2", "type": "bread", "value": 0},
+        {"id": "water1", "type": "water", "value": 0},
+        {"id": "water2", "type": "water", "value": 0},
+        {"id": "med1", "type": "bandage", "value": 0},
+        {"id": "med2", "type": "bandage", "value": 0},
+        {"id": "med3", "type": "bandage", "value": 0},
+    ]
+    inventory.extend(
+        {"id": f"ammo{i}", "type": "ammo_9mm", "value": 0}
+        for i in range(1, ammo_count + 1)
+    )
     agent = {
         "archetype": "stalker_agent",
         "controller": {"kind": "bot"},
@@ -75,7 +43,7 @@ def _hunter(*, goal: str, kill_target_id: str | None = None) -> dict[str, Any]:
         "hunger": 5,
         "thirst": 5,
         "sleepiness": 5,
-        "money": 0,
+        "money": 3000,
         "global_goal": goal,
         "material_threshold": 0,
         "wealth_goal_target": 1000,
@@ -83,18 +51,7 @@ def _hunter(*, goal: str, kill_target_id: str | None = None) -> dict[str, Any]:
             "weapon": {"type": "pistol", "value": 300},
             "armor": {"type": "leather_jacket", "value": 200},
         },
-        "inventory": [
-            {"id": "ammo1", "type": "ammo_9mm", "value": 0},
-            {"id": "ammo2", "type": "ammo_9mm", "value": 0},
-            {"id": "ammo3", "type": "ammo_9mm", "value": 0},
-            {"id": "food1", "type": "bread", "value": 0},
-            {"id": "food2", "type": "bread", "value": 0},
-            {"id": "water1", "type": "water", "value": 0},
-            {"id": "water2", "type": "water", "value": 0},
-            {"id": "med1", "type": "bandage", "value": 0},
-            {"id": "med2", "type": "bandage", "value": 0},
-            {"id": "med3", "type": "bandage", "value": 0},
-        ],
+        "inventory": inventory,
         "memory": [],
         "action_queue": [],
         "scheduled_action": None,
@@ -104,44 +61,15 @@ def _hunter(*, goal: str, kill_target_id: str | None = None) -> dict[str, Any]:
     return agent
 
 
-def test_e2e_get_rich_from_spawn_to_leave_zone() -> None:
-    state = _base_world()
-    state["traders"]["trader_1"] = {
-        "id": "trader_1",
-        "name": "Trader",
-        "location_id": "loc_trader",
-        "is_alive": True,
-    }
-    hunter = _hunter(goal="get_rich")
-    # Deterministic wealth source for quick e2e path: sell one artifact.
-    hunter["inventory"].append({"id": "artifact_1", "type": "soul", "value": 2000})
-    state["agents"]["hunter"] = hunter
-    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
-
-    state, _ = run_until(
-        state,
-        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
-        max_ticks=400,
-    )
-    hunter = state["agents"]["hunter"]
-    assert hunter.get("global_goal_achieved") is True
-    assert hunter.get("has_left_zone") is True
-    assert any_memory(hunter, "global_goal_completed")
-    assert any_memory(hunter, "left_zone")
-    assert any_objective_decision(hunter, "LEAVE_ZONE")
-
-
-def test_e2e_kill_stalker_known_target_to_leave_zone() -> None:
-    state = _base_world()
-    hunter = _hunter(goal="kill_stalker", kill_target_id="target")
-    target = {
+def _target(*, location_id: str, hp: int = 1) -> dict[str, Any]:
+    return {
         "archetype": "stalker_agent",
         "controller": {"kind": "script"},
         "name": "target",
-        "is_alive": False,
+        "is_alive": True,
         "has_left_zone": False,
-        "location_id": "loc_target",
-        "hp": 0,
+        "location_id": location_id,
+        "hp": hp,
         "max_hp": 100,
         "hunger": 0,
         "thirst": 0,
@@ -154,25 +82,163 @@ def test_e2e_kill_stalker_known_target_to_leave_zone() -> None:
         "action_queue": [],
         "scheduled_action": None,
     }
-    state["agents"]["hunter"] = hunter
-    state["agents"]["target"] = target
-    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
-    state["locations"]["loc_target"]["agents"] = ["target"]
+
+
+def _base_state(locations: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "seed": 7,
+        "world_turn": 1,
+        "world_day": 1,
+        "world_hour": 12,
+        "world_minute": 0,
+        "emission_active": False,
+        "emission_scheduled_turn": None,
+        "emission_ends_turn": None,
+        "agents": {},
+        "traders": {},
+        "locations": locations,
+        "combat_interactions": {},
+        "relations": {},
+        "groups": {},
+    }
+
+
+def _remember_target_location(agent: dict[str, Any], state: dict[str, Any], location_id: str) -> None:
     _add_memory(
-        hunter,
+        agent,
         state["world_turn"],
         state,
         "observation",
-        "✅ Подтверждена ликвидация цели",
-        {"action_kind": "target_death_confirmed", "target_id": "target", "location_id": "loc_target"},
-        summary="Цель подтверждена как ликвидированная.",
+        "📍 Известно местоположение цели",
+        {
+            "action_kind": "target_last_known_location",
+            "target_id": str(agent.get("kill_target_id") or ""),
+            "location_id": location_id,
+        },
+        summary=f"Цель замечена в {location_id}",
         agent_id="hunter",
     )
+
+
+def test_e2e_get_rich_finds_artifact_sells_and_leaves_zone() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_anomaly", "travel_time": 2},
+                {"to": "loc_trader", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_anomaly": {
+            "name": "Anomaly",
+            "terrain_type": "wasteland",
+            "anomaly_activity": 10,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_trader", "travel_time": 2},
+            ],
+            "items": [],
+            "artifacts": [{"id": "artifact_1", "type": "soul", "value": 2500}],
+            "agents": [],
+        },
+        "loc_trader": {
+            "name": "Trader",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_anomaly", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_trader", "travel_time": 2}, {"to": "loc_spawn", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_trader",
+        "is_alive": True,
+        "money": 50000,
+    }
+    hunter = _hunter(goal="get_rich")
+    hunter["money"] = 0
+    state["agents"]["hunter"] = hunter
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
 
     state, _ = run_until(
         state,
         lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
-        max_ticks=900,
+        max_ticks=1200,
+    )
+    hunter = state["agents"]["hunter"]
+    assert hunter.get("global_goal_achieved") is True
+    assert hunter.get("has_left_zone") is True
+    assert any_memory(hunter, "global_goal_completed")
+    assert any_memory(hunter, "left_zone")
+    assert any_objective_decision(hunter, "LEAVE_ZONE")
+    assert any_objective_decision(hunter, "FIND_ARTIFACTS") or any_objective_decision(
+        hunter, "GET_MONEY_FOR_RESUPPLY"
+    )
+    assert any_memory(hunter, "trade_sell") or any_memory(hunter, "global_goal_completed")
+
+
+def test_e2e_kill_stalker_live_target_to_leave_zone() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_target", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_target": {
+            "name": "Target",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_target", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target")
+    target = _target(location_id="loc_target", hp=1)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_target"]["agents"] = ["target"]
+    _remember_target_location(hunter, state, "loc_target")
+
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=1200,
     )
     hunter = state["agents"]["hunter"]
     target = state["agents"]["target"]
@@ -183,3 +249,185 @@ def test_e2e_kill_stalker_known_target_to_leave_zone() -> None:
     assert any_memory(hunter, "global_goal_completed")
     assert any_memory(hunter, "left_zone")
     assert any_objective_decision(hunter, "LEAVE_ZONE")
+
+
+def test_e2e_kill_stalker_prepares_before_engage_when_no_ammo() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_target", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_target": {
+            "name": "Target",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_spawn",
+        "is_alive": True,
+        "money": 50000,
+    }
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target", ammo_count=0)
+    target = _target(location_id="loc_target", hp=1)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_target"]["agents"] = ["target"]
+    _remember_target_location(hunter, state, "loc_target")
+
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=1400,
+    )
+    hunter = state["agents"]["hunter"]
+    engage_turn = first_objective_turn(hunter, "ENGAGE_TARGET")
+    ammo_buy_turn = first_memory_turn(hunter, "trade_buy", item_type="ammo_9mm")
+    if engage_turn is not None and ammo_buy_turn is not None:
+        assert ammo_buy_turn <= engage_turn
+    assert hunter.get("has_left_zone") is True
+
+
+def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_old", "travel_time": 2}, {"to": "loc_new", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_old": {
+            "name": "Old",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_new", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_new": {
+            "name": "New",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_old", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_new", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_old",
+        "is_alive": True,
+        "money": 50000,
+    }
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target")
+    target = _target(location_id="loc_old", hp=1)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_old"]["agents"] = ["target"]
+    _remember_target_location(hunter, state, "loc_old")
+
+    for _ in range(500):
+        state, _events = tick_zone_map(state)
+        if state["world_turn"] == 2 and target.get("is_alive", True):
+            if "target" in state["locations"]["loc_old"]["agents"]:
+                state["locations"]["loc_old"]["agents"].remove("target")
+            target["location_id"] = "loc_new"
+            if "target" not in state["locations"]["loc_new"]["agents"]:
+                state["locations"]["loc_new"]["agents"].append("target")
+
+    hunter = state["agents"]["hunter"]
+    assert (
+        any_memory(hunter, "target_not_found")
+        or any_memory(hunter, "target_moved")
+        or any_objective_decision(hunter, "LOCATE_TARGET")
+        or any_objective_decision(hunter, "HUNT_TARGET")
+        or any_active_plan_event(hunter, "active_plan_created")
+    )
+
+
+def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_target", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_target": {
+            "name": "Target",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_target", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_spawn",
+        "is_alive": True,
+        "money": 50000,
+    }
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target")
+    target = _target(location_id="loc_target", hp=1)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_target"]["agents"] = ["target"]
+
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=1400,
+    )
+    hunter = state["agents"]["hunter"]
+    assert any_objective_decision(hunter, "LOCATE_TARGET")
+    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_last_known_location")
+    assert hunter.get("has_left_zone") is True

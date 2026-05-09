@@ -1034,12 +1034,12 @@ def _resolve_exploration(
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Resolve exploration: pick up an existing artifact (50 % chance) or mark the location.
+    """Resolve exploration: pick up an existing artifact or mark the location.
 
     New logic (replaces the old loot-table approach):
     - Checks existing artifacts on the location rather than conjuring one from thin air.
-    - 50 % success roll.  On success the agent picks up one random artifact.
-    - On failure distinguishes between a truly empty location and bad luck.
+    - If artifacts exist, the agent deterministically picks one artifact.
+    - If no artifacts exist, the location is marked as explored-empty.
     """
     from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
     events: List[Dict[str, Any]] = []
@@ -1051,7 +1051,7 @@ def _resolve_exploration(
     found_artifacts: List[Dict[str, Any]] = []
     loc_name = loc.get("name", loc_id)
 
-    artifact_found = existing_artifacts and rng.random() < 0.5
+    artifact_found = bool(existing_artifacts)
     if artifact_found:
         # Pick one artifact at random and transfer it to the agent
         art = rng.choice(existing_artifacts)

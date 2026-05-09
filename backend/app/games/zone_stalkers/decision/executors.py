@@ -32,6 +32,7 @@ from .models.plan import (
     STEP_ASK_FOR_INTEL,
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
+    STEP_MONITOR_COMBAT,
     STEP_CONFIRM_KILL,
     STEP_LEAVE_ZONE,
     STEP_WAIT,
@@ -87,6 +88,7 @@ def execute_plan_step(
         STEP_ASK_FOR_INTEL:        _exec_ask_for_intel,
         STEP_SEARCH_TARGET:        _exec_search_target,
         STEP_START_COMBAT:         _exec_start_combat,
+        STEP_MONITOR_COMBAT:       _exec_monitor_combat,
         STEP_CONFIRM_KILL:         _exec_confirm_kill,
         STEP_LEAVE_ZONE:           _exec_leave_zone,
         STEP_WAIT:                 _exec_wait,
@@ -103,6 +105,8 @@ def execute_plan_step(
         STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM, STEP_TRADE_SELL_ITEM,
         STEP_ASK_FOR_INTEL, STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
     ):
+        plan.advance()
+    elif step.kind == STEP_MONITOR_COMBAT and bool(step.payload.get("_monitor_complete")):
         plan.advance()
 
     return events
@@ -624,6 +628,36 @@ def _exec_start_combat(
         agent["action_used"] = True
         return []
 
+    target_name = target.get("name", target_id)
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "observation",
+        f"🎯 Цель обнаружена перед боем: «{target_name}»",
+        {
+            "action_kind": "target_seen",
+            "target_id": target_id,
+            "target_name": target_name,
+            "location_id": current_loc,
+            "hp": target.get("hp"),
+        },
+        summary=f"Подтвердил визуальный контакт с целью «{target_name}».",
+    )
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "observation",
+        "📍 Последнее известное местоположение цели обновлено",
+        {
+            "action_kind": "target_last_known_location",
+            "target_id": target_id,
+            "location_id": current_loc,
+        },
+        summary="Перед боем обновил последнее известное местоположение цели.",
+    )
+
     weapon = (agent.get("equipment", {}) or {}).get("weapon")
     if not isinstance(weapon, dict):
         agent["action_used"] = True
@@ -689,6 +723,41 @@ def _exec_confirm_kill(
             },
             summary="Подтверждение не удалось: цель всё ещё жива.",
         )
+    agent["action_used"] = True
+    return []
+
+
+def _exec_monitor_combat(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
+    if not target_id:
+        step.payload["_monitor_complete"] = True
+        agent["action_used"] = True
+        return []
+
+    target = state.get("agents", {}).get(target_id)
+    target_alive = bool(target.get("is_alive", True)) if isinstance(target, dict) else False
+
+    combat_active = False
+    for combat in (state.get("combat_interactions", {}) or {}).values():
+        if not isinstance(combat, dict):
+            continue
+        if combat.get("ended") or combat.get("ended_turn") is not None:
+            continue
+        participants = combat.get("participants", {})
+        if not isinstance(participants, dict):
+            continue
+        if agent_id in participants and target_id in participants:
+            combat_active = True
+            break
+
+    step.payload["_monitor_complete"] = (not combat_active) or (not target_alive)
     agent["action_used"] = True
     return []
 
