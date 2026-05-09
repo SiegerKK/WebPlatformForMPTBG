@@ -244,6 +244,51 @@ def test_target_death_confirmed_memory_kind_supported() -> None:
     assert rec["importance"] >= 0.85
 
 
+def test_intel_from_trader_bridges_to_target_intel_memory_v3() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    entry = _make_entry(
+        action_kind="intel_from_trader",
+        observed="agent_location",
+        target_agent_id="target_1",
+        location_id="loc_target",
+        source_agent_id="trader_1",
+        confidence=0.69,
+    )
+    bridge_legacy_entry_to_memory_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+
+    rec = next(iter(ensure_memory_v3(agent)["records"].values()))
+    assert rec["kind"] == "target_intel"
+    assert rec["layer"] == "social"
+    assert rec["location_id"] == "loc_target"
+    assert "target_1" in rec["entity_ids"]
+    assert "trader_1" in rec["entity_ids"]
+    assert "target" in rec["tags"]
+    assert "intel" in rec["tags"]
+    assert "trader" in rec["tags"]
+    assert rec["confidence"] == 0.69
+
+
+def test_intel_from_stalker_bridges_to_target_intel_memory_v3() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    entry = _make_entry(
+        action_kind="intel_from_stalker",
+        observed="agent_location",
+        target_agent_id="target_1",
+        location_id="loc_target",
+        source_agent_id="stalker_1",
+        confidence=0.51,
+    )
+    bridge_legacy_entry_to_memory_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+
+    rec = next(iter(ensure_memory_v3(agent)["records"].values()))
+    assert rec["kind"] == "target_intel"
+    assert rec["layer"] == "social"
+    assert rec["location_id"] == "loc_target"
+    assert "target_1" in rec["entity_ids"]
+    assert "stalker_1" in rec["entity_ids"]
+    assert "stalker" in rec["tags"]
+
+
 def test_add_memory_bridges_new_legacy_entry_to_memory_v3() -> None:
     agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
     state = {"agents": {"bot1": agent}}

@@ -41,6 +41,8 @@ from app.games.zone_stalkers.decision.objectives.generator import (
 from app.games.zone_stalkers.decision.objectives.selection import choose_objective
 from app.games.zone_stalkers.decision.planner import build_plan
 from app.games.zone_stalkers.decision.target_beliefs import build_target_belief
+from app.games.zone_stalkers.memory.models import LAYER_SOCIAL, MemoryRecord
+from app.games.zone_stalkers.memory.store import add_memory_record, ensure_memory_v3
 from tests.decision.conftest import make_agent, make_minimal_state
 
 
@@ -186,8 +188,6 @@ class TestTargetBeliefConstruction:
         assert tb.is_alive is False
 
     def test_target_memory_v3_record_sets_last_known_location(self) -> None:
-        from app.games.zone_stalkers.memory.store import ensure_memory_v3, add_memory_record
-        from app.games.zone_stalkers.memory.models import MemoryRecord
         import uuid
 
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
@@ -217,9 +217,66 @@ class TestTargetBeliefConstruction:
         assert tb.location_confidence >= 0.7
         assert any("memory:" in s for s in tb.source_refs)
 
+    def test_target_belief_reads_target_intel_location(self) -> None:
+        import uuid
+
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
+        state = make_minimal_state(agent=agent)
+        ensure_memory_v3(agent)
+        rec = MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer=LAYER_SOCIAL,
+            kind="target_intel",
+            created_turn=95,
+            last_accessed_turn=None,
+            summary="Разведданные о цели",
+            details={"target_agent_id": "target_1", "location_id": "loc_target"},
+            location_id="loc_target",
+            confidence=0.69,
+        )
+        add_memory_record(agent, rec)
+
+        ctx = build_agent_context("bot1", agent, state)
+        belief_state = build_belief_state(ctx, agent, state["world_turn"])
+        tb = build_target_belief(
+            agent_id="bot1", agent=agent, state=state,
+            world_turn=state["world_turn"], belief_state=belief_state,
+        )
+        assert tb.last_known_location_id == "loc_target"
+        assert tb.location_confidence == pytest.approx(0.69, abs=0.01)
+        assert f"memory:{rec.id}" in tb.source_refs
+
+    def test_target_belief_reads_legacy_intel_from_trader_alias(self) -> None:
+        import uuid
+
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
+        state = make_minimal_state(agent=agent)
+        ensure_memory_v3(agent)
+        rec = MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer=LAYER_SOCIAL,
+            kind="intel_from_trader",
+            created_turn=95,
+            last_accessed_turn=None,
+            summary="Торговец подсказал, где цель",
+            details={"target_agent_id": "target_1", "location_id": "loc_target", "source_agent_id": "trader_1"},
+            location_id="loc_target",
+            confidence=0.69,
+        )
+        add_memory_record(agent, rec)
+
+        ctx = build_agent_context("bot1", agent, state)
+        belief_state = build_belief_state(ctx, agent, state["world_turn"])
+        tb = build_target_belief(
+            agent_id="bot1", agent=agent, state=state,
+            world_turn=state["world_turn"], belief_state=belief_state,
+        )
+        assert tb.last_known_location_id == "loc_target"
+        assert f"memory:{rec.id}" in tb.source_refs
+
     def test_target_death_confirmed_memory_overrides_state_alive(self) -> None:
-        from app.games.zone_stalkers.memory.store import ensure_memory_v3, add_memory_record
-        from app.games.zone_stalkers.memory.models import MemoryRecord
         import uuid
 
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
@@ -279,6 +336,32 @@ class TestHuntObjectiveGeneration:
         objectives = generate_objectives(_make_ctx(agent, state))
         keys = {o.key for o in objectives}
         assert OBJECTIVE_TRACK_TARGET in keys
+
+    def test_after_buying_intel_next_objective_is_track_target(self) -> None:
+        import uuid
+
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = make_minimal_state(agent=agent)
+        ensure_memory_v3(agent)
+        rec = MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer=LAYER_SOCIAL,
+            kind="target_intel",
+            created_turn=95,
+            last_accessed_turn=None,
+            summary="Купил intel о цели",
+            details={"target_agent_id": "target_1", "location_id": "loc_b", "source_agent_id": "trader_1"},
+            location_id="loc_b",
+            confidence=0.69,
+        )
+        add_memory_record(agent, rec)
+
+        objectives = generate_objectives(_make_ctx(agent, state))
+        objective_keys = {objective.key for objective in objectives}
+        assert OBJECTIVE_TRACK_TARGET in objective_keys
+        decision = choose_objective(objectives, personality=agent)
+        assert decision.selected.key == OBJECTIVE_TRACK_TARGET
 
     def test_track_stage_hunt_stage_metadata(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")

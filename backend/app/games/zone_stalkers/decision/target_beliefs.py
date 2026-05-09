@@ -92,7 +92,13 @@ def build_target_belief(
         rec_conf = max(0.0, min(1.0, float(rec.get("confidence") or 0.5)))
         rec_loc = rec.get("location_id") or details.get("location_id")
 
-        if kind in {"target_seen", "target_last_known_location", "target_intel"} and rec_loc:
+        if kind in {
+            "target_seen",
+            "target_last_known_location",
+            "target_intel",
+            "intel_from_trader",
+            "intel_from_stalker",
+        } and rec_loc:
             if rec_turn >= (last_seen_turn or -1):
                 last_seen_turn = rec_turn
                 last_known_location_id = str(rec_loc)

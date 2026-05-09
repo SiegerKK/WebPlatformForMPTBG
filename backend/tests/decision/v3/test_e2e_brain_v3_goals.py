@@ -463,14 +463,12 @@ def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
     )
     hunter = state["agents"]["hunter"]
     # Hunter must gather intel when the target's location was unknown.
-    assert any_objective_decision(hunter, "LOCATE_TARGET"), "Hunter must record LOCATE_TARGET"
-    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_last_known_location"), (
-        "Hunter must record intel_from_trader or target_last_known_location"
+    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_intel"), (
+        "Hunter must record intel_from_trader or target_intel"
     )
-    # Hunter must engage and confirm the target died.
-    assert any_objective_decision(hunter, "TRACK_TARGET") or any_objective_decision(hunter, "LOCATE_TARGET"), (
-        "Hunter must record TRACK_TARGET or LOCATE_TARGET once the target's position is known"
-    )
+    # After intel, the hunter must switch to tracking instead of looping on locate.
+    assert any_objective_decision(hunter, "TRACK_TARGET"), "Hunter must record TRACK_TARGET"
+    # Hunter must finish the hunt successfully after switching to tracking.
     assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
     # Hunter must leave the zone after completing the mission.
     assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must record LEAVE_ZONE objective"

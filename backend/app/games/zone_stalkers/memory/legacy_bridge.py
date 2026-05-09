@@ -76,6 +76,8 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "target_combat_strength_observed": (LAYER_THREAT, "target_combat_strength_observed", ("target", "combat", "threat")),
     "target_death_confirmed": (LAYER_THREAT, "target_death_confirmed", ("target", "death", "confirmed")),
     "target_intel": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social")),
+    "intel_from_trader": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social", "trader")),
+    "intel_from_stalker": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social", "stalker")),
 }
 
 _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
