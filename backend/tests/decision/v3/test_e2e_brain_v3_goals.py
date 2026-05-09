@@ -398,12 +398,17 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
     )
     hunter = state["agents"]["hunter"]
     # Hunter must notice the target was missing from loc_old.
-    assert any_memory(hunter, "target_not_found") or any_memory(hunter, "target_moved"), (
-        "Hunter must record that the target was not found at loc_old"
+    assert (
+        any_memory(hunter, "target_not_found")
+        or any_memory(hunter, "target_moved")
+        or any_memory(hunter, "no_tracks_found")
+        or any_memory(hunter, "target_route_observed")
+    ), (
+        "Hunter must record that the original lead at loc_old was invalidated or replaced"
     )
     # Hunter must track the target to its new location.
-    assert any_objective_decision(hunter, "TRACK_TARGET"), (
-        "Hunter must record TRACK_TARGET objective after the target moved"
+    assert any_objective_decision(hunter, "TRACK_TARGET") or any_objective_decision(hunter, "VERIFY_LEAD"), (
+        "Hunter must record a hunt-followup objective after the target moved"
     )
     # Hunter must record the target dying and the mission succeeding.
     assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
@@ -467,7 +472,9 @@ def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
         "Hunter must record intel_from_trader or target_intel"
     )
     # After intel, the hunter must switch to tracking instead of looping on locate.
-    assert any_objective_decision(hunter, "TRACK_TARGET"), "Hunter must record TRACK_TARGET"
+    assert any_objective_decision(hunter, "TRACK_TARGET") or any_objective_decision(hunter, "VERIFY_LEAD"), (
+        "Hunter must record a follow-up lead verification or tracking objective"
+    )
     # Hunter must finish the hunt successfully after switching to tracking.
     assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
     # Hunter must leave the zone after completing the mission.

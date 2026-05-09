@@ -35,13 +35,13 @@ _LEAD_DECAY_WINDOWS: dict[str, int] = {
 
 _LEAD_WEIGHTS: dict[str, float] = {
     "target_seen": 1.0,
-    "target_last_known_location": 0.9,
-    "target_intel": 0.78,
-    "target_moved": 0.92,
-    "target_route_observed": 0.72,
+    "target_last_known_location": 1.0,
+    "target_intel": 1.0,
+    "target_moved": 1.0,
+    "target_route_observed": 1.0,
     "target_not_found": -1.0,
-    "target_combat_noise": 0.35,
-    "target_wounded": 0.5,
+    "target_combat_noise": 1.0,
+    "target_wounded": 0.8,
 }
 
 _KIND_ALIASES: dict[str, str] = {
