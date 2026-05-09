@@ -30,6 +30,7 @@ from .models.active_plan import (
     ACTIVE_PLAN_STATUS_REPAIRING,
     MAX_REPAIR_COUNT,
     STEP_STATUS_PENDING,
+    STEP_STATUS_RUNNING,
 )
 from .models.objective import ObjectiveDecision
 from .models.plan import Plan
@@ -42,6 +43,95 @@ from app.games.zone_stalkers.rules.tick_constants import (
 )
 
 _AGENT_KEY = "active_plan_v3"
+
+
+def _extract_memory_refs(source_refs: list[str]) -> list[str]:
+    return [
+        ref.removeprefix("memory:")
+        for ref in source_refs
+        if isinstance(ref, str) and ref.startswith("memory:")
+    ]
+
+
+def _canonicalize_step_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    location_id = (
+        normalized.get("location_id")
+        or normalized.get("target_id")
+        or normalized.get("final_target_id")
+    )
+    if location_id is not None:
+        normalized.setdefault("location_id", location_id)
+
+    required_item_type = (
+        normalized.get("required_item_type")
+        or normalized.get("required_item")
+        or normalized.get("item_type")
+    )
+    if required_item_type is not None:
+        normalized.setdefault("required_item_type", required_item_type)
+
+    if kind.startswith("trade_") and normalized.get("trader_location_id") is None:
+        normalized["trader_location_id"] = normalized.get("location_id")
+
+    return normalized
+
+
+def _step_location_id(step: ActivePlanStep | None) -> Optional[str]:
+    if step is None:
+        return None
+    payload = step.payload or {}
+    value = (
+        payload.get("location_id")
+        or payload.get("target_id")
+        or payload.get("final_target_id")
+        or payload.get("trader_location_id")
+    )
+    return str(value) if value is not None else None
+
+
+def _step_required_item_type(step: ActivePlanStep | None) -> Optional[str]:
+    if step is None:
+        return None
+    payload = step.payload or {}
+    value = (
+        payload.get("required_item_type")
+        or payload.get("required_item")
+        or payload.get("item_type")
+    )
+    return str(value) if value is not None else None
+
+
+def _known_trader_ids(state: dict[str, Any]) -> set[str]:
+    known_traders = state.get("known_traders") or state.get("traders") or []
+    if isinstance(known_traders, dict):
+        return {str(key) for key in known_traders.keys()}
+    trader_ids: set[str] = set()
+    for trader in known_traders:
+        if isinstance(trader, str):
+            trader_ids.add(trader)
+        elif isinstance(trader, dict) and trader.get("id") is not None:
+            trader_ids.add(str(trader["id"]))
+    return trader_ids
+
+
+def _known_trader_locations(state: dict[str, Any]) -> set[str]:
+    known_traders = state.get("known_traders") or []
+    trader_locations: set[str] = set()
+    if isinstance(known_traders, dict):
+        for trader in known_traders.values():
+            if isinstance(trader, dict) and trader.get("location_id") is not None:
+                trader_locations.add(str(trader["location_id"]))
+        return trader_locations
+    for trader in known_traders:
+        if isinstance(trader, dict) and trader.get("location_id") is not None:
+            trader_locations.add(str(trader["location_id"]))
+    traders = state.get("traders") or {}
+    if isinstance(traders, dict):
+        for trader in traders.values():
+            if isinstance(trader, dict) and trader.get("location_id") is not None:
+                trader_locations.add(str(trader["location_id"]))
+    return trader_locations
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
@@ -66,12 +156,13 @@ def create_active_plan(
     steps: list[ActivePlanStep] = [
         ActivePlanStep(
             kind=ps.kind,
-            payload=dict(ps.payload),
+            payload=_canonicalize_step_payload(ps.kind, dict(ps.payload)),
             status=STEP_STATUS_PENDING,
         )
         for ps in plan.steps
     ]
     source_refs = list(objective.source_refs) if objective.source_refs else []
+    memory_refs = _extract_memory_refs(source_refs)
     return ActivePlanV3(
         objective_key=objective.key,
         status=ACTIVE_PLAN_STATUS_ACTIVE,
@@ -80,7 +171,7 @@ def create_active_plan(
         steps=steps,
         current_step_index=0,
         source_refs=source_refs,
-        memory_refs=[],
+        memory_refs=memory_refs,
         repair_count=0,
         abort_reason=None,
     )
@@ -166,19 +257,17 @@ def assess_active_plan_v3(
         # in state["known_traders"].
         trader_id = step.payload.get("trader_id")
         if trader_id is not None:
-            known_traders = state.get("known_traders") or []
-            if isinstance(known_traders, list):
-                trader_ids = {t if isinstance(t, str) else t.get("id") for t in known_traders}
-            elif isinstance(known_traders, dict):
-                trader_ids = set(known_traders.keys())
-            else:
-                trader_ids = set()
+            trader_ids = _known_trader_ids(state)
             if trader_id not in trader_ids:
+                return ("repair", "trader_unavailable")
+        elif step.payload.get("trader_location_id") is not None:
+            trader_locations = _known_trader_locations(state)
+            if str(step.payload["trader_location_id"]) not in trader_locations:
                 return ("repair", "trader_unavailable")
 
         # Location empty: step payload has location_id and agent memory shows
         # confirmed_empty for that location.
-        location_id = step.payload.get("location_id")
+        location_id = _step_location_id(step)
         if location_id is not None:
             for mem in agent.get("memory", []):
                 mem_loc = mem.get("location_id") or mem.get("effects", {}).get("location_id")
@@ -187,7 +276,7 @@ def assess_active_plan_v3(
 
         # Supply depletion mid-plan: step requires a supply item but inventory
         # is missing it.
-        required_item = step.payload.get("required_item")
+        required_item = _step_required_item_type(step)
         if required_item is not None:
             inventory: list[dict[str, Any]] = agent.get("inventory") or []
             has_item = any(
@@ -208,6 +297,7 @@ def repair_active_plan(
     active_plan: ActivePlanV3,
     repair_reason: str,
     world_turn: int,
+    state: Optional[dict[str, Any]] = None,
 ) -> ActivePlanV3:
     """Attempt to repair the plan.  Aborts if repair_count would exceed limit.
 
@@ -237,15 +327,48 @@ def repair_active_plan(
         active_plan.abort(f"max_repairs_exceeded_after_{repair_reason}", world_turn)
         return active_plan
 
-    # Reset the current step back to pending so the executor will retry.
     step = active_plan.current_step
-    if step is not None:
+    if repair_reason == "emission_interrupt" and step is not None and state is not None:
+        from .context_builder import build_agent_context  # noqa: PLC0415
+        from .models.plan import STEP_TRAVEL_TO_LOCATION, STEP_WAIT  # noqa: PLC0415
+        from .planner import _nearest_safe_location  # noqa: PLC0415
+
+        ctx = build_agent_context(str(agent.get("id", "active-plan-agent")), agent, state)
+        safe_location = _nearest_safe_location(ctx, state)
+        inserted_steps: list[ActivePlanStep] = []
+        if safe_location and safe_location != agent.get("location_id"):
+            inserted_steps.append(
+                ActivePlanStep(
+                    kind=STEP_TRAVEL_TO_LOCATION,
+                    payload=_canonicalize_step_payload(
+                        STEP_TRAVEL_TO_LOCATION,
+                        {"target_id": safe_location, "reason": "flee_emission"},
+                    ),
+                    status=STEP_STATUS_PENDING,
+                )
+            )
+        inserted_steps.append(
+            ActivePlanStep(
+                kind=STEP_WAIT,
+                payload={"reason": "wait_in_shelter"},
+                status=STEP_STATUS_PENDING,
+            )
+        )
+        step.status = STEP_STATUS_PENDING
+        step.started_turn = None
+        step.failure_reason = None
+        active_plan.steps[active_plan.current_step_index:active_plan.current_step_index] = inserted_steps
+    elif step is not None:
+        if step.status == STEP_STATUS_RUNNING:
+            step.failure_reason = repair_reason
         step.status = STEP_STATUS_PENDING
         step.started_turn = None
         step.failure_reason = None
 
     # Transition back to active once the repair setup is done.
     active_plan.status = ACTIVE_PLAN_STATUS_ACTIVE
+    active_plan.abort_reason = repair_reason
+    active_plan.updated_turn = world_turn
     return active_plan
 
 

@@ -77,6 +77,7 @@ def append_brain_trace_event(
     active_objective: dict[str, Any] | None = None,
     objective_scores: list[dict[str, Any]] | None = None,
     alternatives: list[dict[str, Any]] | None = None,
+    active_plan_runtime: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     trace = agent.get("brain_trace")
@@ -115,6 +116,8 @@ def append_brain_trace_event(
         event["objective_scores"] = objective_scores[:5]
     if alternatives:
         event["alternatives"] = alternatives[:5]
+    if active_plan_runtime is not None:
+        event["active_plan_runtime"] = active_plan_runtime
 
     if not isinstance(trace, dict):
         thought = summary
@@ -180,6 +183,7 @@ def write_decision_brain_trace_from_v2(
     active_objective: dict[str, Any] | None = None,
     objective_scores: list[dict[str, Any]] | None = None,
     alternatives: list[dict[str, Any]] | None = None,
+    active_plan_runtime: dict[str, Any] | None = None,
 ) -> None:
     if active_objective and isinstance(active_objective, dict) and active_objective.get("key"):
         objective_key = active_objective["key"]
@@ -235,6 +239,41 @@ def write_decision_brain_trace_from_v2(
         active_objective=active_objective,
         objective_scores=objective_scores,
         alternatives=alternatives,
+        active_plan_runtime=active_plan_runtime,
+        state=state,
+    )
+
+
+def write_active_plan_trace(
+    agent: dict[str, Any],
+    *,
+    world_turn: int,
+    event: str,
+    active_plan: Any,
+    reason: str | None = None,
+    summary: str | None = None,
+    state: dict[str, Any] | None = None,
+) -> None:
+    current_step = getattr(active_plan, "current_step", None)
+    active_plan_runtime = {
+        "active_plan_id": getattr(active_plan, "id", None),
+        "objective_key": getattr(active_plan, "objective_key", None),
+        "status": getattr(active_plan, "status", None),
+        "current_step_index": getattr(active_plan, "current_step_index", None),
+        "current_step_kind": getattr(current_step, "kind", None),
+        "steps_count": len(getattr(active_plan, "steps", []) or []),
+        "repair_count": getattr(active_plan, "repair_count", 0),
+        "source_refs": list(getattr(active_plan, "source_refs", []) or []),
+        "memory_refs": list(getattr(active_plan, "memory_refs", []) or []),
+    }
+    append_brain_trace_event(
+        agent,
+        world_turn=world_turn,
+        mode="active_plan",
+        decision=event,
+        summary=summary or event,
+        reason=reason,
+        active_plan_runtime=active_plan_runtime,
         state=state,
     )
 

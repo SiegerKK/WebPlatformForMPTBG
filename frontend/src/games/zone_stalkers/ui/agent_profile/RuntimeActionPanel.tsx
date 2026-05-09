@@ -141,7 +141,7 @@ function ActivePlanDisplay({ plan }: { plan: unknown }) {
       {Array.isArray(steps) && steps.length > 0 && (
         <div style={st.steps}>
           {steps.map((step, i) => {
-            const stepType = safeGet<string>(step, 'type') ?? safeGet<string>(step, 'action_type') ?? String(i);
+            const stepType = safeGet<string>(step, 'kind') ?? safeGet<string>(step, 'type') ?? safeGet<string>(step, 'action_type') ?? String(i);
             const stepStatus = safeGet<string>(step, 'status') ?? 'pending';
             const icon = STEP_ICONS[stepStatus] ?? '⏳';
             return (

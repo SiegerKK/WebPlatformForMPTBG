@@ -18,9 +18,29 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.games.zone_stalkers.decision.debug.brain_trace import (
     ensure_brain_trace_for_tick,
+    write_active_plan_trace,
     write_decision_brain_trace_from_v2,
     write_plan_monitor_trace,
 )
+from app.games.zone_stalkers.decision.active_plan_manager import (
+    assess_active_plan_v3,
+    clear_active_plan,
+    create_active_plan,
+    get_active_plan,
+    repair_active_plan,
+    save_active_plan,
+)
+from app.games.zone_stalkers.decision.models.active_plan import (
+    ActivePlanStep,
+    ActivePlanV3,
+    ACTIVE_PLAN_STATUS_ABORTED,
+    ACTIVE_PLAN_STATUS_COMPLETED,
+    STEP_STATUS_COMPLETED,
+    STEP_STATUS_FAILED,
+    STEP_STATUS_PENDING,
+    STEP_STATUS_RUNNING,
+)
+from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep
 from app.games.zone_stalkers.decision.plan_monitor import (
     PlanMonitorResult,
     assess_scheduled_action_v3,
@@ -115,6 +135,430 @@ _OBJECTIVE_TO_GOAL: Dict[str, str] = {
     "PREPARE_FOR_HUNT": "prepare_for_hunt",
     "IDLE": "idle",
 }
+
+
+def _active_plan_step_label(step: ActivePlanStep | None) -> str:
+    return step.kind if step is not None else "none"
+
+
+def _active_plan_trace_payload(active_plan: ActivePlanV3) -> dict[str, Any]:
+    current_step = active_plan.current_step
+    return {
+        "active_plan_id": active_plan.id,
+        "objective_key": active_plan.objective_key,
+        "status": active_plan.status,
+        "current_step_index": active_plan.current_step_index,
+        "current_step_kind": _active_plan_step_label(current_step),
+        "steps_count": len(active_plan.steps),
+        "repair_count": active_plan.repair_count,
+        "source_refs": list(active_plan.source_refs),
+        "memory_refs": list(active_plan.memory_refs),
+    }
+
+
+def _write_active_plan_memory_event(
+    agent: Dict[str, Any],
+    *,
+    world_turn: int,
+    state: Dict[str, Any],
+    action_kind: str,
+    active_plan: ActivePlanV3,
+    reason: str | None = None,
+) -> None:
+    payload = {
+        "action_kind": action_kind,
+        **_active_plan_trace_payload(active_plan),
+        "step_index": active_plan.current_step_index,
+        "step_kind": _active_plan_step_label(active_plan.current_step),
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "decision",
+        f"🧭 {action_kind}",
+        payload,
+        summary=(
+            f"ActivePlan {active_plan.objective_key}: "
+            f"{action_kind} (шаг {active_plan.current_step_index + 1}/{max(1, len(active_plan.steps))}, "
+            f"{_active_plan_step_label(active_plan.current_step)})."
+            + (f" Причина: {reason}." if reason else "")
+        ),
+    )
+
+
+def _write_active_plan_trace_event(
+    agent: Dict[str, Any],
+    *,
+    world_turn: int,
+    state: Dict[str, Any],
+    event: str,
+    active_plan: ActivePlanV3,
+    reason: str | None = None,
+    summary: str | None = None,
+) -> None:
+    write_active_plan_trace(
+        agent,
+        world_turn=world_turn,
+        event=event,
+        active_plan=active_plan,
+        reason=reason,
+        summary=summary,
+        state=state,
+    )
+
+
+def _tag_scheduled_action_with_active_plan(
+    scheduled_action: Dict[str, Any] | None,
+    active_plan: ActivePlanV3,
+    step_index: int,
+) -> None:
+    if not isinstance(scheduled_action, dict):
+        return
+    scheduled_action["active_plan_id"] = active_plan.id
+    scheduled_action["active_plan_step_index"] = step_index
+    scheduled_action["active_plan_objective_key"] = active_plan.objective_key
+
+
+def _scheduled_action_matches_active_step(
+    scheduled_action: Dict[str, Any],
+    step: ActivePlanStep | None,
+) -> bool:
+    if step is None:
+        return False
+    tagged_step_index = scheduled_action.get("active_plan_step_index")
+    if tagged_step_index is not None:
+        try:
+            return int(tagged_step_index) >= 0
+        except (TypeError, ValueError):
+            return False
+    action_type = str(scheduled_action.get("type") or "")
+    step_kind = str(step.kind)
+    if action_type == "travel" and step_kind == "travel_to_location":
+        target = scheduled_action.get("final_target_id") or scheduled_action.get("target_id")
+        step_target = (
+            step.payload.get("location_id")
+            or step.payload.get("target_id")
+            or step.payload.get("final_target_id")
+        )
+        return step_target is None or target == step_target
+    if action_type == "explore_anomaly_location" and step_kind == "explore_location":
+        target = scheduled_action.get("target_id")
+        step_target = step.payload.get("location_id") or step.payload.get("target_id")
+        return step_target is None or target == step_target
+    if action_type == "sleep" and step_kind == "sleep_for_hours":
+        return True
+    return False
+
+
+def _finish_active_plan(
+    agent_id: str,
+    agent: Dict[str, Any],
+    active_plan: ActivePlanV3,
+    state: Dict[str, Any],
+    world_turn: int,
+    *,
+    terminal_event: str,
+    reason: str | None = None,
+) -> None:
+    _write_active_plan_trace_event(
+        agent,
+        world_turn=world_turn,
+        state=state,
+        event=terminal_event,
+        active_plan=active_plan,
+        reason=reason,
+        summary=(
+            f"ActivePlan {active_plan.objective_key}: {terminal_event}."
+            + (f" Причина: {reason}." if reason else "")
+        ),
+    )
+    _write_active_plan_memory_event(
+        agent,
+        world_turn=world_turn,
+        state=state,
+        action_kind=terminal_event,
+        active_plan=active_plan,
+        reason=reason,
+    )
+    clear_active_plan(agent)
+    sched = agent.get("scheduled_action")
+    if isinstance(sched, dict) and sched.get("active_plan_id") == active_plan.id:
+        agent["scheduled_action"] = None
+    agent["action_queue"] = []
+
+
+def _start_or_continue_active_plan_step(
+    agent_id: str,
+    agent: Dict[str, Any],
+    active_plan: ActivePlanV3,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    if agent.get("scheduled_action"):
+        return []
+
+    current_step = active_plan.current_step
+    if current_step is None:
+        active_plan.status = ACTIVE_PLAN_STATUS_COMPLETED
+        save_active_plan(agent, active_plan)
+        _finish_active_plan(
+            agent_id,
+            agent,
+            active_plan,
+            state,
+            world_turn,
+            terminal_event="active_plan_completed",
+        )
+        return []
+
+    if current_step.status not in (STEP_STATUS_PENDING, STEP_STATUS_RUNNING):
+        return []
+
+    current_step.status = STEP_STATUS_RUNNING
+    current_step.started_turn = world_turn
+    active_plan.updated_turn = world_turn
+    save_active_plan(agent, active_plan)
+    _write_active_plan_trace_event(
+        agent,
+        world_turn=world_turn,
+        state=state,
+        event="active_plan_step_started",
+        active_plan=active_plan,
+        summary=(
+            f"ActivePlan {active_plan.objective_key}: старт шага "
+            f"{active_plan.current_step_index + 1}/{len(active_plan.steps)} "
+            f"{current_step.kind}."
+        ),
+    )
+    _write_active_plan_memory_event(
+        agent,
+        world_turn=world_turn,
+        state=state,
+        action_kind="active_plan_step_started",
+        active_plan=active_plan,
+    )
+
+    from app.games.zone_stalkers.decision.context_builder import build_agent_context  # noqa: PLC0415
+    from app.games.zone_stalkers.decision.executors import execute_plan_step  # noqa: PLC0415
+
+    step_plan = Plan(
+        intent_kind="active_plan_step",
+        steps=[PlanStep(kind=current_step.kind, payload=dict(current_step.payload))],
+        created_turn=world_turn,
+    )
+    ctx = build_agent_context(agent_id, agent, state)
+    events = execute_plan_step(ctx, step_plan, state, world_turn)
+
+    refreshed_plan = get_active_plan(agent) or active_plan
+    if agent.get("scheduled_action"):
+        _tag_scheduled_action_with_active_plan(
+            agent["scheduled_action"],
+            refreshed_plan,
+            refreshed_plan.current_step_index,
+        )
+        save_active_plan(agent, refreshed_plan)
+        return events
+
+    if step_plan.current_step_index > 0:
+        refreshed_plan.advance_step(world_turn)
+        save_active_plan(agent, refreshed_plan)
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_step_completed",
+            active_plan=refreshed_plan,
+            summary=(
+                f"ActivePlan {refreshed_plan.objective_key}: завершён шаг "
+                f"{refreshed_plan.current_step_index}/{len(refreshed_plan.steps)}."
+            ),
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_step_completed",
+            active_plan=refreshed_plan,
+            reason="completed",
+        )
+        if refreshed_plan.is_complete:
+            _finish_active_plan(
+                agent_id,
+                agent,
+                refreshed_plan,
+                state,
+                world_turn,
+                terminal_event="active_plan_completed",
+            )
+    else:
+        save_active_plan(agent, refreshed_plan)
+
+    return events
+
+
+def _process_active_plan_v3(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> Tuple[bool, List[Dict[str, Any]]]:
+    active_plan = get_active_plan(agent)
+    if active_plan is None:
+        return False, []
+
+    operation, reason = assess_active_plan_v3(agent, state, world_turn)
+    if operation == "continue":
+        if not agent.get("scheduled_action"):
+            return True, _start_or_continue_active_plan_step(
+                agent_id,
+                agent,
+                active_plan,
+                state,
+                world_turn,
+            )
+        return True, []
+
+    if operation == "repair":
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_repair_requested",
+            active_plan=active_plan,
+            reason=reason,
+            summary=f"ActivePlan {active_plan.objective_key}: требуется repair ({reason}).",
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_repair_requested",
+            active_plan=active_plan,
+            reason=reason,
+        )
+        repaired = repair_active_plan(agent, active_plan, reason or "repair", world_turn, state=state)
+        if repaired.status == ACTIVE_PLAN_STATUS_ABORTED:
+            save_active_plan(agent, repaired)
+            _finish_active_plan(
+                agent_id,
+                agent,
+                repaired,
+                state,
+                world_turn,
+                terminal_event="active_plan_aborted",
+                reason=repaired.abort_reason,
+            )
+            return False, []
+        save_active_plan(agent, repaired)
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_repaired",
+            active_plan=repaired,
+            reason=reason,
+            summary=f"ActivePlan {repaired.objective_key}: repair {reason}.",
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_repaired",
+            active_plan=repaired,
+            reason=reason,
+        )
+        if not agent.get("scheduled_action"):
+            return True, _start_or_continue_active_plan_step(
+                agent_id,
+                agent,
+                repaired,
+                state,
+                world_turn,
+            )
+        return True, []
+
+    if operation == "complete":
+        _finish_active_plan(
+            agent_id,
+            agent,
+            active_plan,
+            state,
+            world_turn,
+            terminal_event="active_plan_completed",
+            reason=reason,
+        )
+        return False, []
+
+    if operation == "abort":
+        active_plan.abort(reason or "abort", world_turn)
+        save_active_plan(agent, active_plan)
+        _finish_active_plan(
+            agent_id,
+            agent,
+            active_plan,
+            state,
+            world_turn,
+            terminal_event="active_plan_aborted",
+            reason=reason,
+        )
+        return False, []
+
+    return False, []
+
+
+def _on_active_plan_scheduled_action_completed(
+    agent_id: str,
+    agent: Dict[str, Any],
+    scheduled_action: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    active_plan = get_active_plan(agent)
+    if active_plan is None:
+        return []
+    if scheduled_action.get("active_plan_id") != active_plan.id:
+        return []
+    if active_plan.current_step_index != int(scheduled_action.get("active_plan_step_index", -1)):
+        return []
+    if not _scheduled_action_matches_active_step(scheduled_action, active_plan.current_step):
+        return []
+
+    completed_step = active_plan.current_step
+    active_plan.advance_step(world_turn)
+    save_active_plan(agent, active_plan)
+    _write_active_plan_trace_event(
+        agent,
+        world_turn=world_turn,
+        state=state,
+        event="active_plan_step_completed",
+        active_plan=active_plan,
+        summary=(
+            f"ActivePlan {active_plan.objective_key}: завершён шаг "
+            f"{active_plan.current_step_index}/{len(active_plan.steps)} "
+            f"{completed_step.kind if completed_step is not None else 'unknown'}."
+        ),
+    )
+    _write_active_plan_memory_event(
+        agent,
+        world_turn=world_turn,
+        state=state,
+        action_kind="active_plan_step_completed",
+        active_plan=active_plan,
+        reason="completed",
+    )
+    if active_plan.is_complete:
+        _finish_active_plan(
+            agent_id,
+            agent,
+            active_plan,
+            state,
+            world_turn,
+            terminal_event="active_plan_completed",
+        )
+    return []
 
 _OBJECTIVE_MEMORY_USED_FOR: Dict[str, str] = {
     "RESTORE_FOOD": "find_food",
@@ -575,6 +1019,17 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         if _agent_in_active_combat(agent_id, state):
             continue
 
+        if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None:
+            handled, active_plan_events = _process_active_plan_v3(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+            )
+            events.extend(active_plan_events)
+            if handled:
+                continue
+
         bot_evs = _run_bot_decision_v2(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
@@ -670,6 +1125,28 @@ def _mark_agent_dead(
     from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
 
     agent["is_alive"] = False
+    active_plan = get_active_plan(agent)
+    if active_plan is not None:
+        active_plan.abort("death", world_turn)
+        save_active_plan(agent, active_plan)
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_aborted",
+            active_plan=active_plan,
+            reason="death",
+            summary=f"ActivePlan {active_plan.objective_key}: прерван из-за смерти.",
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_aborted",
+            active_plan=active_plan,
+            reason="death",
+        )
+        clear_active_plan(agent)
     agent["scheduled_action"] = None
     agent["action_queue"] = []
     agent["action_used"] = False
@@ -777,6 +1254,7 @@ def _process_scheduled_action(
         return events
 
     # Action complete — resolve effects
+    completed_sched = dict(sched)
     agent["scheduled_action"] = None
 
     if action_type == "travel":
@@ -890,6 +1368,10 @@ def _process_scheduled_action(
                 # flee on every hop, creating an infinite loop.
                 if sched.get("emergency_flee"):
                     _next_sched["emergency_flee"] = True
+                if sched.get("active_plan_id") is not None:
+                    _next_sched["active_plan_id"] = sched.get("active_plan_id")
+                    _next_sched["active_plan_step_index"] = sched.get("active_plan_step_index")
+                    _next_sched["active_plan_objective_key"] = sched.get("active_plan_objective_key")
                 agent["scheduled_action"] = _next_sched
                 events.append({
                     "event_type": "travel_hop_completed",
@@ -978,9 +1460,24 @@ def _process_scheduled_action(
             "payload": {"agent_id": agent_id},
         })
 
+    if completed_sched.get("active_plan_id") is not None:
+        events.extend(
+            _on_active_plan_scheduled_action_completed(
+                agent_id,
+                agent,
+                completed_sched,
+                state,
+                world_turn,
+            )
+        )
+
     # Pop next queued action if available
     queue = agent.get("action_queue", [])
-    if queue and not agent.get("scheduled_action"):
+    if (
+        completed_sched.get("active_plan_id") is None
+        and queue
+        and not agent.get("scheduled_action")
+    ):
         next_action = queue.pop(0)
         agent["action_queue"] = queue
         agent["scheduled_action"] = next_action
@@ -4091,6 +4588,21 @@ def _pre_decision_equipment_maintenance(
 
 
 def _build_active_plan_summary(agent: Dict[str, Any]) -> dict[str, Any] | None:
+    active_plan = get_active_plan(agent)
+    if active_plan is not None:
+        steps_count = max(1, len(active_plan.steps))
+        remaining_steps = max(0, steps_count - active_plan.current_step_index)
+        return {
+            "scheduled_action_type": _active_plan_step_label(active_plan.current_step),
+            "urgency": 0.45,
+            "remaining_value": max(0.0, min(1.0, 0.95 - (active_plan.current_step_index / steps_count) * 0.5)),
+            "risk": 0.2,
+            "remaining_time": max(0.0, min(1.0, remaining_steps / steps_count)),
+            "resource_cost": 0.0,
+            "confidence": 0.8,
+            "goal_alignment": 0.8,
+        }
+
     sched = agent.get("scheduled_action")
     if not isinstance(sched, dict):
         return None
@@ -4210,7 +4722,12 @@ def _run_bot_decision_v2_inner(
     from app.games.zone_stalkers.decision.intents import select_intent
     from app.games.zone_stalkers.decision.planner import build_plan
     from app.games.zone_stalkers.decision.executors import execute_plan_step
-    from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext, ObjectiveScore
+    from app.games.zone_stalkers.decision.models.objective import (
+        Objective,
+        ObjectiveDecision,
+        ObjectiveGenerationContext,
+        ObjectiveScore,
+    )
     from app.games.zone_stalkers.decision.objectives.generator import generate_objectives
     from app.games.zone_stalkers.decision.objectives.selection import choose_objective
     from app.games.zone_stalkers.decision.objectives.intent_adapter import objective_to_intent
@@ -4496,6 +5013,24 @@ def _run_bot_decision_v2_inner(
             for _obj, _score in [pair for pair in objective_pairs if pair[0].key != selected_objective.key][:5]
         ]
 
+    runtime_active_plan = None
+    if is_v3_monitored_bot(agent):
+        plan_decision = objective_decision
+        if plan_decision is None and selected_objective is not None and selected_objective_score is not None:
+            plan_decision = ObjectiveDecision(
+                selected=selected_objective,
+                selected_score=selected_objective_score,
+                alternatives=(),
+            )
+        if plan_decision is not None:
+            runtime_active_plan = create_active_plan(
+                objective_decision=plan_decision,
+                world_turn=world_turn,
+                plan=plan,
+            )
+            save_active_plan(agent, runtime_active_plan)
+            agent["action_queue"] = []
+
     write_decision_brain_trace_from_v2(
         agent,
         world_turn=world_turn,
@@ -4508,9 +5043,37 @@ def _run_bot_decision_v2_inner(
         active_objective=_selected_objective_trace,
         objective_scores=_objective_scores_trace,
         alternatives=_alternatives_trace,
+        active_plan_runtime=_active_plan_trace_payload(runtime_active_plan) if runtime_active_plan is not None else None,
     )
 
-    result = execute_plan_step(ctx, plan, state, world_turn)
+    if runtime_active_plan is not None:
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_created",
+            active_plan=runtime_active_plan,
+            summary=(
+                f"ActivePlan {runtime_active_plan.objective_key}: создан "
+                f"с {len(runtime_active_plan.steps)} шаг(ами)."
+            ),
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_created",
+            active_plan=runtime_active_plan,
+        )
+        result = _start_or_continue_active_plan_step(
+            agent_id,
+            agent,
+            runtime_active_plan,
+            state,
+            world_turn,
+        )
+    else:
+        result = execute_plan_step(ctx, plan, state, world_turn)
     # Transient PR3 hint/debug fields should not leak between ticks.
     agent.pop("_belief_memory_hints", None)
     agent.pop("_memory_used_decision", None)
@@ -4653,6 +5216,30 @@ def _execute_leave_zone(
     loc = locations.get(loc_id, {})
     exit_name = loc.get("name", loc_id)
     agent["has_left_zone"] = True
+    active_plan = get_active_plan(agent)
+    if active_plan is not None:
+        active_plan.abort("left_zone", world_turn)
+        save_active_plan(agent, active_plan)
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_completed",
+            active_plan=active_plan,
+            reason="left_zone",
+            summary=f"ActivePlan {active_plan.objective_key}: завершён при выходе из Зоны.",
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_completed",
+            active_plan=active_plan,
+            reason="left_zone",
+        )
+        clear_active_plan(agent)
+    agent["scheduled_action"] = None
+    agent["action_queue"] = []
     # Remove agent from the exit location's agent list
     if agent_id in loc.get("agents", []):
         loc["agents"].remove(agent_id)

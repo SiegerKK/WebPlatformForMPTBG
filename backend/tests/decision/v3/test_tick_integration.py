@@ -2,6 +2,14 @@ from __future__ import annotations
 
 import pytest
 
+from app.games.zone_stalkers.decision.active_plan_manager import create_active_plan
+from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveDecision, ObjectiveScore
+from app.games.zone_stalkers.decision.models.plan import (
+    Plan,
+    PlanStep,
+    STEP_EXPLORE_LOCATION,
+    STEP_TRAVEL_TO_LOCATION,
+)
 from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
 
 
@@ -79,6 +87,34 @@ def _bot_agent() -> dict:
             "remaining_route": [],
         },
     }
+
+
+def _decision(key: str = "FIND_ARTIFACTS") -> ObjectiveDecision:
+    return ObjectiveDecision(
+        selected=Objective(
+            key=key,
+            source="test",
+            urgency=0.7,
+            expected_value=0.8,
+            risk=0.1,
+            time_cost=0.3,
+            resource_cost=0.1,
+            confidence=0.9,
+            goal_alignment=0.8,
+            memory_confidence=0.9,
+            reasons=("test",),
+            source_refs=("memory:mem_test",),
+        ),
+        selected_score=ObjectiveScore(
+            objective_key=key,
+            raw_score=0.8,
+            final_score=0.8,
+            factors=(),
+            penalties=(),
+            decision="selected",
+        ),
+        alternatives=(),
+    )
 
 
 def test_plan_monitor_abort_emits_event_and_clears_action_queue() -> None:
@@ -205,6 +241,156 @@ def test_bot_decision_pipeline_writes_decision_brain_trace_event() -> None:
     trace = new_state["agents"]["bot1"]["brain_trace"]
     assert trace["turn"] == 100
     assert any(ev.get("mode") == "decision" and ev.get("decision") == "new_intent" for ev in trace.get("events", []))
+
+
+def test_tick_objective_decision_creates_active_plan_v3() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["inventory"].append({"id": "art1", "type": "soul", "value": 1000})
+    state["traders"] = {"trader_1": {"id": "trader_1", "location_id": "loc_b", "is_alive": True}}
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    new_bot = new_state["agents"]["bot1"]
+    active_plan = new_bot.get("active_plan_v3")
+    assert active_plan is not None
+    assert active_plan.get("objective_key")
+    assert active_plan.get("steps")
+    assert new_bot["scheduled_action"]["active_plan_id"] == active_plan["id"]
+    assert new_bot["scheduled_action"]["active_plan_step_index"] == 0
+
+
+def test_tick_scheduled_action_completion_advances_active_plan_step() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    plan = Plan(
+        intent_kind="explore",
+        steps=[
+            PlanStep(kind=STEP_TRAVEL_TO_LOCATION, payload={"target_id": "loc_b"}),
+            PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc_b"}),
+        ],
+    )
+    active_plan = create_active_plan(_decision(), world_turn=100, plan=plan)
+    bot["active_plan_v3"] = active_plan.to_dict()
+    bot["scheduled_action"] = {
+        "type": "travel",
+        "turns_remaining": 1,
+        "turns_total": 1,
+        "target_id": "loc_b",
+        "final_target_id": "loc_b",
+        "remaining_route": [],
+        "active_plan_id": active_plan.id,
+        "active_plan_step_index": 0,
+    }
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    new_bot = new_state["agents"]["bot1"]
+    new_plan = new_bot["active_plan_v3"]
+    assert new_plan["current_step_index"] == 1
+    assert new_plan["steps"][0]["status"] == "completed"
+    assert new_bot["scheduled_action"]["type"] == "explore_anomaly_location"
+    assert new_bot["scheduled_action"]["active_plan_step_index"] == 1
+
+
+def test_tick_active_plan_continue_skips_new_objective_decision() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    bot["memory"] = [
+        {
+            "type": "decision",
+            "effects": {"action_kind": "objective_decision", "objective_key": "FIND_ARTIFACTS"},
+        }
+    ]
+    plan = Plan(intent_kind="explore", steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc_a"})])
+    active_plan = create_active_plan(_decision(), world_turn=100, plan=plan)
+    bot["active_plan_v3"] = active_plan.to_dict()
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    new_bot = new_state["agents"]["bot1"]
+    decision_memories = [
+        m
+        for m in new_bot.get("memory", [])
+        if m.get("type") == "decision"
+        and m.get("effects", {}).get("action_kind") == "objective_decision"
+    ]
+    assert len(decision_memories) == 1
+    assert new_bot["active_plan_v3"]["id"] == active_plan.id
+    assert new_bot["scheduled_action"]["active_plan_id"] == active_plan.id
+
+
+def test_tick_emission_interrupt_repairs_active_plan() -> None:
+    state = _make_base_state()
+    state["emission_active"] = True
+    state["emission_ends_turn"] = 200
+    state["locations"]["loc_a"]["terrain_type"] = "plain"
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    plan = Plan(intent_kind="explore", steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc_a"})])
+    active_plan = create_active_plan(_decision(), world_turn=100, plan=plan)
+    bot["active_plan_v3"] = active_plan.to_dict()
+    bot["scheduled_action"] = {
+        "type": "explore_anomaly_location",
+        "target_id": "loc_a",
+        "turns_remaining": 2,
+        "turns_total": 2,
+        "active_plan_id": active_plan.id,
+        "active_plan_step_index": 0,
+    }
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    new_bot = new_state["agents"]["bot1"]
+    new_plan = new_bot["active_plan_v3"]
+    assert new_plan["objective_key"] == "FIND_ARTIFACTS"
+    assert new_plan["repair_count"] == 1
+    assert new_bot["scheduled_action"]["type"] == "travel"
+    assert new_bot["scheduled_action"]["active_plan_id"] == active_plan.id
+
+
+def test_dead_npc_clears_active_plan_v3() -> None:
+    state = _make_base_state()
+    state["locations"]["loc_a"]["terrain_type"] = "plain"
+    state["emission_scheduled_turn"] = 100
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["thirst"] = 10
+    bot["hunger"] = 10
+    plan = Plan(intent_kind="explore", steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc_a"})])
+    active_plan = create_active_plan(_decision(), world_turn=100, plan=plan)
+    bot["active_plan_v3"] = active_plan.to_dict()
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    new_bot = new_state["agents"]["bot1"]
+    assert new_bot["is_alive"] is False
+    assert new_bot.get("active_plan_v3") is None
+    assert new_bot.get("scheduled_action") is None
 
 
 def test_v3_transient_flags_are_removed_after_tick() -> None:

@@ -258,6 +258,28 @@ class TestCreateActivePlan:
         assert "mem-abc" in ap.source_refs
         assert "mem-def" in ap.source_refs
 
+    def test_create_active_plan_extracts_memory_refs_from_source_refs(self) -> None:
+        decision = ObjectiveDecision(
+            selected=Objective(
+                key="SELL_ARTIFACTS",
+                source="test",
+                urgency=0.7,
+                expected_value=0.8,
+                risk=0.1,
+                time_cost=0.3,
+                resource_cost=0.1,
+                confidence=0.9,
+                goal_alignment=0.8,
+                memory_confidence=0.9,
+                source_refs=("memory:mem_trader_1", "world:loc_a"),
+            ),
+            selected_score=_score("SELL_ARTIFACTS"),
+            alternatives=(),
+        )
+        ap = create_active_plan(decision, world_turn=2, plan=_plan(STEP_TRAVEL_TO_LOCATION))
+        assert ap.source_refs == ["memory:mem_trader_1", "world:loc_a"]
+        assert ap.memory_refs == ["mem_trader_1"]
+
     def test_empty_plan_creates_active_plan_with_no_steps(self) -> None:
         decision = _decision("IDLE")
         plan = Plan(intent_kind="idle", steps=[])
@@ -381,6 +403,19 @@ class TestAssessActivePlanV3:
         op, reason = assess_active_plan_v3(agent, state, world_turn=2)
         assert op == "continue"
 
+    def test_active_plan_trader_check_uses_trader_location_when_trader_id_missing(self) -> None:
+        agent = _base_agent()
+        plan = Plan(
+            intent_kind="trade",
+            steps=[PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"trader_location_id": "loc_b"})],
+        )
+        ap = create_active_plan(_decision("RESUPPLY"), world_turn=1, plan=plan)
+        save_active_plan(agent, ap)
+        state = _base_state()
+        state["traders"] = {"trader-001": {"id": "trader-001", "location_id": "loc_b", "is_alive": True}}
+        op, reason = assess_active_plan_v3(agent, state, world_turn=2)
+        assert op == "continue"
+
     def test_repair_target_location_empty(self) -> None:
         agent = _base_agent()
         agent["memory"] = [
@@ -398,12 +433,44 @@ class TestAssessActivePlanV3:
         assert op == "repair"
         assert reason == "target_location_empty"
 
+    def test_active_plan_repair_uses_target_id_alias_for_location(self) -> None:
+        agent = _base_agent()
+        agent["memory"] = [
+            {
+                "type": "observation",
+                "location_id": "loc-alias",
+                "confirmed_empty": True,
+                "world_turn": 5,
+            }
+        ]
+        plan = Plan(
+            intent_kind="explore",
+            steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc-alias"})],
+        )
+        ap = create_active_plan(_decision(), world_turn=1, plan=plan)
+        save_active_plan(agent, ap)
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=6)
+        assert op == "repair"
+        assert reason == "target_location_empty"
+
     def test_repair_supplies_consumed_mid_plan(self) -> None:
         agent = _base_agent()
         agent["inventory"] = []  # no food
         plan = Plan(
             intent_kind="consume",
             steps=[PlanStep(kind=STEP_CONSUME_ITEM, payload={"required_item": "food_can"})],
+        )
+        ap = create_active_plan(_decision("RESTORE_FOOD"), world_turn=1, plan=plan)
+        save_active_plan(agent, ap)
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=2)
+        assert op == "repair"
+        assert reason == "supplies_consumed_mid_plan"
+
+    def test_active_plan_supply_check_uses_item_type_alias(self) -> None:
+        agent = _base_agent()
+        plan = Plan(
+            intent_kind="consume",
+            steps=[PlanStep(kind=STEP_CONSUME_ITEM, payload={"item_type": "food_can"})],
         )
         ap = create_active_plan(_decision("RESTORE_FOOD"), world_turn=1, plan=plan)
         save_active_plan(agent, ap)
@@ -458,6 +525,26 @@ class TestRepairActivePlan:
         result = repair_active_plan(agent, ap, "emission_interrupt", world_turn=5)
         assert result.status == ACTIVE_PLAN_STATUS_ABORTED
         assert "max_repairs_exceeded" in result.abort_reason
+
+    def test_emission_interrupt_inserts_shelter_steps(self) -> None:
+        agent = _base_agent()
+        agent["location_id"] = "loc_a"
+        state = {
+            "world_minute": 0,
+            "emission_active": True,
+            "locations": {
+                "loc_a": {"connections": [{"to": "loc_b"}], "terrain_type": "plain"},
+                "loc_b": {"connections": [{"to": "loc_a"}], "terrain_type": "buildings"},
+            },
+            "agents": {},
+        }
+        plan = _plan(STEP_EXPLORE_LOCATION, STEP_TRAVEL_TO_LOCATION)
+        ap = create_active_plan(_decision(), world_turn=1, plan=plan)
+        result = repair_active_plan(agent, ap, "emission_interrupt", world_turn=2, state=state)
+        assert result.repair_count == 1
+        assert result.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+        assert result.steps[1].kind == "wait"
+        assert result.steps[2].kind == STEP_EXPLORE_LOCATION
 
 
 class TestShouldReplaceActivePlan:
