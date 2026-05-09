@@ -48,6 +48,13 @@ def test_restore_water_maps_to_seek_water_with_metadata() -> None:
 def test_resupply_weapon_maps_to_resupply() -> None:
     intent = objective_to_intent(_objective("RESUPPLY_WEAPON"), _score("RESUPPLY_WEAPON", 0.65), world_turn=100)
     assert intent.kind == INTENT_RESUPPLY
+    assert intent.metadata and intent.metadata.get("forced_resupply_category") == "weapon"
+
+
+def test_resupply_food_maps_to_resupply_with_forced_food_category() -> None:
+    intent = objective_to_intent(_objective("RESUPPLY_FOOD"), _score("RESUPPLY_FOOD", 0.7), world_turn=100)
+    assert intent.kind == INTENT_RESUPPLY
+    assert intent.metadata and intent.metadata.get("forced_resupply_category") == "food"
 
 
 def test_get_money_for_resupply_maps_to_get_rich() -> None:

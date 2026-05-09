@@ -53,6 +53,15 @@ OBJECTIVE_TO_INTENT: dict[str, str] = {
     "CONTINUE_CURRENT_PLAN": INTENT_IDLE,
 }
 
+_RESUPPLY_OBJECTIVE_TO_CATEGORY: dict[str, str] = {
+    "RESUPPLY_WEAPON": "weapon",
+    "RESUPPLY_ARMOR": "armor",
+    "RESUPPLY_AMMO": "ammo",
+    "RESUPPLY_FOOD": "food",
+    "RESUPPLY_DRINK": "drink",
+    "RESUPPLY_MEDICINE": "medicine",
+}
+
 
 def _objective_reason(objective: Objective) -> str:
     if objective.reasons:
@@ -76,6 +85,9 @@ def objective_to_intent(
         "objective_target": objective.target,
         "objective_blockers": objective.metadata.get("blockers") if isinstance(objective.metadata, dict) else None,
     }
+    forced_resupply_category = _RESUPPLY_OBJECTIVE_TO_CATEGORY.get(objective.key)
+    if forced_resupply_category is not None:
+        metadata["forced_resupply_category"] = forced_resupply_category
     return Intent(
         kind=intent_kind,
         score=float(score.final_score),

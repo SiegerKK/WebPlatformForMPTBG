@@ -58,6 +58,7 @@ export type CompactNpcHistoryExport = {
 
   npc_brain: {
     current_thought?: string;
+    latest_event?: BrainTraceEvent | null;
     latest_decision?: {
       turn: number;
       world_time?: string;
@@ -71,23 +72,16 @@ export type CompactNpcHistoryExport = {
       memory_used?: BrainTraceMemoryUsed[];
       summary: string;
     } | null;
+    current_objective?: BrainTraceObjectiveInfo | null;
+    current_runtime?: {
+      mode: 'scheduled_action' | 'idle';
+      scheduled_action?: unknown;
+      latest_plan_monitor?: BrainTraceEvent | null;
+    };
     recent_trace_events: BrainTraceEvent[];
   };
 
-  story_timeline: Array<{
-    turn: number;
-    time_label: string;
-    category: 'decision' | 'action' | 'observation' | 'system';
-    title: string;
-    summary?: string;
-    objective_key?: string;
-    adapter_intent_kind?: string;
-    action_kind?: string;
-    location_id?: string;
-    item_type?: string;
-    artifact_type?: string;
-    money_delta?: number;
-  }>;
+  story_timeline: CompactTimelineEntry[];
 
   memory_v3_summary?: {
     records_count?: number;
@@ -105,6 +99,21 @@ export type CompactNpcHistoryExport = {
       last_accessed_turn?: number | null;
     }>;
   };
+};
+
+export type CompactTimelineEntry = {
+  turn: number;
+  time_label: string;
+  category: 'decision' | 'action' | 'observation' | 'system';
+  title: string;
+  summary?: string;
+  objective_key?: string;
+  adapter_intent_kind?: string;
+  action_kind?: string;
+  location_id?: string;
+  item_type?: string;
+  artifact_type?: string;
+  money_delta?: number;
 };
 
 // ─── Time helpers ─────────────────────────────────────────────────────────────
@@ -216,10 +225,15 @@ export const _INTENT_META: Record<string, { icon: string; label: string }> = {
 
 // ─── Export helper functions ──────────────────────────────────────────────────
 
+export const getLatestTraceEvent = (trace?: BrainTrace | null): BrainTraceEvent | null => {
+  if (!trace?.events?.length) return null;
+  return trace.events[trace.events.length - 1] ?? null;
+};
+
 export const getLatestDecisionEvent = (trace?: BrainTrace | null): BrainTraceEvent | null => {
   if (!trace?.events?.length) return null;
   const decisions = trace.events.filter((ev) => ev.mode === 'decision');
-  return decisions.length ? decisions[decisions.length - 1] : trace.events[trace.events.length - 1];
+  return decisions.length ? decisions[decisions.length - 1] : null;
 };
 
 export const formatObjectiveKey = (key?: string | null): string => {
@@ -278,6 +292,39 @@ export const toCompactTimelineEntry = (m: MemEntry) => {
   };
 };
 
+export const getCurrentObjectiveFromAgent = (
+  agent: AgentForProfile,
+  latestDecision: BrainTraceEvent | null,
+  storyTimeline: CompactTimelineEntry[],
+): BrainTraceObjectiveInfo | null => {
+  if (latestDecision?.active_objective) return latestDecision.active_objective;
+
+  const v2ObjectiveKey = agent._v2_context?.objective_key;
+  if (v2ObjectiveKey) {
+    return {
+      key: v2ObjectiveKey,
+      score: agent._v2_context?.objective_score ?? agent._v2_context?.intent_score ?? 0,
+      source: 'current_context',
+      reason: agent._v2_context?.objective_reason ?? agent._v2_context?.intent_reason ?? undefined,
+    };
+  }
+
+  const lastObjectiveMemory = [...storyTimeline]
+    .reverse()
+    .find((entry) => entry.objective_key);
+
+  if (lastObjectiveMemory?.objective_key) {
+    return {
+      key: lastObjectiveMemory.objective_key,
+      score: 0,
+      source: 'last_objective_decision',
+      reason: lastObjectiveMemory.summary,
+    };
+  }
+
+  return null;
+};
+
 export const buildMemoryV3Summary = (memoryV3: AgentForProfile['memory_v3']) => {
   if (!memoryV3) return undefined;
   const stats = memoryV3.stats ?? {};
@@ -321,9 +368,14 @@ export const buildCompactNpcHistoryExport = (
   displayMemory: MemEntry[],
   locationName: string,
 ): CompactNpcHistoryExport => {
+  const latestEvent = getLatestTraceEvent(agent.brain_trace);
   const latestDecision = getLatestDecisionEvent(agent.brain_trace);
   const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
   const storyTimeline = displayMemory.slice(-120).map(toCompactTimelineEntry);
+  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline);
+  const latestPlanMonitor = latestEvent?.mode === 'plan_monitor' ? latestEvent : null;
+  const adapterIntentKind = latestDecision?.intent_kind ?? agent._v2_context?.intent_kind;
+  const adapterIntentScore = latestDecision?.intent_score ?? agent._v2_context?.intent_score;
 
   return {
     export_schema: 'npc_history_v1',
@@ -343,9 +395,9 @@ export const buildCompactNpcHistoryExport = (
       money: agent.money,
       global_goal: agent.global_goal,
       current_goal: agent.current_goal,
-      active_objective: latestDecision?.active_objective ?? null,
-      adapter_intent: latestDecision
-        ? { kind: latestDecision.intent_kind, score: latestDecision.intent_score }
+      active_objective: currentObjective,
+      adapter_intent: adapterIntentKind != null
+        ? { kind: adapterIntentKind, score: adapterIntentScore }
         : null,
       scheduled_action: agent.scheduled_action,
       active_plan_v3: agent.active_plan_v3,
@@ -354,6 +406,7 @@ export const buildCompactNpcHistoryExport = (
     inventory_summary: summarizeInventory(agent.inventory),
     npc_brain: {
       current_thought: agent.brain_trace?.current_thought,
+      latest_event: latestEvent,
       latest_decision: latestDecision
         ? {
             turn: latestDecision.turn,
@@ -372,6 +425,17 @@ export const buildCompactNpcHistoryExport = (
             summary: latestDecision.summary,
           }
         : null,
+      current_objective: currentObjective,
+      current_runtime: agent.scheduled_action != null
+        ? {
+            mode: 'scheduled_action',
+            scheduled_action: agent.scheduled_action,
+            latest_plan_monitor: latestPlanMonitor,
+          }
+        : {
+            mode: 'idle',
+            latest_plan_monitor: latestPlanMonitor,
+          },
       recent_trace_events: recentTraceEvents,
     },
     story_timeline: storyTimeline,

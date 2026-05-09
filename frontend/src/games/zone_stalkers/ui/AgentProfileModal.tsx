@@ -10,7 +10,10 @@ import {
   currentGoalLabel,
   downloadJson,
   buildCompactNpcHistoryExport,
+  getCurrentObjectiveFromAgent,
+  getLatestTraceEvent,
   getLatestDecisionEvent,
+  toCompactTimelineEntry,
   formatObjectiveKey,
   pct,
 } from './agent_profile/exportNpcHistory';
@@ -140,6 +143,14 @@ export interface AgentForProfile {
   }>;
   brain_trace?: BrainTrace | null;
   active_plan_v3?: unknown;
+  _v2_context?: {
+    objective_key?: string | null;
+    objective_score?: number | null;
+    objective_reason?: string | null;
+    intent_kind?: string | null;
+    intent_score?: number | null;
+    intent_reason?: string | null;
+  } | null;
   /** Extended type: may include records and indexes in full-debug mode. */
   memory_v3?: {
     schema_version?: number;
@@ -238,8 +249,10 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
 
   const displayMemory: MemEntry[] = fetchedMemory ?? (agent.memory ?? []);
 
-  // Latest brain_trace decision event — computed once, shared by all panels
-  const latestEvent = getLatestDecisionEvent(agent.brain_trace);
+  const storyTimelineForObjective = displayMemory.slice(-120).map(toCompactTimelineEntry);
+  const latestTraceEvent = getLatestTraceEvent(agent.brain_trace);
+  const latestDecisionEvent = getLatestDecisionEvent(agent.brain_trace);
+  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecisionEvent, storyTimelineForObjective);
 
   const handleAddItem = async () => {
     if (!sendCommand || !addItemType) return;
@@ -437,32 +450,38 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         {/* ── 3. NPC Brain v3 — Current Decision ── */}
         {agent.brain_trace && (
           <Section label="🧠 NPC Brain v3 — Текущее решение">
-            <NpcBrainPanel brainTrace={agent.brain_trace} latestEvent={latestEvent} scheduledAction={agent.scheduled_action} />
+            <NpcBrainPanel
+              brainTrace={agent.brain_trace}
+              latestTraceEvent={latestTraceEvent}
+              latestDecisionEvent={latestDecisionEvent}
+              currentObjective={currentObjective}
+              scheduledAction={agent.scheduled_action}
+            />
           </Section>
         )}
 
         {/* ── 4. NPC Brain v3 — Objective Ranking ── */}
-        {latestEvent != null && (
-          (latestEvent.objective_scores?.length || latestEvent.alternatives?.length || latestEvent.active_objective != null)
+        {latestDecisionEvent != null && (
+          (latestDecisionEvent.objective_scores?.length || latestDecisionEvent.alternatives?.length || latestDecisionEvent.active_objective != null)
         ) && (
           <Section label="🏆 Рейтинг целей">
-            <ObjectiveRankingPanel latestEvent={latestEvent} />
+            <ObjectiveRankingPanel latestEvent={latestDecisionEvent} />
           </Section>
         )}
 
         {/* ── 5. NPC Brain v3 — Needs & Constraints ── */}
-        {latestEvent != null && (
-          (latestEvent.immediate_needs?.length || latestEvent.item_needs?.length || latestEvent.liquidity != null)
+        {latestDecisionEvent != null && (
+          (latestDecisionEvent.immediate_needs?.length || latestDecisionEvent.item_needs?.length || latestDecisionEvent.liquidity != null)
         ) && (
           <Section label="⚠️ Потребности и ограничения">
-            <NeedsPanel latestEvent={latestEvent} />
+            <NeedsPanel latestEvent={latestDecisionEvent} />
           </Section>
         )}
 
         {/* ── 6. NPC Brain v3 — Memory Used ── */}
-        {latestEvent != null && (
+        {latestDecisionEvent != null && (
           <Section label="🧩 Использованная память">
-            <MemoryUsedPanel latestEvent={latestEvent} />
+            <MemoryUsedPanel latestEvent={latestDecisionEvent} />
           </Section>
         )}
 
@@ -474,7 +493,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         )}
 
         {/* ── 8. Goals ── */}
-        {(agent.global_goal || agent.current_goal || latestEvent?.active_objective || latestEvent?.intent_kind) && (
+        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.intent_kind || agent._v2_context?.intent_kind) && (
           <Section label="🎯 Цели">
             {agent.global_goal && (
               <div style={s.goalRow}>
@@ -488,21 +507,23 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                 <span style={s.goalVal}>{currentGoalLabel(agent.current_goal)}</span>
               </div>
             )}
-            {latestEvent?.active_objective && (
+            {currentObjective && (
               <div style={s.goalRow}>
                 <span style={s.goalLabel}>Активная objective:</span>
                 <span style={{ ...s.goalVal, color: '#a5f3fc', fontWeight: 700 }}>
-                  {formatObjectiveKey(latestEvent.active_objective.key).toUpperCase()}
-                  {latestEvent.active_objective.score != null && (
-                    <span style={{ color: '#64748b', fontWeight: 400, marginLeft: 6 }}>{pct(latestEvent.active_objective.score)}</span>
+                  {formatObjectiveKey(currentObjective.key).toUpperCase()}
+                  {currentObjective.score != null && (
+                    <span style={{ color: '#64748b', fontWeight: 400, marginLeft: 6 }}>{pct(currentObjective.score)}</span>
                   )}
                 </span>
               </div>
             )}
-            {latestEvent?.intent_kind && (
+            {(latestDecisionEvent?.intent_kind || agent._v2_context?.intent_kind) && (
               <div style={s.goalRow}>
                 <span style={s.goalLabel}>Исполнительный intent:</span>
-                <span style={{ ...s.goalVal, color: '#818cf8' }}>{latestEvent.intent_kind}</span>
+                <span style={{ ...s.goalVal, color: '#818cf8' }}>
+                  {latestDecisionEvent?.intent_kind ?? agent._v2_context?.intent_kind}
+                </span>
               </div>
             )}
             {agent.global_goal === 'kill_stalker' && agent.kill_target_id && (

@@ -6,10 +6,12 @@ from app.games.zone_stalkers.decision.models.objective import ObjectiveGeneratio
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_CONTINUE_CURRENT_PLAN,
+    OBJECTIVE_FIND_ARTIFACTS,
     OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
     OBJECTIVE_HUNT_TARGET,
     OBJECTIVE_LOCATE_TARGET,
     OBJECTIVE_PREPARE_FOR_HUNT,
+    OBJECTIVE_REST,
     OBJECTIVE_RESTORE_FOOD,
     OBJECTIVE_REACH_SAFE_SHELTER,
     OBJECTIVE_RESTORE_WATER,
@@ -173,3 +175,59 @@ def test_soft_restore_food_uses_soft_need_source_and_dynamic_expected_value() ->
 
     assert restore_food.source == "soft_need"
     assert 0.35 <= restore_food.expected_value <= 0.5
+
+
+def test_rest_low_sleepiness_is_not_immediate_need() -> None:
+    agent = make_agent(
+        sleepiness=34,
+        hp=100,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent, loc_terrain="buildings")
+    objectives = generate_objectives(_make_ctx(agent, state))
+    rest = next((obj for obj in objectives if obj.key == OBJECTIVE_REST), None)
+    if rest is not None:
+        assert rest.source != "immediate_need"
+
+
+def test_soft_rest_does_not_beat_executable_strategic_goal_by_small_margin() -> None:
+    agent = make_agent(
+        sleepiness=45,
+        hunger=10,
+        thirst=10,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent)
+    state["locations"]["loc_a"]["anomaly_activity"] = 5
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    decision = choose_objective(objectives, personality=agent)
+    assert decision.selected.key in {OBJECTIVE_FIND_ARTIFACTS, OBJECTIVE_GET_MONEY_FOR_RESUPPLY}
+
+
+def test_critical_sleepiness_selects_rest() -> None:
+    agent = make_agent(
+        sleepiness=90,
+        global_goal="get_rich",
+    )
+    state = make_minimal_state(agent=agent, loc_terrain="buildings")
+    objectives = generate_objectives(_make_ctx(agent, state))
+    rest = next(obj for obj in objectives if obj.key == OBJECTIVE_REST)
+
+    assert rest.source == "immediate_need"
+    assert rest.metadata.get("critical") is True
+
+
+def test_recovery_rest_uses_recovery_need_source() -> None:
+    agent = make_agent(
+        hp=40,
+        sleepiness=40,
+        global_goal="get_rich",
+    )
+    agent["radiation"] = 40
+    state = make_minimal_state(agent=agent, loc_terrain="buildings")
+    objectives = generate_objectives(_make_ctx(agent, state))
+    rest = next(obj for obj in objectives if obj.key == OBJECTIVE_REST)
+
+    assert rest.source == "recovery_need"
+    assert "Восстановление" in " ".join(rest.reasons)

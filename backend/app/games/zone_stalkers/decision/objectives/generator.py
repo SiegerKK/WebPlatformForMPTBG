@@ -3,8 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.games.zone_stalkers.decision.constants import (
+    CRITICAL_REST_THRESHOLD,
+    EMISSION_DANGEROUS_TERRAIN,
     SOFT_RESTORE_DRINK_THRESHOLD,
     SOFT_RESTORE_FOOD_THRESHOLD,
+    SOFT_REST_THRESHOLD,
 )
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext
 
@@ -320,15 +323,61 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         )
 
     sleep_score = float(need_result.scores.sleep)
-    if sleep_score > 0.10:
+    sleepiness = int(agent.get("sleepiness") or 0)
+    hp = int(agent.get("hp") or 100)
+    radiation = int(agent.get("radiation") or 0)
+    current_terrain = str(ctx.belief_state.current_location.get("terrain_type") or "")
+    is_safe_for_recovery = current_terrain not in EMISSION_DANGEROUS_TERRAIN
+    is_critical_rest = sleepiness >= CRITICAL_REST_THRESHOLD
+    is_soft_rest = SOFT_REST_THRESHOLD <= sleepiness < CRITICAL_REST_THRESHOLD
+    is_recovery_rest = is_safe_for_recovery and not is_critical_rest and (hp <= 45 or radiation >= 35)
+
+    if is_critical_rest or is_soft_rest or is_recovery_rest:
         rest_refs, rest_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_REST)
-        rest_expected_value = min(0.85, 0.25 + (_clamp01(sleep_score) * 0.60))
+        if is_critical_rest:
+            rest_source = "immediate_need"
+            rest_reasons = ("Критическое истощение — нужен срочный отдых",)
+            rest_urgency = max(_clamp01(sleep_score), 0.8)
+            rest_expected_value = min(1.0, 0.55 + (_clamp01(rest_urgency) * 0.45))
+            rest_metadata: dict[str, Any] = {
+                "is_blocking": True,
+                "critical": True,
+                "soft_threshold": SOFT_REST_THRESHOLD,
+                "critical_threshold": CRITICAL_REST_THRESHOLD,
+            }
+        elif is_recovery_rest:
+            rest_source = "recovery_need"
+            rest_reasons = ("Восстановление после ранений / снятие радиации",)
+            recovery_pressure = max(
+                _clamp01((50 - hp) / 50.0),
+                _clamp01((radiation - 20) / 80.0),
+            )
+            rest_urgency = max(_clamp01(sleep_score), recovery_pressure)
+            rest_expected_value = min(0.9, 0.35 + (rest_urgency * 0.45))
+            rest_metadata = {
+                "is_blocking": False,
+                "critical": False,
+                "recovery_need": True,
+                "recovery_hp": hp,
+                "recovery_radiation": radiation,
+            }
+        else:
+            rest_source = "soft_need"
+            rest_reasons = ("Усталость растёт",)
+            rest_urgency = _clamp01(sleep_score)
+            rest_expected_value = min(0.85, 0.25 + (rest_urgency * 0.60))
+            rest_metadata = {
+                "is_blocking": False,
+                "critical": False,
+                "soft_threshold": SOFT_REST_THRESHOLD,
+                "critical_threshold": CRITICAL_REST_THRESHOLD,
+            }
         _append_unique(
             result,
             Objective(
                 key=OBJECTIVE_REST,
-                source="immediate_need",
-                urgency=_clamp01(sleep_score),
+                source=rest_source,
+                urgency=rest_urgency,
                 expected_value=rest_expected_value,
                 risk=0.05,
                 time_cost=0.4,
@@ -336,9 +385,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 confidence=0.9,
                 goal_alignment=0.7,
                 memory_confidence=rest_memory_conf,
-                reasons=("Усталость растёт",),
+                reasons=rest_reasons,
                 source_refs=("need:sleep",) + rest_refs,
-                metadata={"is_blocking": False},
+                metadata=rest_metadata,
             ),
         )
 

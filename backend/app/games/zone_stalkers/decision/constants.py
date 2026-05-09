@@ -20,3 +20,5 @@ DESIRED_AMMO_COUNT: int = 3
 # PR4 objective soft thresholds for non-critical need restoration.
 SOFT_RESTORE_FOOD_THRESHOLD: int = 50
 SOFT_RESTORE_DRINK_THRESHOLD: int = 40
+SOFT_REST_THRESHOLD: int = 50
+CRITICAL_REST_THRESHOLD: int = 80

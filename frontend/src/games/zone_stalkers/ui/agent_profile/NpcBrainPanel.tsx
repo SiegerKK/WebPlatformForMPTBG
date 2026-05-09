@@ -3,12 +3,14 @@
  * Spec section 4.
  */
 import React from 'react';
-import type { BrainTrace, BrainTraceEvent } from '../AgentProfileModal';
+import type { BrainTrace, BrainTraceEvent, BrainTraceObjectiveInfo } from '../AgentProfileModal';
 import { pct, formatObjectiveKey, traceTimeLabel, schedRemaining } from './exportNpcHistory';
 
 interface NpcBrainPanelProps {
   brainTrace: BrainTrace | null | undefined;
-  latestEvent: BrainTraceEvent | null;
+  latestTraceEvent: BrainTraceEvent | null;
+  latestDecisionEvent: BrainTraceEvent | null;
+  currentObjective: BrainTraceObjectiveInfo | null;
   scheduledAction: {
     type: string;
     turns_remaining: number;
@@ -18,12 +20,18 @@ interface NpcBrainPanelProps {
   } | null;
 }
 
-export function NpcBrainPanel({ brainTrace, latestEvent, scheduledAction }: NpcBrainPanelProps) {
+export function NpcBrainPanel({
+  brainTrace,
+  latestTraceEvent,
+  latestDecisionEvent,
+  currentObjective,
+  scheduledAction,
+}: NpcBrainPanelProps) {
   if (!brainTrace) return null;
 
-  const hasObjective = latestEvent?.active_objective != null;
-  const isPlanMonitorOnly = !hasObjective && latestEvent?.mode === 'plan_monitor';
-  const isLegacyDecision = !hasObjective && latestEvent?.mode === 'decision';
+  const isPlanMonitor = latestTraceEvent?.mode === 'plan_monitor';
+  const hasCurrentObjective = currentObjective != null;
+  const isLegacyDecision = !hasCurrentObjective && latestTraceEvent?.mode === 'decision';
 
   return (
     <div style={st.brainCard}>
@@ -36,9 +44,10 @@ export function NpcBrainPanel({ brainTrace, latestEvent, scheduledAction }: NpcB
       )}
 
       {/* Plan-monitor only — no new decision */}
-      {isPlanMonitorOnly && (
+      {isPlanMonitor && latestTraceEvent && (
         <div style={st.continuationNote}>
-          ⏳ Сейчас нет нового решения, NPC продолжает действие
+          ⏳ Сейчас: {latestTraceEvent.summary}
+          {!hasCurrentObjective ? ' · objective context unavailable' : ''}
         </div>
       )}
 
@@ -46,14 +55,14 @@ export function NpcBrainPanel({ brainTrace, latestEvent, scheduledAction }: NpcB
       {isLegacyDecision && (
         <div style={st.legacyWarning}>
           ⚠️ Legacy decision event — objective отсутствует
-          {latestEvent?.intent_kind && (
-            <span style={st.legacyIntent}> · intent: {latestEvent.intent_kind}</span>
+          {latestTraceEvent?.intent_kind && (
+            <span style={st.legacyIntent}> · intent: {latestTraceEvent.intent_kind}</span>
           )}
         </div>
       )}
 
       {/* Objective-first decision */}
-      {hasObjective && latestEvent && (
+      {hasCurrentObjective && (
         <>
           {/* Active objective */}
           <div style={st.objectiveBlock}>
@@ -62,29 +71,29 @@ export function NpcBrainPanel({ brainTrace, latestEvent, scheduledAction }: NpcB
             </div>
             <div style={st.objectiveKeyRow}>
               <span style={st.objectiveKey}>
-                {formatObjectiveKey(latestEvent.active_objective!.key)}
+                {formatObjectiveKey(currentObjective.key)}
               </span>
-              <span style={st.objectiveScore}>{pct(latestEvent.active_objective!.score)}</span>
+              <span style={st.objectiveScore}>{pct(currentObjective.score)}</span>
             </div>
-            {latestEvent.active_objective!.source && (
+            {currentObjective.source && (
               <div style={st.objectiveMeta}>
-                Источник: {latestEvent.active_objective!.source}
+                Источник: {currentObjective.source}
               </div>
             )}
-            {latestEvent.active_objective!.reason && (
-              <div style={st.objectiveReason}>{latestEvent.active_objective!.reason}</div>
+            {currentObjective.reason && (
+              <div style={st.objectiveReason}>{currentObjective.reason}</div>
             )}
           </div>
 
           {/* Execution info (adapter + scheduled action) */}
           <div style={st.executionBlock}>
             <div style={st.execTitle}>Исполнение:</div>
-            {latestEvent.intent_kind && (
+            {(latestDecisionEvent?.intent_kind || latestTraceEvent?.intent_kind) && (
               <div style={st.execRow}>
                 <span style={st.execKey}>adapter intent:</span>
-                <span style={st.execVal}>{latestEvent.intent_kind}</span>
-                {latestEvent.intent_score != null && (
-                  <span style={st.execScore}>{pct(latestEvent.intent_score)}</span>
+                <span style={st.execVal}>{latestDecisionEvent?.intent_kind ?? latestTraceEvent?.intent_kind}</span>
+                {(latestDecisionEvent?.intent_score ?? latestTraceEvent?.intent_score) != null && (
+                  <span style={st.execScore}>{pct(latestDecisionEvent?.intent_score ?? latestTraceEvent?.intent_score)}</span>
                 )}
               </div>
             )}
@@ -99,17 +108,27 @@ export function NpcBrainPanel({ brainTrace, latestEvent, scheduledAction }: NpcB
             )}
           </div>
 
+          {latestDecisionEvent && (
+            <div style={st.reasonBlock}>
+              <span style={st.memoryLabel}>Последнее решение:</span>{' '}
+              {latestDecisionEvent.summary}
+            </div>
+          )}
+
           {/* Reason / summary */}
-          {latestEvent.reason && (
-            <div style={st.reasonBlock}>{latestEvent.reason}</div>
+          {latestTraceEvent?.reason && (
+            <div style={st.reasonBlock}>{latestTraceEvent.reason}</div>
           )}
         </>
       )}
 
       {/* Timestamp */}
-      {latestEvent && (
+      {(latestTraceEvent ?? latestDecisionEvent) && (
         <div style={st.timeRow}>
-          {traceTimeLabel(latestEvent.turn, latestEvent.world_time)}
+          {traceTimeLabel(
+            (latestTraceEvent ?? latestDecisionEvent)!.turn,
+            (latestTraceEvent ?? latestDecisionEvent)!.world_time,
+          )}
         </div>
       )}
     </div>
@@ -249,6 +268,11 @@ const st: Record<string, React.CSSProperties> = {
     fontStyle: 'italic',
     borderTop: '1px solid #1e293b',
     paddingTop: 4,
+  },
+  memoryLabel: {
+    color: '#64748b',
+    fontWeight: 700,
+    fontSize: '0.72rem',
   },
   timeRow: {
     color: '#334155',
