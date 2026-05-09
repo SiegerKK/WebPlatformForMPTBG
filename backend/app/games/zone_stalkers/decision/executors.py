@@ -44,6 +44,8 @@ from .models.plan import (
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
 _SEARCH_LOCATION_COOLDOWN_TURNS = 300
+# Fix 6 — cooldown turns after exhausting a witness source at a location
+WITNESS_SOURCE_COOLDOWN_TURNS = 180
 
 
 def execute_plan_step(
@@ -518,6 +520,7 @@ def _exec_question_witnesses(
         agent_id, agent, target_id, target_name, state, world_turn
     )
     if not intel_loc:
+        _current_loc_id = str(agent.get("location_id") or "")
         _add_memory(
             agent,
             world_turn,
@@ -527,9 +530,25 @@ def _exec_question_witnesses(
             {
                 "action_kind": "no_witnesses",
                 "target_id": target_id,
-                "location_id": str(agent.get("location_id") or ""),
+                "location_id": _current_loc_id,
             },
             summary="В этой локации нет свидетелей, которые могут указать след цели.",
+        )
+        # Fix 6: Mark witness source as exhausted with cooldown
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "🚫 Источник свидетелей исчерпан",
+            {
+                "action_kind": "witness_source_exhausted",
+                "target_id": target_id,
+                "location_id": _current_loc_id,
+                "source_kind": "location_witnesses",
+                "cooldown_until_turn": world_turn + WITNESS_SOURCE_COOLDOWN_TURNS,
+            },
+            summary=f"Свидетели в локации {_current_loc_id} уже расспрошены, охлаждение до хода {world_turn + WITNESS_SOURCE_COOLDOWN_TURNS}.",
         )
         _bot_buy_hunt_intel_from_trader(
             agent_id,
@@ -723,6 +742,11 @@ def _exec_search_target(
     current_loc = agent.get("location_id")
     if target and target.get("is_alive", True) and target_loc == current_loc:
         target_name = target.get("name", target_id)
+        # Fix 1: Signal hunt outcome to active plan runtime
+        step.payload["_target_found"] = True
+        step.payload["_target_id"] = target_id
+        step.payload["_target_location_id"] = current_loc
+        step.payload["_hunt_step_outcome"] = "target_found"
         _add_memory(
             agent,
             world_turn,

@@ -20,11 +20,12 @@ from app.games.zone_stalkers.decision.models.active_plan import (
     ACTIVE_PLAN_STATUS_ACTIVE,
     ACTIVE_PLAN_STATUS_ABORTED,
     ACTIVE_PLAN_STATUS_COMPLETED,
+    STEP_STATUS_COMPLETED,
     STEP_STATUS_FAILED,
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
 )
-from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep
+from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_SEARCH_TARGET
 from app.games.zone_stalkers.decision.plan_monitor import is_v3_monitored_bot
 
 AddMemoryFn = Callable[..., None]
@@ -407,6 +408,32 @@ def start_or_continue_active_plan_step(
             refreshed_plan.current_step_index,
         )
         save_active_plan(agent, refreshed_plan)
+        return events
+
+    # Fix 2: If search_target found the target, complete the plan early for hunt objectives
+    _HUNT_COMPLETE_ON_FIND: frozenset[str] = frozenset({"VERIFY_LEAD", "TRACK_TARGET", "PURSUE_TARGET"})
+    _executed_payload = step_plan.steps[0].payload if step_plan.steps else {}
+    if (
+        current_step.kind == STEP_SEARCH_TARGET
+        and _executed_payload.get("_hunt_step_outcome") == "target_found"
+        and refreshed_plan.objective_key in _HUNT_COMPLETE_ON_FIND
+        and step_plan.current_step_index > 0
+    ):
+        # Mark all remaining steps as skipped and finish the plan
+        for _remaining in refreshed_plan.steps[refreshed_plan.current_step_index + 1:]:
+            _remaining.status = STEP_STATUS_COMPLETED
+        refreshed_plan.advance_step(world_turn)
+        save_active_plan(agent, refreshed_plan)
+        finish_active_plan(
+            agent_id,
+            agent,
+            refreshed_plan,
+            state,
+            world_turn,
+            add_memory=add_memory,
+            terminal_event="active_plan_completed",
+            reason="target_found",
+        )
         return events
 
     if step_plan.current_step_index > 0:

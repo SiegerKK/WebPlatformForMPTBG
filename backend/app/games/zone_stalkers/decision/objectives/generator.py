@@ -173,6 +173,20 @@ def _objective_memory_refs_and_confidence(
                 _append(mem.get("id"), mem.get("confidence"))
         for trader in ctx.belief_state.known_traders:
             _append(trader.get("memory_id"), trader.get("confidence"))
+    elif objective_key in {
+        OBJECTIVE_VERIFY_LEAD, OBJECTIVE_TRACK_TARGET, OBJECTIVE_GATHER_INTEL,
+        OBJECTIVE_LOCATE_TARGET, OBJECTIVE_ENGAGE_TARGET, OBJECTIVE_CONFIRM_KILL,
+        OBJECTIVE_PREPARE_FOR_HUNT, OBJECTIVE_INTERCEPT_TARGET,
+    }:
+        # Fix 10: Only use hunt-relevant memory kinds, exclude active_plan_* events
+        _hunt_relevant_kinds = {
+            "target_intel", "target_seen", "target_last_known_location",
+            "target_moved", "target_route_observed", "target_not_found",
+        }
+        for mem in relevant:
+            kind = str(mem.get("kind") or "")
+            if kind in _hunt_relevant_kinds:
+                _append(mem.get("id"), mem.get("confidence"))
     else:
         for mem in relevant:
             _append(mem.get("id"), mem.get("confidence"))
@@ -629,6 +643,21 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         exhausted_locations = set(target_belief.exhausted_locations) if target_belief else set()
         route_hypothesis = target_belief.likely_routes[0] if target_belief and target_belief.likely_routes else None
 
+        # Fix 3: Gather recently_seen metadata for current agent location
+        _current_agent_loc = str(agent.get("location_id") or "")
+        _target_recently_here = (
+            target_belief is not None
+            and bool(target_belief.recently_seen)
+            and target_belief.recent_contact_location_id == _current_agent_loc
+            and not target_co_located
+            and not target_visible_now
+        )
+        _has_survival_emergency = float(need_result.scores.survive_now) >= 0.7 or any(
+            n.key in {"drink_now", "eat_now", "heal_now"} and float(n.urgency) >= 0.8
+            for n in need_result.immediate_needs
+        )
+        _combat_readiness_sufficient = weapon_missing == 0 and ammo_missing == 0
+
         if target_alive is False:
             _append_unique(
                 result,
@@ -694,6 +723,34 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         target={"target_id": target_id, "location_id": target_loc} if target_id else None,
                     ),
                 )
+        elif _target_recently_here and _combat_readiness_sufficient and not _has_survival_emergency:
+            # Fix 3: Target was recently seen at current location — generate high-priority ENGAGE_TARGET
+            # Score is high enough to override soft needs (thirst ~0.4-0.5) but below true emergencies
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_ENGAGE_TARGET,
+                    source="global_goal",
+                    urgency=0.87,
+                    expected_value=0.95,
+                    risk=0.2,
+                    time_cost=0.1,
+                    resource_cost=0.1,
+                    confidence=0.85,
+                    goal_alignment=1.0,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
+                    reasons=("Цель недавно замечена в текущей локации — атакую пока след не остыл",),
+                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[0],
+                    metadata={
+                        "is_blocking": False,
+                        "hunt_stage": "engage",
+                        "target_id": target_id,
+                        "target_location_id": _current_agent_loc,
+                        "recently_seen": True,
+                    },
+                    target={"target_id": target_id, "location_id": _current_agent_loc} if target_id else None,
+                ),
+            )
         elif target_loc:
             best_is_exhausted = target_loc in exhausted_locations
             if not best_is_exhausted:
@@ -711,7 +768,11 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         goal_alignment=1.0,
                         memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_VERIFY_LEAD)[1],
                         reasons=("Есть рабочая версия местоположения цели — нужно проверить зацепку",),
-                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_VERIFY_LEAD)[0],
+                        source_refs=(
+                            ("global_goal:kill_stalker",)
+                            + (tuple(target_belief.possible_locations[0].source_refs[:2]) if target_belief and target_belief.possible_locations else ())
+                            + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_VERIFY_LEAD)[0][:1]
+                        ),
                         metadata={
                             "is_blocking": False,
                             "hunt_stage": "verify",

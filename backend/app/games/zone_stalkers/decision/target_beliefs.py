@@ -57,6 +57,11 @@ _MISS_SCORE_MULTIPLIERS: dict[int, float] = {
     2: 0.20,
 }
 
+# Fix 4 — recently_seen TTL in turns
+RECENT_TARGET_CONTACT_TURNS: int = 10
+# Fix 8 — minimum confidence for a possible_location to be included
+POSSIBLE_LOCATION_MIN_CONFIDENCE: float = 0.05
+
 
 def _iter_memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
     memory_v3 = agent.get("memory_v3")
@@ -369,12 +374,17 @@ def _aggregate_location_hypotheses(
     for route_key, score in route_scores.items():
         if score <= 0.01:
             continue
+        # Fix 9: Heavily penalize routes that lead to exhausted locations
+        to_loc = route_key[1]
+        effective_score = score * 0.1 if (to_loc and to_loc in exhausted_locations) else score
+        if effective_score <= 0.01:
+            continue
         refs = tuple(dict.fromkeys(route_source_refs.get(route_key, [])))
         route_hypotheses.append(
             RouteHypothesis(
                 from_location_id=route_key[0],
                 to_location_id=route_key[1],
-                confidence=_clamp01(score),
+                confidence=_clamp01(effective_score),
                 freshness=route_freshness.get(route_key, 0.0),
                 reason=route_reasons.get(route_key, (0.0, "target_route_observed"))[1],
                 source_refs=refs,
@@ -508,17 +518,23 @@ def build_target_belief(
         leads=leads,
         world_turn=world_turn,
     )
+    # Fix 8: Exclude zero-confidence possible_locations
+    possible_locations = tuple(
+        h for h in possible_locations if h.confidence > POSSIBLE_LOCATION_MIN_CONFIDENCE
+    )
     best_hypothesis = next(
         (item for item in possible_locations if item.location_id not in exhausted_locations and item.confidence > 0),
         next((item for item in possible_locations if item.confidence > 0), None),
     )
     best_location_id = best_hypothesis.location_id if best_hypothesis is not None else None
     best_location_confidence = best_hypothesis.confidence if best_hypothesis is not None else 0.0
+    # Fix 9: Exclude exhausted and zero-confidence destinations from route_hints
+    _exhausted_set = set(exhausted_locations)
     route_hints = tuple(
         dict.fromkeys(
             route.to_location_id
             for route in likely_routes
-            if route.to_location_id
+            if route.to_location_id and route.to_location_id not in _exhausted_set
         )
     )
 
@@ -529,6 +545,42 @@ def build_target_belief(
         is_alive = True
         co_located = True
         visible_now = True
+
+    # Fix 4: Compute recently_seen fields from memory_v3 target_seen records
+    recently_seen = False
+    recent_contact_turn: int | None = None
+    recent_contact_location_id: str | None = None
+    recent_contact_age: int | None = None
+    if visible_now:
+        # If target is currently visible, that counts as recently_seen
+        recently_seen = True
+        recent_contact_turn = world_turn
+        recent_contact_location_id = current_loc or None
+        recent_contact_age = 0
+    else:
+        for _rs_record in _iter_memory_v3_records(agent):
+            _rs_kind = _canonical_kind(str(_rs_record.get("kind") or ""))
+            if _rs_kind != "target_seen":
+                continue
+            _rs_details = _coerce_details(_rs_record)
+            _rs_target_id = str(
+                _rs_details.get("target_id") or _rs_details.get("target_agent_id") or ""
+            )
+            if _rs_target_id != target_id and target_id not in {
+                str(v) for v in _rs_record.get("entity_ids", [])
+            }:
+                continue
+            _rs_created = _coerce_int(_rs_record.get("created_turn")) or 0
+            if _rs_created >= world_turn - RECENT_TARGET_CONTACT_TURNS:
+                if recent_contact_turn is None or _rs_created > recent_contact_turn:
+                    recently_seen = True
+                    recent_contact_turn = _rs_created
+                    recent_contact_location_id = str(
+                        _rs_record.get("location_id")
+                        or _rs_details.get("location_id")
+                        or ""
+                    ) or None
+                    recent_contact_age = max(0, world_turn - _rs_created)
 
     return TargetBelief(
         target_id=target_id,
@@ -553,4 +605,9 @@ def build_target_belief(
         lead_count=len(leads),
         route_hints=route_hints,
         source_refs=tuple(dict.fromkeys(source_refs)),
+        # Fix 4 — recently_seen fields
+        recently_seen=recently_seen,
+        recent_contact_turn=recent_contact_turn,
+        recent_contact_location_id=recent_contact_location_id,
+        recent_contact_age=recent_contact_age,
     )
