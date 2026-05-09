@@ -40,3 +40,20 @@ Long artifact plan:
 - interrupted by environment/context,
 - resumed or repaired with updated assumptions,
 - continues without losing full decision context.
+
+## 6) Full E2E chain — get_rich
+
+`spawn` → `FIND_ARTIFACTS`/`GET_MONEY_FOR_RESUPPLY` → `travel_to_location` + `explore_location` → artifact pickup → `SELL_ARTIFACTS` → `trade_sell_item` → `global_goal_completed` → `LEAVE_ZONE` → `has_left_zone=true`.
+
+## 7) Full E2E chain — kill_stalker (known target)
+
+`spawn` + `target_last_known_location` → `TRACK_TARGET` → `search_target`/`target_seen` → `ENGAGE_TARGET` (`start_combat` → `monitor_combat`) → `CONFIRM_KILL`/`target_death_confirmed` → `global_goal_completed` → `LEAVE_ZONE` → `has_left_zone=true`.
+
+## 8) Full E2E chain — kill_stalker (unknown target)
+
+`spawn` without target memory → `LOCATE_TARGET` → `ask_for_intel` (`intel_from_trader`/`intel_from_stalker` bridged to canonical `target_intel`) → `TRACK_TARGET` → `ENGAGE_TARGET` → `CONFIRM_KILL` → `LEAVE_ZONE`.
+
+Important invariant:
+
+- once intel resolves target location, the next tick must prefer `TRACK_TARGET`;
+- the runtime must not fall back into `LOCATE_TARGET → ask_for_intel` every tick for the same resolved hunt.

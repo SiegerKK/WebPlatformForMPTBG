@@ -18,9 +18,29 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.games.zone_stalkers.decision.debug.brain_trace import (
     ensure_brain_trace_for_tick,
-    write_decision_brain_trace_from_v2,
+    write_npc_brain_v3_decision_trace,
     write_plan_monitor_trace,
 )
+from app.games.zone_stalkers.decision.active_plan_manager import (
+    clear_active_plan,
+    create_active_plan,
+    get_active_plan,
+    save_active_plan,
+)
+from app.games.zone_stalkers.decision.active_plan_composer import compose_active_plan_steps
+from app.games.zone_stalkers.decision.active_plan_runtime import (
+    active_plan_trace_payload as _active_plan_trace_payload,
+    finish_active_plan as _finish_active_plan,
+    handle_v3_monitor_abort as _handle_v3_monitor_abort,
+    mark_active_plan_step_failed as _mark_active_plan_step_failed,
+    migrate_legacy_scheduled_action_to_active_plan as _migrate_legacy_scheduled_action_to_active_plan,
+    on_active_plan_scheduled_action_completed as _on_active_plan_scheduled_action_completed,
+    process_active_plan_v3 as _process_active_plan_v3,
+    start_or_continue_active_plan_step as _start_or_continue_active_plan_step,
+    write_active_plan_memory_event as _write_active_plan_memory_event,
+    write_active_plan_trace_event as _write_active_plan_trace_event,
+)
+from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep
 from app.games.zone_stalkers.decision.plan_monitor import (
     PlanMonitorResult,
     assess_scheduled_action_v3,
@@ -81,7 +101,7 @@ _INTENT_LABEL_RU: dict = {
 
 # ── Intent → current_goal mapping (Fix 3) ────────────────────────────────────
 # Maps intent.kind to the canonical agent current_goal string.
-# Used in _run_bot_decision_v2_inner to update current_goal BEFORE writing
+# Used in _run_npc_brain_v3_decision_inner to update current_goal BEFORE writing
 # the decision memory entry so that memory reflects the new goal.
 _INTENT_TO_GOAL: Dict[str, str] = {
     "escape_danger":       "emergency_heal",
@@ -113,8 +133,19 @@ _OBJECTIVE_TO_GOAL: Dict[str, str] = {
     "WAIT_IN_SHELTER": "emergency_shelter",
     "HUNT_TARGET": "kill_stalker",
     "PREPARE_FOR_HUNT": "prepare_for_hunt",
+    "LOCATE_TARGET": "kill_stalker",
+    "TRACK_TARGET": "kill_stalker",
+    "ENGAGE_TARGET": "kill_stalker",
+    "CONFIRM_KILL": "kill_stalker",
     "IDLE": "idle",
 }
+
+
+def _migrate_brain_v3_context(agent: Dict[str, Any]) -> None:
+    legacy_context = agent.pop("_v2_context", None)
+    if "brain_v3_context" not in agent and isinstance(legacy_context, dict):
+        agent["brain_v3_context"] = legacy_context
+
 
 _OBJECTIVE_MEMORY_USED_FOR: Dict[str, str] = {
     "RESTORE_FOOD": "find_food",
@@ -127,7 +158,11 @@ _OBJECTIVE_MEMORY_USED_FOR: Dict[str, str] = {
 
 _WAIT_ALLOWED_OBJECTIVES: frozenset[str] = frozenset({"IDLE", "WAIT_IN_SHELTER"})
 _NON_WAIT_ACTIONABLE_OBJECTIVES: frozenset[str] = frozenset(
-    {"RESTORE_FOOD", "RESTORE_WATER", "GET_MONEY_FOR_RESUPPLY", "SELL_ARTIFACTS"}
+    {
+        "RESTORE_FOOD", "RESTORE_WATER", "GET_MONEY_FOR_RESUPPLY", "SELL_ARTIFACTS",
+        # Hunt objectives that always have a concrete next step
+        "LOCATE_TARGET", "TRACK_TARGET", "ENGAGE_TARGET", "CONFIRM_KILL",
+    }
 )
 
 # Default risk_tolerance used when an agent or item does not specify one.
@@ -212,6 +247,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _agent.setdefault("brain_trace", None)
         _agent.setdefault("active_plan_v3", None)
         _agent.setdefault("memory_v3", None)
+        _migrate_brain_v3_context(_agent)
+        _migrate_legacy_scheduled_action_to_active_plan(
+            _agent,
+            world_turn=world_turn,
+            default_sleep_hours=DEFAULT_SLEEP_HOURS,
+        )
+        if is_v3_monitored_bot(_agent) and get_active_plan(_agent) is not None:
+            _agent["action_queue"] = []
 
     # PR 3: ensure memory_v3 structure exists, lazy-import legacy memory, run decay.
     from app.games.zone_stalkers.memory.store import ensure_memory_v3 as _ensure_mem_v3  # noqa: PLC0415
@@ -268,84 +311,19 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                         state=state,
                     )
                 if monitor_result.decision == "abort":
-                    _dominant_pressure = None
-                    if monitor_result.dominant_pressure is not None and monitor_result.dominant_pressure_value is not None:
-                        _dominant_pressure = {
-                            "key": monitor_result.dominant_pressure,
-                            "value": round(float(monitor_result.dominant_pressure_value), 3),
-                        }
-                    # For sleep aborts, include partial-sleep info in the summary.
-                    if sched.get("type") == "sleep":
-                        _sleep_intervals = int(sched.get("sleep_intervals_applied", 0))
-                        _slept_hours = round(_sleep_intervals * SLEEP_EFFECT_INTERVAL_TURNS / 60, 1)
-                        _summary = (
-                            f"Прерываю sleep из-за {monitor_result.reason}. "
-                            f"Успел поспать {_slept_hours} ч."
-                        )
-                    else:
-                        _summary = f"Прерываю {sched.get('type')} из-за {monitor_result.reason}."
-                    _signature = {
-                        "reason": monitor_result.reason,
-                        "scheduled_action_type": sched.get("type"),
-                        "cancelled_final_target": sched.get("final_target_id", sched.get("target_id")),
-                    }
-                    write_plan_monitor_trace(
-                        agent,
-                        world_turn=world_turn,
-                        decision="abort",
-                        reason=monitor_result.reason,
-                        summary=_summary,
-                        scheduled_action_type=sched.get("type"),
-                        dominant_pressure_key=monitor_result.dominant_pressure,
-                        dominant_pressure_value=monitor_result.dominant_pressure_value,
-                        state=state,
-                    )
-                    if should_write_plan_monitor_memory_event(
-                        agent,
-                        world_turn,
-                        action_kind="plan_monitor_abort",
-                        signature=_signature,
-                    ):
-                        _add_memory(
+                    events.extend(
+                        _handle_v3_monitor_abort(
+                            agent_id,
                             agent,
-                            world_turn,
+                            sched,
                             state,
-                            "decision",
-                            "⚡ PlanMonitor: прерываю активное действие",
-                            {
-                                "action_kind": "plan_monitor_abort",
-                                "reason": monitor_result.reason,
-                                "scheduled_action_type": sched.get("type"),
-                                "dominant_pressure": _dominant_pressure,
-                                "dedup_signature": _signature,
-                            },
-                            summary=_summary,
+                            world_turn,
+                            monitor_result=monitor_result,
+                            add_memory=_add_memory,
+                            should_write_plan_monitor_memory_event=should_write_plan_monitor_memory_event,
+                            sleep_effect_interval_turns=SLEEP_EFFECT_INTERVAL_TURNS,
                         )
-                    events.append({
-                        "event_type": "plan_monitor_aborted_action",
-                        "payload": {
-                            "agent_id": agent_id,
-                            "scheduled_action_type": sched.get("type"),
-                            "reason": monitor_result.reason,
-                            "dominant_pressure": _dominant_pressure
-                            or {"key": "unknown", "value": 0.0},
-                            "cancelled_target": sched.get("target_id"),
-                            "cancelled_final_target": sched.get("final_target_id"),
-                            "current_location_id": agent.get("location_id"),
-                            "turns_remaining": sched.get("turns_remaining"),
-                            **(
-                                {
-                                    "sleep_intervals_applied": sched.get("sleep_intervals_applied"),
-                                    "sleep_progress_turns": sched.get("sleep_progress_turns"),
-                                }
-                                if sched.get("type") == "sleep"
-                                else {}
-                            ),
-                        },
-                    })
-                    agent["scheduled_action"] = None
-                    if monitor_result.should_clear_action_queue:
-                        agent["action_queue"] = []
+                    )
                     continue
                 write_plan_monitor_trace(
                     agent,
@@ -559,7 +537,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     _combat_events = _process_all_combat_interactions(state, world_turn)
     events.extend(_combat_events)
 
-    # 3. AI bot agent decisions — v2 decision pipeline (Phase 5+)
+    # 3. AI bot agent decisions — NPC Brain v3 pipeline
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -575,7 +553,19 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         if _agent_in_active_combat(agent_id, state):
             continue
 
-        bot_evs = _run_bot_decision_v2(agent_id, agent, state, world_turn)
+        if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None:
+            handled, active_plan_events = _process_active_plan_v3(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                add_memory=_add_memory,
+            )
+            events.extend(active_plan_events)
+            if handled:
+                continue
+
+        bot_evs = _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
     for _agent in state.get("agents", {}).values():
@@ -670,6 +660,29 @@ def _mark_agent_dead(
     from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
 
     agent["is_alive"] = False
+    active_plan = get_active_plan(agent)
+    if active_plan is not None:
+        active_plan.abort("death", world_turn)
+        save_active_plan(agent, active_plan)
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_aborted",
+            active_plan=active_plan,
+            reason="death",
+            summary=f"ActivePlan {active_plan.objective_key}: прерван из-за смерти.",
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_aborted",
+            active_plan=active_plan,
+            add_memory=_add_memory,
+            reason="death",
+        )
+        clear_active_plan(agent)
     agent["scheduled_action"] = None
     agent["action_queue"] = []
     agent["action_used"] = False
@@ -777,6 +790,7 @@ def _process_scheduled_action(
         return events
 
     # Action complete — resolve effects
+    completed_sched = dict(sched)
     agent["scheduled_action"] = None
 
     if action_type == "travel":
@@ -890,6 +904,10 @@ def _process_scheduled_action(
                 # flee on every hop, creating an infinite loop.
                 if sched.get("emergency_flee"):
                     _next_sched["emergency_flee"] = True
+                if sched.get("active_plan_id") is not None:
+                    _next_sched["active_plan_id"] = sched.get("active_plan_id")
+                    _next_sched["active_plan_step_index"] = sched.get("active_plan_step_index")
+                    _next_sched["active_plan_objective_key"] = sched.get("active_plan_objective_key")
                 agent["scheduled_action"] = _next_sched
                 events.append({
                     "event_type": "travel_hop_completed",
@@ -978,9 +996,25 @@ def _process_scheduled_action(
             "payload": {"agent_id": agent_id},
         })
 
+    if completed_sched.get("active_plan_id") is not None:
+        events.extend(
+            _on_active_plan_scheduled_action_completed(
+                agent_id,
+                agent,
+                completed_sched,
+                state,
+                world_turn,
+                add_memory=_add_memory,
+            )
+        )
+
     # Pop next queued action if available
     queue = agent.get("action_queue", [])
-    if queue and not agent.get("scheduled_action"):
+    if (
+        completed_sched.get("active_plan_id") is None
+        and queue
+        and not agent.get("scheduled_action")
+    ):
         next_action = queue.pop(0)
         agent["action_queue"] = queue
         agent["scheduled_action"] = next_action
@@ -1000,12 +1034,12 @@ def _resolve_exploration(
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Resolve exploration: pick up an existing artifact (50 % chance) or mark the location.
+    """Resolve exploration: pick up an existing artifact or mark the location.
 
     New logic (replaces the old loot-table approach):
     - Checks existing artifacts on the location rather than conjuring one from thin air.
-    - 50 % success roll.  On success the agent picks up one random artifact.
-    - On failure distinguishes between a truly empty location and bad luck.
+    - If artifacts exist, the agent deterministically picks one artifact.
+    - If no artifacts exist, the location is marked as explored-empty.
     """
     from app.games.zone_stalkers.balance.anomalies import ANOMALY_TYPES
     events: List[Dict[str, Any]] = []
@@ -1017,7 +1051,7 @@ def _resolve_exploration(
     found_artifacts: List[Dict[str, Any]] = []
     loc_name = loc.get("name", loc_id)
 
-    artifact_found = existing_artifacts and rng.random() < 0.5
+    artifact_found = bool(existing_artifacts)
     if artifact_found:
         # Pick one artifact at random and transfer it to the agent
         art = rng.choice(existing_artifacts)
@@ -3964,15 +3998,15 @@ def _update_current_goal_from_intent(
         agent["current_goal"] = new_goal
 
 
-def _run_bot_decision_v2(
+def _run_npc_brain_v3_decision(
     agent_id: str,
     agent: Dict[str, Any],
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """V2 decision engine entry point — wraps inner function and emits bot_decision event on goal change."""
+    """NPC Brain v3 entry point — wraps inner function and emits bot_decision on goal change."""
     prev_goal = agent.get("current_goal")
-    events = _run_bot_decision_v2_inner(agent_id, agent, state, world_turn)
+    events = _run_npc_brain_v3_decision_inner(agent_id, agent, state, world_turn)
     new_goal = agent.get("current_goal")
     if new_goal and prev_goal is not None and new_goal != prev_goal:
         events.append({
@@ -4091,6 +4125,21 @@ def _pre_decision_equipment_maintenance(
 
 
 def _build_active_plan_summary(agent: Dict[str, Any]) -> dict[str, Any] | None:
+    active_plan = get_active_plan(agent)
+    if active_plan is not None:
+        steps_count = max(1, len(active_plan.steps))
+        remaining_steps = max(0, steps_count - active_plan.current_step_index)
+        return {
+            "scheduled_action_type": _active_plan_step_label(active_plan.current_step),
+            "urgency": 0.45,
+            "remaining_value": max(0.0, min(1.0, 0.95 - (active_plan.current_step_index / steps_count) * 0.5)),
+            "risk": 0.2,
+            "remaining_time": max(0.0, min(1.0, remaining_steps / steps_count)),
+            "resource_cost": 0.0,
+            "confidence": 0.8,
+            "goal_alignment": 0.8,
+        }
+
     sched = agent.get("scheduled_action")
     if not isinstance(sched, dict):
         return None
@@ -4198,22 +4247,28 @@ def _build_objective_memory_used_payload(
     return ordered[:5]
 
 
-def _run_bot_decision_v2_inner(
+def _run_npc_brain_v3_decision_inner(
     agent_id: str,
     agent: Dict[str, Any],
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Core V2 decision pipeline: Context → Needs → Intent → Plan → Execute."""
+    """Core NPC Brain v3 pipeline: Objective → adapter intent → plan → ActivePlan/runtime."""
     from app.games.zone_stalkers.decision.context_builder import build_agent_context
     from app.games.zone_stalkers.decision.needs import evaluate_need_result
     from app.games.zone_stalkers.decision.intents import select_intent
     from app.games.zone_stalkers.decision.planner import build_plan
     from app.games.zone_stalkers.decision.executors import execute_plan_step
-    from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext, ObjectiveScore
+    from app.games.zone_stalkers.decision.models.objective import (
+        Objective,
+        ObjectiveDecision,
+        ObjectiveGenerationContext,
+        ObjectiveScore,
+    )
     from app.games.zone_stalkers.decision.objectives.generator import generate_objectives
     from app.games.zone_stalkers.decision.objectives.selection import choose_objective
     from app.games.zone_stalkers.decision.objectives.intent_adapter import objective_to_intent
+    from app.games.zone_stalkers.decision.target_beliefs import build_target_belief
 
     # ── Commitment logic: handle scheduled arrivals first ─────────────────
     arrival_evs = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
@@ -4224,14 +4279,15 @@ def _run_bot_decision_v2_inner(
         return sell_evs
 
     # ── Check and handle global goal completion ────────────────────────────
-    if not agent.get("has_left_zone") and agent.get("is_alive", True):
-        if not agent.get("global_goal_achieved"):
-            _check_global_goal_completion(agent_id, agent, state, world_turn)
-        if agent.get("global_goal_achieved"):
-            loc = state.get("locations", {}).get(agent.get("location_id", ""), {})
-            if loc.get("exit_zone"):
-                return _execute_leave_zone(agent_id, agent, state, world_turn)
-            return _bot_route_to_exit(agent_id, agent, state, world_turn)
+    if not agent.get("has_left_zone") and agent.get("is_alive", True) and not agent.get("global_goal_achieved"):
+        _check_global_goal_completion(agent_id, agent, state, world_turn)
+
+    # If goal is complete and agent is already at exit, leave immediately.
+    # Otherwise route selection goes through objective pipeline (LEAVE_ZONE).
+    if not agent.get("has_left_zone") and agent.get("is_alive", True) and agent.get("global_goal_achieved"):
+        loc = state.get("locations", {}).get(agent.get("location_id", ""), {})
+        if loc.get("exit_zone"):
+            return _execute_leave_zone(agent_id, agent, state, world_turn)
 
     # ── Pre-decision: phase-independent equipment maintenance ─────────────
     # Equip / pick-up / seek from memory happen before the needs pipeline so
@@ -4263,6 +4319,13 @@ def _run_bot_decision_v2_inner(
     if _water_mem:
         _memory_hints["water"] = _water_mem
     agent["_belief_memory_hints"] = _memory_hints
+    target_belief = build_target_belief(
+        agent_id=agent_id,
+        agent=agent,
+        state=state,
+        world_turn=world_turn,
+        belief_state=belief,
+    )
 
     need_result = evaluate_need_result(ctx, state)
     needs = need_result.scores
@@ -4280,6 +4343,7 @@ def _run_bot_decision_v2_inner(
             need_result=need_result,
             active_plan_summary=_build_active_plan_summary(agent),
             personality=agent,
+            target_belief=target_belief,
         )
         objective_candidates = generate_objectives(objective_ctx)
         objective_decision = choose_objective(
@@ -4374,18 +4438,40 @@ def _run_bot_decision_v2_inner(
     )
 
     # Store context for observability / debug
-    agent["_v2_context"] = {
+    agent.pop("_v2_context", None)
+    agent["brain_v3_context"] = {
         "need_scores": _needs_dict,
         "intent_kind": intent.kind,
         "intent_score": round(intent.score, 3),
         "intent_reason": intent.reason,
+        "adapter_intent": {
+            "kind": intent.kind,
+            "score": round(intent.score, 3),
+            "reason": intent.reason,
+        },
         "plan_intent": plan.intent_kind,
         "plan_steps": len(plan.steps),
         "plan_confidence": round(plan.confidence, 3),
         "plan_step_0": plan.steps[0].kind if plan.steps else None,
         "objective_key": _selected_objective_key,
         "objective_score": _selected_objective_score,
+        "objective_reason": "; ".join(selected_objective.reasons) if selected_objective and selected_objective.reasons else (intent.reason or None),
         "objective_switch_decision": objective_decision.switch_decision if objective_decision else None,
+        "hunt_target_belief": {
+            "target_id": target_belief.target_id,
+            "is_known": target_belief.is_known,
+            "is_alive": target_belief.is_alive,
+            "last_known_location_id": target_belief.last_known_location_id,
+            "location_confidence": round(float(target_belief.location_confidence), 3),
+            "last_seen_turn": target_belief.last_seen_turn,
+            "visible_now": target_belief.visible_now,
+            "co_located": target_belief.co_located,
+            "equipment_known": target_belief.equipment_known,
+            "combat_strength": target_belief.combat_strength,
+            "combat_strength_confidence": round(float(target_belief.combat_strength_confidence), 3),
+            "route_hints": list(target_belief.route_hints),
+            "source_refs": list(target_belief.source_refs),
+        } if target_belief.target_id else None,
     }
 
     # Update current_goal from objective first, with intent fallback.
@@ -4496,7 +4582,43 @@ def _run_bot_decision_v2_inner(
             for _obj, _score in [pair for pair in objective_pairs if pair[0].key != selected_objective.key][:5]
         ]
 
-    write_decision_brain_trace_from_v2(
+    runtime_active_plan = None
+    if is_v3_monitored_bot(agent):
+        plan_decision = objective_decision
+        if plan_decision is None and selected_objective is not None and selected_objective_score is not None:
+            plan_decision = ObjectiveDecision(
+                selected=selected_objective,
+                selected_score=selected_objective_score,
+                alternatives=(),
+            )
+        if plan_decision is not None:
+            composed_plan = plan
+            if selected_objective is not None:
+                composed_steps = compose_active_plan_steps(
+                    objective_key=selected_objective.key,
+                    base_plan=plan,
+                    agent=agent,
+                    state=state,
+                    world_turn=world_turn,
+                )
+                composed_plan = Plan(
+                    intent_kind=plan.intent_kind,
+                    steps=composed_steps,
+                    current_step_index=0,
+                    interruptible=plan.interruptible,
+                    confidence=plan.confidence,
+                    created_turn=plan.created_turn,
+                    expires_turn=plan.expires_turn,
+                )
+            runtime_active_plan = create_active_plan(
+                objective_decision=plan_decision,
+                world_turn=world_turn,
+                plan=composed_plan,
+            )
+            save_active_plan(agent, runtime_active_plan)
+            agent["action_queue"] = []
+
+    write_npc_brain_v3_decision_trace(
         agent,
         world_turn=world_turn,
         intent_kind=intent.kind,
@@ -4508,9 +4630,39 @@ def _run_bot_decision_v2_inner(
         active_objective=_selected_objective_trace,
         objective_scores=_objective_scores_trace,
         alternatives=_alternatives_trace,
+        active_plan_runtime=_active_plan_trace_payload(runtime_active_plan) if runtime_active_plan is not None else None,
     )
 
-    result = execute_plan_step(ctx, plan, state, world_turn)
+    if runtime_active_plan is not None:
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_created",
+            active_plan=runtime_active_plan,
+            summary=(
+                f"ActivePlan {runtime_active_plan.objective_key}: создан "
+                f"с {len(runtime_active_plan.steps)} шаг(ами)."
+            ),
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_created",
+            active_plan=runtime_active_plan,
+            add_memory=_add_memory,
+        )
+        result = _start_or_continue_active_plan_step(
+            agent_id,
+            agent,
+            runtime_active_plan,
+            state,
+            world_turn,
+            add_memory=_add_memory,
+        )
+    else:
+        result = execute_plan_step(ctx, plan, state, world_turn)
     # Transient PR3 hint/debug fields should not leak between ticks.
     agent.pop("_belief_memory_hints", None)
     agent.pop("_memory_used_decision", None)
@@ -4527,16 +4679,25 @@ def _check_global_goal_completion(
     from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES as _SECRET_TYPES
     global_goal = agent.get("global_goal")
     if global_goal == "get_rich":
-        wealth = _agent_wealth(agent)
+        from app.games.zone_stalkers.decision.needs import _agent_liquid_wealth  # noqa: PLC0415
+
+        wealth = _agent_liquid_wealth(agent)
         target = agent.get("wealth_goal_target", GET_RICH_COMPLETION_MIN)
         if wealth >= target:
             agent["global_goal_achieved"] = True
             _add_memory(
                 agent, world_turn, state, "observation",
                 "💰 Цель достигнута: разбогател!",
-                {"action_kind": "goal_achieved", "goal": "get_rich",
-                 "wealth": wealth, "target": target},
-                summary=f"Я достиг своей цели — разбогател! Моё состояние: {wealth} руб. Пора покидать Зону",
+                {
+                    "action_kind": "global_goal_completed",
+                    "global_goal": "get_rich",
+                    "wealth_goal_target": target,
+                    "liquid_wealth": wealth,
+                },
+                summary=(
+                    f"Я достиг своей цели «get_rich»: ликвидное богатство {wealth} ≥ {target}. "
+                    "Пора покидать Зону."
+                ),
             )
     elif global_goal == "unravel_zone_mystery":
         has_doc = any(
@@ -4555,17 +4716,42 @@ def _check_global_goal_completion(
         target_id = agent.get("kill_target_id")
         if target_id:
             target_agent = state.get("agents", {}).get(target_id, {})
-            # Goal achieved when the target is confirmed dead in the current game state.
-            # Checking is_alive directly (rather than memory) ensures old fake kill-stub
-            # entries from previous save states do not falsely complete the goal.
             target_is_dead = not target_agent.get("is_alive", True) if target_agent else False
-            if target_is_dead:
+
+            def _has_target_death_confirmed() -> bool:
+                for mem in reversed(agent.get("memory", [])):
+                    effects = mem.get("effects", {}) if isinstance(mem, dict) else {}
+                    if effects.get("action_kind") != "target_death_confirmed":
+                        continue
+                    if str(effects.get("target_id") or "") == str(target_id):
+                        return True
+                memory_v3 = agent.get("memory_v3", {}) if isinstance(agent.get("memory_v3"), dict) else {}
+                records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+                if not isinstance(records, dict):
+                    return False
+                for rec in records.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("status") in {"stale", "archived"}:
+                        continue
+                    if str(rec.get("kind") or "") != "target_death_confirmed":
+                        continue
+                    details = rec.get("details", {}) if isinstance(rec.get("details"), dict) else {}
+                    if str(details.get("target_id") or "") == str(target_id):
+                        return True
+                return False
+
+            if target_is_dead and _has_target_death_confirmed():
                 agent["global_goal_achieved"] = True
                 target_name = target_agent.get("name", target_id)
                 _add_memory(
                     agent, world_turn, state, "observation",
                     f"⚔️ Цель достигнута: «{target_name}» устранён!",
-                    {"action_kind": "goal_achieved", "goal": "kill_stalker", "target_id": target_id},
+                    {
+                        "action_kind": "global_goal_completed",
+                        "global_goal": "kill_stalker",
+                        "target_id": target_id,
+                    },
                     summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
                 )
 
@@ -4653,6 +4839,31 @@ def _execute_leave_zone(
     loc = locations.get(loc_id, {})
     exit_name = loc.get("name", loc_id)
     agent["has_left_zone"] = True
+    active_plan = get_active_plan(agent)
+    if active_plan is not None:
+        active_plan.abort("left_zone", world_turn)
+        save_active_plan(agent, active_plan)
+        _write_active_plan_trace_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            event="active_plan_completed",
+            active_plan=active_plan,
+            reason="left_zone",
+            summary=f"ActivePlan {active_plan.objective_key}: завершён при выходе из Зоны.",
+        )
+        _write_active_plan_memory_event(
+            agent,
+            world_turn=world_turn,
+            state=state,
+            action_kind="active_plan_completed",
+            active_plan=active_plan,
+            add_memory=_add_memory,
+            reason="left_zone",
+        )
+        clear_active_plan(agent)
+    agent["scheduled_action"] = None
+    agent["action_queue"] = []
     # Remove agent from the exit location's agent list
     if agent_id in loc.get("agents", []):
         loc["agents"].remove(agent_id)
@@ -4665,7 +4876,7 @@ def _execute_leave_zone(
     return [{"event_type": "agent_left_zone",
              "payload": {"agent_id": agent_id, "exit_location": loc_id}}]
 
-# ─── Backwards-compatibility aliases (v1 → v2 migration) ─────────────────────
+# ─── Backwards-compatibility aliases (legacy → NPC Brain v3 migration) ───────
 #
 # The v1 cascade functions (_run_bot_action, _run_bot_action_inner,
 # _bot_pursue_goal, _describe_bot_decision_tree) have been removed and
@@ -4678,8 +4889,28 @@ def _run_bot_action(
     state: Dict[str, Any],
     world_turn: int,
 ) -> List[Dict[str, Any]]:
-    """Backwards-compat alias → ``_run_bot_decision_v2``."""
-    return _run_bot_decision_v2(agent_id, agent, state, world_turn)
+    """Backwards-compat alias → ``_run_npc_brain_v3_decision``."""
+    return _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
+
+
+def _run_bot_decision_v2(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Compatibility wrapper retained for older tests/callers."""
+    return _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
+
+
+def _run_bot_decision_v2_inner(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+) -> List[Dict[str, Any]]:
+    """Compatibility wrapper retained for older tests/callers."""
+    return _run_npc_brain_v3_decision_inner(agent_id, agent, state, world_turn)
 
 
 def _run_bot_action_inner(
@@ -4692,7 +4923,7 @@ def _run_bot_action_inner(
 
     This function is called by tests that expect v1-style memory entries
     (seek_item, wander, wait_at_trader, etc.).  Using _bot_pursue_goal
-    rather than _run_bot_decision_v2_inner ensures those memory entries
+    rather than _run_npc_brain_v3_decision_inner ensures those memory entries
     are written correctly.
     """
     import random as _random
@@ -4773,8 +5004,8 @@ def _bot_pursue_goal(
         return _compat_pursue_unravel(agent_id, agent, loc_id, state, world_turn)
     if global_goal == "get_rich":
         return _compat_pursue_get_rich(agent_id, agent, loc_id, loc, state, world_turn, rng)
-    # Default: delegate to v2
-    return _run_bot_decision_v2_inner(agent_id, agent, state, world_turn)
+    # Default: delegate to NPC Brain v3
+    return _run_npc_brain_v3_decision_inner(agent_id, agent, state, world_turn)
 
 
 def _compat_pursue_kill_stalker(

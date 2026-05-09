@@ -40,12 +40,26 @@ export type CompactNpcHistoryExport = {
     sleepiness: number;
     radiation: number;
     money: number;
+    material_threshold?: number;
+    wealth_goal_target?: number;
+    global_goal_achieved?: boolean;
     global_goal?: string;
     current_goal?: string | null;
     active_objective?: BrainTraceObjectiveInfo | null;
     adapter_intent?: { kind?: string | null; score?: number | null } | null;
     scheduled_action?: unknown;
     active_plan_v3?: unknown;
+    brain_v3_context?: AgentForProfile['brain_v3_context'];
+    legacy_context_used?: boolean;
+    wealth_progress?: {
+      money: number;
+      liquid_wealth: number;
+      material_threshold?: number;
+      material_threshold_passed?: boolean;
+      wealth_goal_target?: number;
+      wealth_goal_reached?: boolean;
+      global_goal_achieved?: boolean;
+    };
   };
 
   equipment: Record<string, AgentInventoryItem | null>;
@@ -74,8 +88,9 @@ export type CompactNpcHistoryExport = {
     } | null;
     current_objective?: BrainTraceObjectiveInfo | null;
     current_runtime?: {
-      mode: 'scheduled_action' | 'idle';
+      mode: 'active_plan' | 'scheduled_action' | 'idle';
       scheduled_action?: unknown;
+      active_plan_v3?: unknown;
       latest_plan_monitor?: BrainTraceEvent | null;
     };
     recent_trace_events: BrainTraceEvent[];
@@ -262,6 +277,9 @@ export const summarizeInventory = (items: AgentInventoryItem[]) => {
   return [...grouped.values()].sort((a, b) => a.type.localeCompare(b.type));
 };
 
+export const getLiquidWealth = (agent: AgentForProfile): number =>
+  Number(agent.money ?? 0) + summarizeInventory(agent.inventory).reduce((acc, item) => acc + Number(item.total_value ?? 0), 0);
+
 export const toCompactTimelineEntry = (m: MemEntry) => {
   const effects = m.effects ?? {};
   const actionKind = typeof effects.action_kind === 'string' ? effects.action_kind : undefined;
@@ -296,16 +314,21 @@ export const getCurrentObjectiveFromAgent = (
   agent: AgentForProfile,
   latestDecision: BrainTraceEvent | null,
   storyTimeline: CompactTimelineEntry[],
+  options?: { includeLegacyContext?: boolean },
 ): BrainTraceObjectiveInfo | null => {
   if (latestDecision?.active_objective) return latestDecision.active_objective;
 
-  const v2ObjectiveKey = agent._v2_context?.objective_key;
-  if (v2ObjectiveKey) {
+  let brainContext = agent.brain_v3_context;
+  if (!brainContext && options?.includeLegacyContext) {
+    brainContext = agent._v2_context;
+  }
+  const objectiveKey = brainContext?.objective_key;
+  if (objectiveKey) {
     return {
-      key: v2ObjectiveKey,
-      score: agent._v2_context?.objective_score ?? agent._v2_context?.intent_score ?? 0,
+      key: objectiveKey,
+      score: brainContext?.objective_score ?? brainContext?.intent_score ?? 0,
       source: 'current_context',
-      reason: agent._v2_context?.objective_reason ?? agent._v2_context?.intent_reason ?? undefined,
+      reason: brainContext?.objective_reason ?? brainContext?.intent_reason ?? undefined,
     };
   }
 
@@ -371,11 +394,38 @@ export const buildCompactNpcHistoryExport = (
   const latestEvent = getLatestTraceEvent(agent.brain_trace);
   const latestDecision = getLatestDecisionEvent(agent.brain_trace);
   const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
-  const storyTimeline = displayMemory.slice(-120).map(toCompactTimelineEntry);
-  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline);
-  const latestPlanMonitor = latestEvent?.mode === 'plan_monitor' ? latestEvent : null;
-  const adapterIntentKind = latestDecision?.intent_kind ?? agent._v2_context?.intent_kind;
-  const adapterIntentScore = latestDecision?.intent_score ?? agent._v2_context?.intent_score;
+  const storyTimeline = displayMemory
+    .slice(-120)
+    .map(toCompactTimelineEntry)
+    .filter((entry) => entry.action_kind !== 'active_plan_step_started');
+  const legacyContextUsed = !agent.brain_v3_context && !!agent._v2_context;
+  const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline, {
+    includeLegacyContext: legacyContextUsed,
+  });
+  const latestPlanMonitor = latestEvent?.mode === 'active_plan_monitor' ? latestEvent : null;
+  const adapterContext = agent.brain_v3_context ?? (legacyContextUsed ? agent._v2_context : null);
+  const adapterIntentKind = latestDecision?.adapter_intent?.kind
+    ?? latestDecision?.intent_kind
+    ?? agent.brain_v3_context?.adapter_intent?.kind
+    ?? agent.brain_v3_context?.intent_kind
+    ?? adapterContext?.intent_kind;
+  const adapterIntentScore = latestDecision?.adapter_intent?.score
+    ?? latestDecision?.intent_score
+    ?? agent.brain_v3_context?.adapter_intent?.score
+    ?? agent.brain_v3_context?.intent_score
+    ?? adapterContext?.intent_score;
+  const liquidWealth = getLiquidWealth(agent);
+  const materialThreshold = typeof agent.material_threshold === 'number' ? agent.material_threshold : undefined;
+  const wealthGoalTarget = typeof agent.wealth_goal_target === 'number' ? agent.wealth_goal_target : undefined;
+  const wealthProgress = {
+    money: Number(agent.money ?? 0),
+    liquid_wealth: liquidWealth,
+    material_threshold: materialThreshold,
+    material_threshold_passed: materialThreshold != null ? liquidWealth >= materialThreshold : undefined,
+    wealth_goal_target: wealthGoalTarget,
+    wealth_goal_reached: wealthGoalTarget != null ? liquidWealth >= wealthGoalTarget : undefined,
+    global_goal_achieved: Boolean(agent.global_goal_achieved),
+  };
 
   return {
     export_schema: 'npc_history_v1',
@@ -393,6 +443,9 @@ export const buildCompactNpcHistoryExport = (
       sleepiness: agent.sleepiness,
       radiation: agent.radiation,
       money: agent.money,
+      material_threshold: agent.material_threshold,
+      wealth_goal_target: agent.wealth_goal_target,
+      global_goal_achieved: agent.global_goal_achieved,
       global_goal: agent.global_goal,
       current_goal: agent.current_goal,
       active_objective: currentObjective,
@@ -401,6 +454,9 @@ export const buildCompactNpcHistoryExport = (
         : null,
       scheduled_action: agent.scheduled_action,
       active_plan_v3: agent.active_plan_v3,
+      brain_v3_context: agent.brain_v3_context ?? (legacyContextUsed ? agent._v2_context ?? null : null),
+      legacy_context_used: legacyContextUsed,
+      wealth_progress: wealthProgress,
     },
     equipment: agent.equipment,
     inventory_summary: summarizeInventory(agent.inventory),
@@ -413,8 +469,8 @@ export const buildCompactNpcHistoryExport = (
             world_time: traceTimeLabel(latestDecision.turn, latestDecision.world_time),
             active_objective: latestDecision.active_objective,
             adapter_intent: {
-              kind: latestDecision.intent_kind,
-              score: latestDecision.intent_score,
+              kind: latestDecision.adapter_intent?.kind ?? latestDecision.intent_kind,
+              score: latestDecision.adapter_intent?.score ?? latestDecision.intent_score,
             },
             objective_scores: latestDecision.objective_scores,
             alternatives: latestDecision.alternatives,
@@ -430,6 +486,12 @@ export const buildCompactNpcHistoryExport = (
         ? {
             mode: 'scheduled_action',
             scheduled_action: agent.scheduled_action,
+            latest_plan_monitor: latestPlanMonitor,
+          }
+        : agent.active_plan_v3 != null
+        ? {
+            mode: 'active_plan',
+            active_plan_v3: agent.active_plan_v3,
             latest_plan_monitor: latestPlanMonitor,
           }
         : {

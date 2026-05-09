@@ -9,6 +9,7 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_FIND_ARTIFACTS,
     OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
     OBJECTIVE_HUNT_TARGET,
+    OBJECTIVE_LEAVE_ZONE,
     OBJECTIVE_LOCATE_TARGET,
     OBJECTIVE_PREPARE_FOR_HUNT,
     OBJECTIVE_REST,
@@ -231,3 +232,17 @@ def test_recovery_rest_uses_recovery_need_source() -> None:
 
     assert rest.source == "recovery_need"
     assert "Восстановление" in " ".join(rest.reasons)
+
+
+def test_completed_global_goal_adds_leave_zone_objective() -> None:
+    agent = make_agent(
+        global_goal="get_rich",
+        global_goal_achieved=True,
+    )
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    objective_map = {obj.key: obj for obj in objectives}
+
+    assert OBJECTIVE_LEAVE_ZONE in objective_map
+    assert objective_map[OBJECTIVE_LEAVE_ZONE].source == "global_goal_completed"

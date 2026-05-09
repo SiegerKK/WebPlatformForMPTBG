@@ -8,7 +8,7 @@ Language note:
     This is intentional — Zone Stalkers is a Russian-language game and all
     in-game memory/decision text is in Russian.  The ``reason`` field is
     displayed to players via the explain/debug interface and stored in
-    ``agent._v2_context``.
+    ``agent["brain_v3_context"]``.
 
 Tie-break order (fixed priority — from the addendum §5.1):
     1.  survive_now

@@ -5584,6 +5584,7 @@ class TestKillStalkerGoal:
         """Hunter already at trader should buy intel about target location and write observation."""
         import random
         from app.games.zone_stalkers.rules.tick_rules import _bot_pursue_goal
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
         state = self._minimal_state()
         hunter = self._make_hunter("A", "agent_target")
         hunter["money"] = 1000
@@ -5606,6 +5607,13 @@ class TestKillStalkerGoal:
             "Intel should point to target's actual location"
         )
         assert intel_obs[0]["effects"]["observed"] == "agent_location"
+        mem_v3_records = ensure_memory_v3(hunter)["records"].values()
+        assert any(
+            rec.get("kind") == "target_intel"
+            and rec.get("location_id") == "B"
+            and "agent_target" in rec.get("entity_ids", [])
+            for rec in mem_v3_records
+        ), "intel_from_trader should bridge to canonical target_intel memory_v3"
         # Money should have been deducted
         assert hunter["money"] == 800, f"Expected 800 after paying 200, got {hunter['money']}"
         # Trader should have received the money

@@ -76,6 +76,27 @@ def _make_mutual_kill_state(
     return state, bot1, bot2
 
 
+def _confirm_target_death(
+    agent_id: str,
+    agent: dict[str, Any],
+    target_id: str,
+    state: dict[str, Any],
+    world_turn: int,
+) -> None:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "observation",
+        "✅ Подтверждена ликвидация цели",
+        {"action_kind": "target_death_confirmed", "target_id": target_id},
+        summary="Цель подтверждена как устранённая.",
+        agent_id=agent_id,
+    )
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 class TestMutualKillStalkerIntent:
@@ -105,6 +126,7 @@ class TestMutualKillStalkerIntent:
 
         state, bot1, bot2 = _make_mutual_kill_state()
         bot2["is_alive"] = False
+        _confirm_target_death("bot1", bot1, "bot2", state, world_turn=1)
         # Mark goal as achieved (as done by the engine each tick)
         _check_global_goal_completion("bot1", bot1, state, world_turn=1)
         assert bot1.get("global_goal_achieved") is True
@@ -177,6 +199,7 @@ class TestMutualKillStalkerGoalCompletion:
 
         state, bot1, bot2 = _make_mutual_kill_state()
         bot2["is_alive"] = False
+        _confirm_target_death("bot1", bot1, "bot2", state, world_turn=5)
 
         _check_global_goal_completion("bot1", bot1, state, world_turn=5)
 
@@ -217,6 +240,8 @@ class TestMutualKillStalkerGoalCompletion:
         # Simulate simultaneous kills
         bot1["is_alive"] = False
         bot2["is_alive"] = False
+        _confirm_target_death("bot1", bot1, "bot2", state, world_turn=10)
+        _confirm_target_death("bot2", bot2, "bot1", state, world_turn=10)
 
         _check_global_goal_completion("bot1", bot1, state, world_turn=10)
         _check_global_goal_completion("bot2", bot2, state, world_turn=10)

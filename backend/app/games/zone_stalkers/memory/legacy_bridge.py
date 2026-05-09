@@ -10,6 +10,7 @@ from .models import (
     LAYER_SOCIAL,
     LAYER_THREAT,
     LAYER_SPATIAL,
+    LAYER_GOAL,
 )
 from .store import ensure_memory_v3, add_memory_record, MEMORY_V3_IMPORT_LEGACY_LIMIT
 
@@ -36,6 +37,19 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     # Plan monitor
     "plan_monitor_abort": (LAYER_EPISODIC, "action_aborted", ("plan_monitor", "scheduled_action")),
 
+    # ActivePlan lifecycle
+    "active_plan_created": (LAYER_GOAL, "active_plan_created", ("active_plan",)),
+    "active_plan_step_started": (LAYER_EPISODIC, "active_plan_step_started", ("active_plan", "step")),
+    "active_plan_step_completed": (LAYER_EPISODIC, "active_plan_step_completed", ("active_plan", "step")),
+    "active_plan_step_failed": (LAYER_GOAL, "active_plan_step_failed", ("active_plan", "step", "threat")),
+    "active_plan_repair_requested": (LAYER_GOAL, "active_plan_repair_requested", ("active_plan", "repair")),
+    "active_plan_repaired": (LAYER_GOAL, "active_plan_repaired", ("active_plan", "repair")),
+    "active_plan_paused": (LAYER_GOAL, "active_plan_paused", ("active_plan", "repair")),
+    "active_plan_resumed": (LAYER_GOAL, "active_plan_resumed", ("active_plan", "repair")),
+    "active_plan_aborted": (LAYER_GOAL, "active_plan_aborted", ("active_plan", "threat")),
+    "active_plan_completed": (LAYER_GOAL, "active_plan_completed", ("active_plan",)),
+    "global_goal_completed": (LAYER_GOAL, "global_goal_completed", ("goal", "completion")),
+
     # Threat / environment
     "emission_imminent": (LAYER_THREAT, "emission_warning", ("emission", "danger")),
     "emission_started": (LAYER_THREAT, "emission_started", ("emission", "danger")),
@@ -56,11 +70,14 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "target_seen": (LAYER_SOCIAL, "target_seen", ("target", "tracking", "social")),
     "target_last_known_location": (LAYER_SPATIAL, "target_last_known_location", ("target", "tracking", "spatial")),
     "target_not_found": (LAYER_SPATIAL, "target_not_found", ("target", "tracking", "negative_observation")),
+    "target_moved": (LAYER_SPATIAL, "target_moved", ("target", "tracking", "movement")),
     "target_route_observed": (LAYER_SPATIAL, "target_route_observed", ("target", "route", "tracking")),
     "target_equipment_seen": (LAYER_THREAT, "target_equipment_seen", ("target", "equipment", "combat")),
     "target_combat_strength_observed": (LAYER_THREAT, "target_combat_strength_observed", ("target", "combat", "threat")),
     "target_death_confirmed": (LAYER_THREAT, "target_death_confirmed", ("target", "death", "confirmed")),
     "target_intel": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social")),
+    "intel_from_trader": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social", "trader")),
+    "intel_from_stalker": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social", "stalker")),
 }
 
 _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
@@ -145,6 +162,20 @@ def _map_legacy_to_record(
         if effects.get("scheduled_action_type") == "sleep":
             extra_tags.extend(["sleep", "rest"])
             kind = "sleep_interrupted"
+    if action_kind.startswith("active_plan_"):
+        objective_key = effects.get("objective_key")
+        step_kind = effects.get("step_kind")
+        reason = effects.get("reason")
+        if objective_key:
+            extra_tags.append(f"objective:{objective_key}")
+        if step_kind:
+            extra_tags.append(f"step:{step_kind}")
+        if reason:
+            extra_tags.append(f"repair:{reason}")
+    if action_kind == "global_goal_completed":
+        global_goal = effects.get("global_goal")
+        if global_goal:
+            extra_tags.append(f"goal:{global_goal}")
 
     item_types: tuple[str, ...] = ()
     if action_kind in ("trade_buy", "trade_sell"):
@@ -172,7 +203,7 @@ def _map_legacy_to_record(
     # Retention guidance for target-related memory kinds.
     if kind in {"target_equipment_seen", "target_combat_strength_observed", "target_death_confirmed"}:
         importance = max(importance, 0.85)
-    elif kind in {"target_seen", "target_not_found", "target_last_known_location", "target_route_observed"}:
+    elif kind in {"target_seen", "target_not_found", "target_moved", "target_last_known_location", "target_route_observed"}:
         importance = max(importance, 0.65)
 
     details: dict[str, Any] = dict(effects)
