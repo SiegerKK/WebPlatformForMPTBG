@@ -24,8 +24,8 @@ def build_target_belief(
     world_turn: int,
     belief_state: BeliefState,
 ) -> TargetBelief:
-    del world_turn
-
+    _world_turn = world_turn  # reserved for future use (e.g. time-based belief decay)
+    del _world_turn
     target_id = str(agent.get("kill_target_id") or "")
     if not target_id:
         return TargetBelief(
