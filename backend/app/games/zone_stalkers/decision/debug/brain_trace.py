@@ -135,8 +135,27 @@ def append_brain_trace_event(
     trace["world_time"] = world_time
     trace["mode"] = mode
     trace["current_thought"] = summary
-    events = list(trace.get("events", []))
-    trace["events"] = (events + [event])[-BRAIN_TRACE_MAX_EVENTS:]
+    events = list(trace.get("events", [])) + [event]
+    if len(events) <= BRAIN_TRACE_MAX_EVENTS:
+        trace["events"] = events
+        return
+
+    protected_abort = next(
+        (
+            existing
+            for existing in reversed(events)
+            if existing.get("turn") == world_turn
+            and existing.get("mode") == "plan_monitor"
+            and existing.get("decision") == "abort"
+        ),
+        None,
+    )
+    if protected_abort is None:
+        trace["events"] = events[-BRAIN_TRACE_MAX_EVENTS:]
+        return
+
+    trimmed = [existing for existing in events if existing is not protected_abort]
+    trace["events"] = [protected_abort] + trimmed[-(BRAIN_TRACE_MAX_EVENTS - 1):]
 
 
 def write_plan_monitor_trace(
