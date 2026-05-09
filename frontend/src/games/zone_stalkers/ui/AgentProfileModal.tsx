@@ -149,6 +149,7 @@ export interface AgentForProfile {
   global_goal?: string;
   current_goal?: string | null;
   material_threshold?: number;
+  wealth_goal_target?: number;
   risk_tolerance?: number;
   reputation?: number;
   has_left_zone?: boolean;
@@ -285,6 +286,9 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
   const latestTraceEvent = getLatestTraceEvent(agent.brain_trace);
   const latestDecisionEvent = getLatestDecisionEvent(agent.brain_trace);
   const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecisionEvent, storyTimelineForObjective);
+  const liquidWealth = agent.money + agent.inventory.reduce((acc, item) => acc + Number(item.value ?? 0), 0);
+  const materialThresholdPassed = agent.material_threshold != null ? liquidWealth >= agent.material_threshold : null;
+  const wealthGoalReached = agent.wealth_goal_target != null ? liquidWealth >= agent.wealth_goal_target : null;
 
   const handleAddItem = async () => {
     if (!sendCommand || !addItemType) return;
@@ -525,7 +529,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         )}
 
         {/* ── 8. Goals ── */}
-        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind) && (
+        {(agent.global_goal || agent.current_goal || currentObjective || latestDecisionEvent?.adapter_intent?.kind || latestDecisionEvent?.intent_kind || agent.brain_v3_context?.adapter_intent?.kind || agent.brain_v3_context?.intent_kind || agent.material_threshold != null || agent.wealth_goal_target != null || agent.global_goal_achieved != null) && (
           <Section label="🎯 Цели">
             {agent.global_goal && (
               <div style={s.goalRow}>
@@ -537,6 +541,39 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
               <div style={s.goalRow}>
                 <span style={s.goalLabel}>Текущая высокая цель:</span>
                 <span style={s.goalVal}>{currentGoalLabel(agent.current_goal)}</span>
+              </div>
+            )}
+            {(agent.material_threshold != null || agent.wealth_goal_target != null) && (
+              <>
+                <div style={s.goalRow}>
+                  <span style={s.goalLabel}>Liquid wealth:</span>
+                  <span style={s.goalVal}>{liquidWealth} RU</span>
+                </div>
+                {agent.material_threshold != null && (
+                  <div style={s.goalRow}>
+                    <span style={s.goalLabel}>Material threshold:</span>
+                    <span style={s.goalVal}>
+                      {agent.material_threshold} RU {materialThresholdPassed == null ? '' : materialThresholdPassed ? '— passed' : '— not passed'}
+                    </span>
+                  </div>
+                )}
+                {agent.wealth_goal_target != null && (
+                  <div style={s.goalRow}>
+                    <span style={s.goalLabel}>Wealth goal target:</span>
+                    <span style={s.goalVal}>
+                      {agent.wealth_goal_target} RU {wealthGoalReached == null ? '' : wealthGoalReached ? '— reached' : '— not reached'}
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+            {agent.global_goal_achieved != null && (
+              <div style={s.goalRow}>
+                <span style={s.goalLabel}>Global goal completed:</span>
+                <span style={s.goalVal}>
+                  {agent.global_goal_achieved ? 'yes' : 'no'}
+                  {agent.global_goal_achieved ? ' · next objective: LEAVE_ZONE' : ''}
+                </span>
               </div>
             )}
             {currentObjective && (

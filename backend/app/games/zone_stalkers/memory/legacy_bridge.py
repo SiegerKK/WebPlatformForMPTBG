@@ -48,6 +48,7 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "active_plan_resumed": (LAYER_GOAL, "active_plan_resumed", ("active_plan", "repair")),
     "active_plan_aborted": (LAYER_GOAL, "active_plan_aborted", ("active_plan", "threat")),
     "active_plan_completed": (LAYER_GOAL, "active_plan_completed", ("active_plan",)),
+    "global_goal_completed": (LAYER_GOAL, "global_goal_completed", ("goal", "completion")),
 
     # Threat / environment
     "emission_imminent": (LAYER_THREAT, "emission_warning", ("emission", "danger")),
@@ -168,6 +169,10 @@ def _map_legacy_to_record(
             extra_tags.append(f"step:{step_kind}")
         if reason:
             extra_tags.append(f"repair:{reason}")
+    if action_kind == "global_goal_completed":
+        global_goal = effects.get("global_goal")
+        if global_goal:
+            extra_tags.append(f"goal:{global_goal}")
 
     item_types: tuple[str, ...] = ()
     if action_kind in ("trade_buy", "trade_sell"):

@@ -40,6 +40,9 @@ export type CompactNpcHistoryExport = {
     sleepiness: number;
     radiation: number;
     money: number;
+    material_threshold?: number;
+    wealth_goal_target?: number;
+    global_goal_achieved?: boolean;
     global_goal?: string;
     current_goal?: string | null;
     active_objective?: BrainTraceObjectiveInfo | null;
@@ -48,6 +51,15 @@ export type CompactNpcHistoryExport = {
     active_plan_v3?: unknown;
     brain_v3_context?: AgentForProfile['brain_v3_context'];
     legacy_context_used?: boolean;
+    wealth_progress?: {
+      money: number;
+      liquid_wealth: number;
+      material_threshold?: number;
+      material_threshold_passed?: boolean;
+      wealth_goal_target?: number;
+      wealth_goal_reached?: boolean;
+      global_goal_achieved?: boolean;
+    };
   };
 
   equipment: Record<string, AgentInventoryItem | null>;
@@ -265,6 +277,9 @@ export const summarizeInventory = (items: AgentInventoryItem[]) => {
   return [...grouped.values()].sort((a, b) => a.type.localeCompare(b.type));
 };
 
+export const getLiquidWealth = (agent: AgentForProfile): number =>
+  Number(agent.money ?? 0) + summarizeInventory(agent.inventory).reduce((acc, item) => acc + Number(item.total_value ?? 0), 0);
+
 export const toCompactTimelineEntry = (m: MemEntry) => {
   const effects = m.effects ?? {};
   const actionKind = typeof effects.action_kind === 'string' ? effects.action_kind : undefined;
@@ -303,9 +318,10 @@ export const getCurrentObjectiveFromAgent = (
 ): BrainTraceObjectiveInfo | null => {
   if (latestDecision?.active_objective) return latestDecision.active_objective;
 
-  const brainContext = options?.includeLegacyContext
-    ? (agent.brain_v3_context ?? agent._v2_context)
-    : agent.brain_v3_context;
+  let brainContext = agent.brain_v3_context;
+  if (!brainContext && options?.includeLegacyContext) {
+    brainContext = agent._v2_context;
+  }
   const objectiveKey = brainContext?.objective_key;
   if (objectiveKey) {
     return {
@@ -378,7 +394,10 @@ export const buildCompactNpcHistoryExport = (
   const latestEvent = getLatestTraceEvent(agent.brain_trace);
   const latestDecision = getLatestDecisionEvent(agent.brain_trace);
   const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
-  const storyTimeline = displayMemory.slice(-120).map(toCompactTimelineEntry);
+  const storyTimeline = displayMemory
+    .slice(-120)
+    .map(toCompactTimelineEntry)
+    .filter((entry) => entry.action_kind !== 'active_plan_step_started');
   const legacyContextUsed = !agent.brain_v3_context && !!agent._v2_context;
   const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline, {
     includeLegacyContext: legacyContextUsed,
@@ -395,6 +414,18 @@ export const buildCompactNpcHistoryExport = (
     ?? agent.brain_v3_context?.adapter_intent?.score
     ?? agent.brain_v3_context?.intent_score
     ?? adapterContext?.intent_score;
+  const liquidWealth = getLiquidWealth(agent);
+  const materialThreshold = typeof agent.material_threshold === 'number' ? agent.material_threshold : undefined;
+  const wealthGoalTarget = typeof agent.wealth_goal_target === 'number' ? agent.wealth_goal_target : undefined;
+  const wealthProgress = {
+    money: Number(agent.money ?? 0),
+    liquid_wealth: liquidWealth,
+    material_threshold: materialThreshold,
+    material_threshold_passed: materialThreshold != null ? liquidWealth >= materialThreshold : undefined,
+    wealth_goal_target: wealthGoalTarget,
+    wealth_goal_reached: wealthGoalTarget != null ? liquidWealth >= wealthGoalTarget : undefined,
+    global_goal_achieved: Boolean(agent.global_goal_achieved),
+  };
 
   return {
     export_schema: 'npc_history_v1',
@@ -412,6 +443,9 @@ export const buildCompactNpcHistoryExport = (
       sleepiness: agent.sleepiness,
       radiation: agent.radiation,
       money: agent.money,
+      material_threshold: agent.material_threshold,
+      wealth_goal_target: agent.wealth_goal_target,
+      global_goal_achieved: agent.global_goal_achieved,
       global_goal: agent.global_goal,
       current_goal: agent.current_goal,
       active_objective: currentObjective,
@@ -422,6 +456,7 @@ export const buildCompactNpcHistoryExport = (
       active_plan_v3: agent.active_plan_v3,
       brain_v3_context: agent.brain_v3_context ?? (legacyContextUsed ? agent._v2_context ?? null : null),
       legacy_context_used: legacyContextUsed,
+      wealth_progress: wealthProgress,
     },
     equipment: agent.equipment,
     inventory_summary: summarizeInventory(agent.inventory),

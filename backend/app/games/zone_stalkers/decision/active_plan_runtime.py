@@ -59,6 +59,8 @@ def write_active_plan_memory_event(
     active_plan: ActivePlanV3,
     add_memory: AddMemoryFn,
     reason: str | None = None,
+    payload_overrides: dict[str, Any] | None = None,
+    summary_override: str | None = None,
 ) -> None:
     payload = {
         "action_kind": action_kind,
@@ -66,6 +68,8 @@ def write_active_plan_memory_event(
         "step_index": active_plan.current_step_index,
         "step_kind": active_plan_step_label(active_plan.current_step),
     }
+    if payload_overrides:
+        payload.update(payload_overrides)
     if reason is not None:
         payload["reason"] = reason
     add_memory(
@@ -76,10 +80,14 @@ def write_active_plan_memory_event(
         f"🧭 {action_kind}",
         payload,
         summary=(
-            f"ActivePlan {active_plan.objective_key}: "
-            f"{action_kind} (шаг {active_plan.current_step_index + 1}/{max(1, len(active_plan.steps))}, "
-            f"{active_plan_step_label(active_plan.current_step)})."
-            + (f" Причина: {reason}." if reason else "")
+            summary_override
+            if summary_override is not None
+            else (
+                f"ActivePlan {active_plan.objective_key}: "
+                f"{action_kind} (шаг {active_plan.current_step_index + 1}/{max(1, len(active_plan.steps))}, "
+                f"{active_plan_step_label(active_plan.current_step)})."
+                + (f" Причина: {reason}." if reason else "")
+            )
         ),
     )
 
@@ -245,6 +253,19 @@ def finish_active_plan(
     terminal_event: str,
     reason: str | None = None,
 ) -> None:
+    completed_steps = sum(1 for step in active_plan.steps if step.status == "completed")
+    completion_summary = (
+        f"ActivePlan {active_plan.objective_key}: completed, "
+        f"{completed_steps}/{len(active_plan.steps)} steps completed."
+    )
+    event_summary = (
+        completion_summary
+        if terminal_event == "active_plan_completed"
+        else (
+            f"ActivePlan {active_plan.objective_key}: {terminal_event}."
+            + (f" Причина: {reason}." if reason else "")
+        )
+    )
     write_active_plan_trace_event(
         agent,
         world_turn=world_turn,
@@ -252,10 +273,7 @@ def finish_active_plan(
         event=terminal_event,
         active_plan=active_plan,
         reason=reason,
-        summary=(
-            f"ActivePlan {active_plan.objective_key}: {terminal_event}."
-            + (f" Причина: {reason}." if reason else "")
-        ),
+        summary=event_summary,
     )
     write_active_plan_memory_event(
         agent,
@@ -265,6 +283,7 @@ def finish_active_plan(
         active_plan=active_plan,
         add_memory=add_memory,
         reason=reason,
+        summary_override=event_summary,
     )
     clear_active_plan(agent)
     sched = agent.get("scheduled_action")
@@ -391,18 +410,25 @@ def start_or_continue_active_plan_step(
         return events
 
     if step_plan.current_step_index > 0:
+        completed_step_index = refreshed_plan.current_step_index
+        completed_step = refreshed_plan.current_step
+        completed_step_kind = completed_step.kind if completed_step is not None else "unknown"
+        steps_count = len(refreshed_plan.steps)
+
         refreshed_plan.advance_step(world_turn)
         save_active_plan(agent, refreshed_plan)
+        next_step = refreshed_plan.current_step
+        step_completed_summary = (
+            f"ActivePlan {refreshed_plan.objective_key}: шаг "
+            f"{completed_step_index + 1}/{steps_count} {completed_step_kind} завершён."
+        )
         write_active_plan_trace_event(
             agent,
             world_turn=world_turn,
             state=state,
             event="active_plan_step_completed",
             active_plan=refreshed_plan,
-            summary=(
-                f"ActivePlan {refreshed_plan.objective_key}: завершён шаг "
-                f"{refreshed_plan.current_step_index}/{len(refreshed_plan.steps)}."
-            ),
+            summary=step_completed_summary,
         )
         write_active_plan_memory_event(
             agent,
@@ -412,6 +438,21 @@ def start_or_continue_active_plan_step(
             active_plan=refreshed_plan,
             add_memory=add_memory,
             reason="completed",
+            payload_overrides={
+                "step_index": completed_step_index,
+                "step_kind": completed_step_kind,
+                "completed_step_index": completed_step_index,
+                "completed_step_number": completed_step_index + 1,
+                "completed_step_kind": completed_step_kind,
+                "steps_count": steps_count,
+                "next_step_index": (
+                    refreshed_plan.current_step_index
+                    if next_step is not None
+                    else None
+                ),
+                "next_step_kind": active_plan_step_label(next_step) if next_step is not None else None,
+            },
+            summary_override=step_completed_summary,
         )
         if refreshed_plan.is_complete:
             finish_active_plan(
@@ -568,19 +609,23 @@ def on_active_plan_scheduled_action_completed(
         return []
 
     completed_step = active_plan.current_step
+    completed_step_index = active_plan.current_step_index
+    completed_step_kind = completed_step.kind if completed_step is not None else "unknown"
+    steps_count = len(active_plan.steps)
     active_plan.advance_step(world_turn)
     save_active_plan(agent, active_plan)
+    next_step = active_plan.current_step
+    step_completed_summary = (
+        f"ActivePlan {active_plan.objective_key}: шаг "
+        f"{completed_step_index + 1}/{steps_count} {completed_step_kind} завершён."
+    )
     write_active_plan_trace_event(
         agent,
         world_turn=world_turn,
         state=state,
         event="active_plan_step_completed",
         active_plan=active_plan,
-        summary=(
-            f"ActivePlan {active_plan.objective_key}: завершён шаг "
-            f"{active_plan.current_step_index}/{len(active_plan.steps)} "
-            f"{completed_step.kind if completed_step is not None else 'unknown'}."
-        ),
+        summary=step_completed_summary,
     )
     write_active_plan_memory_event(
         agent,
@@ -590,6 +635,17 @@ def on_active_plan_scheduled_action_completed(
         active_plan=active_plan,
         add_memory=add_memory,
         reason="completed",
+        payload_overrides={
+            "step_index": completed_step_index,
+            "step_kind": completed_step_kind,
+            "completed_step_index": completed_step_index,
+            "completed_step_number": completed_step_index + 1,
+            "completed_step_kind": completed_step_kind,
+            "steps_count": steps_count,
+            "next_step_index": active_plan.current_step_index if next_step is not None else None,
+            "next_step_kind": active_plan_step_label(next_step) if next_step is not None else None,
+        },
+        summary_override=step_completed_summary,
     )
     if active_plan.is_complete:
         finish_active_plan(

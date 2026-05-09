@@ -27,6 +27,7 @@ from app.games.zone_stalkers.decision.active_plan_manager import (
     get_active_plan,
     save_active_plan,
 )
+from app.games.zone_stalkers.decision.active_plan_composer import compose_active_plan_steps
 from app.games.zone_stalkers.decision.active_plan_runtime import (
     active_plan_trace_payload as _active_plan_trace_payload,
     finish_active_plan as _finish_active_plan,
@@ -4269,14 +4270,15 @@ def _run_npc_brain_v3_decision_inner(
         return sell_evs
 
     # ── Check and handle global goal completion ────────────────────────────
-    if not agent.get("has_left_zone") and agent.get("is_alive", True):
-        if not agent.get("global_goal_achieved"):
-            _check_global_goal_completion(agent_id, agent, state, world_turn)
-        if agent.get("global_goal_achieved"):
-            loc = state.get("locations", {}).get(agent.get("location_id", ""), {})
-            if loc.get("exit_zone"):
-                return _execute_leave_zone(agent_id, agent, state, world_turn)
-            return _bot_route_to_exit(agent_id, agent, state, world_turn)
+    if not agent.get("has_left_zone") and agent.get("is_alive", True) and not agent.get("global_goal_achieved"):
+        _check_global_goal_completion(agent_id, agent, state, world_turn)
+
+    # If goal is complete and agent is already at exit, leave immediately.
+    # Otherwise route selection goes through objective pipeline (LEAVE_ZONE).
+    if not agent.get("has_left_zone") and agent.get("is_alive", True) and agent.get("global_goal_achieved"):
+        loc = state.get("locations", {}).get(agent.get("location_id", ""), {})
+        if loc.get("exit_zone"):
+            return _execute_leave_zone(agent_id, agent, state, world_turn)
 
     # ── Pre-decision: phase-independent equipment maintenance ─────────────
     # Equip / pick-up / seek from memory happen before the needs pipeline so
@@ -4558,10 +4560,28 @@ def _run_npc_brain_v3_decision_inner(
                 alternatives=(),
             )
         if plan_decision is not None:
+            composed_plan = plan
+            if selected_objective is not None:
+                composed_steps = compose_active_plan_steps(
+                    objective_key=selected_objective.key,
+                    base_plan=plan,
+                    agent=agent,
+                    state=state,
+                    world_turn=world_turn,
+                )
+                composed_plan = Plan(
+                    intent_kind=plan.intent_kind,
+                    steps=composed_steps,
+                    current_step_index=0,
+                    interruptible=plan.interruptible,
+                    confidence=plan.confidence,
+                    created_turn=plan.created_turn,
+                    expires_turn=plan.expires_turn,
+                )
             runtime_active_plan = create_active_plan(
                 objective_decision=plan_decision,
                 world_turn=world_turn,
-                plan=plan,
+                plan=composed_plan,
             )
             save_active_plan(agent, runtime_active_plan)
             agent["action_queue"] = []
@@ -4627,16 +4647,25 @@ def _check_global_goal_completion(
     from app.games.zone_stalkers.balance.items import SECRET_DOCUMENT_ITEM_TYPES as _SECRET_TYPES
     global_goal = agent.get("global_goal")
     if global_goal == "get_rich":
-        wealth = _agent_wealth(agent)
+        from app.games.zone_stalkers.decision.needs import _agent_liquid_wealth  # noqa: PLC0415
+
+        wealth = _agent_liquid_wealth(agent)
         target = agent.get("wealth_goal_target", GET_RICH_COMPLETION_MIN)
         if wealth >= target:
             agent["global_goal_achieved"] = True
             _add_memory(
                 agent, world_turn, state, "observation",
                 "💰 Цель достигнута: разбогател!",
-                {"action_kind": "goal_achieved", "goal": "get_rich",
-                 "wealth": wealth, "target": target},
-                summary=f"Я достиг своей цели — разбогател! Моё состояние: {wealth} руб. Пора покидать Зону",
+                {
+                    "action_kind": "global_goal_completed",
+                    "global_goal": "get_rich",
+                    "wealth_goal_target": target,
+                    "liquid_wealth": wealth,
+                },
+                summary=(
+                    f"Я достиг своей цели «get_rich»: ликвидное богатство {wealth} ≥ {target}. "
+                    "Пора покидать Зону."
+                ),
             )
     elif global_goal == "unravel_zone_mystery":
         has_doc = any(
