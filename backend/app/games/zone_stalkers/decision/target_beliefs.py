@@ -509,6 +509,9 @@ def build_target_belief(
         target_id=target_id,
         is_known=bool(target_id),
         is_alive=is_alive,
+        # Backwards-compatible alias: last_known_location_id is set to the
+        # confidence-ranked best hypothesis rather than a strict temporal "last seen"
+        # location.  Consumers should prefer best_location_id going forward.
         last_known_location_id=best_location_id,
         location_confidence=_clamp01(best_location_confidence),
         best_location_id=best_location_id,

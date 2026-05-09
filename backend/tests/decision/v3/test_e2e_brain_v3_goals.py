@@ -588,11 +588,17 @@ def test_hunter_does_not_repeat_search_target_same_empty_location_forever() -> N
         "Hunter must record target_not_found at the false lead location"
     )
     # Crucially: the hunter must NOT have looped on loc_false indefinitely.
-    # The exhaustion threshold is 3; a sane hunter finds a better lead before hitting it.
+    # The exhaustion threshold is 3; in this scenario look_for_tracks finds the
+    # true trail on the first visit, so the hunter switches to the real location
+    # after at most one search.  The upper bound of 3 accommodates variance in
+    # scenarios where tracks are not immediately available.
     false_lead_searches = _count_memory_v3("target_not_found", location_id="loc_false")
-    assert 1 <= false_lead_searches <= 3, (
-        f"Hunter must search loc_false a bounded number of times "
-        f"(1..3), got {false_lead_searches}"
+    assert false_lead_searches >= 1, (
+        "Hunter must search the false lead at least once"
+    )
+    assert false_lead_searches <= 3, (
+        f"Hunter must stop searching the empty location at the exhaustion threshold (≤3), "
+        f"got {false_lead_searches} — the exhaustion / track-following mechanism may be broken"
     )
     # Eventually the hunter must purchase intel from the trader or see the target.
     assert (

@@ -105,9 +105,16 @@ def test_target_seen_creates_high_confidence_location_hypothesis() -> None:
 
 
 def test_target_not_found_suppresses_old_location() -> None:
+    """A single target_not_found with higher confidence than the positive lead
+    should push the net score negative, eliminating loc_b from usable hypotheses.
+    (With typical default confidence 0.75 the net stays positive; this test uses
+    an explicit confidence of 0.9 to model a high-certainty negative observation.)
+    """
     agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
     state = _make_state(agent)
+    # Positive lead: confidence 0.85, weight +1.0 → contribution +0.85
     _remember(agent, kind="target_last_known_location", created_turn=95, location_id="loc_b", confidence=0.85)
+    # Negative evidence: confidence 0.9, weight -1.0 → contribution -0.90 (net < 0, display 0)
     _remember(agent, kind="target_not_found", created_turn=99, location_id="loc_b", confidence=0.9)
     ctx = build_agent_context("bot1", agent, state)
     belief_state = build_belief_state(ctx, agent, state["world_turn"])
@@ -120,8 +127,44 @@ def test_target_not_found_suppresses_old_location() -> None:
         belief_state=belief_state,
     )
 
+    # Net score is negative (strong denial > positive lead), so no usable best location.
     assert belief.best_location_id is None
     assert belief.location_confidence == 0.0
+
+
+def test_target_not_found_reduces_but_not_eliminates_with_weak_negative() -> None:
+    """A single target_not_found with default confidence (0.75) against a stronger
+    positive lead (0.95 target_seen) should reduce confidence significantly but
+    NOT zero it out — the net score stays positive.
+    """
+    agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
+    state = _make_state(agent)
+    # Strong positive lead: target_seen confidence 0.95
+    _remember(agent, kind="target_seen", created_turn=95, location_id="loc_b", confidence=0.95)
+    # Weak negative: target_not_found with default confidence (0.75)
+    _remember(agent, kind="target_not_found", created_turn=99, location_id="loc_b", confidence=0.75)
+    ctx = build_agent_context("bot1", agent, state)
+    belief_state = build_belief_state(ctx, agent, state["world_turn"])
+
+    belief = build_target_belief(
+        agent_id="bot1",
+        agent=agent,
+        state=state,
+        world_turn=state["world_turn"],
+        belief_state=belief_state,
+    )
+
+    # Net score is positive (0.95 - 0.75 = 0.20), so loc_b still appears.
+    assert belief.best_location_id == "loc_b", (
+        "Location with strong positive lead should survive one weak negative observation"
+    )
+    # Confidence is meaningfully lower than 0.95 (strongly reduced).
+    assert belief.best_location_confidence < 0.50, (
+        "One target_not_found should reduce confidence significantly"
+    )
+    assert belief.best_location_confidence > 0.0, (
+        "One target_not_found alone should not eliminate the location"
+    )
 
 
 def test_repeated_target_not_found_exhausts_location() -> None:

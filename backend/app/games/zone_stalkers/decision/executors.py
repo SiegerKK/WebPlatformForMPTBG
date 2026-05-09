@@ -544,6 +544,9 @@ def _exec_look_for_tracks(
 
     target = state.get("agents", {}).get(target_id)
     current_loc = str(agent.get("location_id") or "")
+    # MVP: the game resolves track-finding by consulting the authoritative target
+    # location in the game state.  This is intentionally simplified — a richer
+    # simulation would limit information to what the hunter can actually observe.
     target_loc = str(target.get("location_id") or "") if isinstance(target, dict) else ""
 
     if isinstance(target, dict) and target.get("is_alive", True) and target_loc and target_loc != current_loc:
