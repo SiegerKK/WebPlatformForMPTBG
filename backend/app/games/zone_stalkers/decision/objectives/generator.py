@@ -599,75 +599,159 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         weapon_missing = int(readiness.get("weapon_missing") or 0)
         ammo_missing = int(readiness.get("ammo_missing") or 0)
         hp = int(agent.get("hp") or 100)
+        target_belief = ctx.target_belief
 
         blockers: list[dict[str, Any]] = []
-        reasons: list[str] = ["Охота требует предварительной готовности"]
+        prepare_reasons: list[str] = ["Охота требует предварительной готовности"]
         if weapon_missing > 0:
             blockers.append({"key": "no_weapon", "reason": "Нет оружия", "blocked": True, "penalty": 0.55})
-            reasons.append("Нет оружия")
+            prepare_reasons.append("Нет оружия")
         if ammo_missing > 0:
             blockers.append({"key": "low_ammo", "reason": "Недостаточно патронов", "blocked": True, "penalty": 0.45})
-            reasons.append("Недостаточно патронов")
+            prepare_reasons.append("Недостаточно патронов")
         if hp <= 35:
             blockers.append({"key": "hp_low", "reason": "HP слишком низкий", "blocked": True, "penalty": 0.5})
-            reasons.append("Нужно восстановить HP")
+            prepare_reasons.append("Нужно восстановить HP")
+        if target_belief and target_belief.combat_strength is not None and target_belief.combat_strength > 0.8 and hp <= 50:
+            blockers.append({"key": "target_too_strong", "reason": "Цель слишком сильная сейчас", "blocked": True, "penalty": 0.5})
+            prepare_reasons.append("Цель слишком сильная для текущего состояния")
 
-        _append_unique(
-            result,
-            Objective(
-                key=OBJECTIVE_PREPARE_FOR_HUNT,
-                source="global_goal",
-                urgency=0.65 + (0.2 if blockers else 0.0),
-                expected_value=0.85,
-                risk=0.25,
-                time_cost=0.45,
-                resource_cost=0.25,
-                confidence=0.8,
-                goal_alignment=1.0,
-                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_PREPARE_FOR_HUNT)[1],
-                reasons=tuple(reasons),
-                source_refs=("global_goal:kill_stalker",),
-                metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "prepare"},
-            ),
-        )
+        target_id = str(agent.get("kill_target_id") or "")
+        target_loc = target_belief.last_known_location_id if target_belief else None
+        target_visible_now = bool(target_belief.visible_now) if target_belief else False
+        target_co_located = bool(target_belief.co_located) if target_belief else False
+        target_alive = target_belief.is_alive if target_belief else None
 
-        _append_unique(
-            result,
-            Objective(
-                key=OBJECTIVE_LOCATE_TARGET,
-                source="global_goal",
-                urgency=0.55,
-                expected_value=0.75,
-                risk=0.2,
-                time_cost=0.5,
-                resource_cost=0.1,
-                confidence=0.7,
-                goal_alignment=1.0,
-                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[1],
-                reasons=("Нужно определить местоположение цели",),
-                source_refs=("global_goal:kill_stalker",),
-                metadata={"is_blocking": False, "hunt_stage": "locate"},
-            ),
-        )
-
-        _append_unique(
-            result,
-            Objective(
-                key=OBJECTIVE_ENGAGE_TARGET,
-                source="global_goal",
-                urgency=0.5,
-                expected_value=0.9,
-                risk=0.8,
-                time_cost=0.35,
-                resource_cost=0.2,
-                confidence=0.6,
-                goal_alignment=1.0,
-                memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
-                reasons=("Прямая атака возможна только при боевой готовности",),
-                source_refs=("global_goal:kill_stalker",),
-                metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "engage"},
-            ),
-        )
+        if target_alive is False:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_CONFIRM_KILL,
+                    source="global_goal",
+                    urgency=0.85,
+                    expected_value=1.0,
+                    risk=0.1,
+                    time_cost=0.2,
+                    resource_cost=0.0,
+                    confidence=0.9,
+                    goal_alignment=1.0,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONFIRM_KILL)[1],
+                    reasons=("Есть данные, что цель мертва — нужно подтвердить устранение",),
+                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONFIRM_KILL)[0],
+                    metadata={
+                        "is_blocking": False,
+                        "hunt_stage": "confirm",
+                        "target_id": target_id,
+                        "target_location_id": target_loc,
+                    },
+                    target={"target_id": target_id, "location_id": target_loc} if target_id else None,
+                ),
+            )
+        elif target_co_located or target_visible_now:
+            if blockers:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_PREPARE_FOR_HUNT,
+                        source="global_goal",
+                        urgency=0.9,
+                        expected_value=0.85,
+                        risk=0.25,
+                        time_cost=0.45,
+                        resource_cost=0.25,
+                        confidence=0.8,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_PREPARE_FOR_HUNT)[1],
+                        reasons=tuple(prepare_reasons) + ("Цель рядом, но вступать в бой рано",),
+                        source_refs=("global_goal:kill_stalker",),
+                        metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "prepare"},
+                    ),
+                )
+            else:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_ENGAGE_TARGET,
+                        source="global_goal",
+                        urgency=0.95,
+                        expected_value=1.0,
+                        risk=0.75,
+                        time_cost=0.2,
+                        resource_cost=0.15,
+                        confidence=0.8,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
+                        reasons=("Цель обнаружена рядом, боеготовность достаточна — атакую",),
+                        source_refs=("global_goal:kill_stalker",),
+                        metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "engage"},
+                        target={"target_id": target_id, "location_id": target_loc} if target_id else None,
+                    ),
+                )
+        elif target_loc:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_TRACK_TARGET,
+                    source="global_goal",
+                    urgency=0.75,
+                    expected_value=0.85,
+                    risk=0.35,
+                    time_cost=0.5,
+                    resource_cost=0.1,
+                    confidence=max(0.5, float(target_belief.location_confidence) if target_belief else 0.6),
+                    goal_alignment=1.0,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_TRACK_TARGET)[1],
+                    reasons=("Есть последнее известное местоположение цели — начинаю преследование",),
+                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_TRACK_TARGET)[0],
+                    metadata={
+                        "is_blocking": False,
+                        "hunt_stage": "track",
+                        "target_id": target_id,
+                        "target_location_id": target_loc,
+                        "target_location_confidence": float(target_belief.location_confidence) if target_belief else 0.6,
+                    },
+                    target={"target_id": target_id, "location_id": target_loc} if target_id else None,
+                ),
+            )
+            if blockers:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_PREPARE_FOR_HUNT,
+                        source="global_goal",
+                        urgency=0.72,
+                        expected_value=0.82,
+                        risk=0.22,
+                        time_cost=0.45,
+                        resource_cost=0.25,
+                        confidence=0.8,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_PREPARE_FOR_HUNT)[1],
+                        reasons=tuple(prepare_reasons),
+                        source_refs=("global_goal:kill_stalker",),
+                        metadata={"is_blocking": False, "blockers": blockers, "hunt_stage": "prepare"},
+                    ),
+                )
+        else:
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_LOCATE_TARGET,
+                    source="global_goal",
+                    urgency=0.82,
+                    expected_value=0.8,
+                    risk=0.2,
+                    time_cost=0.55,
+                    resource_cost=0.1,
+                    confidence=0.75,
+                    goal_alignment=1.0,
+                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[1],
+                    reasons=("Местоположение цели неизвестно — собираю разведданные",),
+                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[0],
+                    metadata={"is_blocking": False, "hunt_stage": "locate", "target_id": target_id},
+                    target={"target_id": target_id} if target_id else None,
+                ),
+            )
 
     if ctx.active_plan_summary:
         continue_refs, continue_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONTINUE_CURRENT_PLAN)

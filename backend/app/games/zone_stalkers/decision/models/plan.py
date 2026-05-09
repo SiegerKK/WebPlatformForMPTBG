@@ -25,6 +25,9 @@ STEP_EQUIP_ITEM = "equip_item"
 STEP_PICKUP_ITEM = "pickup_item"
 STEP_HEAL_SELF = "heal_self"
 STEP_ASK_FOR_INTEL = "ask_for_intel"
+STEP_SEARCH_TARGET = "search_target"
+STEP_START_COMBAT = "start_combat"
+STEP_CONFIRM_KILL = "confirm_kill"
 STEP_WAIT = "wait"
 
 # ── Legacy bridge kinds ────────────────────────────────────────────────────────

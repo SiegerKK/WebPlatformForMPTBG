@@ -4260,6 +4260,7 @@ def _run_npc_brain_v3_decision_inner(
     from app.games.zone_stalkers.decision.objectives.generator import generate_objectives
     from app.games.zone_stalkers.decision.objectives.selection import choose_objective
     from app.games.zone_stalkers.decision.objectives.intent_adapter import objective_to_intent
+    from app.games.zone_stalkers.decision.target_beliefs import build_target_belief
 
     # ── Commitment logic: handle scheduled arrivals first ─────────────────
     arrival_evs = _bot_pickup_on_arrival(agent_id, agent, state, world_turn)
@@ -4310,6 +4311,13 @@ def _run_npc_brain_v3_decision_inner(
     if _water_mem:
         _memory_hints["water"] = _water_mem
     agent["_belief_memory_hints"] = _memory_hints
+    target_belief = build_target_belief(
+        agent_id=agent_id,
+        agent=agent,
+        state=state,
+        world_turn=world_turn,
+        belief_state=belief,
+    )
 
     need_result = evaluate_need_result(ctx, state)
     needs = need_result.scores
@@ -4327,6 +4335,7 @@ def _run_npc_brain_v3_decision_inner(
             need_result=need_result,
             active_plan_summary=_build_active_plan_summary(agent),
             personality=agent,
+            target_belief=target_belief,
         )
         objective_candidates = generate_objectives(objective_ctx)
         objective_decision = choose_objective(
@@ -4440,6 +4449,21 @@ def _run_npc_brain_v3_decision_inner(
         "objective_score": _selected_objective_score,
         "objective_reason": "; ".join(selected_objective.reasons) if selected_objective and selected_objective.reasons else (intent.reason or None),
         "objective_switch_decision": objective_decision.switch_decision if objective_decision else None,
+        "hunt_target_belief": {
+            "target_id": target_belief.target_id,
+            "is_known": target_belief.is_known,
+            "is_alive": target_belief.is_alive,
+            "last_known_location_id": target_belief.last_known_location_id,
+            "location_confidence": round(float(target_belief.location_confidence), 3),
+            "last_seen_turn": target_belief.last_seen_turn,
+            "visible_now": target_belief.visible_now,
+            "co_located": target_belief.co_located,
+            "equipment_known": target_belief.equipment_known,
+            "combat_strength": target_belief.combat_strength,
+            "combat_strength_confidence": round(float(target_belief.combat_strength_confidence), 3),
+            "route_hints": list(target_belief.route_hints),
+            "source_refs": list(target_belief.source_refs),
+        } if target_belief.target_id else None,
     }
 
     # Update current_goal from objective first, with intent fallback.

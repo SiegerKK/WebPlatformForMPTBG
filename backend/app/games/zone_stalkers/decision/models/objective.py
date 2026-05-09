@@ -5,6 +5,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.games.zone_stalkers.decision.beliefs import BeliefState
+    from app.games.zone_stalkers.decision.models.target_belief import TargetBelief
     from .need_evaluation import NeedEvaluationResult
 
 
@@ -55,3 +56,4 @@ class ObjectiveGenerationContext:
     need_result: "NeedEvaluationResult"
     active_plan_summary: dict[str, Any] | None
     personality: dict[str, Any]
+    target_belief: "TargetBelief | None" = None

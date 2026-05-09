@@ -30,6 +30,9 @@ from .models.plan import (
     STEP_EQUIP_ITEM,
     STEP_PICKUP_ITEM,
     STEP_ASK_FOR_INTEL,
+    STEP_SEARCH_TARGET,
+    STEP_START_COMBAT,
+    STEP_CONFIRM_KILL,
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
     STEP_HEAL_SELF,
@@ -81,6 +84,9 @@ def execute_plan_step(
         STEP_PICKUP_ITEM:          _exec_pickup,
         STEP_HEAL_SELF:            _exec_consume,   # same as consume
         STEP_ASK_FOR_INTEL:        _exec_ask_for_intel,
+        STEP_SEARCH_TARGET:        _exec_search_target,
+        STEP_START_COMBAT:         _exec_start_combat,
+        STEP_CONFIRM_KILL:         _exec_confirm_kill,
         STEP_WAIT:                 _exec_wait,
         STEP_LEGACY_SCHEDULED_ACTION: _exec_legacy_passthrough,
     }
@@ -93,7 +99,7 @@ def execute_plan_step(
     if step.kind in (
         STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM,
         STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM, STEP_TRADE_SELL_ITEM,
-        STEP_ASK_FOR_INTEL,
+        STEP_ASK_FOR_INTEL, STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
     ):
         plan.advance()
 
@@ -443,6 +449,11 @@ def _exec_ask_for_intel(
     world_turn: int,
 ) -> list[dict[str, Any]]:
     """Ask co-located stalkers for intelligence."""
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _bot_buy_hunt_intel_from_trader,
+        _find_hunt_intel_location,
+    )
+
     target_id = step.payload.get("target_id")
     if target_id:
         from app.games.zone_stalkers.rules.tick_rules import _bot_ask_colocated_stalkers_about_agent
@@ -453,7 +464,227 @@ def _exec_ask_for_intel(
         _bot_ask_colocated_stalkers_about_agent(
             agent_id, agent, target_id, target_name, state, world_turn
         )
+        # If stalkers had no intel, try trader intel at current location.
+        intel_loc = _find_hunt_intel_location(agent, str(target_id), state)
+        if not intel_loc:
+            _bot_buy_hunt_intel_from_trader(
+                agent_id,
+                agent,
+                str(target_id),
+                target_name,
+                state,
+                world_turn,
+            )
         agent["action_used"] = True
+    return []
+
+
+def _exec_search_target(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
+    if not target_id:
+        agent["action_used"] = True
+        return []
+
+    target = state.get("agents", {}).get(target_id)
+    target_loc = target.get("location_id") if isinstance(target, dict) else None
+    current_loc = agent.get("location_id")
+    if target and target.get("is_alive", True) and target_loc == current_loc:
+        target_name = target.get("name", target_id)
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            f"🎯 Цель обнаружена: «{target_name}»",
+            {
+                "action_kind": "target_seen",
+                "target_id": target_id,
+                "target_name": target_name,
+                "location_id": current_loc,
+                "hp": target.get("hp"),
+            },
+            summary=f"Вижу цель «{target_name}» в текущей локации.",
+        )
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "📍 Последнее известное местоположение цели обновлено",
+            {
+                "action_kind": "target_last_known_location",
+                "target_id": target_id,
+                "location_id": current_loc,
+            },
+            summary="Обновил последнее известное местоположение цели.",
+        )
+        weapon_type = (target.get("equipment", {}) or {}).get("weapon", {}).get("type") if isinstance(target, dict) else None
+        armor_type = (target.get("equipment", {}) or {}).get("armor", {}).get("type") if isinstance(target, dict) else None
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "🧪 Оценка боевой силы цели",
+            {
+                "action_kind": "target_combat_strength_observed",
+                "target_id": target_id,
+                "location_id": current_loc,
+                "combat_strength": max(0.1, min(1.0, float(target.get("hp", 100)) / 100.0)),
+                "weapon_type": weapon_type,
+                "armor_type": armor_type,
+            },
+            summary="Оценил боевую силу цели по текущему состоянию.",
+        )
+        if weapon_type or armor_type:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                "🔎 Снаряжение цели замечено",
+                {
+                    "action_kind": "target_equipment_seen",
+                    "target_id": target_id,
+                    "location_id": current_loc,
+                    "weapon_type": weapon_type,
+                    "armor_type": armor_type,
+                },
+                summary="Зафиксировал видимое снаряжение цели.",
+            )
+    else:
+        expected_loc = step.payload.get("target_location_id") or current_loc
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "❓ Цель не найдена в ожидаемой локации",
+            {
+                "action_kind": "target_not_found",
+                "target_id": target_id,
+                "location_id": expected_loc,
+                "confirmed_empty": True,
+            },
+            summary="Цель отсутствует в проверенной локации.",
+        )
+    agent["action_used"] = True
+    return []
+
+
+def _exec_start_combat(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _compat_initiate_combat, _add_memory
+
+    target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
+    if not target_id:
+        agent["action_used"] = True
+        return []
+    target = state.get("agents", {}).get(target_id)
+    if not isinstance(target, dict) or not target.get("is_alive", True):
+        agent["action_used"] = True
+        return []
+
+    current_loc = agent.get("location_id")
+    if target.get("location_id") != current_loc:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "🎯 Цель сместилась перед боем",
+            {
+                "action_kind": "target_not_found",
+                "target_id": target_id,
+                "location_id": current_loc,
+                "confirmed_empty": True,
+            },
+            summary="Не удалось начать бой: цель уже не в этой локации.",
+        )
+        agent["action_used"] = True
+        return []
+
+    weapon = (agent.get("equipment", {}) or {}).get("weapon")
+    if not isinstance(weapon, dict):
+        agent["action_used"] = True
+        return []
+
+    events = _compat_initiate_combat(
+        agent_id,
+        agent,
+        target_id,
+        target,
+        current_loc,
+        state,
+        world_turn,
+    )
+    return events or []
+
+
+def _exec_confirm_kill(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
+    if not target_id:
+        agent["action_used"] = True
+        return []
+
+    target = state.get("agents", {}).get(target_id)
+    if isinstance(target, dict) and not target.get("is_alive", True):
+        target_name = target.get("name", target_id)
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            f"✅ Подтверждена ликвидация цели «{target_name}»",
+            {
+                "action_kind": "target_death_confirmed",
+                "target_id": target_id,
+                "target_name": target_name,
+                "location_id": target.get("location_id"),
+                "killer_id": agent_id,
+                "cause": "combat",
+            },
+            summary=f"Подтвердил, что цель «{target_name}» ликвидирована.",
+        )
+    else:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            "❌ Ликвидация цели не подтверждена",
+            {
+                "action_kind": "hunt_failed",
+                "target_id": target_id,
+                "reason": "target_still_alive",
+            },
+            summary="Подтверждение не удалось: цель всё ещё жива.",
+        )
+    agent["action_used"] = True
     return []
 
 
