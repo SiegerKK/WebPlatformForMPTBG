@@ -204,14 +204,52 @@ class ZoneStalkerRuleSet(RuleSet):
         db.commit()
 
         # Build compact WebSocket delta (avoids full HTTP projection round-trip on frontend).
+        # Try dirty-set delta first (faster); fall back to full diff on failure/empty sets.
+
+        # Pick up last tick runtime for profiler data + dirty sets.
+        _runtime = None
+        profiler_data = None
+        try:
+            from app.games.zone_stalkers.rules.tick_rules import _last_tick_runtime
+            _runtime = _last_tick_runtime
+            if _runtime and _runtime.profiler:
+                profiler_data = _runtime.profiler.to_dict()
+                profiler_data["counters"].update(_runtime.to_debug_counters())
+        except Exception:
+            _runtime = None
+
+        # Store profiler data in performance metrics
+        try:
+            from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+            record_tick_metrics(
+                str(match.id),
+                {
+                    "world_turn": new_state.get("world_turn"),
+                    "profiler": profiler_data,
+                },
+            )
+        except Exception:
+            pass
+
         zone_delta = None
         try:
-            from app.games.zone_stalkers.delta import build_zone_delta
-            zone_delta = build_zone_delta(
-                old_state=old_state,
-                new_state=new_state,
-                events=new_events_for_ws,
-            )
+            if _runtime and (
+                _runtime.dirty_agents or _runtime.dirty_locations or _runtime.dirty_traders
+            ):
+                from app.games.zone_stalkers.delta_dirty import build_zone_delta_from_dirty
+                zone_delta = build_zone_delta_from_dirty(
+                    state=new_state,
+                    runtime=_runtime,
+                    events=new_events_for_ws,
+                    old_state=old_state,
+                )
+            if zone_delta is None:
+                from app.games.zone_stalkers.delta import build_zone_delta
+                zone_delta = build_zone_delta(
+                    old_state=old_state,
+                    new_state=new_state,
+                    events=new_events_for_ws,
+                )
         except Exception:
             zone_delta = None
 

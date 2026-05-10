@@ -235,6 +235,11 @@ _ITEM_SCORE_WEIGHT_INV_WEIGHT = 0.1  # Lighter items are preferred
 _HUNT_INTEL_PRICE = 200
 
 
+from typing import Any as _Any
+_last_tick_runtime: _Any = None
+_current_tick_runtime: _Any = None
+
+
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Advance the world by one turn.
@@ -245,18 +250,32 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     events: List[Dict[str, Any]] = []
     world_turn = state.get("world_turn", 1)
 
-    for _agent in state.get("agents", {}).values():
-        _agent.setdefault("brain_trace", None)
-        _agent.setdefault("active_plan_v3", None)
-        _agent.setdefault("memory_v3", None)
-        _migrate_brain_v3_context(_agent)
-        _migrate_legacy_scheduled_action_to_active_plan(
-            _agent,
-            world_turn=world_turn,
-            default_sleep_hours=DEFAULT_SLEEP_HOURS,
-        )
-        if is_v3_monitored_bot(_agent) and get_active_plan(_agent) is not None:
-            _agent["action_queue"] = []
+    # ── PR1: TickProfiler + TickRuntime ──────────────────────────────────────
+    try:
+        from app.games.zone_stalkers.performance.tick_profiler import TickProfiler as _TickProfiler
+        from app.games.zone_stalkers.runtime.tick_runtime import TickRuntime as _TickRuntime
+        _tick_profiler = _TickProfiler()
+        _tick_runtime = _TickRuntime(profiler=_tick_profiler)
+    except Exception:
+        _tick_profiler = None
+        _tick_runtime = None
+    global _current_tick_runtime
+    _current_tick_runtime = _tick_runtime
+
+    _profiler_ctx_migration = _tick_profiler.section("migration_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    with _profiler_ctx_migration:
+        for _agent in state.get("agents", {}).values():
+            _agent.setdefault("brain_trace", None)
+            _agent.setdefault("active_plan_v3", None)
+            _agent.setdefault("memory_v3", None)
+            _migrate_brain_v3_context(_agent)
+            _migrate_legacy_scheduled_action_to_active_plan(
+                _agent,
+                world_turn=world_turn,
+                default_sleep_hours=DEFAULT_SLEEP_HOURS,
+            )
+            if is_v3_monitored_bot(_agent) and get_active_plan(_agent) is not None:
+                _agent["action_queue"] = []
 
     # PR 3: ensure memory_v3 structure exists, lazy-import legacy memory, run decay.
     # Decay runs every MEMORY_DECAY_INTERVAL_TURNS to reduce CPU; legacy import
@@ -265,12 +284,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     from app.games.zone_stalkers.memory.store import ensure_memory_v3 as _ensure_mem_v3  # noqa: PLC0415
     from app.games.zone_stalkers.memory.legacy_bridge import import_legacy_memory as _import_legacy  # noqa: PLC0415
     from app.games.zone_stalkers.memory.decay import decay_memory as _decay_mem  # noqa: PLC0415
-    for _pr3_agent_id, _pr3_agent in state.get("agents", {}).items():
-        _ensure_mem_v3(_pr3_agent)
-        if not _pr3_agent.get("memory_v3", {}).get("records"):
-            _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)
-        if (world_turn - 1) % MEMORY_DECAY_INTERVAL_TURNS == 0:
-            _decay_mem(_pr3_agent, world_turn)
+    _profiler_ctx_memory = _tick_profiler.section("memory_v3_ensure_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    with _profiler_ctx_memory:
+        for _pr3_agent_id, _pr3_agent in state.get("agents", {}).items():
+            _ensure_mem_v3(_pr3_agent)
+            if not _pr3_agent.get("memory_v3", {}).get("records"):
+                _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)
+            if (world_turn - 1) % MEMORY_DECAY_INTERVAL_TURNS == 0:
+                _decay_mem(_pr3_agent, world_turn)
 
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
@@ -286,6 +307,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         state["_terrain_migrated_v3"] = True
 
     # 1. Process scheduled actions for each alive stalker agent
+    _pr_sched = _tick_profiler.section("scheduled_actions_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    _pr_sched.__enter__()
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -343,7 +366,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
             events.extend(new_evs)
 
+    _pr_sched.__exit__(None, None, None)
+
     # 2. Degrade survival needs and apply critical penalties (once per in-game hour)
+    _pr_survive = _tick_profiler.section("survival_needs_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    _pr_survive.__enter__()
     # Determine current minute after advancing (before committing to state)
     _new_minute = (state.get("world_minute", 0) + 1) % 60
     if _new_minute == 0:  # hour boundary reached
@@ -355,12 +382,18 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             agent["hunger"] = min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR)
             agent["thirst"] = min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR)
             agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR)
+            if _tick_runtime:
+                from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad
+                _mad(_tick_runtime, agent_id)
             # Critical thirst causes HP damage faster than hunger
             if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
                 agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_THIRST)
             if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
                 agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER)
             if agent["hp"] <= 0 and agent.get("is_alive", True):
+                if _tick_runtime:
+                    from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad3
+                    _mad3(_tick_runtime, agent_id)
                 _hunger = agent.get("hunger", 0)
                 _thirst = agent.get("thirst", 0)
                 _death_cause_str = (
@@ -379,6 +412,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     events=events,
                 )
 
+
+    _pr_survive.__exit__(None, None, None)
 
     # 2b. Emission (Выброс) mechanic — replaces the old midnight artifact spawn.
     # The emission spawns artifacts in anomaly locations, kills stalkers on open
@@ -544,6 +579,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     events.extend(_combat_events)
 
     # 3. AI bot agent decisions — NPC Brain v3 pipeline
+    _pr_npc = _tick_profiler.section("npc_brain_total_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    _pr_npc.__enter__()
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -573,6 +610,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 
         bot_evs = _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
+
+    _pr_npc.__exit__(None, None, None)
 
     debug_brain_trace_enabled = state.get("debug_brain_trace_enabled", False)
     debug_brain_trace_agent_ids = set(state.get("debug_brain_trace_agent_ids") or [])
@@ -666,6 +705,19 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     except Exception:
         pass
     state.setdefault("debug", {})
+
+    # ── PR1: Store profiler counters + last runtime ───────────────────────────
+    try:
+        if _tick_profiler:
+            _agents_all = state.get("agents", {})
+            _tick_profiler.set_counter("agents_total", len(_agents_all))
+            _tick_profiler.set_counter("dirty_agents_count", len(_tick_runtime.dirty_agents) if _tick_runtime else 0)
+            _tick_profiler.set_counter("dirty_locations_count", len(_tick_runtime.dirty_locations) if _tick_runtime else 0)
+        global _last_tick_runtime
+        _last_tick_runtime = _tick_runtime
+    except Exception:
+        pass
+
     return state, events
 
 
@@ -840,6 +892,16 @@ def _process_scheduled_action(
             if agent_id in old_loc_data.get("agents", []):
                 old_loc_data["agents"].remove(agent_id)
             agent["location_id"] = destination
+            # PR1: mark agent + locations dirty via module-level current-tick runtime
+            try:
+                from app.games.zone_stalkers.rules.tick_rules import _current_tick_runtime as _ctr
+                if _ctr is not None:
+                    from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad2, mark_location_dirty as _mld2
+                    _mad2(_ctr, agent_id)
+                    _mld2(_ctr, old_loc)
+                    _mld2(_ctr, destination)
+            except Exception:
+                pass
             new_loc_data = state["locations"].get(destination, {})
             if agent_id not in new_loc_data.get("agents", []):
                 new_loc_data.setdefault("agents", []).append(agent_id)
