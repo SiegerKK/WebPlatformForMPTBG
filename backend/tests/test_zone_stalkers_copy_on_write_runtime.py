@@ -383,3 +383,97 @@ def test_cow_tick_emission_artifact_spawn_does_not_mutate_input_location():
         assert len(new_state["locations"][anomaly_loc_id].get("artifacts", [])) > len(
             before["locations"][anomaly_loc_id].get("artifacts", [])
         )
+
+
+def test_cow_tick_travel_arrival_does_not_mutate_input():
+    """Travel arrival (turns_remaining=1 → 0) must update new_state but not mutate input state."""
+    state = _make_cow_tick_state(seed=133, num_players=1, num_ai_stalkers=0, num_traders=0)
+    loc_ids = list(state["locations"].keys())
+    assert len(loc_ids) >= 2
+    old_loc, new_loc = loc_ids[0], loc_ids[1]
+    state["locations"][old_loc]["connections"] = [{"to": new_loc, "travel_time": 1, "closed": False}]
+    state["locations"][new_loc]["connections"] = [{"to": old_loc, "travel_time": 1, "closed": False}]
+    agent_id = next(iter(state["agents"].keys()))
+    for aid, agent in state["agents"].items():
+        agent["has_left_zone"] = aid != agent_id
+        agent["controller"] = {"kind": "human", "participant_id": None}
+        agent["scheduled_action"] = None
+        agent["action_queue"] = []
+        agent["action_used"] = False
+    state["agents"][agent_id]["location_id"] = old_loc
+    state["agents"][agent_id]["scheduled_action"] = {
+        "type": "travel",
+        "turns_remaining": 1,
+        "turns_total": 1,
+        "target_id": new_loc,
+        "final_target_id": new_loc,
+        "remaining_route": [],
+        "started_turn": state.get("world_turn", 2),
+    }
+    state["locations"][old_loc]["agents"] = [agent_id]
+    state["locations"][new_loc]["agents"] = []
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    assert new_state["agents"][agent_id]["location_id"] == new_loc
+    assert agent_id not in new_state["locations"][old_loc]["agents"]
+    assert agent_id in new_state["locations"][new_loc]["agents"]
+
+
+def test_cow_tick_emission_warning_memory_does_not_mutate_input():
+    """Emission warning memory write must not mutate input agent memory list."""
+    state = _make_cow_tick_state(seed=134, num_players=1, num_ai_stalkers=0, num_traders=0)
+    for agent in state["agents"].values():
+        agent["memory"] = []
+        agent["scheduled_action"] = None
+        agent["has_left_zone"] = False
+
+    # Force the emission warning to trigger at world_turn=2:
+    # warning fires when (emission_scheduled_turn - world_turn) == emission_warning_offset
+    # so: scheduled_turn=12, offset=10, world_turn=2 → triggers
+    world_turn = state.get("world_turn", 2)
+    warn_offset = 10
+    state["emission_active"] = False
+    state["emission_scheduled_turn"] = world_turn + warn_offset
+    state["emission_warning_offset"] = warn_offset
+    state["emission_warning_written_turn"] = None
+
+    before = copy.deepcopy(state)
+    new_state, events = tick_zone_map(state)
+
+    assert state == before
+    warning_events = [e for e in events if e.get("event_type") == "emission_warning"]
+    assert warning_events, "Emission warning event should have been emitted"
+    for agent_id, agent_after in new_state["agents"].items():
+        agent_memory = agent_after.get("memory", [])
+        assert any(
+            m.get("title") == "⚠️ Скоро выброс!" for m in agent_memory
+        ), f"Agent {agent_id} should have emission warning memory in new_state"
+
+
+def test_cow_tick_live_npc_bot_does_not_mutate_input():
+    """A full tick with a live NPC bot agent must not mutate the input state."""
+    state = generate_zone(
+        seed=135,
+        num_players=0,
+        num_ai_stalkers=2,
+        num_mutants=0,
+        num_traders=0,
+    )
+    state["cpu_copy_on_write_enabled"] = True
+    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
+    state["world_turn"] = 2
+
+    for agent in state["agents"].values():
+        agent.setdefault("brain_trace", None)
+        agent.setdefault("action_queue", [])
+        agent.setdefault("action_used", False)
+        agent.setdefault("scheduled_action", None)
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    assert new_state is not state
