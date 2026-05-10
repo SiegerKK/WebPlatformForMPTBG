@@ -193,6 +193,7 @@ class CommandPipeline:
             # can detect staleness after a command changes state.
             if isinstance(new_state, dict) and new_state.get("context_type") == "zone_map":
                 new_state["state_revision"] = int(new_state.get("state_revision", 0)) + 1
+                new_state["_debug_revision"] = int(new_state.get("_debug_revision", 0)) + 1
             save_context_state(context.id, new_state, context, force_persist=True)
 
             # 9. Emit events
@@ -247,6 +248,45 @@ class CommandPipeline:
                         "Failed to build zone_delta for match %s context %s; falling back to state_updated",
                         match_id_str, context_id_str,
                     )
+
+            if _sent_delta:
+                from app.core.ws.manager import get_debug_subscriptions
+                debug_subs = get_debug_subscriptions(match_id_str)
+                if debug_subs:
+                    debug_resync_required = False
+                    try:
+                        from app.games.zone_stalkers.debug_delta import build_zone_debug_delta
+                        debug_revision = int(new_state.get("_debug_revision", 0))
+                        for conn_id, sub in debug_subs.items():
+                            debug_delta = build_zone_debug_delta(
+                                old_state=old_state,
+                                new_state=new_state,
+                                subscription=sub,
+                                debug_revision=debug_revision,
+                            )
+                            if debug_delta:
+                                ws_manager.notify_to_connection(conn_id, {
+                                    "type": "zone_debug_delta",
+                                    "match_id": match_id_str,
+                                    "context_id": context_id_str,
+                                    **debug_delta,
+                                })
+                    except Exception:
+                        debug_resync_required = True
+                        logger.exception(
+                            "Failed to build zone_debug_delta after command for match %s context %s",
+                            match_id_str, context_id_str,
+                        )
+
+                    if debug_resync_required:
+                        for conn_id in debug_subs:
+                            ws_manager.notify_to_connection(conn_id, {
+                                "type": "debug_requires_resync",
+                                "match_id": match_id_str,
+                                "context_id": context_id_str,
+                                "state_revision": new_state.get("state_revision"),
+                                "debug_revision": new_state.get("_debug_revision"),
+                            })
 
             if not _sent_delta:
                 ws_manager.notify(match_id_str, {

@@ -58,7 +58,7 @@ function getRegionColors(
   );
 }
 
-export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId, debugState, subscribeZoneDebug: _subscribeZoneDebug, unsubscribeZoneDebug: _unsubscribeZoneDebug }: DebugMapPageProps) {
+export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId, debugState, subscribeZoneDebug, unsubscribeZoneDebug }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [mapOverlayMode, setMapOverlayMode] = useState<'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes' | 'combat_hunt_events'>('default');
@@ -1203,6 +1203,10 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       ),
     [selectedHuntDebug, huntMinConfidence, freshnessFloor],
   );
+  const visibleLocationIds = useMemo(
+    () => Object.keys(zoneState.locations).sort(),
+    [zoneState.locations],
+  );
   const combatEventLocations = useMemo(() => {
     const traces = zoneState.debug?.location_hunt_traces ?? {};
     const entries = Object.entries(traces);
@@ -1218,6 +1222,31 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     if (!huntDebugTargetId || !showActualTargetLocation) return null;
     return zoneState.agents[huntDebugTargetId]?.location_id ?? null;
   }, [huntDebugTargetId, showActualTargetLocation, zoneState.agents]);
+
+  useEffect(() => {
+    if (!contextId || !subscribeZoneDebug) return;
+    subscribeZoneDebug({
+      context_id: contextId,
+      mode: 'debug-map',
+      hunter_id: huntDebugHunterId,
+      target_id: huntDebugTargetId,
+      visible_location_ids: visibleLocationIds,
+      min_confidence: huntMinConfidence,
+      freshness_window: huntFreshnessWindow,
+    });
+    return () => {
+      unsubscribeZoneDebug?.();
+    };
+  }, [
+    contextId,
+    subscribeZoneDebug,
+    unsubscribeZoneDebug,
+    huntDebugHunterId,
+    huntDebugTargetId,
+    visibleLocationIds,
+    huntMinConfidence,
+    huntFreshnessWindow,
+  ]);
 
   return (
     <div

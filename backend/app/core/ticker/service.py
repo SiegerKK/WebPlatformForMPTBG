@@ -142,7 +142,6 @@ def tick_match(match_id_str: str, db: Session) -> dict:
         # Send scoped zone_debug_delta to each subscribed connection
         if zone_delta is not None and context_id_str:
             try:
-                import asyncio
                 from app.core.ws.manager import get_debug_subscriptions
                 from app.games.zone_stalkers.debug_delta import build_zone_debug_delta
 
@@ -151,11 +150,11 @@ def tick_match(match_id_str: str, db: Session) -> dict:
                     old_state = result.get("old_state")
                     new_state = result.get("new_state")
                     if old_state is not None and new_state is not None:
-                        debug_revision = int(new_state.get("_debug_revision", 0)) + 1
+                        debug_revision = int(new_state.get("_debug_revision", 0))
+                        if debug_revision <= 0:
+                            debug_revision = int(old_state.get("_debug_revision", 0)) + 1
+                            new_state["_debug_revision"] = debug_revision
                         for conn_id, sub in debug_subs.items():
-                            ws_conn = ws_manager.get_connection(conn_id)
-                            if ws_conn is None:
-                                continue
                             debug_delta = build_zone_debug_delta(
                                 old_state=old_state,
                                 new_state=new_state,
@@ -169,14 +168,7 @@ def tick_match(match_id_str: str, db: Session) -> dict:
                                     "context_id": context_id_str,
                                     **debug_delta,
                                 }
-                                try:
-                                    loop = asyncio.get_running_loop()
-                                    loop.create_task(ws_manager.send_to(ws_conn, payload))
-                                except RuntimeError:
-                                    if ws_manager._loop is not None and ws_manager._loop.is_running():
-                                        asyncio.run_coroutine_threadsafe(
-                                            ws_manager.send_to(ws_conn, payload), ws_manager._loop
-                                        )
+                                ws_manager.notify_to_connection(conn_id, payload)
             except Exception as exc:
                 logger.debug("zone_debug_delta send failed: %s", exc)
 

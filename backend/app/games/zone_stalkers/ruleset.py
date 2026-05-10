@@ -109,6 +109,7 @@ class ZoneStalkerRuleSet(RuleSet):
 
         # Increment state revision so frontends can detect stale deltas.
         new_state["state_revision"] = int(state.get("state_revision", 0)) + 1
+        new_state["_debug_revision"] = int(state.get("_debug_revision", 0)) + 1
 
         emitted = []
         new_events_for_ws = []  # serializable copies for WebSocket broadcast

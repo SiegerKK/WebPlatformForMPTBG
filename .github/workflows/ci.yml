@@ -4,11 +4,6 @@ on:
   pull_request:
     branches:
       - "**"
-  push:
-    branches:
-      - main
-      - master
-      - copilot/**
   workflow_dispatch:
 
 permissions:
@@ -39,7 +34,7 @@ jobs:
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
-        run: pytest backend/tests
+        run: pytest backend/tests -k "not e2e"
 
   backend-v3-e2e:
     name: Backend NPC Brain v3 E2E

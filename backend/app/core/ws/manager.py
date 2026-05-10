@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Set
+from typing import Any, Awaitable, Dict, Set
 
 from fastapi import WebSocket
 
@@ -89,6 +89,31 @@ class ConnectionManager:
         except Exception as exc:
             logger.debug("WS send_to failed: %s", exc)
 
+    def schedule(self, coro: Awaitable[Any]) -> bool:
+        """
+        Schedule *coro* on the active loop from sync or async contexts.
+
+        Returns ``True`` when scheduled, ``False`` when no runnable loop exists.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+            return True
+        except RuntimeError:
+            pass
+
+        if self._loop is not None and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+            return True
+        return False
+
+    def notify_to_connection(self, conn_id: str, data: Dict[str, Any]) -> bool:
+        """Schedule JSON send to a single connection id; returns True if scheduled."""
+        ws = self.get_connection(conn_id)
+        if ws is None:
+            return False
+        return self.schedule(self.send_to(ws, data))
+
     def notify(self, match_id: str, data: Dict[str, Any]) -> None:
         """
         Schedule a broadcast from **synchronous** code.
@@ -99,16 +124,7 @@ class ConnectionManager:
           uses ``asyncio.run_coroutine_threadsafe`` with the stored loop.
         * Unit-test context with no event loop — silently skipped.
         """
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.broadcast(match_id, data))
-            return
-        except RuntimeError:
-            pass
-
-        # Called from a thread — schedule via the stored event loop.
-        if self._loop is not None and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.broadcast(match_id, data), self._loop)
+        self.schedule(self.broadcast(match_id, data))
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────────
