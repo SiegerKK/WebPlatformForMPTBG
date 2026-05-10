@@ -154,6 +154,18 @@ def test_tick_zone_map_does_not_mutate_input_state():
 def test_tick_zone_map_cow_does_not_copy_all_agents():
     state = _make_cow_tick_state(seed=124, num_players=1, num_ai_stalkers=0, num_traders=0)
     base_loc = next(iter(state["locations"].keys()))
+    _complete_mem_v3 = {
+        "records": {"seed_rec": {"id": "seed_rec", "kind": "observation"}},
+        "indexes": {
+            "by_entity": {},
+            "by_item_type": {},
+            "by_kind": {"observation": ["seed_rec"]},
+            "by_layer": {},
+            "by_location": {},
+            "by_tag": {},
+        },
+        "stats": {"last_consolidation_turn": None, "last_decay_turn": 1, "records_count": 1},
+    }
     for idx in range(9):
         aid = f"cow_agent_{idx}"
         state["agents"][aid] = {
@@ -166,7 +178,7 @@ def test_tick_zone_map_cow_does_not_copy_all_agents():
             "has_left_zone": True,
             "brain_trace": None,
             "active_plan_v3": None,
-            "memory_v3": {"records": {}},
+            "memory_v3": copy.deepcopy(_complete_mem_v3),
             "action_queue": [],
             "scheduled_action": None,
             "action_used": False,
@@ -308,3 +320,66 @@ def test_cow_tick_emission_still_kills_exposed_agent():
     new_state, _events = tick_zone_map(state)
 
     assert new_state["agents"][agent_id]["is_alive"] is False
+
+
+def test_cow_tick_does_not_mutate_input_when_agent_missing_optional_fields():
+    """Agents lacking optional fields (brain_trace/active_plan_v3/memory_v3/action_queue)
+    must not cause tick to mutate the input state dict."""
+    state = _make_cow_tick_state(seed=130, num_players=1, num_ai_stalkers=0, num_traders=0)
+    for agent in state["agents"].values():
+        agent.pop("brain_trace", None)
+        agent.pop("active_plan_v3", None)
+        agent.pop("memory_v3", None)
+        agent.pop("action_queue", None)
+        agent["has_left_zone"] = True
+
+    before = copy.deepcopy(state)
+    tick_zone_map(state)
+
+    assert state == before
+
+
+def test_cow_tick_does_not_mutate_input_during_terrain_migration():
+    """Terrain migration (unknown → plain) must happen in new_state, not in the input state."""
+    state = _make_cow_tick_state(seed=131, num_players=1, num_ai_stalkers=0, num_traders=0)
+    state["_terrain_migrated_v3"] = False
+    loc_id = next(iter(state["locations"].keys()))
+    state["locations"][loc_id]["terrain_type"] = "unknown_legacy_type"
+    for agent in state["agents"].values():
+        agent["has_left_zone"] = True
+
+    before = copy.deepcopy(state)
+    new_state, _ = tick_zone_map(state)
+
+    assert state == before
+    assert new_state["locations"][loc_id]["terrain_type"] == "plain"
+
+
+def test_cow_tick_emission_artifact_spawn_does_not_mutate_input_location():
+    """Artifact spawning during emission start must not mutate the input location's artifacts list."""
+    state = _make_cow_tick_state(seed=132, num_players=1, num_ai_stalkers=0, num_traders=0)
+    anomaly_loc_id = None
+    for lid, loc in state["locations"].items():
+        if loc.get("anomaly_activity", 0) > 0:
+            anomaly_loc_id = lid
+            break
+    if anomaly_loc_id is None:
+        first_lid = next(iter(state["locations"].keys()))
+        state["locations"][first_lid]["anomaly_activity"] = 10
+        anomaly_loc_id = first_lid
+    state["locations"][anomaly_loc_id].setdefault("artifacts", [])
+    for agent in state["agents"].values():
+        agent["has_left_zone"] = True
+    state["emission_active"] = False
+    state["emission_scheduled_turn"] = state.get("world_turn", 2)
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    artifact_events = [e for e in _events if e.get("event_type") == "artifact_spawned"
+                       and e.get("payload", {}).get("location_id") == anomaly_loc_id]
+    if artifact_events:
+        assert len(new_state["locations"][anomaly_loc_id].get("artifacts", [])) > len(
+            before["locations"][anomaly_loc_id].get("artifacts", [])
+        )

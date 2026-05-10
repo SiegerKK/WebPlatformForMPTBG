@@ -305,6 +305,34 @@ def _runtime_set_action_used(agent: Dict[str, Any], value: bool) -> None:
     agent["action_used"] = value
 
 
+def _runtime_set_location_field(state: Dict[str, Any], location_id: str, key: str, value: Any) -> None:
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            runtime.set_location_field(location_id, key, value)
+            return
+        except Exception:
+            pass
+    loc = state.get("locations", {}).get(location_id)
+    if loc is not None:
+        loc[key] = value
+
+
+def _runtime_mutable_location_list(state: Dict[str, Any], location_id: str, key: str) -> list:
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            return runtime.mutable_location_list(location_id, key)
+        except Exception:
+            pass
+    loc = state.get("locations", {}).get(location_id, {})
+    val = loc.get(key, [])
+    if not isinstance(val, list):
+        val = []
+    loc[key] = val
+    return val
+
+
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Advance the world by one turn.
@@ -353,18 +381,38 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 
     _profiler_ctx_migration = _tick_profiler.section("migration_ms") if _tick_profiler else __import__("contextlib").nullcontext()
     with _profiler_ctx_migration:
-        for _agent in state.get("agents", {}).values():
-            _agent.setdefault("brain_trace", None)
-            _agent.setdefault("active_plan_v3", None)
-            _agent.setdefault("memory_v3", None)
+        for _agent_id in list(state.get("agents", {}).keys()):
+            _raw_agent = state["agents"][_agent_id]
+            # Determine if any mutation might happen before getting the COW copy.
+            _missing_optional = (
+                "brain_trace" not in _raw_agent
+                or "active_plan_v3" not in _raw_agent
+                or "memory_v3" not in _raw_agent
+            )
+            _is_v3_bot = is_v3_monitored_bot(_raw_agent)
+            _has_legacy_context = "_v2_context" in _raw_agent
+            _needs_migration_cow = _missing_optional or _has_legacy_context or _is_v3_bot
+            if _needs_migration_cow:
+                _agent = _runtime_agent(_agent_id, _raw_agent)
+            else:
+                _agent = _raw_agent
+            if "brain_trace" not in _agent:
+                _runtime_set_agent_field(_agent_id, "brain_trace", None, _agent)
+                _agent = _runtime_agent(_agent_id, _agent)
+            if "active_plan_v3" not in _agent:
+                _runtime_set_agent_field(_agent_id, "active_plan_v3", None, _agent)
+                _agent = _runtime_agent(_agent_id, _agent)
+            if "memory_v3" not in _agent:
+                _runtime_set_agent_field(_agent_id, "memory_v3", None, _agent)
+                _agent = _runtime_agent(_agent_id, _agent)
             _migrate_brain_v3_context(_agent)
             _migrate_legacy_scheduled_action_to_active_plan(
                 _agent,
                 world_turn=world_turn,
                 default_sleep_hours=DEFAULT_SLEEP_HOURS,
             )
-            if is_v3_monitored_bot(_agent) and get_active_plan(_agent) is not None:
-                _agent["action_queue"] = []
+            if _is_v3_bot and get_active_plan(_agent) is not None:
+                _runtime_set_agent_field(_agent_id, "action_queue", [], _agent)
 
     # PR 3: ensure memory_v3 structure exists, lazy-import legacy memory, run decay.
     # Decay runs every MEMORY_DECAY_INTERVAL_TURNS to reduce CPU; legacy import
@@ -374,12 +422,31 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     from app.games.zone_stalkers.memory.legacy_bridge import import_legacy_memory as _import_legacy  # noqa: PLC0415
     from app.games.zone_stalkers.memory.decay import decay_memory as _decay_mem  # noqa: PLC0415
     _profiler_ctx_memory = _tick_profiler.section("memory_v3_ensure_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    _is_decay_turn = (world_turn - 1) % MEMORY_DECAY_INTERVAL_TURNS == 0
+    _MEM_IDX_KEYS = frozenset({"by_layer", "by_kind", "by_location", "by_entity", "by_item_type", "by_tag"})
     with _profiler_ctx_memory:
         for _pr3_agent_id, _pr3_agent in state.get("agents", {}).items():
+            # Only COW-copy the agent if we know a mutation is actually needed.
+            _mem_v3 = _pr3_agent.get("memory_v3")
+            _mem_complete = (
+                isinstance(_mem_v3, dict)
+                and "records" in _mem_v3
+                and "indexes" in _mem_v3
+                and "stats" in _mem_v3
+                and _MEM_IDX_KEYS.issubset(_mem_v3["indexes"])
+            )
+            _records_populated = bool(_mem_complete and _mem_v3.get("records"))
+            _needs_memory_cow = (
+                not _mem_complete
+                or not _records_populated
+                or _is_decay_turn
+            )
+            if _needs_memory_cow:
+                _pr3_agent = _runtime_agent(_pr3_agent_id, _pr3_agent)
             _ensure_mem_v3(_pr3_agent)
             if not _pr3_agent.get("memory_v3", {}).get("records"):
                 _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)
-            if (world_turn - 1) % MEMORY_DECAY_INTERVAL_TURNS == 0:
+            if _is_decay_turn:
                 _decay_mem(_pr3_agent, world_turn)
 
     # One-time migration: normalize terrain types that were removed in the v3 update
@@ -390,10 +457,10 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             "hamlet", "farm", "field_camp", "dungeon", "x_lab", "bridge",
             "tunnel", "swamp", "scientific_bunker",
         })
-        for loc in state.get("locations", {}).values():
-            if loc.get("terrain_type") not in _valid_v3:
-                loc["terrain_type"] = "plain"
-        state["_terrain_migrated_v3"] = True
+        for _loc_id, _loc in state.get("locations", {}).items():
+            if _loc.get("terrain_type") not in _valid_v3:
+                _runtime_set_location_field(state, _loc_id, "terrain_type", "plain")
+        _runtime_set_state_field(state, "_terrain_migrated_v3", True)
 
     # 1. Process scheduled actions for each alive stalker agent
     _pr_sched = _tick_profiler.section("scheduled_actions_ms") if _tick_profiler else __import__("contextlib").nullcontext()
@@ -596,7 +663,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 _art_type = _emission_rng.choice(list(ARTIFACT_TYPES.keys()))
                 _art_info = ARTIFACT_TYPES[_art_type]
                 _art_id = f"art_emission_{_em_loc_id}_{world_turn}"
-                _em_loc.setdefault("artifacts", []).append({
+                _em_artifacts = _runtime_mutable_location_list(state, _em_loc_id, "artifacts")
+                _em_artifacts.append({
                     "id": _art_id,
                     "type": _art_type,
                     "name": _art_info["name"],
@@ -1604,7 +1672,31 @@ def _add_memory(
     if summary:
         memory_entry["summary"] = summary
 
-    mem = agent.setdefault("memory", [])
+    # Resolve agent_id before accessing memory to enable COW-safe mutation.
+    resolved_agent_id = agent_id
+    if not resolved_agent_id:
+        resolved_agent_id = agent.get("agent_id")
+    if not resolved_agent_id:
+        resolved_agent_id = agent.get("id") or agent.get("name")
+    if not resolved_agent_id:
+        # Best effort: find actual key in state["agents"] by object identity.
+        for _aid, _a in state.get("agents", {}).items():
+            if _a is agent:
+                resolved_agent_id = _aid
+                break
+    if not resolved_agent_id:
+        resolved_agent_id = "unknown"
+
+    # Use COW-safe mutable list when a runtime is active so that appending
+    # to the memory list does not mutate the original (input) agent dict.
+    _cow = _cow_runtime()
+    if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
+        try:
+            mem = _cow.mutable_agent_list(resolved_agent_id, "memory")
+        except Exception:
+            mem = agent.setdefault("memory", [])
+    else:
+        mem = agent.setdefault("memory", [])
     mem.append(memory_entry)
     # Keep only the last MAX_AGENT_MEMORY memory entries
     if len(mem) > MAX_AGENT_MEMORY:
@@ -1613,17 +1705,14 @@ def _add_memory(
     # PR 3: bridge this entry into memory_v3 using stable agent id.
     from app.games.zone_stalkers.memory.legacy_bridge import bridge_legacy_entry_to_memory_v3  # noqa: PLC0415
 
-    resolved_agent_id = agent_id
-    if not resolved_agent_id:
-        resolved_agent_id = agent.get("agent_id")
-    if not resolved_agent_id:
-        # Best effort: find actual key in state["agents"] by object identity.
-        for _aid, _a in state.get("agents", {}).items():
-            if _a is agent:
-                resolved_agent_id = _aid
-                break
-    if not resolved_agent_id:
-        resolved_agent_id = agent.get("id") or agent.get("name") or "unknown"
+    # Ensure memory_v3 is COW-copied before in-place mutations inside the bridge.
+    if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
+        try:
+            agent = _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")
+            # bridge expects the full agent dict, not just memory_v3
+            agent = _cow.agent(resolved_agent_id)
+        except Exception:
+            pass
 
     bridge_legacy_entry_to_memory_v3(
         agent_id=str(resolved_agent_id),
