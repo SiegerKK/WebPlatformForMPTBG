@@ -81,3 +81,26 @@ def test_pathfinding_cache_get_stats():
     stats = pc.get_stats()
     assert stats["size"] == 1
     assert stats["max_size"] == pc._MAX_PATH_CACHE_ENTRIES
+
+
+def test_dijkstra_reachable_uses_cache_on_second_call():
+    """_dijkstra_reachable_locations must hit cache on second call with same map_revision."""
+    from app.games.zone_stalkers.rules.tick_rules import _dijkstra_reachable_locations
+    import app.games.zone_stalkers.pathfinding_cache as _pc
+
+    _pc.invalidate_all()
+    locations = {
+        "A": {"connections": [{"to": "B", "travel_time": 12}]},
+        "B": {"connections": [{"to": "A", "travel_time": 12}, {"to": "C", "travel_time": 12}]},
+        "C": {"connections": [{"to": "B", "travel_time": 12}]},
+    }
+    rev = 99
+
+    result1 = _dijkstra_reachable_locations("A", locations, max_minutes=60.0, map_revision=rev)
+    assert "B" in result1
+    assert _pc.get_stats()["size"] == 1
+
+    # Mutate locations to prove cache is used (not re-computed)
+    locations["B"]["connections"] = []
+    result2 = _dijkstra_reachable_locations("A", locations, max_minutes=60.0, map_revision=rev)
+    assert result2 == result1  # cache hit: stale graph is NOT re-traversed

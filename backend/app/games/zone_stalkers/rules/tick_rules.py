@@ -2036,13 +2036,32 @@ def _dijkstra_reachable_locations(
     from_loc_id: str,
     locations: Dict[str, Any],
     max_minutes: float,
+    map_revision: Any = None,
 ) -> Dict[str, float]:
     """Return {loc_id: travel_minutes} for every location reachable from *from_loc_id*
     within *max_minutes* of total travel time via open (non-closed) connections.
 
     Uses Dijkstra's algorithm so that connections with different ``travel_time`` values
     are compared fairly.  *from_loc_id* itself is not included in the result.
+
+    When *map_revision* is provided the result is memoised in the pathfinding cache so
+    subsequent calls for the same origin and radius hit the cache instead of re-running
+    the full Dijkstra traversal.
     """
+    if map_revision is not None:
+        try:
+            from app.games.zone_stalkers.pathfinding_cache import get_cached as _cache_get
+            _cached = _cache_get(
+                map_revision=map_revision,
+                from_loc_id=from_loc_id,
+                query_kind="dijkstra_reachable",
+                extra_key=str(max_minutes),
+            )
+            if _cached is not None:
+                return _cached
+        except Exception:
+            pass
+
     dist: Dict[str, float] = {}
     # heap entries: (total_minutes, loc_id)
     heap: list = [(0.0, from_loc_id)]
@@ -2064,6 +2083,20 @@ def _dijkstra_reachable_locations(
             nxt_min = cur_min + edge_min
             if nxt_min <= max_minutes:
                 heapq.heappush(heap, (nxt_min, nxt))
+
+    if map_revision is not None:
+        try:
+            from app.games.zone_stalkers.pathfinding_cache import set_cached as _cache_set
+            _cache_set(
+                map_revision=map_revision,
+                from_loc_id=from_loc_id,
+                query_kind="dijkstra_reachable",
+                extra_key=str(max_minutes),
+                value=dist,
+            )
+        except Exception:
+            pass
+
     return dist
 
 
@@ -5438,7 +5471,10 @@ def _compat_pursue_unravel(
     best_loc = None
     for conn in loc.get("connections", []) if False else []:  # conn iteration placeholder
         pass
-    reachable = _dijkstra_reachable_locations(loc_id, locations, max_minutes=6 * 60 * MINUTES_PER_TURN)
+    reachable = _dijkstra_reachable_locations(
+        loc_id, locations, max_minutes=6 * 60 * MINUTES_PER_TURN,
+        map_revision=int(state.get("map_revision", 0)),
+    )
     for rlt, dist in sorted(reachable.items(), key=lambda x: x[1]):
         if rlt == loc_id:
             continue
@@ -5535,7 +5571,10 @@ def _compat_pursue_get_rich(
                  "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
     # Find best reachable anomaly location by anomaly_activity score
-    reachable = _dijkstra_reachable_locations(loc_id, locations, max_minutes=6 * 60 * MINUTES_PER_TURN)
+    reachable = _dijkstra_reachable_locations(
+        loc_id, locations, max_minutes=6 * 60 * MINUTES_PER_TURN,
+        map_revision=int(state.get("map_revision", 0)),
+    )
     best_loc_id = None
     best_score = -1.0
     for cand_id, travel_min in reachable.items():
