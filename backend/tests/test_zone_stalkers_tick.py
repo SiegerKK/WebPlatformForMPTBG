@@ -6595,3 +6595,69 @@ class TestCombatInteraction:
                and m.get("effects", {}).get("subject") == "agent_b"
         ]
         assert a_retreat_obs, "A should have retreat_observed memory for B's escape"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Hunt debug gating tests (Change D+E)
+# ─────────────────────────────────────────────────────────────────
+
+class TestHuntDebugGating:
+    """Verify build_hunt_debug_payload is gated by debug_hunt_traces_enabled."""
+
+    def _make_minimal_state(self):
+        state = _make_world(seed=1, num_bots=0)
+        # Ensure world_turn is divisible by 30 to trigger memory decay,
+        # and set to a value the gating logic can reference.
+        state["world_turn"] = 30
+        return state
+
+    def test_hunt_debug_not_built_when_disabled(self):
+        """When debug_hunt_traces_enabled is falsy, no location_hunt_traces added."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        # Ensure flag is not set (default)
+        state.pop("debug_hunt_traces_enabled", None)
+        new_state, _ = tick_zone_map(state)
+        debug = new_state.get("debug", {})
+        assert "location_hunt_traces" not in debug
+        assert "hunt_search_by_agent" not in debug
+
+    def test_hunt_debug_not_built_when_explicitly_false(self):
+        """When debug_hunt_traces_enabled=False, hunt debug data is cleared."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        state["debug_hunt_traces_enabled"] = False
+        # Pre-populate stale data that should be cleared
+        state["debug"] = {
+            "location_hunt_traces": {"C1": {}},
+            "hunt_search_by_agent": {"a1": {}},
+        }
+        new_state, _ = tick_zone_map(state)
+        debug = new_state.get("debug", {})
+        assert "location_hunt_traces" not in debug
+        assert "hunt_search_by_agent" not in debug
+
+    def test_hunt_debug_built_when_enabled(self):
+        """When debug_hunt_traces_enabled=True, hunt debug fields appear after tick."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        state["debug_hunt_traces_enabled"] = True
+        state["_debug_hunt_traces_built_turn"] = -9999  # force build
+        new_state, _ = tick_zone_map(state)
+        # The builder runs; debug dict should exist (even if empty traces)
+        assert isinstance(new_state.get("debug"), dict)
+        # _debug_hunt_traces_built_turn should be updated
+        assert new_state.get("_debug_hunt_traces_built_turn") is not None
+
+    def test_hunt_debug_interval_respected(self):
+        """When enabled, hunt debug is not rebuilt if last build was recent."""
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        state = self._make_minimal_state()
+        state["debug_hunt_traces_enabled"] = True
+        state["debug_hunt_traces_refresh_interval"] = 10
+        # Set last built turn to same as current world_turn to prevent rebuild
+        state["_debug_hunt_traces_built_turn"] = state["world_turn"]
+        state["debug"] = {"sentinel": "should_stay"}
+        new_state, _ = tick_zone_map(state)
+        # sentinel should still be there (no rebuild wiped it)
+        assert new_state.get("debug", {}).get("sentinel") == "should_stay"

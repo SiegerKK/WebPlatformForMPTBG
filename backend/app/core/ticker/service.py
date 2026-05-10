@@ -9,7 +9,7 @@ Game-specific tick logic lives in each game's RuleSet.tick() implementation.
 import logging
 import time
 import json
-from typing import Dict
+from typing import Any, Dict
 
 from sqlalchemy.orm import Session
 
@@ -44,12 +44,39 @@ _TICK_INTERVALS: Dict[str, float] = {
     "x600":      0.1,  # 600× realtime — 1 tick per 0.1 real seconds
 }
 
+# ── WebSocket tick payload compaction ─────────────────────────────────────────
+# Limits the number of events sent inline with every WS tick notification.
+# Full event history remains available via GET /matches/{id}/events.
+WS_TICK_EVENT_PREVIEW_LIMIT = 10
+
+_WS_EVENT_PAYLOAD_KEEP_FIELDS = (
+    "agent_id",
+    "location_id",
+    "world_turn",
+    "objective_key",
+    "action_kind",
+    "summary",
+)
+
+
+def _compact_event_payload(payload: dict) -> dict:
+    """Return a compact subset of an event payload (drop heavy nested data)."""
+    return {k: payload[k] for k in _WS_EVENT_PAYLOAD_KEEP_FIELDS if k in payload}
+
+
+def _compact_tick_event(event: dict) -> dict:
+    """Return a compact representation of one tick event for WS delivery."""
+    return {
+        "event_type": event.get("event_type"),
+        "payload": _compact_event_payload(event.get("payload", {})),
+    }
+
 
 def tick_match(match_id_str: str, db: Session) -> dict:
     """
     Advance the world by one game-turn for the given match.
 
-    Delegates all game-specific logic to the match's registered RuleSet.
+    Delegates all game-specific logic to the match's registered RuleSet.tick().
     Returns a summary dict with events emitted (or an ``"error"`` key on
     failure).
     """
@@ -71,6 +98,10 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     # Notify connected WebSocket clients that the state changed.
     if "error" not in result:
         from app.core.ws.manager import ws_manager
+
+        all_events: list[Any] = result.get("new_events", []) or []
+        preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+
         ws_payload = {
             "type": "ticked",
             "match_id": match_id_str,
@@ -78,7 +109,8 @@ def tick_match(match_id_str: str, db: Session) -> dict:
             "world_hour": result.get("world_hour"),
             "world_day": result.get("world_day"),
             "world_minute": result.get("world_minute"),
-            "new_events": result.get("new_events", []),
+            "event_count": len(all_events),
+            "new_events_preview": preview_events,
         }
         ws_manager.notify(match_id_str, ws_payload)
 
@@ -86,7 +118,7 @@ def tick_match(match_id_str: str, db: Session) -> dict:
             from app.games.zone_stalkers.performance_metrics import record_tick_metrics
             metrics_payload: dict = {
                 "tick_total_ms": round(tick_total_ms, 3),
-                "events_emitted": len(result.get("new_events", []) or []),
+                "events_emitted": len(all_events),
                 "response_size_bytes": len(
                     json.dumps(ws_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 ),

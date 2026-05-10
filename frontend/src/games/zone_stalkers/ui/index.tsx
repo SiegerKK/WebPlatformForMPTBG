@@ -550,6 +550,12 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // When set, the next refresh() call will skip fetching events from the API
   // because they already arrived inline via the WS `ticked` message payload.
   const skipNextEventsRef = useRef(false);
+  // Track zone_map context id so refreshGame() can use projection endpoint.
+  const contextIdRef = useRef<string | null>(null);
+  // WS-triggered refresh throttle (ms): prevents flooding at x600 auto-tick.
+  const GAME_PROJECTION_REFRESH_MS = 250;
+  const wsLastRefreshMsRef = useRef<number>(0);
+  const wsPendingRefreshRef = useRef(false);
 
   const zoneState: ZoneMapState | null = context
     ? (context.state_blob as unknown as ZoneMapState)
@@ -563,6 +569,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   useEffect(() => { profileAgentIdRef.current = profileAgentId; }, [profileAgentId]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
   useEffect(() => { myAgentIdRef.current = myAgentId; }, [myAgentId]);
+  useEffect(() => { contextIdRef.current = context?.id ?? null; }, [context?.id]);
 
   const isCreator = match.created_by_user_id === user.id;
   const isWaiting = match.status === 'waiting_for_players' || match.status === 'draft';
@@ -636,6 +643,79 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     }
   }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ─── lightweight game projection refresh (for WS-triggered updates) ─────
+  // Uses GET /zone-stalkers/contexts/{id}/projection?mode=game instead of
+  // the heavy getTree() call, to reduce traffic at high auto-tick speeds.
+  const refreshGame = useCallback(async () => {
+    const ctxId = contextIdRef.current;
+    if (!ctxId) {
+      // Fall back to full refresh when context id is not yet known.
+      refresh();
+      return;
+    }
+    if (refreshInFlightRef.current) {
+      pendingRefreshRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
+    const fetchEvents = !skipNextEventsRef.current;
+    skipNextEventsRef.current = false;
+    try {
+      const projRes = await contextsApi.getZoneProjection(ctxId, 'game');
+      const projData = projRes.data as { state: ZoneMapState };
+      setContext((prev) => {
+        if (!prev) return prev;
+        return { ...prev, state_blob: projData.state as unknown as Record<string, unknown> };
+      });
+      // Handle active events: only re-fetch event ctx when it changed
+      const newZoneState = projData.state;
+      if (newZoneState?.active_events?.length) {
+        const activeEvtId = newZoneState.active_events[0];
+        setActiveEventCtx((prev) => {
+          if (prev?.id === activeEvtId) return prev; // already have it, no fetch needed
+          // Fetch event context asynchronously
+          contextsApi.get(activeEvtId).then(res => {
+            setActiveEventCtx(res.data as GameContext);
+            setActiveTab('event');
+          }).catch(() => {});
+          return prev; // return previous while fetching
+        });
+      } else {
+        setActiveEventCtx(null);
+      }
+      if (fetchEvents) {
+        const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
+        setEvents(evRes.data as GameEvent[]);
+      }
+    } catch { /* ignore */ }
+    finally {
+      refreshInFlightRef.current = false;
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        setTimeout(() => refreshGame(), 0);
+      }
+    }
+  }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── throttled WS-triggered refresh ──────────────────────────────────────
+  // At x600 auto-tick, ticks arrive every 100 ms — we cap UI refreshes at
+  // GAME_PROJECTION_REFRESH_MS (250 ms) so the browser is not saturated.
+  const triggerThrottledRefresh = useCallback(() => {
+    const now = Date.now();
+    const elapsed = now - wsLastRefreshMsRef.current;
+    if (elapsed >= GAME_PROJECTION_REFRESH_MS) {
+      wsLastRefreshMsRef.current = now;
+      refreshGame();
+    } else if (!wsPendingRefreshRef.current) {
+      wsPendingRefreshRef.current = true;
+      setTimeout(() => {
+        wsPendingRefreshRef.current = false;
+        wsLastRefreshMsRef.current = Date.now();
+        refreshGame();
+      }, GAME_PROJECTION_REFRESH_MS - elapsed);
+    }
+  }, [refreshGame]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ─── WebSocket push — replaces polling when connected ────────────────────
   const wsToken = localStorage.getItem('access_token');
   const { connected: wsConnected } = useMatchWebSocket(
@@ -667,22 +747,23 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             };
           });
         }
-        // Append new events that arrived inline with the WS notification.
-        // This avoids a separate listForMatch() API call on every tick.
-        const wsNewEvents = msg.new_events as GameEvent[] | undefined;
-        if (Array.isArray(wsNewEvents) && wsNewEvents.length > 0) {
+        // The WS payload now includes new_events_preview (compact, max 10)
+        // instead of the full new_events array to reduce WS traffic.
+        // event_count tells us how many events were emitted this tick.
+        const wsPreviewEvents = msg.new_events_preview as GameEvent[] | undefined;
+        if (Array.isArray(wsPreviewEvents) && wsPreviewEvents.length > 0) {
+          // Preview events are compact; use them to update the feed optimistically.
+          // A full event fetch happens in refreshGame() below if needed.
           setEvents((prev) => {
             const existingIds = new Set(prev.map((e) => e.id));
-            const added = wsNewEvents.filter((e) => !existingIds.has(e.id));
+            const added = wsPreviewEvents.filter((e) => !existingIds.has(e.id));
             if (added.length === 0) return prev;
             const combined = [...prev, ...added];
-            // Keep the last 100 events (same cap as the listForMatch call)
             return combined.length > 100 ? combined.slice(-100) : combined;
           });
-          // Signal refresh() to skip the events API call — we already have them.
-          skipNextEventsRef.current = true;
         }
-        refresh();
+        // Use throttled lightweight projection refresh instead of full getTree().
+        triggerThrottledRefresh();
         // Re-fetch memory for whichever agent is currently visible so the
         // profile / memory tab shows entries written during this tick.
         const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
@@ -705,7 +786,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           };
         });
       }
-    }, [refresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
+    }, [refresh, refreshGame, triggerThrottledRefresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // ─── ensure zone_map context exists ─────────────────────────────────────

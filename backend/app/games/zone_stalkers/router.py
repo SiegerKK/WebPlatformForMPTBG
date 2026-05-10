@@ -279,3 +279,41 @@ def get_zone_performance(
         "latest": get_last_tick_metrics(match_id=match_id_str),
         "items": metrics,
     }
+
+
+@router.get("/zone-stalkers/debug/hunt-search/{context_id}")
+def get_hunt_debug(
+    context_id: uuid.UUID,
+    store: bool = Query(default=False, description="If true, persist result into state.debug"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Build and return hunt-search debug payload for the given zone_map context.
+
+    When ``store=true``, the payload is also persisted into ``state.debug`` and
+    ``debug_hunt_traces_enabled`` is set so that subsequent ticks refresh it
+    automatically.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state, save_context_state
+    from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+    state = load_context_state(ctx.id, ctx)
+    debug_payload = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+    if store:
+        state.setdefault("debug", {}).update(debug_payload)
+        state["debug_hunt_traces_enabled"] = True
+        state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+        save_context_state(ctx.id, state, ctx)
+    return {
+        "context_id": str(ctx.id),
+        **debug_payload,
+    }
+

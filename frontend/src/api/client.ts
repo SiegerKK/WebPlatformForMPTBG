@@ -58,6 +58,9 @@ export const contextsApi = {
   get: (id: string) => apiClient.get(`/contexts/${id}`),
   getTree: (matchId: string) => apiClient.get(`/matches/${matchId}/contexts`),
   getProjection: (id: string) => apiClient.get(`/contexts/${id}/projection`),
+  /** Fetch Zone Stalkers game projection (avoids full state deepcopy on backend). */
+  getZoneProjection: (id: string, mode: 'game' | 'debug-map' | 'full' = 'game') =>
+    apiClient.get(`/zone-stalkers/contexts/${id}/projection`, { params: { mode } }),
   /** Fetch the full memory array for one agent on demand (stripped from getTree). */
   getAgentMemory: (contextId: string, agentId: string) =>
     apiClient.get(`/contexts/${contextId}/agents/${agentId}/memory`),

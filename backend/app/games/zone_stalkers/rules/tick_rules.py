@@ -259,6 +259,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _agent["action_queue"] = []
 
     # PR 3: ensure memory_v3 structure exists, lazy-import legacy memory, run decay.
+    # Decay runs every MEMORY_DECAY_INTERVAL_TURNS to reduce CPU; legacy import
+    # still happens on every turn when memory_v3 is empty.
+    MEMORY_DECAY_INTERVAL_TURNS = 30
     from app.games.zone_stalkers.memory.store import ensure_memory_v3 as _ensure_mem_v3  # noqa: PLC0415
     from app.games.zone_stalkers.memory.legacy_bridge import import_legacy_memory as _import_legacy  # noqa: PLC0415
     from app.games.zone_stalkers.memory.decay import decay_memory as _decay_mem  # noqa: PLC0415
@@ -266,7 +269,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _ensure_mem_v3(_pr3_agent)
         if not _pr3_agent.get("memory_v3", {}).get("records"):
             _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)
-        _decay_mem(_pr3_agent, world_turn)
+        if (world_turn - 1) % MEMORY_DECAY_INTERVAL_TURNS == 0:
+            _decay_mem(_pr3_agent, world_turn)
 
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
@@ -579,6 +583,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     # Writes a new observation entry only when content has changed since the last
     # entry of the same category; merges repeated observations via the semantic
     # merge system; marks stale entries before writing new ones.
+    # Gate observations to every LOCATION_OBSERVATION_INTERVAL_TURNS turns to
+    # reduce memory churn; travel-triggered observations still happen inline.
+    LOCATION_OBSERVATION_INTERVAL_TURNS = 10
     from app.games.zone_stalkers.rules.memory_merge import apply_staleness  # noqa: PLC0415
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
@@ -589,11 +596,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         loc_id = agent.get("location_id")
         if loc_id:
-            # Apply staleness decay before writing so that a previously-stale
-            # entry is properly re-opened (status→active) when the same
-            # observation recurs, rather than being confused with a fresh one.
-            apply_staleness(agent.get("memory", []), world_turn)
-            _write_location_observations(agent_id, agent, loc_id, state, world_turn)
+            # Write observation every LOCATION_OBSERVATION_INTERVAL_TURNS turns.
+            # (observation on travel is still written inline in travel logic)
+            if (world_turn - 1) % LOCATION_OBSERVATION_INTERVAL_TURNS == 0:
+                apply_staleness(agent.get("memory", []), world_turn)
+                _write_location_observations(agent_id, agent, loc_id, state, world_turn)
 
     # 4. Advance world time (1 tick = 1 minute)
     world_minute = state.get("world_minute", 0)
@@ -635,15 +642,24 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         },
     })
     try:
-        from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload  # noqa: PLC0415
-
-        debug_payload = build_hunt_debug_payload(
-            state=state,
-            world_turn=state["world_turn"],
-        )
-        state.setdefault("debug", {}).update(debug_payload)
+        if state.get("debug_hunt_traces_enabled"):
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload  # noqa: PLC0415
+            interval = int(state.get("debug_hunt_traces_refresh_interval", 10))
+            last_turn = int(state.get("_debug_hunt_traces_built_turn", -999999))
+            if state["world_turn"] - last_turn >= interval:
+                debug_payload = build_hunt_debug_payload(
+                    state=state,
+                    world_turn=state["world_turn"],
+                )
+                state.setdefault("debug", {}).update(debug_payload)
+                state["_debug_hunt_traces_built_turn"] = state["world_turn"]
+        else:
+            # Clear stale debug payload when disabled to avoid state bloat
+            state.get("debug", {}).pop("location_hunt_traces", None)
+            state.get("debug", {}).pop("hunt_search_by_agent", None)
     except Exception:
-        state.setdefault("debug", {})
+        pass
+    state.setdefault("debug", {})
     return state, events
 
 
