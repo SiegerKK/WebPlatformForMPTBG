@@ -199,7 +199,7 @@ def _project_zone_game(state: dict[str, Any]) -> dict[str, Any]:
         "debug_layout": state.get("debug_layout"),
         "max_turns": state.get("max_turns"),
         "state_revision": state.get("state_revision", 0),
-        "map_revision": state.get("map_revision", 1),
+        "map_revision": state.get("map_revision", 0),
         "agents": {id_: _project_agent_game(a) for id_, a in agents_raw.items() if isinstance(a, dict)},
         "traders": {id_: _project_trader_game(t) for id_, t in traders_raw.items() if isinstance(t, dict)},
         "locations": _project_locations_game(state.get("locations", {})),

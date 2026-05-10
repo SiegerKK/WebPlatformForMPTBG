@@ -556,6 +556,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const contextIdRef = useRef<string | null>(null);
   // Track state_revision for WS delta sync — starts at 0 (before first projection load).
   const stateRevisionRef = useRef<number>(0);
+  // Set to true once the first projection has been successfully loaded.
+  // Guards against applying deltas to an uninitialised state on race conditions
+  // where the first zone_delta arrives before ensureContext()+refreshGame() completes.
+  const projectionLoadedRef = useRef<boolean>(false);
   // WS-triggered refresh throttle (ms): prevents flooding at x600 auto-tick.
   const GAME_PROJECTION_REFRESH_MS = 250;
   const wsLastRefreshMsRef = useRef<number>(0);
@@ -576,7 +580,11 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   useEffect(() => { contextIdRef.current = context?.id ?? null; }, [context?.id]);
   useEffect(() => {
     const rev = (zoneState as unknown as { state_revision?: number })?.state_revision;
-    if (typeof rev === 'number') stateRevisionRef.current = rev;
+    if (typeof rev === 'number') {
+      stateRevisionRef.current = rev;
+      // Mark that a valid projection has been loaded — deltas can now be applied safely.
+      projectionLoadedRef.current = true;
+    }
   }, [zoneState]);
 
   const isCreator = match.created_by_user_id === user.id;
@@ -737,7 +745,14 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         const delta = msg as unknown as ZoneDelta & { match_id: string; context_id: string };
         const currentRevision = stateRevisionRef.current;
 
-        if (delta.base_revision !== currentRevision && currentRevision !== 0) {
+        // Only apply delta once the initial projection has been loaded.
+        // If the projection hasn't loaded yet (race condition), trigger a resync.
+        if (!projectionLoadedRef.current) {
+          triggerThrottledRefresh();
+          return;
+        }
+
+        if (delta.base_revision !== currentRevision) {
           // Revision mismatch — our local state is stale; force a full resync.
           triggerThrottledRefresh();
           return;
@@ -788,8 +803,8 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         // If requires_resync is set, do a full projection refresh.
         if (msg.requires_resync) {
           triggerThrottledRefresh();
-          const visibleAgent2 = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
-          if (visibleAgent2) loadAgentMemory(visibleAgent2);
+          const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+          if (visibleAgent) loadAgentMemory(visibleAgent);
           return;
         }
         // Immediately patch the 4 time fields in the local context state so the

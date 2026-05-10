@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Literal
 
+from app.games.zone_stalkers.projections import INVENTORY_PREVIEW_LIMIT
+
 # Fields compared per agent to detect changes
 _AGENT_HOT_FIELDS: frozenset[str] = frozenset({
     "location_id", "is_alive", "has_left_zone",
@@ -77,7 +79,7 @@ def _compact_inventory_delta(inventory: Any) -> list[dict[str, Any]]:
     if not isinstance(inventory, list):
         return []
     result = []
-    for item in inventory[:20]:
+    for item in inventory[:INVENTORY_PREVIEW_LIMIT]:
         if isinstance(item, dict):
             result.append({"id": item.get("id"), "type": item.get("type"), "name": item.get("name")})
     return result

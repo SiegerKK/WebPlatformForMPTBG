@@ -133,7 +133,9 @@ def tick_match(match_id_str: str, db: Session) -> dict:
                 "world_minute": result.get("world_minute"),
                 "event_count": len(all_events),
                 "new_events_preview": preview_events,
-                "requires_resync": True,
+                # requires_resync is set only for Zone Stalkers when a delta was expected
+                # but could not be built.  Other games don't use delta sync at all.
+                "requires_resync": match.game_id == "zone_stalkers",
             }
         ws_manager.notify(match_id_str, ws_payload)
 
