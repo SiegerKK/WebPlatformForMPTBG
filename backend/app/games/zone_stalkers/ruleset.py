@@ -204,14 +204,50 @@ class ZoneStalkerRuleSet(RuleSet):
         db.commit()
 
         # Build compact WebSocket delta (avoids full HTTP projection round-trip on frontend).
+        # Try dirty-set delta first (faster); fall back to full diff on failure/empty sets.
+
+        # Pick up last tick runtime for profiler data + dirty sets.
+        _runtime = None
+        profiler_data = None
+        try:
+            from app.games.zone_stalkers.rules.tick_rules import _last_tick_runtime
+            _runtime = _last_tick_runtime
+            if _runtime and _runtime.profiler:
+                profiler_data = _runtime.profiler.to_dict()
+                profiler_data["counters"].update(_runtime.to_debug_counters())
+        except Exception:
+            _runtime = None
+
+        # Store profiler data in performance metrics
+        try:
+            from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+            record_tick_metrics(
+                str(match.id),
+                {
+                    "world_turn": new_state.get("world_turn"),
+                    "profiler": profiler_data,
+                },
+            )
+        except Exception:
+            pass
+
         zone_delta = None
         try:
-            from app.games.zone_stalkers.delta import build_zone_delta
-            zone_delta = build_zone_delta(
-                old_state=old_state,
-                new_state=new_state,
-                events=new_events_for_ws,
-            )
+            if _should_use_dirty_ws_delta(new_state, _runtime):
+                from app.games.zone_stalkers.delta_dirty import build_zone_delta_from_dirty
+                zone_delta = build_zone_delta_from_dirty(
+                    state=new_state,
+                    runtime=_runtime,
+                    events=new_events_for_ws,
+                    old_state=old_state,
+                )
+            if zone_delta is None:
+                from app.games.zone_stalkers.delta import build_zone_delta
+                zone_delta = build_zone_delta(
+                    old_state=old_state,
+                    new_state=new_state,
+                    events=new_events_for_ws,
+                )
         except Exception:
             zone_delta = None
 
@@ -300,3 +336,16 @@ def _emit_events(ctx, match, event_dicts: list, emitted: list, db) -> None:
         )
         db.add(ev)
         emitted.append(ev_data)
+
+
+def _should_use_dirty_ws_delta(state: dict[str, Any], runtime: Any | None) -> bool:
+    """Dirty WS delta is opt-in and disabled by default for safety."""
+    if not bool((state or {}).get("cpu_dirty_delta_enabled", False)):
+        return False
+    if runtime is None:
+        return False
+    return bool(
+        getattr(runtime, "dirty_agents", None)
+        or getattr(runtime, "dirty_locations", None)
+        or getattr(runtime, "dirty_traders", None)
+    )

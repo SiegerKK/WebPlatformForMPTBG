@@ -1,11 +1,5 @@
 # CPU Optimization PR 1 — Dirty Runtime Foundation
 
-> Base branch:
->
-> ```text
-> after merge of copilot/optimize-network-traffic-cpu-load
-> ```
->
 > Goal:
 >
 > ```text
@@ -392,22 +386,22 @@ Build:
 
 ```json
 {
-  "base_revision": previous_revision,
-  "revision": current_revision,
-  "world": {...},
+  "base_revision": "previous_revision",
+  "revision": "current_revision",
+  "world": {},
   "changes": {
     "agents": {
-      "agent_1": {...}
+      "agent_1": {}
     },
     "locations": {
-      "loc_A": {...}
+      "loc_A": {}
     },
     "traders": {},
-    "state": {...}
+    "state": {}
   },
   "events": {
     "count": 3,
-    "preview": [...]
+    "preview": []
   }
 }
 ```

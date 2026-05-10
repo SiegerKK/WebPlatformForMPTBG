@@ -560,8 +560,8 @@ travel tests
 [ ] Need thresholds/damage are scheduled tasks.
 [ ] Eating/drinking/sleeping still works.
 [ ] Critical needs still affect NPC.
-[ ] Existing PR6 hunt logic still works.
-[ ] CPU work per tick drops when many NPC are in long actions.
+[ ] Existing hunt logic still works.
+[ ] CPU work per tick drops when many NPCs are in long actions.
 ```
 
 ---

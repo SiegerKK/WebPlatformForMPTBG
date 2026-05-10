@@ -9,6 +9,38 @@ from app.games.zone_stalkers.decision.models.need_evaluation import NeedEvaluati
 from app.games.zone_stalkers.rules.tick_constants import BRAIN_TRACE_MAX_EVENTS
 
 
+def is_brain_trace_enabled(agent_id: str, state: dict | None) -> bool:
+    """Return True if full brain trace should be written for this agent."""
+    if state is None:
+        return True  # backwards-compat: no state = trace everything
+    if not state.get("debug_brain_trace_enabled", False):
+        return False
+    allowed_ids = state.get("debug_brain_trace_agent_ids") or []
+    return len(allowed_ids) == 0 or agent_id in allowed_ids
+
+
+def update_agent_decision_summary(
+    agent: dict[str, Any],
+    *,
+    world_turn: int,
+    objective_key: str | None = None,
+    intent_kind: str | None = None,
+    summary: str | None = None,
+) -> None:
+    """Write a compact decision summary into agent brain_v3_context.
+
+    This is always written regardless of brain trace gating so that NPC
+    profile panels can still show the last decision.
+    """
+    ctx = agent.setdefault("brain_v3_context", {})
+    ctx["latest_decision_summary"] = {
+        "turn": world_turn,
+        "objective_key": objective_key,
+        "intent_kind": intent_kind,
+        "summary": summary,
+    }
+
+
 def _time_from_turn(world_turn: int) -> dict[str, int]:
     total_minutes = 6 * 60 + (world_turn - 1)
     return {
@@ -64,6 +96,7 @@ def append_brain_trace_event(
     mode: str,
     decision: str,
     summary: str,
+    agent_id: str | None = None,
     reason: str | None = None,
     scheduled_action_type: str | None = None,
     intent_kind: str | None = None,
@@ -81,6 +114,21 @@ def append_brain_trace_event(
     active_plan_runtime: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
+    # --- Gating: skip full trace only when agent_id is explicitly provided ---
+    # When agent_id is None (existing callers), no gating — backwards-compat.
+    # When agent_id is provided, check state flag.
+    if agent_id is not None:
+        _trace_enabled = is_brain_trace_enabled(agent_id, state)
+        if not _trace_enabled:
+            # Still update the compact decision summary so profile panels work.
+            update_agent_decision_summary(
+                agent,
+                world_turn=world_turn,
+                intent_kind=intent_kind,
+                summary=summary,
+            )
+            return
+
     trace = agent.get("brain_trace")
     world_time = _time_payload(world_turn, state)
     event: dict[str, Any] = {
@@ -173,6 +221,7 @@ def write_plan_monitor_trace(
     dominant_pressure_value: float | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
+    _agent_id = str(agent.get("id") or "")
     dominant_pressure = None
     if dominant_pressure_key is not None and dominant_pressure_value is not None:
         dominant_pressure = {
@@ -185,6 +234,7 @@ def write_plan_monitor_trace(
         mode="active_plan_monitor",
         decision=decision,
         summary=summary,
+        agent_id=_agent_id or None,
         reason=reason,
         scheduled_action_type=scheduled_action_type,
         dominant_pressure=dominant_pressure,
@@ -207,6 +257,7 @@ def write_npc_brain_v3_decision_trace(
     alternatives: list[dict[str, Any]] | None = None,
     active_plan_runtime: dict[str, Any] | None = None,
 ) -> None:
+    _agent_id = str(agent.get("id") or "")
     if active_objective and isinstance(active_objective, dict) and active_objective.get("key"):
         objective_key = active_objective["key"]
         thought = f"Выбрана цель {objective_key} ({round(intent_score * 100)}%). Адаптер intent: {intent_kind}."
@@ -250,6 +301,7 @@ def write_npc_brain_v3_decision_trace(
         mode="decision",
         decision="objective_decision",
         summary=thought,
+        agent_id=_agent_id or None,
         reason=reason,
         intent_kind=intent_kind,
         intent_score=intent_score,
@@ -312,6 +364,7 @@ def write_active_plan_trace(
     summary: str | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
+    _agent_id = str(agent.get("id") or "")
     current_step = getattr(active_plan, "current_step", None)
     active_plan_runtime = {
         "active_plan_id": getattr(active_plan, "id", None),
@@ -330,6 +383,7 @@ def write_active_plan_trace(
         mode="active_plan",
         decision=event,
         summary=summary or event,
+        agent_id=_agent_id or None,
         reason=reason,
         active_plan_runtime=active_plan_runtime,
         state=state,
@@ -342,6 +396,10 @@ def ensure_brain_trace_for_tick(
     world_turn: int,
     state: dict[str, Any] | None = None,
 ) -> None:
+    _agent_id = str(agent.get("id") or "")
+    if _agent_id and not is_brain_trace_enabled(_agent_id, state):
+        return
+
     trace = agent.get("brain_trace")
     world_time = _time_payload(world_turn, state)
     no_op_event = _no_op_event(world_turn, world_time)
