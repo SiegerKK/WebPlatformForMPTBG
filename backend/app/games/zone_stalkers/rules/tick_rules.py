@@ -1708,9 +1708,8 @@ def _add_memory(
     # Ensure memory_v3 is COW-copied before in-place mutations inside the bridge.
     if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
         try:
-            agent = _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")
-            # bridge expects the full agent dict, not just memory_v3
-            agent = _cow.agent(resolved_agent_id)
+            _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")  # triggers COW copy
+            agent = _cow.agent(resolved_agent_id)  # full agent dict with copied memory_v3
         except Exception:
             pass
 
