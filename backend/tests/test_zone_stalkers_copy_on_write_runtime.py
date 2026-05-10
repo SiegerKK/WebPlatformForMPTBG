@@ -572,3 +572,95 @@ def test_tick_zone_map_restores_previous_current_runtime(monkeypatch):
     tick_zone_map(state)
 
     assert tick_rules._current_tick_runtime is sentinel_runtime
+
+
+def test_cow_mutation_helper_does_not_mutate_source_on_runtime_error(monkeypatch):
+    class _FakeProfiler:
+        def __init__(self):
+            self.counters = {}
+
+        def inc(self, key: str) -> None:
+            self.counters[key] = int(self.counters.get(key, 0)) + 1
+
+    class _BrokenRuntime:
+        def __init__(self):
+            self.profiler = _FakeProfiler()
+            self._agent = {"id": "a1", "hp": 100}
+
+        def set_agent_field(self, *_args, **_kwargs):
+            raise RuntimeError("runtime setter failure")
+
+        def agent(self, _agent_id: str):
+            return self._agent
+
+        def mark_agent_dirty(self, _agent_id: str):
+            return None
+
+    source_agent = {"id": "a1", "hp": 100}
+    broken_runtime = _BrokenRuntime()
+    monkeypatch.setattr(tick_rules, "_current_tick_runtime", broken_runtime)
+
+    tick_rules._runtime_set_agent_field("a1", "hp", 50, source_agent)
+
+    assert source_agent["hp"] == 100
+    assert broken_runtime._agent["hp"] == 50
+    assert broken_runtime.profiler.counters.get("cow_mutation_fallback_errors", 0) == 1
+
+
+def test_cow_live_get_rich_bot_tick_does_not_mutate_input():
+    state = _make_cow_tick_state(seed=140, num_players=0, num_ai_stalkers=2, num_traders=1)
+    bot_id = next(iter(state["agents"].keys()))
+    state["agents"][bot_id]["global_goal"] = "get_rich"
+    state["agents"][bot_id]["money"] = 0
+    state["agents"][bot_id]["has_left_zone"] = False
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    assert new_state is not state
+
+
+def test_cow_live_kill_stalker_bot_tick_does_not_mutate_input():
+    state = _make_cow_tick_state(seed=141, num_players=0, num_ai_stalkers=3, num_traders=1)
+    bot_ids = list(state["agents"].keys())
+    hunter_id = bot_ids[0]
+    target_id = bot_ids[1]
+    state["agents"][hunter_id]["global_goal"] = "kill_stalker"
+    state["agents"][hunter_id]["kill_target_id"] = target_id
+    state["agents"][hunter_id]["has_left_zone"] = False
+    state["agents"][target_id]["has_left_zone"] = False
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    assert new_state is not state
+
+
+def test_cow_live_bot_with_existing_scheduled_action_does_not_mutate_input():
+    state = _make_cow_tick_state(seed=142, num_players=0, num_ai_stalkers=2, num_traders=0)
+    loc_ids = list(state["locations"].keys())
+    assert len(loc_ids) >= 2
+    old_loc, new_loc = loc_ids[0], loc_ids[1]
+    agent_id = next(iter(state["agents"].keys()))
+    state["locations"][old_loc]["connections"] = [{"to": new_loc, "travel_time": 1, "closed": False}]
+    state["locations"][new_loc]["connections"] = [{"to": old_loc, "travel_time": 1, "closed": False}]
+    state["agents"][agent_id]["location_id"] = old_loc
+    state["agents"][agent_id]["scheduled_action"] = {
+        "type": "travel",
+        "turns_remaining": 1,
+        "turns_total": 1,
+        "target_id": new_loc,
+        "final_target_id": new_loc,
+        "remaining_route": [],
+        "started_turn": state.get("world_turn", 2),
+    }
+    state["locations"][old_loc]["agents"] = [agent_id]
+    state["locations"][new_loc]["agents"] = []
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    assert new_state is not state

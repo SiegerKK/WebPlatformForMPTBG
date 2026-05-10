@@ -260,6 +260,19 @@ def _runtime_agent(agent_id: str, fallback_agent: Dict[str, Any]) -> Dict[str, A
         return fallback_agent
 
 
+def _runtime_inc_counter(counter_name: str) -> None:
+    runtime = _cow_runtime()
+    if runtime is None:
+        return
+    profiler = getattr(runtime, "profiler", None)
+    if profiler is None:
+        return
+    try:
+        profiler.inc(counter_name)
+    except Exception:
+        pass
+
+
 def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent: Dict[str, Any]) -> None:
     runtime = _cow_runtime()
     if runtime is not None:
@@ -267,7 +280,15 @@ def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent
             runtime.set_agent_field(agent_id, key, value)
             return
         except Exception:
-            pass
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                agent = runtime.agent(agent_id)
+                if agent.get(key) != value:
+                    agent[key] = value
+                    runtime.mark_agent_dirty(agent_id)
+                return
+            except Exception:
+                return
     fallback_agent[key] = value
 
 
@@ -278,7 +299,14 @@ def _runtime_set_state_field(state: Dict[str, Any], key: str, value: Any) -> Non
             runtime.set_state_field(key, value)
             return
         except Exception:
-            pass
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                if runtime.state.get(key) != value:
+                    runtime.state[key] = value
+                    runtime.mark_state_dirty(key)
+                return
+            except Exception:
+                return
     state[key] = value
 
 
@@ -289,7 +317,15 @@ def _runtime_mutable_location_agents(state: Dict[str, Any], location_id: str) ->
         try:
             return runtime.mutable_location_list(location_id, "agents")
         except Exception:
-            pass
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                location_rt = runtime.location(location_id)
+                value = copy.deepcopy(location_rt.get("agents", []))
+                location_rt["agents"] = value
+                runtime.mark_location_dirty(location_id)
+                return value
+            except Exception:
+                return list(location.get("agents", []))
     return location.setdefault("agents", [])
 
 
@@ -301,7 +337,15 @@ def _runtime_set_action_used(agent: Dict[str, Any], value: bool) -> None:
             runtime.set_agent_field(agent_id, "action_used", value)
             return
         except Exception:
-            pass
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                safe_agent = runtime.agent(agent_id)
+                if safe_agent.get("action_used") != value:
+                    safe_agent["action_used"] = value
+                    runtime.mark_agent_dirty(agent_id)
+                return
+            except Exception:
+                return
     agent["action_used"] = value
 
 
@@ -312,7 +356,15 @@ def _runtime_set_location_field(state: Dict[str, Any], location_id: str, key: st
             runtime.set_location_field(location_id, key, value)
             return
         except Exception:
-            pass
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                location = runtime.location(location_id)
+                if location.get(key) != value:
+                    location[key] = value
+                    runtime.mark_location_dirty(location_id)
+                return
+            except Exception:
+                return
     loc = state.get("locations", {}).get(location_id)
     if loc is not None:
         loc[key] = value
@@ -324,7 +376,17 @@ def _runtime_mutable_location_list(state: Dict[str, Any], location_id: str, key:
         try:
             return runtime.mutable_location_list(location_id, key)
         except Exception:
-            pass
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                location = runtime.location(location_id)
+                value = copy.deepcopy(location.get(key, []))
+                if not isinstance(value, list):
+                    value = []
+                location[key] = value
+                runtime.mark_location_dirty(location_id)
+                return value
+            except Exception:
+                pass
     loc = state.get("locations", {}).get(location_id, {})
     val = loc.get(key, [])
     if not isinstance(val, list):
@@ -413,6 +475,12 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             if "memory_v3" not in _agent:
                 _runtime_set_agent_field(_agent_id, "memory_v3", None, _agent)
                 _agent = _runtime_agent(_agent_id, _agent)
+            _runtime = _cow_runtime()
+            if _runtime is not None and isinstance(_agent.get("scheduled_action"), dict):
+                try:
+                    _runtime.mutable_agent_scheduled_action(_agent_id)
+                except Exception:
+                    _runtime_inc_counter("cow_mutation_fallback_errors")
             _migrate_brain_v3_context(_agent)
             _migrate_legacy_scheduled_action_to_active_plan(
                 _agent,
@@ -796,6 +864,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _npc_brain_skipped_count += 1
             continue
 
+        agent = _runtime_agent(agent_id, agent)
         if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None:
             handled, active_plan_events = _process_active_plan_v3(
                 agent_id,
@@ -4429,6 +4498,7 @@ def _run_npc_brain_v3_decision(
     world_turn: int,
 ) -> List[Dict[str, Any]]:
     """NPC Brain v3 entry point — wraps inner function and emits bot_decision on goal change."""
+    agent = _runtime_agent(agent_id, agent)
     prev_goal = agent.get("current_goal")
     events = _run_npc_brain_v3_decision_inner(agent_id, agent, state, world_turn)
     new_goal = agent.get("current_goal")
@@ -4678,6 +4748,7 @@ def _run_npc_brain_v3_decision_inner(
     world_turn: int,
 ) -> List[Dict[str, Any]]:
     """Core NPC Brain v3 pipeline: Objective → adapter intent → plan → ActivePlan/runtime."""
+    agent = _runtime_agent(agent_id, agent)
     from app.games.zone_stalkers.decision.context_builder import build_agent_context
     from app.games.zone_stalkers.decision.needs import evaluate_need_result
     from app.games.zone_stalkers.decision.intents import select_intent
@@ -5308,6 +5379,7 @@ def _execute_leave_zone(
     world_turn: int,
 ) -> List[Dict[str, Any]]:
     """Agent has reached an exit_zone location after achieving their goal. Mark as left."""
+    agent = _runtime_agent(agent_id, agent)
     loc_id = agent.get("location_id", "")
     locations = state.get("locations", {})
     loc = locations.get(loc_id, {})
@@ -5339,8 +5411,9 @@ def _execute_leave_zone(
     agent["scheduled_action"] = None
     agent["action_queue"] = []
     # Remove agent from the exit location's agent list
-    if agent_id in loc.get("agents", []):
-        loc["agents"].remove(agent_id)
+    loc_agents = _runtime_mutable_location_agents(state, loc_id)
+    if agent_id in loc_agents:
+        loc_agents.remove(agent_id)
     _add_memory(
         agent, world_turn, state, "observation",
         "🚪 Покинул Зону",
