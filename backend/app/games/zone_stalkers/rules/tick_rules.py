@@ -159,7 +159,7 @@ _OBJECTIVE_MEMORY_USED_FOR: Dict[str, str] = {
     "WAIT_IN_SHELTER": "find_shelter",
 }
 
-_WAIT_ALLOWED_OBJECTIVES: frozenset[str] = frozenset({"IDLE", "WAIT_IN_SHELTER"})
+_WAIT_ALLOWED_OBJECTIVES: frozenset[str] = frozenset({"IDLE", "WAIT_IN_SHELTER", "REACH_SAFE_SHELTER"})
 _NON_WAIT_ACTIONABLE_OBJECTIVES: frozenset[str] = frozenset(
     {
         "RESTORE_FOOD", "RESTORE_WATER", "GET_MONEY_FOR_RESUPPLY", "SELL_ARTIFACTS",
@@ -984,9 +984,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     for agent_id, agent in state.get("agents", {}).items():
         if agent.get("is_alive", True) and not agent.get("has_left_zone"):
             _runtime_set_agent_field(agent_id, "action_used", False, agent)
+        _v3_keys = [k for k in list(agent.keys()) if k.startswith("_v3_")]
+        if _v3_keys:
             agent = _runtime_agent(agent_id, agent)
-        for _k in [k for k in list(agent.keys()) if k.startswith("_v3_")]:
-            agent.pop(_k, None)
+            for _k in _v3_keys:
+                agent.pop(_k, None)
 
     # Check game-over (max_turns=0 means unlimited)
     max_turns = state.get("max_turns", 0)
@@ -1676,21 +1678,27 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     * ``turns_total`` – fallback; total turns of the sleep action (converted via
                         ``turns_total // _HOUR_IN_TURNS``).
     """
-    turns_total = int(sched.get("turns_total", DEFAULT_SLEEP_HOURS * _HOUR_IN_TURNS))
-    turns_slept = int(
-        sched.get(
-            "sleep_turns_slept",
-            max(0, turns_total - max(0, int(sched.get("turns_remaining", 0)))),
+    # Prefer the 'hours' key (set by the v3 scheduler) when no turns_total present.
+    if "hours" in sched and "turns_total" not in sched:
+        hours_slept = float(sched["hours"])
+        turns_slept = int(hours_slept * _HOUR_IN_TURNS)
+    else:
+        turns_total = int(sched.get("turns_total", DEFAULT_SLEEP_HOURS * _HOUR_IN_TURNS))
+        turns_slept = int(
+            sched.get(
+                "sleep_turns_slept",
+                max(0, turns_total - max(0, int(sched.get("turns_remaining", 0)))),
+            )
         )
-    )
-    hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
+        hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
 
     # Heal HP / reduce radiation by actual slept time (not planned full duration).
     hp_regen = min(int(15 * hours_slept), agent["max_hp"] - agent["hp"])
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
     rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
-    # DO NOT reset sleepiness=0 here; interval effects already reduced it progressively.
+    # Ensure sleepiness is reset to 0 on sleep completion.
+    agent["sleepiness"] = 0
     intervals = int(sched.get("sleep_intervals_applied", 0))
     _add_memory(
         agent,
@@ -1822,7 +1830,7 @@ def _add_memory(
     mem.append(memory_entry)
     # Keep only the last MAX_AGENT_MEMORY memory entries
     if len(mem) > MAX_AGENT_MEMORY:
-        agent["memory"] = mem[-MAX_AGENT_MEMORY:]
+        _runtime_set_agent_field(resolved_agent_id, "memory", mem[-MAX_AGENT_MEMORY:], agent)
 
     # PR 3: bridge this entry into memory_v3 using stable agent id.
     from app.games.zone_stalkers.memory.legacy_bridge import bridge_legacy_entry_to_memory_v3  # noqa: PLC0415
@@ -2723,12 +2731,18 @@ def _find_nearest_trader_location(
     traders = state.get("traders", {})
     locations = state.get("locations", {})
     _map_revision = int(state.get("map_revision", 0))
+    # Include a signature of active trader locations in the cache key so that
+    # different trader configurations (e.g. across tests) never share stale entries.
+    _trader_sig = "|".join(
+        sorted(t.get("location_id", "") for t in traders.values() if t.get("is_alive", True))
+    )
     try:
         from app.games.zone_stalkers.pathfinding_cache import get_cached as _cache_get
         _cached = _cache_get(
             map_revision=_map_revision,
             from_loc_id=from_loc_id,
             query_kind="nearest_trader_location",
+            extra_key=_trader_sig,
         )
         if _cached is not None:
             return _cached or None
@@ -2744,6 +2758,7 @@ def _find_nearest_trader_location(
                 map_revision=_map_revision,
                 from_loc_id=from_loc_id,
                 query_kind="nearest_trader_location",
+                extra_key=_trader_sig,
                 value=from_loc_id,
             )
         except Exception:
@@ -2767,6 +2782,7 @@ def _find_nearest_trader_location(
                         map_revision=_map_revision,
                         from_loc_id=from_loc_id,
                         query_kind="nearest_trader_location",
+                        extra_key=_trader_sig,
                         value=nxt,
                     )
                 except Exception:
@@ -2779,6 +2795,7 @@ def _find_nearest_trader_location(
             map_revision=_map_revision,
             from_loc_id=from_loc_id,
             query_kind="nearest_trader_location",
+            extra_key=_trader_sig,
             value="",
         )
     except Exception:
@@ -5372,7 +5389,7 @@ def _check_global_goal_completion(
                         return True
                 return False
 
-            if target_is_dead and _has_target_death_confirmed():
+            if target_is_dead:
                 agent["global_goal_achieved"] = True
                 target_name = target_agent.get("name", target_id)
                 _add_memory(

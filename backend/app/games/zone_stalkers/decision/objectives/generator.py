@@ -410,9 +410,15 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         )
 
     dominant_item_urgency = 0.0
+    _agent_money = int(agent.get("money", 0))
+    _material_threshold = int(agent.get("material_threshold", 0))
+    _in_phase1 = _material_threshold > 0 and _agent_money < _material_threshold
     for item_need in need_result.item_needs:
         objective_key = ITEM_NEED_TO_OBJECTIVE.get(item_need.key)
         if objective_key is None or item_need.urgency <= 0:
+            continue
+        # Phase-1 gate: don't chase weapon/armor while still in the wealth-building phase.
+        if _in_phase1 and item_need.key in ("weapon", "armor"):
             continue
         dominant_item_urgency = max(dominant_item_urgency, float(item_need.urgency))
 
@@ -563,22 +569,39 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     global_goal = str(agent.get("global_goal") or "get_rich")
     global_key = OBJECTIVE_LEAVE_ZONE if agent.get("global_goal_achieved") else _global_goal_objective(global_goal)
     global_refs, global_memory_conf = _objective_memory_refs_and_confidence(ctx, global_key)
+    _raw_global_urgency = max(0.1, float(getattr(need_result.scores, {
+        "get_rich": "get_rich",
+        "kill_stalker": "hunt_target",
+        "unravel_zone_mystery": "unravel_zone_mystery",
+        "leave_zone": "leave_zone",
+    }.get(global_goal, "get_rich"), 0.1)))
+    # Boost FIND_ARTIFACTS when the agent is already at a location with artifacts —
+    # picking up a present artifact is cheap and highly profitable.
+    _loc_has_artifact = bool(ctx.location_state.get("artifacts"))
+    _loc_has_anomaly = int(ctx.location_state.get("anomaly_activity", 0)) > 0
+    _artifact_boost = (
+        global_goal == "get_rich"
+        and global_key == OBJECTIVE_FIND_ARTIFACTS
+        and _loc_has_artifact
+        and _loc_has_anomaly
+    )
+    if _artifact_boost:
+        _global_urgency = max(0.5, _raw_global_urgency)
+        _global_ev, _global_risk, _global_tc, _global_conf = 0.92, 0.20, 0.15, 0.90
+    else:
+        _global_urgency = _raw_global_urgency
+        _global_ev, _global_risk, _global_tc, _global_conf = 0.7, 0.35, 0.6, 0.7
     _append_unique(
         result,
         Objective(
             key=global_key,
             source="global_goal",
-            urgency=max(0.1, float(getattr(need_result.scores, {
-                "get_rich": "get_rich",
-                "kill_stalker": "hunt_target",
-                "unravel_zone_mystery": "unravel_zone_mystery",
-                "leave_zone": "leave_zone",
-            }.get(global_goal, "get_rich"), 0.1))),
-            expected_value=0.7,
-            risk=0.35,
-            time_cost=0.6,
+            urgency=_global_urgency,
+            expected_value=_global_ev,
+            risk=_global_risk,
+            time_cost=_global_tc,
             resource_cost=0.2,
-            confidence=0.7,
+            confidence=_global_conf,
             goal_alignment=1.0,
             memory_confidence=global_memory_conf,
             reasons=(f"Глобальная цель: {global_goal}",),

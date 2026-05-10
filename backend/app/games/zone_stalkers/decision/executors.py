@@ -149,10 +149,10 @@ def _exec_travel(
     elif reason in ("heal_self", "emergency_heal", "seek_medical", "buy_heal"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "medical", target_id,
                             emergency=True)
-    elif reason in ("seek_food", "emergency_food", "buy_food"):
+    elif reason in ("seek_food", "emergency_food", "buy_food", "buy_food_survival", "buy_food_stock"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "food", target_id,
                             emergency=True)
-    elif reason in ("seek_drink", "emergency_drink", "buy_drink"):
+    elif reason in ("seek_drink", "emergency_drink", "buy_drink", "buy_drink_survival", "buy_drink_stock"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "drink", target_id,
                             emergency=True)
     elif reason in ("sell_artifacts", "sell_artifacts_get_rich"):
