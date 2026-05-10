@@ -84,7 +84,7 @@ def tick_match(match_id_str: str, db: Session) -> dict:
 
         try:
             from app.games.zone_stalkers.performance_metrics import record_tick_metrics
-            metrics_payload = {
+            metrics_payload: dict = {
                 "tick_total_ms": round(tick_total_ms, 3),
                 "events_emitted": len(result.get("new_events", []) or []),
                 "response_size_bytes": len(
@@ -93,17 +93,12 @@ def tick_match(match_id_str: str, db: Session) -> dict:
             }
             if match.game_id == "zone_stalkers":
                 from app.core.contexts.models import ContextStatus, GameContext
-                from app.core.state_cache.service import load_context_state
-                from app.games.zone_stalkers.projections import build_zone_state_size_report
-
                 zone_ctx = db.query(GameContext).filter(
                     GameContext.match_id == match.id,
                     GameContext.context_type == "zone_map",
                     GameContext.status == ContextStatus.ACTIVE,
                 ).first()
                 if zone_ctx:
-                    state = load_context_state(zone_ctx.id, zone_ctx)
-                    metrics_payload.update(build_zone_state_size_report(state))
                     metrics_payload["context_id"] = str(zone_ctx.id)
             record_tick_metrics(match_id_str, metrics_payload)
         except Exception as exc:

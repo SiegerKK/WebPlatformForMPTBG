@@ -1073,3 +1073,49 @@ The original optimization plan is directionally correct, but after PR6 the most 
 PR6 hunt/search debug data must be explicitly projection-gated,
 bounded, measured, and lazy-loadable.
 ```
+
+---
+
+# 14. Status after final PR6 fixes
+
+```text
+PR6 contains:
+  - hunt search mechanics (HuntLead / TargetBelief);
+  - Hunt Traces debug map;
+  - target_found correctness fixes;
+  - lightweight projection/metrics diagnostics groundwork.
+
+PR6 does NOT contain full optimization.
+```
+
+## Completed in PR6
+
+```text
+- search_target produces target_found outcome;
+- VERIFY_LEAD/TRACK_TARGET/PURSUE_TARGET stop after target_found;
+- recently_seen supports ENGAGE_TARGET after fresh contact;
+- no_witnesses creates witness_source_exhausted cooldown;
+- zero-confidence possible_locations are filtered;
+- route_hints ignore exhausted destinations;
+- witness_source_exhausted appears in Hunt Traces (negative_leads + is_exhausted_for);
+- /debug/state-size endpoint for manual full size report;
+- /debug/performance endpoint for tick metrics;
+- /projection endpoint with cheap json_size_bytes sizing (not full report);
+- tick path records only cheap metrics (tick_total_ms, events_emitted, response_size_bytes).
+```
+
+## Still deferred to optimization PR
+
+```text
+- move frontend normal flow to game projection;
+- debug-map projection adoption by frontend;
+- static/dynamic map split;
+- WebSocket delta;
+- CPU profiling and deeper runtime optimization;
+- pathfinding cache;
+- decision invalidation;
+- memory pruning;
+- trace-on-demand;
+- frontend Performance panel.
+```
+

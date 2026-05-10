@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.games.zone_stalkers.performance_metrics import get_last_tick_metrics, get_tick_metrics, record_tick_metrics
-from app.games.zone_stalkers.projections import build_zone_state_size_report, project_zone_state
+from app.games.zone_stalkers.projections import build_zone_state_size_report, json_size_bytes, project_zone_state
 
 
 def _sample_state() -> dict:
@@ -81,4 +81,18 @@ def test_tick_metrics_buffer_returns_latest() -> None:
     assert latest["match_id"] == "match-proj-test"
     assert latest["tick_total_ms"] == 12.5
     assert get_tick_metrics(match_id="match-proj-test", limit=1)[0]["response_size_bytes"] == 128
+
+
+def test_json_size_bytes_returns_positive_size() -> None:
+    assert json_size_bytes({"key": "value", "n": 42}) > 0
+    assert json_size_bytes([1, 2, 3]) > 0
+    assert json_size_bytes({}) == len(b"{}")
+
+
+def test_json_size_bytes_matches_game_projection_size() -> None:
+    state = _sample_state()
+    projected = project_zone_state(state=state, mode="game")
+    direct_size = json_size_bytes(projected)
+    report_size = build_zone_state_size_report(state)["game_projection_size_bytes"]
+    assert direct_size == report_size
 

@@ -222,7 +222,7 @@ def get_zone_projection(
 ):
     from app.core.contexts.models import GameContext
     from app.core.state_cache.service import load_context_state
-    from app.games.zone_stalkers.projections import build_zone_state_size_report, project_zone_state
+    from app.games.zone_stalkers.projections import json_size_bytes, project_zone_state
 
     ctx = db.query(GameContext).filter(
         GameContext.id == context_id,
@@ -235,7 +235,7 @@ def get_zone_projection(
     return {
         "context_id": str(ctx.id),
         "projection_mode": mode,
-        "projection_size_bytes": build_zone_state_size_report(projected)["state_size_bytes"],
+        "projection_size_bytes": json_size_bytes(projected),
         "state": projected,
     }
 

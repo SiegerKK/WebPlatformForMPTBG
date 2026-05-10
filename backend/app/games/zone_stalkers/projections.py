@@ -22,6 +22,11 @@ def _json_size_bytes(payload: Any) -> int:
         return 0
 
 
+def json_size_bytes(payload: Any) -> int:
+    """Public helper: return the JSON-serialized byte size of *payload*."""
+    return _json_size_bytes(payload)
+
+
 def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
     ctx = agent.get("brain_v3_context")
     if not isinstance(ctx, dict):
