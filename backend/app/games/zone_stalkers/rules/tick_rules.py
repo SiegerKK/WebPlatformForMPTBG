@@ -241,6 +241,70 @@ _last_tick_runtime: _Any = None
 _current_tick_runtime: _Any = None
 
 
+def _cow_runtime() -> Any | None:
+    runtime = _current_tick_runtime
+    if runtime is None:
+        return None
+    if not hasattr(runtime, "set_agent_field"):
+        return None
+    return runtime
+
+
+def _runtime_agent(agent_id: str, fallback_agent: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = _cow_runtime()
+    if runtime is None:
+        return fallback_agent
+    try:
+        return runtime.agent(agent_id)
+    except Exception:
+        return fallback_agent
+
+
+def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent: Dict[str, Any]) -> None:
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            runtime.set_agent_field(agent_id, key, value)
+            return
+        except Exception:
+            pass
+    fallback_agent[key] = value
+
+
+def _runtime_set_state_field(state: Dict[str, Any], key: str, value: Any) -> None:
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            runtime.set_state_field(key, value)
+            return
+        except Exception:
+            pass
+    state[key] = value
+
+
+def _runtime_mutable_location_agents(state: Dict[str, Any], location_id: str) -> list[str]:
+    location = state.get("locations", {}).get(location_id, {})
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            return runtime.mutable_location_list(location_id, "agents")
+        except Exception:
+            pass
+    return location.setdefault("agents", [])
+
+
+def _runtime_set_action_used(agent: Dict[str, Any], value: bool) -> None:
+    agent_id = str(agent.get("id") or "")
+    runtime = _cow_runtime()
+    if runtime is not None and agent_id:
+        try:
+            runtime.set_agent_field(agent_id, "action_used", value)
+            return
+        except Exception:
+            pass
+    agent["action_used"] = value
+
+
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Advance the world by one turn.
@@ -271,7 +335,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             try:
                 from app.games.zone_stalkers.runtime.zone_tick_runtime import ZoneTickRuntime as _ZoneTickRuntime
                 _tick_runtime = _ZoneTickRuntime(source_state=source_state, profiler=_tick_profiler)
-                _tick_runtime.prepare_for_legacy_mutation()
+                if source_state.get("cpu_copy_on_write_legacy_bridge_enabled", False):
+                    _tick_runtime.prepare_for_legacy_mutation()
                 state = _tick_runtime.state
             except Exception:
                 state = copy.deepcopy(source_state)
@@ -399,21 +464,50 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     _new_minute = (state.get("world_minute", 0) + 1) % 60
     if _new_minute == 0:  # hour boundary reached
         for agent_id, agent in state.get("agents", {}).items():
+            agent = _runtime_agent(agent_id, agent)
             if not agent.get("is_alive", True):
                 continue
             if agent.get("has_left_zone"):  # departed agents need no hunger/thirst/sleep degradation
                 continue
-            agent["hunger"] = min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR)
-            agent["thirst"] = min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR)
-            agent["sleepiness"] = min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR)
+            _runtime_set_agent_field(
+                agent_id,
+                "hunger",
+                min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR),
+                agent,
+            )
+            _runtime_set_agent_field(
+                agent_id,
+                "thirst",
+                min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR),
+                agent,
+            )
+            _runtime_set_agent_field(
+                agent_id,
+                "sleepiness",
+                min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR),
+                agent,
+            )
+            agent = _runtime_agent(agent_id, agent)
             if _tick_runtime:
                 from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad
                 _mad(_tick_runtime, agent_id)
             # Critical thirst causes HP damage faster than hunger
             if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
-                agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_THIRST)
+                _runtime_set_agent_field(
+                    agent_id,
+                    "hp",
+                    max(0, agent.get("hp", 0) - HP_DAMAGE_PER_HOUR_CRITICAL_THIRST),
+                    agent,
+                )
+                agent = _runtime_agent(agent_id, agent)
             if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
-                agent["hp"] = max(0, agent["hp"] - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER)
+                _runtime_set_agent_field(
+                    agent_id,
+                    "hp",
+                    max(0, agent.get("hp", 0) - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER),
+                    agent,
+                )
+                agent = _runtime_agent(agent_id, agent)
             if agent["hp"] <= 0 and agent.get("is_alive", True):
                 if _tick_runtime:
                     from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad3
@@ -461,10 +555,10 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _warn_offset = _emission_rng.randint(
                 _EMISSION_WARNING_MIN_TURNS, _EMISSION_WARNING_MAX_TURNS
             )
-            state["emission_warning_offset"] = _warn_offset
+            _runtime_set_state_field(state, "emission_warning_offset", _warn_offset)
         _warn_offset = state["emission_warning_offset"]
         if _turns_until == _warn_offset:
-            state["emission_warning_written_turn"] = world_turn
+            _runtime_set_state_field(state, "emission_warning_written_turn", world_turn)
             for _ew_agent_id, _ew_agent in state.get("agents", {}).items():
                 if not _ew_agent.get("is_alive", True):
                     continue
@@ -490,8 +584,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _emission_duration = _emission_rng.randint(
             _EMISSION_MIN_DURATION_TURNS, _EMISSION_MAX_DURATION_TURNS
         )
-        state["emission_active"] = True
-        state["emission_ends_turn"] = world_turn + _emission_duration
+        _runtime_set_state_field(state, "emission_active", True)
+        _runtime_set_state_field(state, "emission_ends_turn", world_turn + _emission_duration)
 
         # Spawn artifacts in all anomaly locations during emission start
         for _em_loc_id, _em_loc in state.get("locations", {}).items():
@@ -562,15 +656,15 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 
     # ── End emission when its duration has passed ──────────────────────────────
     if state.get("emission_active", False) and world_turn >= state.get("emission_ends_turn", 0):
-        state["emission_active"] = False
+        _runtime_set_state_field(state, "emission_active", False)
         # Schedule next emission 1–2 in-game days from now
         _next_emission_delay = _emission_rng.randint(
             _EMISSION_MIN_INTERVAL_TURNS, _EMISSION_MAX_INTERVAL_TURNS
         )
-        state["emission_scheduled_turn"] = world_turn + _next_emission_delay
+        _runtime_set_state_field(state, "emission_scheduled_turn", world_turn + _next_emission_delay)
         # Reset warning state so the next cycle gets a fresh random offset.
-        state["emission_warning_written_turn"] = None
-        state["emission_warning_offset"] = None
+        _runtime_set_state_field(state, "emission_warning_written_turn", None)
+        _runtime_set_state_field(state, "emission_warning_offset", None)
 
         # Write observation memory for every still-alive stalker.
         # This is the signal used to invalidate stale confirmed-empty zone records:
@@ -691,15 +785,16 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             world_hour = 0
             world_day += 1
             events.append({"event_type": "day_changed", "payload": {"world_day": world_day}})
-    state["world_minute"] = world_minute
-    state["world_hour"] = world_hour
-    state["world_day"] = world_day
-    state["world_turn"] = world_turn + 1
+    _runtime_set_state_field(state, "world_minute", world_minute)
+    _runtime_set_state_field(state, "world_hour", world_hour)
+    _runtime_set_state_field(state, "world_day", world_day)
+    _runtime_set_state_field(state, "world_turn", world_turn + 1)
 
     # 5. Reset action_used for next turn
-    for agent in state.get("agents", {}).values():
+    for agent_id, agent in state.get("agents", {}).items():
         if agent.get("is_alive", True) and not agent.get("has_left_zone"):
-            agent["action_used"] = False
+            _runtime_set_agent_field(agent_id, "action_used", False, agent)
+            agent = _runtime_agent(agent_id, agent)
         for _k in [k for k in list(agent.keys()) if k.startswith("_v3_")]:
             agent.pop(_k, None)
 
@@ -788,7 +883,9 @@ def _mark_agent_dead(
     """
     from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
 
-    agent["is_alive"] = False
+    agent = _runtime_agent(agent_id, agent)
+    _runtime_set_agent_field(agent_id, "is_alive", False, agent)
+    agent = _runtime_agent(agent_id, agent)
     active_plan = get_active_plan(agent)
     if active_plan is not None:
         active_plan.abort("death", world_turn)
@@ -812,9 +909,9 @@ def _mark_agent_dead(
             reason="death",
         )
         clear_active_plan(agent)
-    agent["scheduled_action"] = None
+    _runtime_set_agent_field(agent_id, "scheduled_action", None, agent)
     agent["action_queue"] = []
-    agent["action_used"] = False
+    _runtime_set_agent_field(agent_id, "action_used", False, agent)
 
     _add_memory(
         agent, world_turn, state, "observation",
@@ -866,6 +963,14 @@ def _process_scheduled_action(
     world_turn: int,
 ) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
+    agent = _runtime_agent(agent_id, agent)
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            sched = runtime.mutable_agent_dict(agent_id, "scheduled_action")
+            agent = _runtime_agent(agent_id, agent)
+        except Exception:
+            pass
     action_type = sched["type"]
     turns_remaining = sched["turns_remaining"] - 1
     sched["turns_remaining"] = turns_remaining
@@ -891,7 +996,8 @@ def _process_scheduled_action(
         # loop that prevents the agent from reaching safety.
         if action_type in ("explore_anomaly_location", "travel"):
             if not sched.get("emergency_flee") and _is_emission_threat(agent, state):
-                agent["scheduled_action"] = None
+                _runtime_set_agent_field(agent_id, "scheduled_action", None, agent)
+                agent = _runtime_agent(agent_id, agent)
                 _int_loc_name = state.get("locations", {}).get(
                     agent.get("location_id", ""), {}
                 ).get("name", "текущей позиции")
@@ -920,7 +1026,8 @@ def _process_scheduled_action(
 
     # Action complete — resolve effects
     completed_sched = dict(sched)
-    agent["scheduled_action"] = None
+    _runtime_set_agent_field(agent_id, "scheduled_action", None, agent)
+    agent = _runtime_agent(agent_id, agent)
 
     if action_type == "travel":
         # target_id is the IMMEDIATE next hop; final_target_id is the ultimate goal.
@@ -931,10 +1038,11 @@ def _process_scheduled_action(
         if destination and destination in state.get("locations", {}):
             old_loc = agent["location_id"]
             # Move agent to this hop's location
-            old_loc_data = state["locations"].get(old_loc, {})
-            if agent_id in old_loc_data.get("agents", []):
-                old_loc_data["agents"].remove(agent_id)
-            agent["location_id"] = destination
+            old_agents = _runtime_mutable_location_agents(state, old_loc)
+            if agent_id in old_agents:
+                old_agents.remove(agent_id)
+            _runtime_set_agent_field(agent_id, "location_id", destination, agent)
+            agent = _runtime_agent(agent_id, agent)
             # PR1: mark agent + locations dirty via module-level current-tick runtime
             try:
                 from app.games.zone_stalkers.rules.tick_rules import _current_tick_runtime as _ctr
@@ -945,9 +1053,9 @@ def _process_scheduled_action(
                     _mld2(_ctr, destination)
             except Exception:
                 pass
-            new_loc_data = state["locations"].get(destination, {})
-            if agent_id not in new_loc_data.get("agents", []):
-                new_loc_data.setdefault("agents", []).append(agent_id)
+            new_agents = _runtime_mutable_location_agents(state, destination)
+            if agent_id not in new_agents:
+                new_agents.append(agent_id)
             # Apply anomaly damage for this single hop
             hop_loc = state["locations"].get(destination, {})
             hop_anomaly_activity = hop_loc.get("anomaly_activity", 0)
@@ -956,7 +1064,8 @@ def _process_scheduled_action(
                 _hop_rng = random.Random(agent_id + str(world_turn) + destination)
                 if _hop_rng.random() < hop_anomaly_activity / 20.0:
                     total_dmg = 5 + hop_anomaly_activity
-                    agent["hp"] = max(0, agent["hp"] - total_dmg)
+                    _runtime_set_agent_field(agent_id, "hp", max(0, agent.get("hp", 0) - total_dmg), agent)
+                    agent = _runtime_agent(agent_id, agent)
             if remaining_route:
                 # ── Emergency interrupt: don't continue travel when emission is active/warned ──
                 # Even if the route is still open, staying put on dangerous terrain is a
@@ -1047,7 +1156,8 @@ def _process_scheduled_action(
                     _next_sched["active_plan_id"] = sched.get("active_plan_id")
                     _next_sched["active_plan_step_index"] = sched.get("active_plan_step_index")
                     _next_sched["active_plan_objective_key"] = sched.get("active_plan_objective_key")
-                agent["scheduled_action"] = _next_sched
+                _runtime_set_agent_field(agent_id, "scheduled_action", _next_sched, agent)
+                agent = _runtime_agent(agent_id, agent)
                 events.append({
                     "event_type": "travel_hop_completed",
                     "payload": {
@@ -1730,7 +1840,7 @@ def _combat_flee(
                 },
                 summary=f"«{agent_name}» отступил с «{loc_name}» на «{to_loc_name}»",
             )
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return events
 
 
@@ -1838,7 +1948,7 @@ def _combat_shoot(
                 "payload": {"agent_id": target_id, "cause": "combat",
                             "killer_id": agent_id, "combat_id": cid},
             })
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return events
 
 
@@ -1888,7 +1998,7 @@ def _combat_heal_action(
         "payload": {"agent_id": agent_id, "item_type": item_type,
                     "hp_restored": actual_restore, "combat_id": cid},
     })
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return events
 
 
@@ -2609,7 +2719,7 @@ def _bot_sell_to_trader(
     # Remove sold items from inventory
     sold_ids = {i["id"] for i in sold_items}
     agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] not in sold_ids]
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
 
     # ── Stalker memory (Step 7) ───────────────────────────────────
     item_names = ", ".join(i.get("name", i.get("type", "?")) for i in sold_items)
@@ -2702,7 +2812,7 @@ def _bot_sell_items_for_cash(
     candidates.sort(key=lambda i: (_item_priority(i), -i.get("value", 0)))
 
     if not candidates:
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return []
 
     events: List[Dict[str, Any]] = []
@@ -2737,13 +2847,13 @@ def _bot_sell_items_for_cash(
         })
 
     if not sold_items:
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return []
 
     # Remove sold items (compare by object identity)
     sold_obj_ids = {id(i) for i in sold_items}
     agent["inventory"] = [i for i in agent.get("inventory", []) if id(i) not in sold_obj_ids]
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
 
     item_names = ", ".join(
         _IT.get(i.get("type", ""), {}).get("name", i.get("type", "?"))
@@ -2821,7 +2931,7 @@ def _bot_schedule_travel(
     if emergency_flee:
         sched["emergency_flee"] = True
     agent["scheduled_action"] = sched
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return [{
         "event_type": "agent_travel_started",
         "payload": {"agent_id": agent_id, "destination": target_loc_id, "turns": hop_time, "bot": True},
@@ -2985,7 +3095,7 @@ def _bot_buy_from_trader(
             "value": base_value,
         }
         agent.setdefault("inventory", []).append(new_item)
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         item_name = ITEM_TYPES[item_type].get("name", item_type)
         trader_name = trader.get("name", trader.get("id", "trader"))
         # Collect up to 2 runner-ups (next candidates in the scored list, regardless of affordability)
@@ -3067,7 +3177,7 @@ def _bot_consume(
     effects = item_info.get("effects", {})
     _apply_item_effects(agent, effects)
     agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] != item["id"]]
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     item_name = item_info.get("name", item.get("name", item["type"]))
     _add_memory(
         agent, world_turn, state, "action",
@@ -3106,7 +3216,7 @@ def _bot_equip_from_inventory(
     else:
         agent["inventory"] = [i for i in inventory if i["id"] != item["id"]]
     equipment[slot] = item
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     item_name = item.get("name", item["type"])
     _add_memory(
         agent, world_turn, state, "action",
@@ -3272,7 +3382,7 @@ def _bot_pickup_item_from_ground(
         return []
     loc["items"] = [i for i in ground_items if i["id"] != item["id"]]
     agent.setdefault("inventory", []).append(item)
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     item_name = item.get("name", item["type"])
     loc_name = loc.get("name", loc_id)
     _add_memory(
@@ -4286,7 +4396,7 @@ def _pre_decision_equipment_maintenance(
                  "destination": mem_loc},
                 summary=f"Иду за оружием в {state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}",
             )
-            agent["action_used"] = True
+            _runtime_set_action_used(agent, True)
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
 
     # 4–5: armor
@@ -4321,7 +4431,7 @@ def _pre_decision_equipment_maintenance(
                          "ammo_type": required_ammo, "destination": mem_loc},
                         summary=f"Иду за патронами в {state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}",
                     )
-                    agent["action_used"] = True
+                    _runtime_set_action_used(agent, True)
                     return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
 
     # 8: proactive seek heal items from memory
@@ -4336,7 +4446,7 @@ def _pre_decision_equipment_maintenance(
                  "destination": mem_loc},
                 summary=f"Иду за медикаментами в {state.get('locations', {}).get(mem_loc, {}).get('name', mem_loc)}",
             )
-            agent["action_used"] = True
+            _runtime_set_action_used(agent, True)
             return _bot_schedule_travel(agent_id, agent, mem_loc, state, world_turn)
 
     return None  # nothing to do — run the main pipeline
@@ -5286,7 +5396,7 @@ def _compat_pursue_kill_stalker(
     """v1-compat kill_stalker logic: combat initiation, intel, trader travel."""
     target_id: Optional[str] = agent.get("kill_target_id")
     if not target_id:
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return []
 
     agents = state.get("agents", {})
@@ -5303,7 +5413,7 @@ def _compat_pursue_kill_stalker(
         agent_id, agent, target_id, target_name, state, world_turn
     )
     if new_intel:
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         # If we learned the location, schedule travel there
         intel_loc = _find_hunt_intel_location(agent, target_id, state)
         if intel_loc and intel_loc != loc_id:
@@ -5319,7 +5429,7 @@ def _compat_pursue_kill_stalker(
             {"action_kind": "hunt_travel", "destination": hunt_loc, "target_id": target_id},
             summary=f"Отправляюсь в {hunt_loc} за целью",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, hunt_loc, state, world_turn)
 
     # 4. At trader location → try to buy intel; if broke → wait
@@ -5331,13 +5441,13 @@ def _compat_pursue_kill_stalker(
         for mem in reversed(agent.get("memory", [])):
             if mem.get("type") == "decision":
                 if mem.get("effects", {}).get("action_kind") == "hunt_wait_at_trader":
-                    agent["action_used"] = True
+                    _runtime_set_action_used(agent, True)
                     return []
                 break  # last decision is different — may write
         bought = _bot_buy_hunt_intel_from_trader(
             agent_id, agent, target_id, target_name, state, world_turn
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         if bought:
             return []
         # Broke or intel already bought → wait
@@ -5359,11 +5469,11 @@ def _compat_pursue_kill_stalker(
             {"action_kind": "hunt_wait_at_trader", "destination": nearest_trader_loc},
             summary="Еду к торговцу за информацией о цели",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, nearest_trader_loc, state, world_turn)
 
     # 6. No intel, no trader anywhere → wait
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return []
 
 
@@ -5409,7 +5519,7 @@ def _compat_initiate_combat(
         {"action_kind": "combat_initiated", "target_id": target_id, "combat_id": cid},
         summary=f"Начинаю боевое взаимодействие с «{target_name}»",
     )
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return [{"event_type": "combat_initiated",
              "payload": {"agent_id": agent_id, "target_id": target_id,
                          "combat_id": cid, "location_id": loc_id}}]
@@ -5441,7 +5551,7 @@ def _compat_pursue_unravel(
              "destination": known_loc},
             summary=f"Еду в {known_loc} за секретным документом",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, known_loc, state, world_turn)
 
     # 3. Ask co-located stalkers about docs
@@ -5456,7 +5566,7 @@ def _compat_pursue_unravel(
              "destination": new_intel_loc},
             summary=f"Еду в {new_intel_loc} за секретным документом",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, new_intel_loc, state, world_turn)
 
     # 4. If at trader → wait (anti-spam)
@@ -5476,7 +5586,7 @@ def _compat_pursue_unravel(
                 {"action_kind": "wait_at_trader", "location_id": loc_id},
                 summary="Жду у торговца новостей о документах",
             )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return []
 
     # 5. Travel to nearest trader
@@ -5489,7 +5599,7 @@ def _compat_pursue_unravel(
             {"action_kind": "wait_at_trader", "destination": nearest_trader_loc},
             summary="Еду к торговцу за информацией о документах",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, nearest_trader_loc, state, world_turn)
 
     # 6. Wander toward dungeon/x_lab if available
@@ -5516,7 +5626,7 @@ def _compat_pursue_unravel(
             {"action_kind": "wander", "destination": best_loc},
             summary="Иду искать документы на объектах",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, best_loc, state, world_turn)
 
     # 7. Wander to any neighbor
@@ -5529,10 +5639,10 @@ def _compat_pursue_unravel(
             {"action_kind": "wander", "destination": next_loc},
             summary="Иду наугад в поисках документов",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, next_loc, state, world_turn)
 
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return []
 
 
@@ -5571,7 +5681,7 @@ def _compat_pursue_get_rich(
                 if trader:
                     return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn)
             else:
-                agent["action_used"] = True
+                _runtime_set_action_used(agent, True)
                 return _bot_schedule_travel(agent_id, agent, nearest_trader_loc, state, world_turn)
 
     # Find best anomaly location
@@ -5593,7 +5703,7 @@ def _compat_pursue_get_rich(
             "turns_total": EXPLORE_DURATION_TURNS,
             "started_turn": world_turn,
         }
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return [{"event_type": "exploration_started",
                  "payload": {"agent_id": agent_id, "location_id": loc_id}}]
 
@@ -5624,8 +5734,8 @@ def _compat_pursue_get_rich(
              "travel_minutes": travel_minutes},
             summary=f"Еду искать артефакты в {best_loc_id}",
         )
-        agent["action_used"] = True
+        _runtime_set_action_used(agent, True)
         return _bot_schedule_travel(agent_id, agent, best_loc_id, state, world_turn)
 
-    agent["action_used"] = True
+    _runtime_set_action_used(agent, True)
     return []
