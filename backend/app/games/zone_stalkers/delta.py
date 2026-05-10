@@ -33,6 +33,15 @@ _LOCATION_HOT_FIELDS: frozenset[str] = frozenset({
     "dominant_anomaly_type",
 })
 
+# Fields compared per trader to detect changes
+_TRADER_HOT_FIELDS: frozenset[str] = frozenset({"location_id", "is_alive", "money", "inventory"})
+
+# State-level fields that are part of the hot delta
+_STATE_HOT_FIELDS: frozenset[str] = frozenset({
+    "game_over", "emission_active", "emission_scheduled_turn", "emission_ends_turn",
+    "active_events", "auto_tick_enabled", "auto_tick_speed",
+})
+
 WS_EVENT_PREVIEW_LIMIT = 10
 
 
@@ -198,7 +207,6 @@ def build_zone_delta(
     new_traders = new_state.get("traders", {}) or {}
     trader_changes: dict[str, Any] = {}
 
-    _TRADER_HOT_FIELDS = frozenset({"location_id", "is_alive", "money", "inventory"})
     for trader_id in set(old_traders) | set(new_traders):
         old_tr = old_traders.get(trader_id, {})
         new_tr = new_traders.get(trader_id, {})
@@ -218,10 +226,6 @@ def build_zone_delta(
 
     # --- State-level changes ---
     state_changes: dict[str, Any] = {}
-    _STATE_HOT_FIELDS = frozenset({
-        "game_over", "emission_active", "emission_scheduled_turn", "emission_ends_turn",
-        "active_events", "auto_tick_enabled", "auto_tick_speed",
-    })
     for f in _STATE_HOT_FIELDS:
         if old_state.get(f) != new_state.get(f):
             state_changes[f] = new_state.get(f)
