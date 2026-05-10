@@ -138,6 +138,33 @@ def test_build_location_hunt_traces_extracts_routes() -> None:
     assert payload["loc_a"]["routes_out"][0]["to_location_id"] == "loc_b"
 
 
+def test_build_location_hunt_traces_includes_witness_source_exhausted() -> None:
+    hunter = make_agent(agent_id="hunter", global_goal="kill_stalker", kill_target_id="target_1")
+    state = make_minimal_state(agent=hunter)
+    _add_record(
+        hunter,
+        kind="witness_source_exhausted",
+        created_turn=111,
+        location_id="loc_a",
+        confidence=0.9,
+        details={
+            "target_id": "target_1",
+            "location_id": "loc_a",
+            "source_kind": "location_witnesses",
+            "cooldown_until_turn": 320,
+        },
+    )
+
+    payload = build_location_hunt_traces(state=state, world_turn=120)
+    loc_payload = payload["loc_a"]
+    witness_entry = next(item for item in loc_payload["negative_leads"] if item["kind"] == "witness_source_exhausted")
+    assert witness_entry["source_kind"] == "location_witnesses"
+    assert witness_entry["cooldown_until_turn"] == 320
+    exhausted_entry = next(item for item in loc_payload["is_exhausted_for"] if item["source_ref"] == witness_entry["source_ref"])
+    assert exhausted_entry["source_kind"] == "location_witnesses"
+    assert exhausted_entry["cooldown_until_turn"] == 320
+
+
 def test_build_hunt_debug_payload_contains_agent_and_location_maps() -> None:
     hunter = make_agent(agent_id="hunter", global_goal="kill_stalker", kill_target_id="target_1")
     state = make_minimal_state(agent=hunter)

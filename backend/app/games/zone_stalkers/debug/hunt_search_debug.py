@@ -18,6 +18,7 @@ _NEGATIVE_LEAD_KINDS = {
     "target_location_exhausted",
     "no_tracks_found",
     "no_witnesses",
+    "witness_source_exhausted",
     "target_rumor_unreliable",
     "hunt_failed",
 }
@@ -249,6 +250,7 @@ def build_location_hunt_traces(
                 "hunter_id": str(hunter_id),
                 "target_id": target_id,
                 "source_agent_id": source_agent_id,
+                "source_kind": details.get("source_kind"),
                 "summary": summary,
                 "confidence": confidence,
                 "freshness": freshness,
@@ -284,6 +286,20 @@ def build_location_hunt_traces(
                         "hunter_id": str(hunter_id),
                         "target_id": target_id,
                         "source_agent_id": source_agent_id,
+                        "failed_search_count": _coerce_int(details.get("failed_search_count"), 0),
+                        "cooldown_until_turn": _coerce_int(details.get("cooldown_until_turn"), 0) or None,
+                        "source_ref": source_ref,
+                        "turn": created_turn,
+                        "freshness": freshness,
+                    }
+                )
+            if kind == "witness_source_exhausted" and location_id:
+                _bucket(location_id)["is_exhausted_for"].append(
+                    {
+                        "hunter_id": str(hunter_id),
+                        "target_id": target_id,
+                        "source_agent_id": source_agent_id,
+                        "source_kind": details.get("source_kind"),
                         "failed_search_count": _coerce_int(details.get("failed_search_count"), 0),
                         "cooldown_until_turn": _coerce_int(details.get("cooldown_until_turn"), 0) or None,
                         "source_ref": source_ref,
@@ -387,4 +403,3 @@ def build_hunt_debug_payload(
             freshness_window=freshness_window,
         ),
     }
-

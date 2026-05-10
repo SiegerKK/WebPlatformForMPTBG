@@ -77,13 +77,13 @@ not as always-hot game data.
 
 Это значит: PR6 уже добавил полноценный слой debug visibility для поиска цели.
 
-## 1.2. Что ещё выглядит не закрытым по коду
+## 1.2. Статус correctness gate по коду
 
-Перед началом оптимизации нужно убедиться, что следующие PR6-correctness issues закрыты.
+После follow-up правок correctness gate закрыт: ниже перечислены уже реализованные пункты.
 
-### 1.2.1. `search_target found target` должен останавливать `VERIFY_LEAD`
+### 1.2.1. `search_target found target` останавливает `VERIFY_LEAD`
 
-В текущем runtime всё ещё есть риск:
+Ранее в runtime был риск:
 
 ```text
 VERIFY_LEAD:
@@ -93,7 +93,7 @@ VERIFY_LEAD:
   → question_witnesses
 ```
 
-Нужно явное runtime-правило:
+Сейчас действует явное runtime-правило:
 
 ```text
 if objective in {VERIFY_LEAD, TRACK_TARGET, PURSUE_TARGET}
@@ -103,7 +103,7 @@ and target_found:
   next decision should select ENGAGE_TARGET
 ```
 
-Иначе логика снова может повторить баг:
+Что закрывает баг-сценарий:
 
 ```text
 нашёл цель
@@ -112,9 +112,9 @@ and target_found:
 → занялся другой целью
 ```
 
-### 1.2.2. Нужен explicit outcome от `search_target`
+### 1.2.2. Есть explicit outcome от `search_target`
 
-`_exec_search_target()` должен выставлять:
+`_exec_search_target()` выставляет:
 
 ```python
 step.payload["_target_found"] = True
@@ -123,15 +123,13 @@ step.payload["_target_id"] = target_id
 step.payload["_target_location_id"] = current_location_id
 ```
 
-или возвращать equivalent execution result.
+и runtime использует это для раннего завершения hunt active plan.
 
-Сейчас по структуре runtime не видно полноценного канала “step result → ActivePlan decision”.
-
-### 1.2.3. Нужен short-term recent target contact
+### 1.2.3. Добавлен short-term recent target contact
 
 Если после `target_seen` следующий decision tick уже не считает цель `visible_now`, TargetBelief должен всё равно помнить свежий контакт.
 
-Добавить:
+Добавлены поля:
 
 ```python
 recently_seen: bool
@@ -146,7 +144,7 @@ TTL:
 RECENT_TARGET_CONTACT_TURNS = 5–15
 ```
 
-`ENGAGE_TARGET` должен генерироваться при:
+`ENGAGE_TARGET` генерируется при:
 
 ```text
 visible_now
@@ -154,9 +152,9 @@ or co_located
 or recently_seen at current location
 ```
 
-### 1.2.4. `no_witnesses` должен exhaust/cooldown-ить источник
+### 1.2.4. `no_witnesses` exhaust/cooldown-ит источник
 
-Сейчас есть риск нового loop:
+Ранее существовал риск loop:
 
 ```text
 GATHER_INTEL
@@ -166,7 +164,7 @@ GATHER_INTEL
 → question_witnesses
 ```
 
-Добавить memory event:
+Реализован memory event:
 
 ```text
 witness_source_exhausted
@@ -184,11 +182,11 @@ Payload:
 }
 ```
 
-Objective/planner must not repeat same witness source until cooldown.
+Objective/planner не повторяет тот же witness source до конца cooldown.
 
-### 1.2.5. `possible_locations` should not contain zero-confidence locations
+### 1.2.5. `possible_locations` не содержит zero-confidence locations
 
-Сейчас PR6 может оставлять locations with:
+Ранее PR6 мог оставлять locations with:
 
 ```text
 confidence = 0
@@ -197,7 +195,7 @@ probability = 0
 
 inside `possible_locations`.
 
-Better:
+Сейчас:
 
 ```text
 possible_locations:
@@ -207,17 +205,17 @@ rejected_locations:
   confidence = 0 / exhausted / fully suppressed
 ```
 
-This matters both for debug UI and for payload size.
+Это важно и для debug UI, и для размера payload.
 
-### 1.2.6. Route hints should ignore exhausted destinations
+### 1.2.6. Route hints игнорируют exhausted destinations
 
-If route destination is exhausted:
+Если route destination exhausted:
 
 ```text
 route.to_location_id in exhausted_locations
 ```
 
-then either:
+то применяется:
 
 ```text
 drop route
@@ -229,9 +227,9 @@ or:
 route.confidence *= 0.1
 ```
 
-Route hints should not keep pushing NPC toward zero-confidence exhausted destinations.
+Route hints не толкают NPC к exhausted/zero-confidence destinations.
 
-### 1.2.7. Hunt source_refs should prefer target lead memories
+### 1.2.7. Hunt source_refs предпочитают target lead memories
 
 For hunt objectives:
 
@@ -254,7 +252,7 @@ target_route_observed
 target_not_found
 ```
 
-and not recent `active_plan_*` lifecycle records.
+`active_plan_*` lifecycle records исключены из приоритетных source refs.
 
 ---
 
@@ -670,17 +668,19 @@ Debug map refresh rate
 
 ## Optimization PR 0 — correctness gate before optimization
 
-Before optimizing, close remaining gameplay correctness issues:
+Status: closed (реализовано в follow-up перед optimization PR 1).
+
+Gameplay correctness issues:
 
 ```text
-[ ] search_target found target produces explicit outcome.
-[ ] VERIFY_LEAD/TRACK_TARGET stops after target_found.
-[ ] Next objective after target_found is ENGAGE_TARGET if combat-ready.
-[ ] Soft needs do not override visible/recent target contact.
-[ ] no_witnesses creates witness_source_exhausted/cooldown.
-[ ] possible_locations excludes zero-confidence entries or moves them to rejected_locations.
-[ ] route_hints ignore exhausted/zero-confidence destinations.
-[ ] hunt objective source_refs prefer target lead memories over active_plan lifecycle.
+[x] search_target found target produces explicit outcome.
+[x] VERIFY_LEAD/TRACK_TARGET stops after target_found.
+[x] Next objective after target_found is ENGAGE_TARGET if combat-ready.
+[x] Soft needs do not override visible/recent target contact.
+[x] no_witnesses creates witness_source_exhausted/cooldown.
+[x] possible_locations excludes zero-confidence entries or moves them to rejected_locations.
+[x] route_hints ignore exhausted/zero-confidence destinations.
+[x] hunt objective source_refs prefer target lead memories over active_plan lifecycle.
 ```
 
 Tests:
@@ -695,7 +695,7 @@ test_route_hints_ignore_exhausted_destination
 test_verify_lead_source_refs_use_target_intel_not_active_plan_lifecycle
 ```
 
-This is not a performance PR, but it should happen before optimizing so we do not optimize broken behavior.
+PR 0 больше не блокирует оптимизацию: можно переходить к PR 1.
 
 ---
 
@@ -1024,7 +1024,7 @@ frontend fallback messaging
 
 # 12. Minimal first optimization PR
 
-Do this first after PR6 correctness gate:
+Do this first after PR6 correctness gate (gate already closed):
 
 ```text
 1. Add tick profiler.
@@ -1051,7 +1051,7 @@ Do not start with WebSocket delta immediately.
 Recommended order:
 
 ```text
-0. Finish remaining PR6 correctness gate.
+0. PR6 correctness gate closed.
 1. Measurement/profiling.
 2. Projections/stripping.
 3. Static/dynamic split.

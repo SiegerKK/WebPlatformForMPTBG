@@ -500,3 +500,70 @@ class TestRouteHintsIgnoreExhausted:
             f"Non-exhausted loc_b should appear in route_hints or possible_locations. "
             f"route_hints={route_dest_ids}, possible_locations={loc_ids}"
         )
+
+    def test_route_hint_to_target_not_found_exhausted_destination_is_removed(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a"
+        )
+        state = make_minimal_state(agent=agent)
+        state["agents"]["target_1"] = _make_target(location_id="loc_c")
+        state["debug_omniscient_targets"] = False
+        world_turn = state["world_turn"]
+
+        ensure_memory_v3(agent)
+        route_record = MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer="spatial",
+            kind="target_route_observed",
+            created_turn=world_turn - 2,
+            last_accessed_turn=None,
+            summary="Route loc_a -> loc_b",
+            details={
+                "target_id": "target_1",
+                "from_location_id": "loc_a",
+                "to_location_id": "loc_b",
+            },
+            location_id="loc_b",
+            confidence=0.9,
+        )
+        add_memory_record(agent, route_record)
+
+        exhausted_record = MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer="spatial",
+            kind="target_not_found",
+            created_turn=world_turn - 1,
+            last_accessed_turn=None,
+            summary="Target not found at loc_b",
+            details={
+                "target_id": "target_1",
+                "location_id": "loc_b",
+                "failed_search_count": 3,
+                "cooldown_until_turn": world_turn + 180,
+            },
+            location_id="loc_b",
+            confidence=0.95,
+        )
+        add_memory_record(agent, exhausted_record)
+
+        ctx = build_agent_context("bot1", agent, state)
+        belief = build_belief_state(ctx, agent, world_turn)
+        tb = build_target_belief(
+            agent_id="bot1",
+            agent=agent,
+            state=state,
+            world_turn=world_turn,
+            belief_state=belief,
+        )
+
+        route_dest_ids = [rh.to_location_id for rh in tb.route_hints]
+        assert "loc_b" not in route_dest_ids, (
+            f"Route hint destination loc_b should be excluded when exhausted, got: {route_dest_ids}"
+        )
+        assert "loc_b" in tb.exhausted_locations
+        routed_to_loc_b = [route for route in tb.likely_routes if route.to_location_id == "loc_b"]
+        assert all(route.confidence <= 0.1 for route in routed_to_loc_b), (
+            f"Routes to exhausted loc_b should be dropped or heavily penalized, got: {routed_to_loc_b}"
+        )

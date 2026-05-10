@@ -8,6 +8,7 @@ Game-specific tick logic lives in each game's RuleSet.tick() implementation.
 """
 import logging
 import time
+import json
 from typing import Dict
 
 from sqlalchemy.orm import Session
@@ -63,12 +64,14 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     if not ruleset:
         return {"error": f"no ruleset registered for game '{match.game_id}'"}
 
+    _started = time.perf_counter()
     result = ruleset.tick(match_id_str, db)
+    tick_total_ms = (time.perf_counter() - _started) * 1000.0
 
     # Notify connected WebSocket clients that the state changed.
     if "error" not in result:
         from app.core.ws.manager import ws_manager
-        ws_manager.notify(match_id_str, {
+        ws_payload = {
             "type": "ticked",
             "match_id": match_id_str,
             "world_turn": result.get("world_turn"),
@@ -76,7 +79,35 @@ def tick_match(match_id_str: str, db: Session) -> dict:
             "world_day": result.get("world_day"),
             "world_minute": result.get("world_minute"),
             "new_events": result.get("new_events", []),
-        })
+        }
+        ws_manager.notify(match_id_str, ws_payload)
+
+        try:
+            from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+            metrics_payload = {
+                "tick_total_ms": round(tick_total_ms, 3),
+                "events_emitted": len(result.get("new_events", []) or []),
+                "response_size_bytes": len(
+                    json.dumps(ws_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ),
+            }
+            if match.game_id == "zone_stalkers":
+                from app.core.contexts.models import ContextStatus, GameContext
+                from app.core.state_cache.service import load_context_state
+                from app.games.zone_stalkers.projections import build_zone_state_size_report
+
+                zone_ctx = db.query(GameContext).filter(
+                    GameContext.match_id == match.id,
+                    GameContext.context_type == "zone_map",
+                    GameContext.status == ContextStatus.ACTIVE,
+                ).first()
+                if zone_ctx:
+                    state = load_context_state(zone_ctx.id, zone_ctx)
+                    metrics_payload.update(build_zone_state_size_report(state))
+                    metrics_payload["context_id"] = str(zone_ctx.id)
+            record_tick_metrics(match_id_str, metrics_payload)
+        except Exception as exc:
+            logger.debug("tick metric collection skipped for %s: %s", match_id_str, exc)
 
     return result
 
@@ -197,4 +228,3 @@ def tick_debug_auto_matches() -> dict:
         return {"ticked": ticked}
     finally:
         db.close()
-

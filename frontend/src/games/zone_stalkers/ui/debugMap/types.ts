@@ -171,6 +171,7 @@ export interface ZoneMapState {
         hunter_id: string;
         target_id?: string | null;
         source_agent_id?: string | null;
+        source_kind?: string | null;
         summary: string;
         confidence: number;
         freshness: number;
@@ -207,6 +208,7 @@ export interface ZoneMapState {
         hunter_id: string;
         target_id?: string | null;
         source_agent_id?: string | null;
+        source_kind?: string | null;
         failed_search_count?: number;
         cooldown_until_turn?: number | null;
         source_ref?: string;

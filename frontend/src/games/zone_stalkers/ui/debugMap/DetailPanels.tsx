@@ -278,6 +278,7 @@ export function LocationDetailPanel({
               <DetailRow key={`neg-${lead.id}`}>
                 <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1 }}>
                   {lead.kind}
+                  {lead.source_kind ? ` · src=${lead.source_kind}` : ""}
                   {lead.failed_search_count != null && lead.failed_search_count > 0 ? ` · miss=${lead.failed_search_count}` : ""}
                   {lead.cooldown_until_turn ? ` · cd→${lead.cooldown_until_turn}` : ""}
                   {" · "}
