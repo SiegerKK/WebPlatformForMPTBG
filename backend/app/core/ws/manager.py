@@ -105,6 +105,9 @@ class ConnectionManager:
         if self._loop is not None and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, self._loop)
             return True
+        close_coro = getattr(coro, "close", None)
+        if callable(close_coro):
+            close_coro()
         return False
 
     def notify_to_connection(self, conn_id: str, data: Dict[str, Any]) -> bool:
