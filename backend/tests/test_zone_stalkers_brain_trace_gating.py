@@ -4,6 +4,7 @@ from app.games.zone_stalkers.decision.debug.brain_trace import (
     is_brain_trace_enabled,
     update_agent_decision_summary,
     append_brain_trace_event,
+    write_npc_brain_v3_decision_trace,
 )
 
 
@@ -104,3 +105,22 @@ def test_brain_trace_no_state_backwards_compat():
     )
     # Should write trace since no state = always trace
     assert agent.get("brain_trace") is not None
+
+
+def test_write_npc_brain_v3_decision_trace_respects_gating():
+    agent = {"id": "a1", "brain_trace": None}
+    state = {"debug_brain_trace_enabled": False}
+
+    write_npc_brain_v3_decision_trace(
+        agent,
+        world_turn=11,
+        intent_kind="hunt_target",
+        intent_score=0.93,
+        reason="target_seen",
+        state=state,
+        active_objective={"key": "TRACK_TARGET"},
+    )
+
+    assert agent.get("brain_trace") is None
+    latest = agent.get("brain_v3_context", {}).get("latest_decision_summary", {})
+    assert latest.get("turn") == 11

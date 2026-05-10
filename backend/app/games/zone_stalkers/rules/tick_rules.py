@@ -581,19 +581,25 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     # 3. AI bot agent decisions — NPC Brain v3 pipeline
     _pr_npc = _tick_profiler.section("npc_brain_total_ms") if _tick_profiler else __import__("contextlib").nullcontext()
     _pr_npc.__enter__()
+    _npc_brain_decision_count = 0
+    _npc_brain_skipped_count = 0
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
         if agent.get("controller", {}).get("kind") != "bot":
             continue
         if agent.get("has_left_zone"):
+            _npc_brain_skipped_count += 1
             continue
         if agent.get("scheduled_action"):
+            _npc_brain_skipped_count += 1
             continue
         if agent.get("action_used"):
+            _npc_brain_skipped_count += 1
             continue
         # Skip bot decisions for agents in active combat (not fled)
         if _agent_in_active_combat(agent_id, state):
+            _npc_brain_skipped_count += 1
             continue
 
         if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None:
@@ -606,9 +612,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             )
             events.extend(active_plan_events)
             if handled:
+                _npc_brain_skipped_count += 1
                 continue
 
         bot_evs = _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
+        _npc_brain_decision_count += 1
         events.extend(bot_evs)
 
     _pr_npc.__exit__(None, None, None)
@@ -711,12 +719,20 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         if _tick_profiler:
             _agents_all = state.get("agents", {})
             _tick_profiler.set_counter("agents_total", len(_agents_all))
+            _tick_profiler.set_counter(
+                "agents_processed_count",
+                len([a for a in _agents_all.values() if isinstance(a, dict) and a.get("controller", {}).get("kind") == "bot"]),
+            )
+            _tick_profiler.set_counter("npc_brain_decision_count", _npc_brain_decision_count)
+            _tick_profiler.set_counter("npc_brain_skipped_count", _npc_brain_skipped_count)
             _tick_profiler.set_counter("dirty_agents_count", len(_tick_runtime.dirty_agents) if _tick_runtime else 0)
             _tick_profiler.set_counter("dirty_locations_count", len(_tick_runtime.dirty_locations) if _tick_runtime else 0)
-        global _last_tick_runtime
-        _last_tick_runtime = _tick_runtime
     except Exception:
         pass
+    finally:
+        global _last_tick_runtime
+        _last_tick_runtime = _tick_runtime
+        _current_tick_runtime = None
 
     return state, events
 
@@ -2326,10 +2342,32 @@ def _find_nearest_trader_location(
     """
     traders = state.get("traders", {})
     locations = state.get("locations", {})
+    _map_revision = int(state.get("map_revision", 0))
+    try:
+        from app.games.zone_stalkers.pathfinding_cache import get_cached as _cache_get
+        _cached = _cache_get(
+            map_revision=_map_revision,
+            from_loc_id=from_loc_id,
+            query_kind="nearest_trader_location",
+        )
+        if _cached is not None:
+            return _cached or None
+    except Exception:
+        pass
     trader_locs: set = {
         t["location_id"] for t in traders.values() if t.get("is_alive", True)
     }
     if from_loc_id in trader_locs:
+        try:
+            from app.games.zone_stalkers.pathfinding_cache import set_cached as _cache_set
+            _cache_set(
+                map_revision=_map_revision,
+                from_loc_id=from_loc_id,
+                query_kind="nearest_trader_location",
+                value=from_loc_id,
+            )
+        except Exception:
+            pass
         return from_loc_id
     queue: collections.deque = collections.deque([(from_loc_id, 0)])
     seen = {from_loc_id}
@@ -2343,8 +2381,28 @@ def _find_nearest_trader_location(
                 continue
             seen.add(nxt)
             if nxt in trader_locs:
+                try:
+                    from app.games.zone_stalkers.pathfinding_cache import set_cached as _cache_set
+                    _cache_set(
+                        map_revision=_map_revision,
+                        from_loc_id=from_loc_id,
+                        query_kind="nearest_trader_location",
+                        value=nxt,
+                    )
+                except Exception:
+                    pass
                 return nxt
             queue.append((nxt, dist + 1))
+    try:
+        from app.games.zone_stalkers.pathfinding_cache import set_cached as _cache_set
+        _cache_set(
+            map_revision=_map_revision,
+            from_loc_id=from_loc_id,
+            query_kind="nearest_trader_location",
+            value="",
+        )
+    except Exception:
+        pass
     return None
 
 
@@ -4891,33 +4949,57 @@ def _bot_route_to_exit(
     """Route agent toward the nearest exit_zone location (by travel time)."""
     locations = state.get("locations", {})
     loc_id = agent.get("location_id", "")
-    # Dijkstra to nearest exit_zone
-    _heap: List = [(0, 0, loc_id)]
-    _dist: Dict[str, int] = {}
+    _map_revision = int(state.get("map_revision", 0))
     _best_exit: Optional[str] = None
-    _best_time: Optional[int] = None
-    while _heap:
-        _cur_min, _cur_hops, _cur_id = heapq.heappop(_heap)
-        if _cur_id in _dist:
-            continue
-        _dist[_cur_id] = _cur_min
-        if _best_time is not None and _cur_min > _best_time:
-            break
-        if _cur_id != loc_id and locations.get(_cur_id, {}).get("exit_zone"):
-            if _best_time is None or _cur_min < _best_time:
-                _best_time = _cur_min
-                _best_exit = _cur_id
-            continue  # don't expand from exit
-        for _conn in locations.get(_cur_id, {}).get("connections", []):
-            if _conn.get("closed"):
+    try:
+        from app.games.zone_stalkers.pathfinding_cache import get_cached as _cache_get
+        _cached_exit = _cache_get(
+            map_revision=_map_revision,
+            from_loc_id=loc_id,
+            query_kind="nearest_exit_location",
+        )
+        if _cached_exit:
+            _best_exit = str(_cached_exit)
+    except Exception:
+        _best_exit = None
+
+    if _best_exit is None:
+        # Dijkstra to nearest exit_zone
+        _heap: List = [(0, 0, loc_id)]
+        _dist: Dict[str, int] = {}
+        _best_time: Optional[int] = None
+        while _heap:
+            _cur_min, _cur_hops, _cur_id = heapq.heappop(_heap)
+            if _cur_id in _dist:
                 continue
-            _nxt = _conn["to"]
-            if _nxt in _dist:
-                continue
-            _edge_min = _conn.get("travel_time", 12) * MINUTES_PER_TURN
-            _nxt_min = _cur_min + _edge_min
-            if _best_time is None or _nxt_min <= _best_time:
-                heapq.heappush(_heap, (_nxt_min, _cur_hops + 1, _nxt))
+            _dist[_cur_id] = _cur_min
+            if _best_time is not None and _cur_min > _best_time:
+                break
+            if _cur_id != loc_id and locations.get(_cur_id, {}).get("exit_zone"):
+                if _best_time is None or _cur_min < _best_time:
+                    _best_time = _cur_min
+                    _best_exit = _cur_id
+                continue  # don't expand from exit
+            for _conn in locations.get(_cur_id, {}).get("connections", []):
+                if _conn.get("closed"):
+                    continue
+                _nxt = _conn["to"]
+                if _nxt in _dist:
+                    continue
+                _edge_min = _conn.get("travel_time", 12) * MINUTES_PER_TURN
+                _nxt_min = _cur_min + _edge_min
+                if _best_time is None or _nxt_min <= _best_time:
+                    heapq.heappush(_heap, (_nxt_min, _cur_hops + 1, _nxt))
+        try:
+            from app.games.zone_stalkers.pathfinding_cache import set_cached as _cache_set
+            _cache_set(
+                map_revision=_map_revision,
+                from_loc_id=loc_id,
+                query_kind="nearest_exit_location",
+                value=_best_exit or "",
+            )
+        except Exception:
+            pass
 
     if _best_exit is None:
         # No exit found — log once

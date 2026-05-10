@@ -233,9 +233,7 @@ class ZoneStalkerRuleSet(RuleSet):
 
         zone_delta = None
         try:
-            if _runtime and (
-                _runtime.dirty_agents or _runtime.dirty_locations or _runtime.dirty_traders
-            ):
+            if _should_use_dirty_ws_delta(new_state, _runtime):
                 from app.games.zone_stalkers.delta_dirty import build_zone_delta_from_dirty
                 zone_delta = build_zone_delta_from_dirty(
                     state=new_state,
@@ -338,3 +336,16 @@ def _emit_events(ctx, match, event_dicts: list, emitted: list, db) -> None:
         )
         db.add(ev)
         emitted.append(ev_data)
+
+
+def _should_use_dirty_ws_delta(state: dict[str, Any], runtime: Any | None) -> bool:
+    """Dirty WS delta is opt-in and disabled by default for safety."""
+    if not bool((state or {}).get("cpu_dirty_delta_enabled", False)):
+        return False
+    if runtime is None:
+        return False
+    return bool(
+        getattr(runtime, "dirty_agents", None)
+        or getattr(runtime, "dirty_locations", None)
+        or getattr(runtime, "dirty_traders", None)
+    )

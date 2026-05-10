@@ -117,6 +117,22 @@ def test_dirty_delta_revision_fields():
     assert delta["revision"] == 7
 
 
+def test_dirty_delta_base_revision_uses_old_state_revision():
+    old_state = _make_state(state_revision=41, agents={"a1": _make_agent("a1", hp=100)})
+    new_state = _make_state(state_revision=42, agents={"a1": _make_agent("a1", hp=90)})
+    rt = TickRuntime()
+    rt.dirty_agents.add("a1")
+
+    delta = build_zone_delta_from_dirty(
+        state=new_state,
+        runtime=rt,
+        events=[],
+        old_state=old_state,
+    )
+    assert delta["base_revision"] == 41
+    assert delta["revision"] == 42
+
+
 def test_dirty_delta_events_preview():
     state = _make_state()
     rt = TickRuntime()

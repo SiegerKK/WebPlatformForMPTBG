@@ -103,9 +103,16 @@ def build_zone_delta_from_dirty(
     # ── Event preview ────────────────────────────────────────────────────────
     preview = [_compact_event_for_delta(e) for e in events[:WS_EVENT_PREVIEW_LIMIT]]
 
+    _new_revision = int(state.get("state_revision", 0) or 0)
+    _base_revision = (
+        int(old_state.get("state_revision", _new_revision - 1) or (_new_revision - 1))
+        if isinstance(old_state, dict)
+        else max(0, _new_revision - 1)
+    )
+
     return {
-        "base_revision": state.get("state_revision", 0),
-        "revision": state.get("state_revision", 0),
+        "base_revision": _base_revision,
+        "revision": _new_revision,
         "world": {
             "world_turn": state.get("world_turn"),
             "world_day": state.get("world_day"),
