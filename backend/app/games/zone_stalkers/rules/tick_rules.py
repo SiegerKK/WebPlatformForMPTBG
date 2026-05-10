@@ -256,10 +256,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     except Exception:
         _tick_profiler = None
     _tick_runtime = None
+    _cpu_copy_on_write_enabled = bool(source_state.get("cpu_copy_on_write_enabled", True))
 
     _copy_ctx = _tick_profiler.section("deepcopy_ms") if _tick_profiler else contextlib.nullcontext()
     with _copy_ctx:
-        if not source_state.get("cpu_copy_on_write_enabled", True):
+        if not _cpu_copy_on_write_enabled:
             state = copy.deepcopy(source_state)
             try:
                 from app.games.zone_stalkers.runtime.tick_runtime import TickRuntime as _TickRuntime
