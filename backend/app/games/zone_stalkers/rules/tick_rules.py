@@ -246,19 +246,41 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
 
     Returns (new_state, events_emitted).
     """
-    state = copy.deepcopy(state)
-    events: List[Dict[str, Any]] = []
-    world_turn = state.get("world_turn", 1)
+    source_state = state
 
-    # ── PR1: TickProfiler + TickRuntime ──────────────────────────────────────
+    # ── PR1/PR2: TickProfiler + TickRuntime/ZoneTickRuntime ─────────────────
     try:
         from app.games.zone_stalkers.performance.tick_profiler import TickProfiler as _TickProfiler
-        from app.games.zone_stalkers.runtime.tick_runtime import TickRuntime as _TickRuntime
         _tick_profiler = _TickProfiler()
-        _tick_runtime = _TickRuntime(profiler=_tick_profiler)
     except Exception:
         _tick_profiler = None
-        _tick_runtime = None
+    _tick_runtime = None
+
+    _copy_ctx = _tick_profiler.section("deepcopy_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    with _copy_ctx:
+        if not source_state.get("cpu_copy_on_write_enabled", True):
+            state = copy.deepcopy(source_state)
+            try:
+                from app.games.zone_stalkers.runtime.tick_runtime import TickRuntime as _TickRuntime
+                _tick_runtime = _TickRuntime(profiler=_tick_profiler)
+            except Exception:
+                _tick_runtime = None
+        else:
+            try:
+                from app.games.zone_stalkers.runtime.zone_tick_runtime import ZoneTickRuntime as _ZoneTickRuntime
+                _tick_runtime = _ZoneTickRuntime(source_state=source_state, profiler=_tick_profiler)
+                _tick_runtime.prepare_for_legacy_mutation()
+                state = _tick_runtime.state
+            except Exception:
+                state = copy.deepcopy(source_state)
+                try:
+                    from app.games.zone_stalkers.runtime.tick_runtime import TickRuntime as _TickRuntime
+                    _tick_runtime = _TickRuntime(profiler=_tick_profiler)
+                except Exception:
+                    _tick_runtime = None
+
+    events: List[Dict[str, Any]] = []
+    world_turn = state.get("world_turn", 1)
     global _current_tick_runtime
     _current_tick_runtime = _tick_runtime
 
@@ -727,6 +749,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             _tick_profiler.set_counter("npc_brain_skipped_count", _npc_brain_skipped_count)
             _tick_profiler.set_counter("dirty_agents_count", len(_tick_runtime.dirty_agents) if _tick_runtime else 0)
             _tick_profiler.set_counter("dirty_locations_count", len(_tick_runtime.dirty_locations) if _tick_runtime else 0)
+            if _tick_runtime is not None and hasattr(_tick_runtime, "to_debug_counters"):
+                for _counter_name, _counter_value in _tick_runtime.to_debug_counters().items():
+                    _tick_profiler.set_counter(_counter_name, int(_counter_value))
     except Exception:
         pass
     finally:
