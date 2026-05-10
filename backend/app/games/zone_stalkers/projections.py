@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 ProjectionMode = Literal["zone-lite", "game", "debug-map", "full"]
 
+INVENTORY_PREVIEW_LIMIT = 20
+
 _GAME_AGENT_STRIP_FIELDS = (
     "memory",
     "memory_v3",
@@ -93,7 +95,7 @@ def _compact_inventory(inventory: Any) -> list[dict[str, Any]]:
     if not isinstance(inventory, list):
         return []
     result = []
-    for item in inventory[:20]:  # cap at 20 items
+    for item in inventory[:INVENTORY_PREVIEW_LIMIT]:
         if isinstance(item, dict):
             result.append({
                 "id": item.get("id"),

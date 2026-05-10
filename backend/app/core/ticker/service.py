@@ -49,14 +49,14 @@ _TICK_INTERVALS: Dict[str, float] = {
 # Full event history remains available via GET /matches/{id}/events.
 WS_TICK_EVENT_PREVIEW_LIMIT = 10
 
-_WS_EVENT_PAYLOAD_KEEP_FIELDS = (
+_WS_EVENT_PAYLOAD_KEEP_FIELDS: frozenset[str] = frozenset({
     "agent_id",
     "location_id",
     "world_turn",
     "objective_key",
     "action_kind",
     "summary",
-)
+})
 
 
 def _compact_event_payload(payload: dict) -> dict:
