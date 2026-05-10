@@ -349,6 +349,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _tick_profiler = None
     _tick_runtime = None
     _cpu_copy_on_write_enabled = bool(source_state.get("cpu_copy_on_write_enabled", True))
+    _cow_fallback_to_deepcopy = 0
 
     _copy_ctx = _tick_profiler.section("deepcopy_ms") if _tick_profiler else contextlib.nullcontext()
     with _copy_ctx:
@@ -367,16 +368,23 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     _tick_runtime.prepare_for_legacy_mutation()
                 state = _tick_runtime.state
             except Exception:
+                _cow_fallback_to_deepcopy = 1
                 state = copy.deepcopy(source_state)
                 try:
                     from app.games.zone_stalkers.runtime.tick_runtime import TickRuntime as _TickRuntime
                     _tick_runtime = _TickRuntime(profiler=_tick_profiler)
                 except Exception:
                     _tick_runtime = None
+    if _tick_profiler:
+        try:
+            _tick_profiler.set_counter("cow_fallback_to_deepcopy", int(_cow_fallback_to_deepcopy))
+        except Exception:
+            pass
 
     events: List[Dict[str, Any]] = []
     world_turn = state.get("world_turn", 1)
     global _current_tick_runtime
+    previous_runtime = _current_tick_runtime
     _current_tick_runtime = _tick_runtime
 
     _profiler_ctx_migration = _tick_profiler.section("migration_ms") if _tick_profiler else __import__("contextlib").nullcontext()
@@ -922,7 +930,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     finally:
         global _last_tick_runtime
         _last_tick_runtime = _tick_runtime
-        _current_tick_runtime = None
+        _current_tick_runtime = previous_runtime
 
     return state, events
 

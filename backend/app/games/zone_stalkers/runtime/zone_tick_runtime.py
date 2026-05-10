@@ -197,6 +197,63 @@ class ZoneTickRuntime(TickRuntime):
         self._inc_nested_copy()
         return value
 
+    def mutable_agent_inventory(self, agent_id: str) -> list[Any]:
+        return self.mutable_agent_list(agent_id, "inventory")
+
+    def mutable_agent_equipment(self, agent_id: str) -> dict[str, Any]:
+        return self.mutable_agent_dict(agent_id, "equipment")
+
+    def mutable_agent_scheduled_action(self, agent_id: str) -> dict[str, Any] | None:
+        agent = self.agent(agent_id)
+        current = agent.get("scheduled_action")
+        if current is None:
+            return None
+        return self.mutable_agent_dict(agent_id, "scheduled_action")
+
+    def mutable_agent_active_plan(self, agent_id: str) -> dict[str, Any] | None:
+        agent = self.agent(agent_id)
+        current = agent.get("active_plan_v3")
+        if current is None:
+            return None
+        return self.mutable_agent_dict(agent_id, "active_plan_v3")
+
+    def mutable_agent_memory(self, agent_id: str) -> list[Any]:
+        return self.mutable_agent_list(agent_id, "memory")
+
+    def mutable_agent_memory_v3(self, agent_id: str) -> dict[str, Any]:
+        return self.mutable_agent_dict(agent_id, "memory_v3")
+
+    def mutable_agent_memory_v3_records(self, agent_id: str) -> dict[str, Any]:
+        mem_v3 = self.mutable_agent_memory_v3(agent_id)
+        records = copy.deepcopy(mem_v3.get("records", {}))
+        mem_v3["records"] = records
+        self.mark_agent_dirty(agent_id)
+        self._inc_nested_copy()
+        return records
+
+    def mutable_agent_memory_v3_indexes(self, agent_id: str) -> dict[str, Any]:
+        mem_v3 = self.mutable_agent_memory_v3(agent_id)
+        indexes = copy.deepcopy(mem_v3.get("indexes", {}))
+        mem_v3["indexes"] = indexes
+        self.mark_agent_dirty(agent_id)
+        self._inc_nested_copy()
+        return indexes
+
+    def mutable_agent_brain_trace(self, agent_id: str) -> dict[str, Any] | list[Any] | None:
+        agent = self.agent(agent_id)
+        current = agent.get("brain_trace")
+        if current is None:
+            return None
+        if isinstance(current, dict):
+            return self.mutable_agent_dict(agent_id, "brain_trace")
+        if isinstance(current, list):
+            return self.mutable_agent_list(agent_id, "brain_trace")
+        copied = copy.deepcopy(current)
+        agent["brain_trace"] = copied
+        self.mark_agent_dirty(agent_id)
+        self._inc_nested_copy()
+        return copied
+
     def prepare_for_legacy_mutation(self) -> None:
         """Defensive bridge for legacy direct writes that are not yet runtime-aware."""
         self.state["agents"] = copy.deepcopy(self.state.get("agents", {}))

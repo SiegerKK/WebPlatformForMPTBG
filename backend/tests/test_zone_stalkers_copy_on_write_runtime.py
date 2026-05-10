@@ -139,6 +139,27 @@ def test_memory_v3_mutation_copies_records_container():
     assert "y" in runtime.state["agents"]["a1"]["memory_v3"]["records"]
 
 
+def test_runtime_targeted_helpers_copy_nested_structures():
+    source = _make_min_state()
+    runtime = ZoneTickRuntime(source_state=source)
+
+    records = runtime.mutable_agent_memory_v3_records("a1")
+    records["rec_new"] = {"world_turn": 3}
+    indexes = runtime.mutable_agent_memory_v3_indexes("a1")
+    by_kind = indexes.setdefault("by_kind", {})
+    by_kind.setdefault("observation", []).append("rec_new")
+    inventory = runtime.mutable_agent_inventory("a1")
+    inventory.append({"id": "i3"})
+    sched = runtime.mutable_agent_scheduled_action("a1")
+    assert sched is not None
+    sched["turns_remaining"] = 1
+
+    assert "rec_new" not in source["agents"]["a1"]["memory_v3"]["records"]
+    assert len(source["agents"]["a1"]["inventory"]) == 1
+    assert source["agents"]["a1"]["scheduled_action"]["turns_remaining"] == 2
+    assert "a1" in runtime.dirty_agents
+
+
 def test_tick_zone_map_does_not_mutate_input_state():
     old = _make_cow_tick_state(num_players=1, num_ai_stalkers=0, num_traders=0)
     for _agent in old.get("agents", {}).values():
@@ -477,3 +498,77 @@ def test_cow_tick_live_npc_bot_does_not_mutate_input():
 
     assert state == before
     assert new_state is not state
+
+
+def test_tick_zone_map_default_cow_does_not_deepcopy_full_state(monkeypatch):
+    state = _make_cow_tick_state(seed=136, num_players=1, num_ai_stalkers=0, num_traders=0)
+    for agent in state["agents"].values():
+        agent["has_left_zone"] = True
+
+    original_deepcopy = copy.deepcopy
+    full_state_deepcopy_calls = 0
+
+    def _deepcopy_spy(obj, *args, **kwargs):
+        nonlocal full_state_deepcopy_calls
+        if obj is state:
+            full_state_deepcopy_calls += 1
+        return original_deepcopy(obj, *args, **kwargs)
+
+    monkeypatch.setattr(tick_rules.copy, "deepcopy", _deepcopy_spy)
+    tick_zone_map(state)
+
+    assert full_state_deepcopy_calls == 0
+
+
+def test_tick_zone_map_deepcopy_flag_uses_full_deepcopy(monkeypatch):
+    state = _make_cow_tick_state(seed=137, num_players=1, num_ai_stalkers=0, num_traders=0)
+    for agent in state["agents"].values():
+        agent["has_left_zone"] = True
+    state["cpu_copy_on_write_enabled"] = False
+
+    original_deepcopy = copy.deepcopy
+    full_state_deepcopy_calls = 0
+
+    def _deepcopy_spy(obj, *args, **kwargs):
+        nonlocal full_state_deepcopy_calls
+        if obj is state:
+            full_state_deepcopy_calls += 1
+        return original_deepcopy(obj, *args, **kwargs)
+
+    monkeypatch.setattr(tick_rules.copy, "deepcopy", _deepcopy_spy)
+    tick_zone_map(state)
+
+    assert full_state_deepcopy_calls == 1
+
+
+def test_cow_fallback_counter_is_set_if_runtime_init_fails(monkeypatch):
+    state = _make_cow_tick_state(seed=138, num_players=1, num_ai_stalkers=0, num_traders=0)
+    for agent in state["agents"].values():
+        agent["has_left_zone"] = True
+
+    import app.games.zone_stalkers.runtime.zone_tick_runtime as zone_tick_runtime_module
+
+    class BrokenZoneTickRuntime:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("forced runtime init failure")
+
+    monkeypatch.setattr(zone_tick_runtime_module, "ZoneTickRuntime", BrokenZoneTickRuntime)
+
+    _new_state, _events = tick_zone_map(state)
+    runtime = tick_rules._last_tick_runtime
+    assert runtime is not None
+    profiler_data = runtime.profiler.to_dict() if runtime.profiler is not None else {}
+    counters = profiler_data.get("counters", {})
+    assert int(counters.get("cow_fallback_to_deepcopy", 0)) == 1
+
+
+def test_tick_zone_map_restores_previous_current_runtime(monkeypatch):
+    state = _make_cow_tick_state(seed=139, num_players=1, num_ai_stalkers=0, num_traders=0)
+    for agent in state["agents"].values():
+        agent["has_left_zone"] = True
+
+    sentinel_runtime = object()
+    monkeypatch.setattr(tick_rules, "_current_tick_runtime", sentinel_runtime)
+    tick_zone_map(state)
+
+    assert tick_rules._current_tick_runtime is sentinel_runtime
