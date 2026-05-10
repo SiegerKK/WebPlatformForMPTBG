@@ -5,6 +5,9 @@ import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';
 import { useMatchWebSocket } from '../../../hooks/useMatchWebSocket';
+import { applyZoneDelta } from '../state/applyZoneDelta';
+import { applyZoneDebugDelta } from '../state/applyZoneDebugDelta';
+import type { ZoneDelta, ZoneDebugDelta, ZoneDebugState, ZoneDebugSubscription } from '../state/types';
 
 // ─── DebugTimeControl ────────────────────────────────────────────────────────
 function DebugTimeControl({
@@ -504,6 +507,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [showDebug, setShowDebug] = useState(false);
   // Sub-tab within the debug panel
   const [debugTab, setDebugTab] = useState<'map' | 'characters' | 'global'>('map');
+  // debugState is populated by zone_debug_delta WebSocket messages;
+  // it will be wired to debug components in subsequent iterations.
+  const [debugState, setDebugState] = useState<ZoneDebugState>({
+    huntSearchByAgent: {},
+    locationHuntTraces: {},
+    selectedAgentProfile: null,
+    selectedLocationProfile: null,
+    debugRevision: 0,
+  });
 
   // Enter game as your own assigned character
   const enterGame = () => {
@@ -550,6 +562,18 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // When set, the next refresh() call will skip fetching events from the API
   // because they already arrived inline via the WS `ticked` message payload.
   const skipNextEventsRef = useRef(false);
+  // Track zone_map context id for refreshGame(), delta verification, and debug API calls.
+  const contextIdRef = useRef<string | null>(null);
+  // Track state_revision for WS delta sync — starts at 0 (before first projection load).
+  const stateRevisionRef = useRef<number>(0);
+  // Set to true once the first projection has been successfully loaded.
+  // Guards against applying deltas to an uninitialised state on race conditions
+  // where the first zone_delta arrives before ensureContext()+refreshGame() completes.
+  const projectionLoadedRef = useRef<boolean>(false);
+  // WS-triggered refresh throttle (ms): prevents flooding at x600 auto-tick.
+  const GAME_PROJECTION_REFRESH_MS = 250;
+  const wsLastRefreshMsRef = useRef<number>(0);
+  const wsPendingRefreshRef = useRef(false);
 
   const zoneState: ZoneMapState | null = context
     ? (context.state_blob as unknown as ZoneMapState)
@@ -563,6 +587,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   useEffect(() => { profileAgentIdRef.current = profileAgentId; }, [profileAgentId]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
   useEffect(() => { myAgentIdRef.current = myAgentId; }, [myAgentId]);
+  useEffect(() => { contextIdRef.current = context?.id ?? null; }, [context?.id]);
+  useEffect(() => {
+    const rev = (zoneState as unknown as { state_revision?: number })?.state_revision;
+    if (typeof rev === 'number') {
+      stateRevisionRef.current = rev;
+      // Mark that a valid projection has been loaded — deltas can now be applied safely.
+      projectionLoadedRef.current = true;
+    }
+  }, [zoneState]);
 
   const isCreator = match.created_by_user_id === user.id;
   const isWaiting = match.status === 'waiting_for_players' || match.status === 'draft';
@@ -636,13 +669,154 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     }
   }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ─── lightweight game projection refresh (for WS-triggered updates) ─────
+  // Uses GET /zone-stalkers/contexts/{id}/projection?mode=game instead of
+  // the heavy getTree() call, to reduce traffic at high auto-tick speeds.
+  const refreshGame = useCallback(async () => {
+    const ctxId = contextIdRef.current;
+    if (!ctxId) {
+      // Fall back to full refresh when context id is not yet known.
+      refresh();
+      return;
+    }
+    if (refreshInFlightRef.current) {
+      pendingRefreshRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
+    const fetchEvents = !skipNextEventsRef.current;
+    skipNextEventsRef.current = false;
+    try {
+      const projRes = await contextsApi.getZoneProjection(ctxId, 'game');
+      const projData = projRes.data as { state: ZoneMapState };
+      setContext((prev) => {
+        if (!prev) return prev;
+        return { ...prev, state_blob: projData.state as unknown as Record<string, unknown> };
+      });
+      // Handle active events: only re-fetch event ctx when it changed
+      const newZoneState = projData.state;
+      if (newZoneState?.active_events?.length) {
+        const activeEvtId = newZoneState.active_events[0];
+        setActiveEventCtx((prev) => {
+          if (prev?.id === activeEvtId) return prev; // already have it, no fetch needed
+          // Fetch event context asynchronously
+          contextsApi.get(activeEvtId).then(res => {
+            setActiveEventCtx(res.data as GameContext);
+            setActiveTab('event');
+          }).catch(() => {});
+          return prev; // return previous while fetching
+        });
+      } else {
+        setActiveEventCtx(null);
+      }
+      if (fetchEvents) {
+        const evRes = await eventsApi.listForMatch(match.id, { limit: 100 });
+        setEvents(evRes.data as GameEvent[]);
+      }
+    } catch { /* ignore */ }
+    finally {
+      refreshInFlightRef.current = false;
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        setTimeout(() => refreshGame(), 0);
+      }
+    }
+  }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── throttled WS-triggered refresh ──────────────────────────────────────
+  // At x600 auto-tick, ticks arrive every 100 ms — we cap UI refreshes at
+  // GAME_PROJECTION_REFRESH_MS (250 ms) so the browser is not saturated.
+  const triggerThrottledRefresh = useCallback(() => {
+    const now = Date.now();
+    const elapsed = now - wsLastRefreshMsRef.current;
+    if (elapsed >= GAME_PROJECTION_REFRESH_MS) {
+      wsLastRefreshMsRef.current = now;
+      refreshGame();
+    } else if (!wsPendingRefreshRef.current) {
+      wsPendingRefreshRef.current = true;
+      setTimeout(() => {
+        wsPendingRefreshRef.current = false;
+        wsLastRefreshMsRef.current = Date.now();
+        refreshGame();
+      }, GAME_PROJECTION_REFRESH_MS - elapsed);
+    }
+  }, [refreshGame]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ─── WebSocket push — replaces polling when connected ────────────────────
   const wsToken = localStorage.getItem('access_token');
-  const { connected: wsConnected } = useMatchWebSocket(
+  const { connected: wsConnected, sendMessage: wsSendMessage } = useMatchWebSocket(
     match.id,
     wsToken,
     useCallback((msg) => {
-      if (msg.type === 'ticked') {
+      if (msg.type === 'zone_delta') {
+        // ── WebSocket delta sync — no HTTP round-trip required ────────────
+        // The backend sends a compact diff of only the changed agents/locations.
+        // We apply it locally so the UI updates instantly without a projection fetch.
+        const delta = msg as unknown as ZoneDelta & { match_id: string; context_id: string };
+        const currentRevision = stateRevisionRef.current;
+
+        // Only apply delta once the initial projection has been loaded.
+        // If the projection hasn't loaded yet (race condition), trigger a resync.
+        if (!projectionLoadedRef.current) {
+          triggerThrottledRefresh();
+          return;
+        }
+
+        if (delta.base_revision !== currentRevision) {
+          // Revision mismatch — our local state is stale; force a full resync.
+          triggerThrottledRefresh();
+          return;
+        }
+
+        // Apply delta to local state (no HTTP request).
+        setContext((prev) => {
+          if (!prev) return prev;
+          const blob = (prev.state_blob as Record<string, unknown>) ?? {};
+          const newBlob = applyZoneDelta(blob, delta);
+          return { ...prev, state_blob: newBlob };
+        });
+
+        // Advance revision so the next delta can verify continuity.
+        stateRevisionRef.current = delta.revision;
+
+        // Handle active_events changes from the delta state patch.
+        const stateChanges = delta.changes?.state ?? {};
+        if ('active_events' in stateChanges) {
+          const activeEvents = stateChanges.active_events as string[] | null;
+          if (activeEvents?.length) {
+            const activeEvtId = activeEvents[0];
+            setActiveEventCtx((prev) => {
+              if (prev?.id === activeEvtId) return prev;
+              contextsApi.get(activeEvtId).then(res => {
+                setActiveEventCtx(res.data as GameContext);
+                setActiveTab('event');
+              }).catch(() => {});
+              return prev;
+            });
+          } else {
+            setActiveEventCtx(null);
+          }
+        }
+
+        // Event preview from delta carries compact info but no stable IDs;
+        // signal that the next refreshGame() should skip fetching events
+        // since we already have a preview and a full fetch isn't yet needed.
+        if (Array.isArray(delta.events?.preview) && delta.events.preview.length > 0) {
+          skipNextEventsRef.current = true;
+        }
+
+        // Re-fetch memory for whichever agent is currently visible.
+        const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+        if (visibleAgent) loadAgentMemory(visibleAgent);
+      } else if (msg.type === 'ticked') {
+        // Fallback: non-zone-stalkers games or when delta build fails.
+        // If requires_resync is set, do a full projection refresh.
+        if (msg.requires_resync) {
+          triggerThrottledRefresh();
+          const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+          if (visibleAgent) loadAgentMemory(visibleAgent);
+          return;
+        }
         // Immediately patch the 4 time fields in the local context state so the
         // clock display updates on every single tick without waiting for a full
         // API round-trip. The full refresh() call below handles the rest of the
@@ -667,26 +841,30 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             };
           });
         }
-        // Append new events that arrived inline with the WS notification.
-        // This avoids a separate listForMatch() API call on every tick.
-        const wsNewEvents = msg.new_events as GameEvent[] | undefined;
-        if (Array.isArray(wsNewEvents) && wsNewEvents.length > 0) {
+        // The WS payload now includes new_events_preview (compact, max 10)
+        // instead of the full new_events array to reduce WS traffic.
+        // event_count tells us how many events were emitted this tick.
+        const wsPreviewEvents = msg.new_events_preview as GameEvent[] | undefined;
+        if (Array.isArray(wsPreviewEvents) && wsPreviewEvents.length > 0) {
+          // Preview events are compact; use them to update the feed optimistically.
+          // A full event fetch happens in refreshGame() below if needed.
           setEvents((prev) => {
             const existingIds = new Set(prev.map((e) => e.id));
-            const added = wsNewEvents.filter((e) => !existingIds.has(e.id));
+            const added = wsPreviewEvents.filter((e) => !existingIds.has(e.id));
             if (added.length === 0) return prev;
             const combined = [...prev, ...added];
-            // Keep the last 100 events (same cap as the listForMatch call)
             return combined.length > 100 ? combined.slice(-100) : combined;
           });
-          // Signal refresh() to skip the events API call — we already have them.
-          skipNextEventsRef.current = true;
         }
-        refresh();
+        // Use throttled lightweight projection refresh instead of full getTree().
+        triggerThrottledRefresh();
         // Re-fetch memory for whichever agent is currently visible so the
         // profile / memory tab shows entries written during this tick.
         const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
         if (visibleAgent) loadAgentMemory(visibleAgent);
+      } else if (msg.type === 'zone_debug_delta') {
+        const debugDelta = msg as unknown as ZoneDebugDelta;
+        setDebugState((prev) => applyZoneDebugDelta(prev, debugDelta));
       } else if (msg.type === 'state_updated') {
         refresh();
       } else if (msg.type === 'auto_tick_changed') {
@@ -705,8 +883,22 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           };
         });
       }
-    }, [refresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
+    }, [refresh, refreshGame, triggerThrottledRefresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  // ─── Zone debug delta subscription helpers ──────────────────────────────
+  const subscribeZoneDebug = useCallback((subscription: ZoneDebugSubscription) => {
+    if (context?.id) {
+      wsSendMessage({
+        type: 'subscribe_zone_debug',
+        subscription: { ...subscription, context_id: context.id },
+      });
+    }
+  }, [context?.id, wsSendMessage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const unsubscribeZoneDebug = useCallback(() => {
+    wsSendMessage({ type: 'unsubscribe_zone_debug' });
+  }, [wsSendMessage]);
 
   // ─── ensure zone_map context exists ─────────────────────────────────────
   const ensureContext = useCallback(async () => {
@@ -2210,7 +2402,16 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
 
         {debugTab === 'map' && (
-          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} contextId={context?.id} />
+          <DebugMapPage
+            matchId={match.id}
+            zoneState={zoneState}
+            currentLocId={currentLocId}
+            sendCommand={sendCommand}
+            contextId={context?.id}
+            debugState={debugState}
+            subscribeZoneDebug={subscribeZoneDebug}
+            unsubscribeZoneDebug={unsubscribeZoneDebug}
+          />
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}

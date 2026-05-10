@@ -9,7 +9,7 @@ Game-specific tick logic lives in each game's RuleSet.tick() implementation.
 import logging
 import time
 import json
-from typing import Dict
+from typing import Any, Dict
 
 from sqlalchemy.orm import Session
 
@@ -44,12 +44,39 @@ _TICK_INTERVALS: Dict[str, float] = {
     "x600":      0.1,  # 600× realtime — 1 tick per 0.1 real seconds
 }
 
+# ── WebSocket tick payload compaction ─────────────────────────────────────────
+# Limits the number of events sent inline with every WS tick notification.
+# Full event history remains available via GET /matches/{id}/events.
+WS_TICK_EVENT_PREVIEW_LIMIT = 10
+
+_WS_EVENT_PAYLOAD_KEEP_FIELDS: frozenset[str] = frozenset({
+    "agent_id",
+    "location_id",
+    "world_turn",
+    "objective_key",
+    "action_kind",
+    "summary",
+})
+
+
+def _compact_event_payload(payload: dict) -> dict:
+    """Return a compact subset of an event payload (drop heavy nested data)."""
+    return {k: payload[k] for k in _WS_EVENT_PAYLOAD_KEEP_FIELDS if k in payload}
+
+
+def _compact_tick_event(event: dict) -> dict:
+    """Return a compact representation of one tick event for WS delivery."""
+    return {
+        "event_type": event.get("event_type"),
+        "payload": _compact_event_payload(event.get("payload", {})),
+    }
+
 
 def tick_match(match_id_str: str, db: Session) -> dict:
     """
     Advance the world by one game-turn for the given match.
 
-    Delegates all game-specific logic to the match's registered RuleSet.
+    Delegates all game-specific logic to the match's registered RuleSet.tick().
     Returns a summary dict with events emitted (or an ``"error"`` key on
     failure).
     """
@@ -71,35 +98,91 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     # Notify connected WebSocket clients that the state changed.
     if "error" not in result:
         from app.core.ws.manager import ws_manager
-        ws_payload = {
-            "type": "ticked",
-            "match_id": match_id_str,
-            "world_turn": result.get("world_turn"),
-            "world_hour": result.get("world_hour"),
-            "world_day": result.get("world_day"),
-            "world_minute": result.get("world_minute"),
-            "new_events": result.get("new_events", []),
-        }
+
+        all_events: list[Any] = result.get("new_events", []) or []
+        zone_delta = result.get("zone_delta")
+
+        # Resolve zone context id (needed for delta WS payload and metrics).
+        context_id_str: str | None = None
+        if match.game_id == "zone_stalkers":
+            from app.core.contexts.models import ContextStatus, GameContext
+            zone_ctx_for_ws = db.query(GameContext).filter(
+                GameContext.match_id == match.id,
+                GameContext.context_type == "zone_map",
+                GameContext.status == ContextStatus.ACTIVE,
+            ).first()
+            if zone_ctx_for_ws:
+                context_id_str = str(zone_ctx_for_ws.id)
+
+        if zone_delta is not None:
+            ws_payload = {
+                "type": "zone_delta",
+                "match_id": match_id_str,
+                "context_id": context_id_str,
+                **zone_delta,
+            }
+        else:
+            # Fallback to compact ticked message (non-zone-stalkers games, or on delta build failure).
+            preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+            ws_payload = {
+                "type": "ticked",
+                "match_id": match_id_str,
+                "world_turn": result.get("world_turn"),
+                "world_hour": result.get("world_hour"),
+                "world_day": result.get("world_day"),
+                "world_minute": result.get("world_minute"),
+                "event_count": len(all_events),
+                "new_events_preview": preview_events,
+                # requires_resync is set only for Zone Stalkers when a delta was expected
+                # but could not be built.  Other games don't use delta sync at all.
+                "requires_resync": match.game_id == "zone_stalkers",
+            }
         ws_manager.notify(match_id_str, ws_payload)
+
+        # Send scoped zone_debug_delta to each subscribed connection
+        if zone_delta is not None and context_id_str:
+            try:
+                from app.core.ws.manager import get_debug_subscriptions
+                from app.games.zone_stalkers.debug_delta import build_zone_debug_delta
+
+                debug_subs = get_debug_subscriptions(match_id_str)
+                if debug_subs:
+                    old_state = result.get("old_state")
+                    new_state = result.get("new_state")
+                    if old_state is not None and new_state is not None:
+                        debug_revision = int(new_state.get("_debug_revision", 0))
+                        if debug_revision <= 0:
+                            debug_revision = int(old_state.get("_debug_revision", 0)) + 1
+                            new_state["_debug_revision"] = debug_revision
+                        for conn_id, sub in debug_subs.items():
+                            debug_delta = build_zone_debug_delta(
+                                old_state=old_state,
+                                new_state=new_state,
+                                subscription=sub,
+                                debug_revision=debug_revision,
+                            )
+                            if debug_delta:
+                                payload = {
+                                    "type": "zone_debug_delta",
+                                    "match_id": match_id_str,
+                                    "context_id": context_id_str,
+                                    **debug_delta,
+                                }
+                                ws_manager.notify_to_connection(conn_id, payload)
+            except Exception as exc:
+                logger.debug("zone_debug_delta send failed: %s", exc)
 
         try:
             from app.games.zone_stalkers.performance_metrics import record_tick_metrics
             metrics_payload: dict = {
                 "tick_total_ms": round(tick_total_ms, 3),
-                "events_emitted": len(result.get("new_events", []) or []),
+                "events_emitted": len(all_events),
                 "response_size_bytes": len(
                     json.dumps(ws_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 ),
             }
-            if match.game_id == "zone_stalkers":
-                from app.core.contexts.models import ContextStatus, GameContext
-                zone_ctx = db.query(GameContext).filter(
-                    GameContext.match_id == match.id,
-                    GameContext.context_type == "zone_map",
-                    GameContext.status == ContextStatus.ACTIVE,
-                ).first()
-                if zone_ctx:
-                    metrics_payload["context_id"] = str(zone_ctx.id)
+            if context_id_str:
+                metrics_payload["context_id"] = context_id_str
             record_tick_metrics(match_id_str, metrics_payload)
         except Exception as exc:
             logger.debug("tick metric collection skipped for %s: %s", match_id_str, exc)

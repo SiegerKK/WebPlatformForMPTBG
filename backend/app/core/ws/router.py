@@ -23,8 +23,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 
-from app.core.ws.manager import ws_manager
-from app.database import SessionLocal
+from app.core.ws.manager import ws_manager, add_debug_subscription, remove_debug_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +50,9 @@ def _authenticate_token(token: str) -> bool:
         return False
 
 
+from app.database import SessionLocal
+
+
 @router.websocket("/ws/matches/{match_id}")
 async def match_websocket(
     match_id: uuid.UUID,
@@ -62,7 +64,12 @@ async def match_websocket(
 
     The client connects, receives push messages whenever the match state
     changes (tick or command), and can send ``{"type": "ping"}`` to keep
-    the connection alive.  Any other client message is ignored.
+    the connection alive.
+
+    Supported client messages:
+    - ``{"type": "ping"}`` — keepalive, server replies ``{"type": "pong"}``
+    - ``{"type": "subscribe_zone_debug", "subscription": {...}}`` — subscribe to zone debug deltas
+    - ``{"type": "unsubscribe_zone_debug"}`` — cancel debug subscription
     """
     # ── Auth ──────────────────────────────────────────────────────────────────
     # Accept the connection first so we can send a proper WebSocket close frame
@@ -76,16 +83,30 @@ async def match_websocket(
         return
 
     mid = str(match_id)
+    # Use the websocket object id as a stable connection identifier
+    conn_id = str(id(ws))
     await ws_manager.connect(mid, ws)
     try:
-        # Keep the socket open; process incoming messages (ping/pong).
+        # Keep the socket open; process incoming messages.
         while True:
             data = await ws.receive_json()
-            if isinstance(data, dict) and data.get("type") == "ping":
+            if not isinstance(data, dict):
+                continue
+            msg_type = data.get("type")
+            if msg_type == "ping":
                 await ws.send_json({"type": "pong"})
+            elif msg_type == "subscribe_zone_debug":
+                sub = data.get("subscription")
+                if isinstance(sub, dict):
+                    add_debug_subscription(mid, conn_id, sub)
+                    await ws.send_json({"type": "zone_debug_subscribed", "match_id": mid})
+            elif msg_type == "unsubscribe_zone_debug":
+                remove_debug_subscription(mid, conn_id)
+                await ws.send_json({"type": "zone_debug_unsubscribed", "match_id": mid})
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         logger.debug("WS error for match %s: %s", mid, exc)
     finally:
+        remove_debug_subscription(mid, conn_id)
         ws_manager.disconnect(mid, ws)

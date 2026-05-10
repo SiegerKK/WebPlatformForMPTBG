@@ -21,7 +21,7 @@ from app.core.contexts.service import create_context
 from app.database import get_db
 
 router = APIRouter(tags=["zone_stalkers"])
-ProjectionModeParam = Literal["zone-lite", "game", "debug-map", "full"]
+ProjectionModeParam = Literal["zone-lite", "game", "debug-map", "debug-map-lite", "full"]
 
 # ── Media configuration ────────────────────────────────────────────────────────
 
@@ -278,4 +278,450 @@ def get_zone_performance(
         "count": len(metrics),
         "latest": get_last_tick_metrics(match_id=match_id_str),
         "items": metrics,
+    }
+
+
+@router.get("/zone-stalkers/debug/hunt-search/{context_id}")
+def get_hunt_debug(
+    context_id: uuid.UUID,
+    store: bool = Query(default=False, description="If true, persist result into state.debug"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Build and return hunt-search debug payload for the given zone_map context.
+
+    When ``store=true``, the payload is also persisted into ``state.debug`` and
+    ``debug_hunt_traces_enabled`` is set so that subsequent ticks refresh it
+    automatically.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state, save_context_state
+    from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+    state = load_context_state(ctx.id, ctx)
+    debug_payload = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+    if store:
+        state.setdefault("debug", {}).update(debug_payload)
+        state["debug_hunt_traces_enabled"] = True
+        state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+        save_context_state(ctx.id, state, ctx)
+    return {
+        "context_id": str(ctx.id),
+        **debug_payload,
+    }
+
+
+
+# ── Static/dynamic map split endpoints ────────────────────────────────────────
+
+@router.get("/zone-stalkers/contexts/{context_id}/map-static")
+def get_zone_map_static(
+    context_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return static map data (location topology, names, terrain, connections, layout).
+    This data only changes when map_revision increments — clients can cache it.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    locations = state.get("locations") or {}
+    static_locs = {}
+    for loc_id, loc in locations.items():
+        if not isinstance(loc, dict):
+            continue
+        static_locs[loc_id] = {
+            "id": loc.get("id"),
+            "name": loc.get("name"),
+            "terrain_type": loc.get("terrain_type"),
+            "connections": loc.get("connections"),
+            "debug_layout": loc.get("debug_layout"),
+            "image_url": loc.get("image_url"),
+            "region": loc.get("region"),
+            "exit_zone": loc.get("exit_zone"),
+        }
+    return {
+        "context_id": str(ctx.id),
+        "map_revision": state.get("map_revision", 0),
+        "debug_layout": state.get("debug_layout"),
+        "locations": static_locs,
+    }
+
+
+@router.get("/zone-stalkers/contexts/{context_id}/map-dynamic")
+def get_zone_map_dynamic(
+    context_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return dynamic map data (agent positions, resource counts, anomaly activity,
+    world time). Clients refresh this on zone_delta messages.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    locations = state.get("locations") or {}
+    agents_raw = state.get("agents") or {}
+
+    # Lite agent info for map display
+    agents_lite = {
+        agent_id: {
+            "id": a.get("id"),
+            "name": a.get("name"),
+            "location_id": a.get("location_id"),
+            "is_alive": a.get("is_alive"),
+            "has_left_zone": a.get("has_left_zone"),
+            "archetype": a.get("archetype"),
+            "faction": a.get("faction"),
+            "controller": a.get("controller"),
+        }
+        for agent_id, a in agents_raw.items()
+        if isinstance(a, dict)
+    }
+
+    # Per-location dynamic fields
+    dynamic_locs = {}
+    for loc_id, loc in locations.items():
+        if not isinstance(loc, dict):
+            continue
+        artifacts = loc.get("artifacts") or []
+        items = loc.get("items") or []
+        dynamic_locs[loc_id] = {
+            "id": loc.get("id"),
+            "agents": loc.get("agents", []),
+            "artifacts_count": len(artifacts),
+            "items_count": len(items),
+            "anomaly_activity": loc.get("anomaly_activity"),
+            "dominant_anomaly_type": loc.get("dominant_anomaly_type"),
+        }
+
+    return {
+        "context_id": str(ctx.id),
+        "state_revision": state.get("state_revision", 0),
+        "world_turn": state.get("world_turn"),
+        "world_day": state.get("world_day"),
+        "world_hour": state.get("world_hour"),
+        "world_minute": state.get("world_minute"),
+        "emission_active": state.get("emission_active"),
+        "emission_scheduled_turn": state.get("emission_scheduled_turn"),
+        "locations": dynamic_locs,
+        "agents": agents_lite,
+    }
+
+
+# ── Scoped debug endpoints ─────────────────────────────────────────────────────
+
+@router.get("/zone-stalkers/contexts/{context_id}/debug/hunt-search")
+def get_debug_hunt_search(
+    context_id: uuid.UUID,
+    hunter_id: str = Query(default=None),
+    target_id: str = Query(default=None),
+    min_confidence: float = Query(default=0.0),
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return compact hunt_search_by_agent summary.
+
+    Optional filters: hunter_id, target_id, min_confidence.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    debug = state.get("debug") or {}
+    hsba = debug.get("hunt_search_by_agent") or {}
+
+    # Build on-demand if cache is empty
+    if not hsba:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            hsba = debug.get("hunt_search_by_agent") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
+    result = {}
+    count = 0
+    for agent_id, v in hsba.items():
+        if count >= limit:
+            break
+        if hunter_id and agent_id != hunter_id:
+            continue
+        if not isinstance(v, dict):
+            continue
+        if target_id and v.get("target_id") != target_id:
+            continue
+        conf = v.get("best_location_confidence") or 0.0
+        if conf < min_confidence:
+            continue
+        result[agent_id] = {
+            "target_id": v.get("target_id"),
+            "best_location_id": v.get("best_location_id"),
+            "best_location_confidence": conf,
+            "lead_count": v.get("lead_count"),
+        }
+        count += 1
+
+    return {
+        "context_id": str(ctx.id),
+        "state_revision": state.get("state_revision", 0),
+        "total_agents": len(hsba),
+        "returned": len(result),
+        "hunt_search_by_agent": result,
+    }
+
+
+@router.get("/zone-stalkers/contexts/{context_id}/debug/hunt-search/agents/{agent_id}")
+def get_debug_hunt_search_agent(
+    context_id: uuid.UUID,
+    agent_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return full hunt_search data for one specific agent."""
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    debug = state.get("debug") or {}
+    hsba = debug.get("hunt_search_by_agent") or {}
+
+    # Build on-demand if cache is empty
+    if not hsba:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            hsba = debug.get("hunt_search_by_agent") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
+    entry = hsba.get(agent_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"No hunt search data for agent {agent_id}")
+
+    leads = entry.get("leads") or []
+    return {
+        "context_id": str(ctx.id),
+        "agent_id": agent_id,
+        "state_revision": state.get("state_revision", 0),
+        "target_id": entry.get("target_id"),
+        "best_location_id": entry.get("best_location_id"),
+        "best_location_confidence": entry.get("best_location_confidence"),
+        "possible_locations": entry.get("possible_locations"),
+        "likely_routes": entry.get("likely_routes"),
+        "exhausted_locations": entry.get("exhausted_locations"),
+        "lead_count": entry.get("lead_count"),
+        "leads": leads[:30],
+    }
+
+
+@router.get("/zone-stalkers/contexts/{context_id}/debug/hunt-search/locations/{location_id}")
+def get_debug_hunt_search_location(
+    context_id: uuid.UUID,
+    location_id: str,
+    hunter_id: str = Query(default=None),
+    target_id: str = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return hunt traces for one location, with optional filters."""
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    debug = state.get("debug") or {}
+    lht = debug.get("location_hunt_traces") or {}
+
+    # Build on-demand if cache is empty
+    if not lht:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            lht = debug.get("location_hunt_traces") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
+    loc_trace = lht.get(location_id)
+    if loc_trace is None:
+        return {
+            "context_id": str(ctx.id),
+            "location_id": location_id,
+            "records": [],
+            "records_count": 0,
+        }
+
+    records = loc_trace.get("records") or loc_trace.get("positive_leads") or []
+    if hunter_id:
+        records = [r for r in records if isinstance(r, dict) and r.get("hunter_id") == hunter_id]
+    if target_id:
+        records = [r for r in records if isinstance(r, dict) and r.get("target_id") == target_id]
+
+    return {
+        "context_id": str(ctx.id),
+        "location_id": location_id,
+        "state_revision": state.get("state_revision", 0),
+        "records_count": len(records),
+        "records": records[:limit],
+    }
+
+
+@router.get("/zone-stalkers/contexts/{context_id}/debug/hunt-search/targets/{target_id}")
+def get_debug_hunt_search_target(
+    context_id: uuid.UUID,
+    target_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return hunt search data for all hunters targeting target_id."""
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    debug = state.get("debug") or {}
+    hsba = debug.get("hunt_search_by_agent") or {}
+
+    # Build on-demand if cache is empty
+    if not hsba:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            hsba = debug.get("hunt_search_by_agent") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
+    result = {}
+    for agent_id, v in hsba.items():
+        if len(result) >= limit:
+            break
+        if not isinstance(v, dict):
+            continue
+        if v.get("target_id") != target_id:
+            continue
+        result[agent_id] = {
+            "target_id": v.get("target_id"),
+            "best_location_id": v.get("best_location_id"),
+            "best_location_confidence": v.get("best_location_confidence"),
+            "lead_count": v.get("lead_count"),
+            "possible_locations": (v.get("possible_locations") or [])[:5],
+            "exhausted_locations": (v.get("exhausted_locations") or [])[:10],
+        }
+
+    return {
+        "context_id": str(ctx.id),
+        "target_id": target_id,
+        "state_revision": state.get("state_revision", 0),
+        "hunters": result,
+    }
+
+
+@router.post("/zone-stalkers/contexts/{context_id}/debug/hunt-search/refresh")
+def refresh_debug_hunt_search(
+    context_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Trigger a rebuild of hunt debug payload for the context.
+    Sets debug_hunt_traces_enabled=True and rebuilds immediately.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state, save_context_state
+    from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    debug_payload = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+    state.setdefault("debug", {}).update(debug_payload)
+    state["debug_hunt_traces_enabled"] = True
+    state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+    save_context_state(ctx.id, state, ctx)
+
+    return {
+        "context_id": str(ctx.id),
+        "status": "refreshed",
+        "world_turn": state.get("world_turn", 0),
     }

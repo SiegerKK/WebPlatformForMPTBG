@@ -101,9 +101,15 @@ class ZoneStalkerRuleSet(RuleSet):
 
         # Load state from Redis (or DB fallback on cache miss).
         state = load_context_state(zone_ctx.id, zone_ctx)
+        # Capture old state for delta computation (tick_zone_map does not mutate state in place).
+        old_state = state
 
         # ── Tick the world map ────────────────────────────────────────
         new_state, map_events = tick_zone_map(state)
+
+        # Increment state revision so frontends can detect stale deltas.
+        new_state["state_revision"] = int(state.get("state_revision", 0)) + 1
+        new_state["_debug_revision"] = int(state.get("_debug_revision", 0)) + 1
 
         emitted = []
         new_events_for_ws = []  # serializable copies for WebSocket broadcast
@@ -197,6 +203,18 @@ class ZoneStalkerRuleSet(RuleSet):
 
         db.commit()
 
+        # Build compact WebSocket delta (avoids full HTTP projection round-trip on frontend).
+        zone_delta = None
+        try:
+            from app.games.zone_stalkers.delta import build_zone_delta
+            zone_delta = build_zone_delta(
+                old_state=old_state,
+                new_state=new_state,
+                events=new_events_for_ws,
+            )
+        except Exception:
+            zone_delta = None
+
         return {
             "world_turn": new_state.get("world_turn"),
             "world_hour": new_state.get("world_hour"),
@@ -204,6 +222,9 @@ class ZoneStalkerRuleSet(RuleSet):
             "world_minute": new_state.get("world_minute"),
             "events_emitted": len(emitted),
             "new_events": new_events_for_ws,
+            "zone_delta": zone_delta,
+            "old_state": old_state,
+            "new_state": new_state,
         }
 
     # ── Command validation / resolution ──────────────────────────────────────
