@@ -100,18 +100,41 @@ def tick_match(match_id_str: str, db: Session) -> dict:
         from app.core.ws.manager import ws_manager
 
         all_events: list[Any] = result.get("new_events", []) or []
-        preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+        zone_delta = result.get("zone_delta")
 
-        ws_payload = {
-            "type": "ticked",
-            "match_id": match_id_str,
-            "world_turn": result.get("world_turn"),
-            "world_hour": result.get("world_hour"),
-            "world_day": result.get("world_day"),
-            "world_minute": result.get("world_minute"),
-            "event_count": len(all_events),
-            "new_events_preview": preview_events,
-        }
+        # Resolve zone context id (needed for delta WS payload and metrics).
+        context_id_str: str | None = None
+        if match.game_id == "zone_stalkers":
+            from app.core.contexts.models import ContextStatus, GameContext
+            zone_ctx_for_ws = db.query(GameContext).filter(
+                GameContext.match_id == match.id,
+                GameContext.context_type == "zone_map",
+                GameContext.status == ContextStatus.ACTIVE,
+            ).first()
+            if zone_ctx_for_ws:
+                context_id_str = str(zone_ctx_for_ws.id)
+
+        if zone_delta is not None:
+            ws_payload = {
+                "type": "zone_delta",
+                "match_id": match_id_str,
+                "context_id": context_id_str,
+                **zone_delta,
+            }
+        else:
+            # Fallback to compact ticked message (non-zone-stalkers games, or on delta build failure).
+            preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+            ws_payload = {
+                "type": "ticked",
+                "match_id": match_id_str,
+                "world_turn": result.get("world_turn"),
+                "world_hour": result.get("world_hour"),
+                "world_day": result.get("world_day"),
+                "world_minute": result.get("world_minute"),
+                "event_count": len(all_events),
+                "new_events_preview": preview_events,
+                "requires_resync": True,
+            }
         ws_manager.notify(match_id_str, ws_payload)
 
         try:
@@ -123,15 +146,8 @@ def tick_match(match_id_str: str, db: Session) -> dict:
                     json.dumps(ws_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 ),
             }
-            if match.game_id == "zone_stalkers":
-                from app.core.contexts.models import ContextStatus, GameContext
-                zone_ctx = db.query(GameContext).filter(
-                    GameContext.match_id == match.id,
-                    GameContext.context_type == "zone_map",
-                    GameContext.status == ContextStatus.ACTIVE,
-                ).first()
-                if zone_ctx:
-                    metrics_payload["context_id"] = str(zone_ctx.id)
+            if context_id_str:
+                metrics_payload["context_id"] = context_id_str
             record_tick_metrics(match_id_str, metrics_payload)
         except Exception as exc:
             logger.debug("tick metric collection skipped for %s: %s", match_id_str, exc)

@@ -5,6 +5,8 @@ import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';
 import { useMatchWebSocket } from '../../../hooks/useMatchWebSocket';
+import { applyZoneDelta } from '../state/applyZoneDelta';
+import type { ZoneDelta } from '../state/types';
 
 // ─── DebugTimeControl ────────────────────────────────────────────────────────
 function DebugTimeControl({
@@ -552,6 +554,8 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const skipNextEventsRef = useRef(false);
   // Track zone_map context id so refreshGame() can use projection endpoint.
   const contextIdRef = useRef<string | null>(null);
+  // Track state_revision for WS delta sync — starts at 0 (before first projection load).
+  const stateRevisionRef = useRef<number>(0);
   // WS-triggered refresh throttle (ms): prevents flooding at x600 auto-tick.
   const GAME_PROJECTION_REFRESH_MS = 250;
   const wsLastRefreshMsRef = useRef<number>(0);
@@ -570,6 +574,10 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
   useEffect(() => { myAgentIdRef.current = myAgentId; }, [myAgentId]);
   useEffect(() => { contextIdRef.current = context?.id ?? null; }, [context?.id]);
+  useEffect(() => {
+    const rev = (zoneState as unknown as { state_revision?: number })?.state_revision;
+    if (typeof rev === 'number') stateRevisionRef.current = rev;
+  }, [zoneState]);
 
   const isCreator = match.created_by_user_id === user.id;
   const isWaiting = match.status === 'waiting_for_players' || match.status === 'draft';
@@ -722,7 +730,68 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     match.id,
     wsToken,
     useCallback((msg) => {
-      if (msg.type === 'ticked') {
+      if (msg.type === 'zone_delta') {
+        // ── WebSocket delta sync — no HTTP round-trip required ────────────
+        // The backend sends a compact diff of only the changed agents/locations.
+        // We apply it locally so the UI updates instantly without a projection fetch.
+        const delta = msg as unknown as ZoneDelta & { match_id: string; context_id: string };
+        const currentRevision = stateRevisionRef.current;
+
+        if (delta.base_revision !== currentRevision && currentRevision !== 0) {
+          // Revision mismatch — our local state is stale; force a full resync.
+          triggerThrottledRefresh();
+          return;
+        }
+
+        // Apply delta to local state (no HTTP request).
+        setContext((prev) => {
+          if (!prev) return prev;
+          const blob = (prev.state_blob as Record<string, unknown>) ?? {};
+          const newBlob = applyZoneDelta(blob, delta);
+          return { ...prev, state_blob: newBlob };
+        });
+
+        // Advance revision so the next delta can verify continuity.
+        stateRevisionRef.current = delta.revision;
+
+        // Handle active_events changes from the delta state patch.
+        const stateChanges = delta.changes?.state ?? {};
+        if ('active_events' in stateChanges) {
+          const activeEvents = stateChanges.active_events as string[] | null;
+          if (activeEvents?.length) {
+            const activeEvtId = activeEvents[0];
+            setActiveEventCtx((prev) => {
+              if (prev?.id === activeEvtId) return prev;
+              contextsApi.get(activeEvtId).then(res => {
+                setActiveEventCtx(res.data as GameContext);
+                setActiveTab('event');
+              }).catch(() => {});
+              return prev;
+            });
+          } else {
+            setActiveEventCtx(null);
+          }
+        }
+
+        // Event preview from delta — we have compact info but no full ids;
+        // skip updating the events list (avoids duplicate compact entries).
+        // The next manual or throttled resync will fetch full events.
+        if (Array.isArray(delta.events?.preview) && delta.events.preview.length > 0) {
+          skipNextEventsRef.current = true;
+        }
+
+        // Re-fetch memory for whichever agent is currently visible.
+        const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+        if (visibleAgent) loadAgentMemory(visibleAgent);
+      } else if (msg.type === 'ticked') {
+        // Fallback: non-zone-stalkers games or when delta build fails.
+        // If requires_resync is set, do a full projection refresh.
+        if (msg.requires_resync) {
+          triggerThrottledRefresh();
+          const visibleAgent2 = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
+          if (visibleAgent2) loadAgentMemory(visibleAgent2);
+          return;
+        }
         // Immediately patch the 4 time fields in the local context state so the
         // clock display updates on every single tick without waiting for a full
         // API round-trip. The full refresh() call below handles the rest of the

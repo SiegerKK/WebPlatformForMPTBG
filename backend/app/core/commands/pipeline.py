@@ -185,6 +185,10 @@ class CommandPipeline:
 
             # 8. Persist state — user-initiated commands always write to DB
             # (force_persist=True) so that the change is immediately durable.
+            # Increment state_revision for zone_map contexts so frontend deltas
+            # can detect staleness after a command changes state.
+            if isinstance(new_state, dict) and new_state.get("context_type") == "zone_map":
+                new_state["state_revision"] = int(new_state.get("state_revision", 0)) + 1
             save_context_state(context.id, new_state, context, force_persist=True)
 
             # 9. Emit events
