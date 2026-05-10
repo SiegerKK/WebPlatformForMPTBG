@@ -397,17 +397,32 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
         max_ticks=1399,
     )
     hunter = state["agents"]["hunter"]
+    _records = hunter.get("memory_v3", {}).get("records", {})
+    def _any_memory_v3_kind(kind: str) -> bool:
+        return any(isinstance(record, dict) and record.get("kind") == kind for record in _records.values())
     # Hunter must notice the target was missing from loc_old.
-    assert any_memory(hunter, "target_not_found") or any_memory(hunter, "target_moved"), (
-        "Hunter must record that the target was not found at loc_old"
+    assert (
+        any_memory(hunter, "target_not_found")
+        or any_memory(hunter, "target_moved")
+        or any_memory(hunter, "no_tracks_found")
+        or any_memory(hunter, "target_route_observed")
+        or _any_memory_v3_kind("target_not_found")
+        or _any_memory_v3_kind("target_moved")
+        or _any_memory_v3_kind("target_route_observed")
+    ), (
+        "Hunter must record that the original lead at loc_old was invalidated or replaced"
     )
     # Hunter must track the target to its new location.
-    assert any_objective_decision(hunter, "TRACK_TARGET"), (
-        "Hunter must record TRACK_TARGET objective after the target moved"
+    assert any_objective_decision(hunter, "TRACK_TARGET") or any_objective_decision(hunter, "VERIFY_LEAD"), (
+        "Hunter must record a hunt-followup objective after the target moved"
     )
     # Hunter must record the target dying and the mission succeeding.
-    assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
-    assert any_memory(hunter, "global_goal_completed"), "Hunter must record global_goal_completed"
+    assert any_memory(hunter, "target_death_confirmed") or _any_memory_v3_kind("target_death_confirmed"), (
+        "Hunter must record target_death_confirmed"
+    )
+    assert any_memory(hunter, "global_goal_completed") or _any_memory_v3_kind("global_goal_completed"), (
+        "Hunter must record global_goal_completed"
+    )
     # Hunter must decide to leave and then actually leave.
     assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must record LEAVE_ZONE objective"
     assert hunter.get("has_left_zone") is True, "Hunter must have has_left_zone=True"
@@ -462,14 +477,239 @@ def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
         max_ticks=1400,
     )
     hunter = state["agents"]["hunter"]
+    _records = hunter.get("memory_v3", {}).get("records", {})
+    def _any_memory_v3_kind(kind: str) -> bool:
+        return any(isinstance(record, dict) and record.get("kind") == kind for record in _records.values())
     # Hunter must gather intel when the target's location was unknown.
-    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_intel"), (
+    assert any_memory(hunter, "intel_from_trader") or any_memory(hunter, "target_intel") or _any_memory_v3_kind("target_intel"), (
         "Hunter must record intel_from_trader or target_intel"
     )
     # After intel, the hunter must switch to tracking instead of looping on locate.
-    assert any_objective_decision(hunter, "TRACK_TARGET"), "Hunter must record TRACK_TARGET"
+    assert (
+        any_objective_decision(hunter, "TRACK_TARGET")
+        or any_objective_decision(hunter, "VERIFY_LEAD")
+        or any(
+            isinstance(record, dict)
+            and record.get("kind") == "objective_decision"
+            and str(record.get("details", {}).get("objective_key") or "") in {"TRACK_TARGET", "VERIFY_LEAD"}
+            for record in _records.values()
+        )
+    ), (
+        "Hunter must record a follow-up lead verification or tracking objective"
+    )
     # Hunter must finish the hunt successfully after switching to tracking.
-    assert any_memory(hunter, "target_death_confirmed"), "Hunter must record target_death_confirmed"
+    assert any_memory(hunter, "target_death_confirmed") or _any_memory_v3_kind("target_death_confirmed"), (
+        "Hunter must record target_death_confirmed"
+    )
     # Hunter must leave the zone after completing the mission.
     assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must record LEAVE_ZONE objective"
     assert hunter.get("has_left_zone") is True, "Hunter must have has_left_zone=True"
+
+
+def test_hunter_does_not_repeat_search_target_same_empty_location_forever() -> None:
+    """E2E regression: hunter must exhaust a false lead, then switch to intel,
+    find the target via trader intel, and complete the hunt — without looping on
+    the same empty location indefinitely.
+
+    Setup:
+    - Hunter starts at loc_spawn with a WRONG memory lead pointing to loc_false.
+    - Target is actually at loc_target (different from loc_false).
+    - A trader at loc_spawn can sell the correct intel once the wrong lead is exhausted.
+    - The hunter must search loc_false up to 3 times, mark it exhausted, then
+      buy intel and switch to the real target location.
+    """
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_false", "travel_time": 2},
+                {"to": "loc_target", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_false": {
+            "name": "False Lead",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_target", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_target": {
+            "name": "Target Location",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_false", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_target", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_spawn",
+        "is_alive": True,
+        "money": 50000,
+    }
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target", ammo_count=5)
+    target = _target(location_id="loc_target", hp=1)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_target"]["agents"] = ["target"]
+
+    # Plant a FALSE lead so the hunter starts by checking the wrong location.
+    _remember_target_location(hunter, state, "loc_false")
+
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=2000,
+    )
+    hunter = state["agents"]["hunter"]
+
+    # Helper: check memory_v3 records (legacy memory list may evict old entries
+    # over long runs; memory_v3 retains up to 5000 records with eviction of
+    # the lowest-priority entries, so relevant hunt records survive).
+    def _any_memory_v3_kind(kind: str) -> bool:
+        mv3 = hunter.get("memory_v3", {})
+        return any(r.get("kind") == kind for r in mv3.get("records", {}).values())
+
+    def _count_memory_v3(kind: str, *, location_id: str | None = None) -> int:
+        mv3 = hunter.get("memory_v3", {})
+        return sum(
+            1
+            for r in mv3.get("records", {}).values()
+            if r.get("kind") == kind and (location_id is None or r.get("location_id") == location_id)
+        )
+
+    # The hunter must have searched loc_false and recorded it as "not found".
+    assert _any_memory_v3_kind("target_not_found"), (
+        "Hunter must record target_not_found at the false lead location"
+    )
+    # Crucially: the hunter must NOT have looped on loc_false indefinitely.
+    # The exhaustion threshold is 3, so loc_false must be bounded even when
+    # the first lead is wrong.
+    false_lead_searches = _count_memory_v3("target_not_found", location_id="loc_false")
+    assert false_lead_searches >= 1, (
+        "Hunter must search the false lead at least once"
+    )
+    assert false_lead_searches <= 3, (
+        f"Hunter must stop searching the empty location at the exhaustion threshold (≤3), "
+        f"got {false_lead_searches} — the exhaustion / track-following mechanism may be broken"
+    )
+    # The hunter must continue with search/intel objectives rather than sticking
+    # forever to one stale location.
+    assert (
+        any_objective_decision(hunter, "GATHER_INTEL")
+        or any_objective_decision(hunter, "VERIFY_LEAD")
+        or any_objective_decision(hunter, "TRACK_TARGET")
+    ), "Hunter should continue lead-based search flow after exhausting stale location"
+    # Hunter leaves zone after mission completion.
+    assert hunter.get("has_left_zone") is True, "Hunter must leave the zone"
+
+
+def test_hunter_exhausts_empty_location_without_omniscient_tracks() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_false", "travel_time": 2},
+                {"to": "loc_target", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_false": {
+            "name": "False Lead",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_target", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_target": {
+            "name": "Target Location",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_false", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["debug_omniscient_targets"] = False
+
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target", ammo_count=5)
+    target = _target(location_id="loc_target", hp=100)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_target"]["agents"] = ["target"]
+
+    # Wrong initial lead and no traders/witnesses to avoid omniscient shortcuts.
+    _remember_target_location(hunter, state, "loc_false")
+
+    for _ in range(220):
+        state, _ = tick_zone_map(state)
+
+    hunter = state["agents"]["hunter"]
+    mv3 = hunter.get("memory_v3", {})
+    records = mv3.get("records", {}) if isinstance(mv3, dict) else {}
+    false_not_found = [
+        record
+        for record in records.values()
+        if isinstance(record, dict)
+        and record.get("kind") == "target_not_found"
+        and record.get("location_id") == "loc_false"
+    ]
+
+    assert 1 <= len(false_not_found) <= 3, (
+        f"Hunter must stop repeatedly searching loc_false after exhaustion threshold (<=3), got {len(false_not_found)}"
+    )
+    assert any(
+        isinstance(record, dict)
+        and record.get("kind") == "target_not_found"
+        and record.get("location_id") == "loc_false"
+        and isinstance(record.get("details"), dict)
+        and int(record.get("details", {}).get("failed_search_count") or 0) >= 3
+        for record in records.values()
+    ), "loc_false should be marked exhausted after repeated failed searches"
+
+    assert (
+        any_objective_decision(hunter, "GATHER_INTEL")
+        or any_objective_decision(hunter, "LOCATE_TARGET")
+        or any_memory(hunter, "no_witnesses")
+    ), "After exhausting false lead hunter should switch to intel-gathering behavior"

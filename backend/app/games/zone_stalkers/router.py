@@ -8,9 +8,9 @@ pollute the generic platform core.
 import os
 import uuid
 import shutil
-from typing import List
+from typing import List, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ from app.core.contexts.service import create_context
 from app.database import get_db
 
 router = APIRouter(tags=["zone_stalkers"])
+ProjectionModeParam = Literal["zone-lite", "game", "debug-map", "full"]
 
 # ── Media configuration ────────────────────────────────────────────────────────
 
@@ -210,3 +211,71 @@ def create_zone_event(
     db.commit()
 
     return event_ctx
+
+
+@router.get("/zone-stalkers/contexts/{context_id}/projection")
+def get_zone_projection(
+    context_id: uuid.UUID,
+    mode: ProjectionModeParam = Query(default="game"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+    from app.games.zone_stalkers.projections import json_size_bytes, project_zone_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+    state = load_context_state(ctx.id, ctx)
+    projected = project_zone_state(state=state, mode=mode)
+    return {
+        "context_id": str(ctx.id),
+        "projection_mode": mode,
+        "projection_size_bytes": json_size_bytes(projected),
+        "state": projected,
+    }
+
+
+@router.get("/zone-stalkers/debug/state-size/{context_id}")
+def get_zone_state_size(
+    context_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+    from app.games.zone_stalkers.projections import build_zone_state_size_report
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+    state = load_context_state(ctx.id, ctx)
+    return {
+        "context_id": str(ctx.id),
+        **build_zone_state_size_report(state),
+    }
+
+
+@router.get("/zone-stalkers/debug/performance/{match_id}")
+def get_zone_performance(
+    match_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+):
+    from app.games.zone_stalkers.performance_metrics import get_last_tick_metrics, get_tick_metrics
+
+    match_id_str = str(match_id)
+    metrics = get_tick_metrics(match_id=match_id_str, limit=limit)
+    return {
+        "match_id": match_id_str,
+        "count": len(metrics),
+        "latest": get_last_tick_metrics(match_id=match_id_str),
+        "items": metrics,
+    }

@@ -80,6 +80,17 @@ export function LocationDetailPanel({
   const mutants = loc.agents.map((id) => zoneState.mutants[id]).filter(Boolean);
   const aliveMutants = mutants.filter((m) => m.is_alive);
   const deadMutants = mutants.filter((m) => !m.is_alive);
+  const locationTrace = zoneState.debug?.location_hunt_traces?.[loc.id];
+  const positiveLeads = locationTrace?.positive_leads ?? [];
+  const negativeLeads = locationTrace?.negative_leads ?? [];
+  const exhaustedFor = locationTrace?.is_exhausted_for ?? [];
+  const routesIn = locationTrace?.routes_in ?? [];
+  const routesOut = locationTrace?.routes_out ?? [];
+  const combatHuntEvents = locationTrace?.combat_hunt_events ?? [];
+  const getAgentName = (id?: string | null) => {
+    if (!id) return "unknown";
+    return zoneState.agents[id]?.name ?? zoneState.traders[id]?.name ?? id;
+  };
 
   return (
     <div style={s.detail}>
@@ -223,6 +234,102 @@ export function LocationDetailPanel({
               </DetailRow>
             );
           })
+        )}
+      </Section>
+
+      <Section label="🕵️ Следы / Hunt Traces">
+        {(positiveLeads.length === 0 && negativeLeads.length === 0 && exhaustedFor.length === 0 && routesIn.length === 0 && routesOut.length === 0 && combatHuntEvents.length === 0) ? (
+          <EmptyRow />
+        ) : (
+          <>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Положительные</span>
+              <span style={{ color: '#67e8f9', fontSize: '0.78rem' }}>{positiveLeads.length}</span>
+            </DetailRow>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Негативные</span>
+              <span style={{ color: '#fda4af', fontSize: '0.78rem' }}>{negativeLeads.length}</span>
+            </DetailRow>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Exhausted для</span>
+              <span style={{ color: '#fda4af', fontSize: '0.78rem' }}>{exhaustedFor.length}</span>
+            </DetailRow>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Routes in / out</span>
+              <span style={{ color: '#a5b4fc', fontSize: '0.78rem' }}>{routesIn.length} / {routesOut.length}</span>
+            </DetailRow>
+            <DetailRow>
+              <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 120, flexShrink: 0 }}>Events</span>
+              <span style={{ color: '#fbbf24', fontSize: '0.78rem' }}>{combatHuntEvents.length}</span>
+            </DetailRow>
+
+            {positiveLeads.slice(0, 8).map((lead) => (
+              <DetailRow key={`lead-${lead.id}`}>
+                <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1 }}>
+                  {lead.kind} · {Math.round(lead.confidence * 100)}% · t{lead.turn}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                  {getAgentName(lead.hunter_id)} → {lead.target_id ?? "target?"}
+                </span>
+              </DetailRow>
+            ))}
+
+            {negativeLeads.slice(0, 10).map((lead) => (
+              <DetailRow key={`neg-${lead.id}`}>
+                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1 }}>
+                  {lead.kind}
+                  {lead.source_kind ? ` · src=${lead.source_kind}` : ""}
+                  {lead.failed_search_count != null && lead.failed_search_count > 0 ? ` · miss=${lead.failed_search_count}` : ""}
+                  {lead.cooldown_until_turn ? ` · cd→${lead.cooldown_until_turn}` : ""}
+                  {" · "}
+                  {Math.round(lead.confidence * 100)}% · t{lead.turn}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                  {lead.source_ref}
+                </span>
+              </DetailRow>
+            ))}
+
+            {exhaustedFor.slice(0, 8).map((item) => (
+              <DetailRow key={`exh-${item.hunter_id}-${item.target_id ?? "target"}`}>
+                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1 }}>
+                  ⛔ exhausted
+                  {item.failed_search_count ? ` · miss=${item.failed_search_count}` : ""}
+                  {item.cooldown_until_turn ? ` · cd→${item.cooldown_until_turn}` : ""}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                  {getAgentName(item.hunter_id)} → {item.target_id ?? "target?"}
+                </span>
+              </DetailRow>
+            ))}
+
+            {routesIn.slice(0, 10).map((route) => (
+              <DetailRow key={`in-${route.source_ref}`}>
+                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1 }}>
+                  ← {route.from_location_id ?? 'unknown'} · {Math.round(route.confidence * 100)}% · {route.reason} · t{route.turn}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{getAgentName(route.hunter_id)}</span>
+              </DetailRow>
+            ))}
+
+            {routesOut.slice(0, 10).map((route) => (
+              <DetailRow key={`out-${route.source_ref}`}>
+                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1 }}>
+                  → {route.to_location_id ?? 'unknown'} · {Math.round(route.confidence * 100)}% · {route.reason} · t{route.turn}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{getAgentName(route.hunter_id)}</span>
+              </DetailRow>
+            ))}
+
+            {combatHuntEvents.slice(0, 10).map((event) => (
+              <DetailRow key={`evt-${event.source_ref}`}>
+                <span style={{ color: '#fbbf24', fontSize: '0.75rem', flex: 1 }}>
+                  {event.kind} · t{event.turn} · {event.summary}
+                </span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{getAgentName(event.hunter_id)}</span>
+              </DetailRow>
+            ))}
+          </>
         )}
       </Section>
 

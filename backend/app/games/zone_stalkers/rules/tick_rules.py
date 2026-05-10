@@ -132,8 +132,10 @@ _OBJECTIVE_TO_GOAL: Dict[str, str] = {
     "REACH_SAFE_SHELTER": "emergency_shelter",
     "WAIT_IN_SHELTER": "emergency_shelter",
     "HUNT_TARGET": "kill_stalker",
+    "GATHER_INTEL": "kill_stalker",
     "PREPARE_FOR_HUNT": "prepare_for_hunt",
     "LOCATE_TARGET": "kill_stalker",
+    "VERIFY_LEAD": "kill_stalker",
     "TRACK_TARGET": "kill_stalker",
     "ENGAGE_TARGET": "kill_stalker",
     "CONFIRM_KILL": "kill_stalker",
@@ -632,6 +634,16 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             "world_day": world_day,
         },
     })
+    try:
+        from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload  # noqa: PLC0415
+
+        debug_payload = build_hunt_debug_payload(
+            state=state,
+            world_turn=state["world_turn"],
+        )
+        state.setdefault("debug", {}).update(debug_payload)
+    except Exception:
+        state.setdefault("debug", {})
     return state, events
 
 
@@ -3597,6 +3609,8 @@ def _bot_ask_colocated_stalkers_about_agent(
                     "source_agent_id": other_id,
                     "source_agent_name": other_name,
                     "obs_world_turn": obs_turn,
+                    # Stalker witnesses are less reliable than trader network intel.
+                    "confidence": 0.55,
                 },
                 summary=(
                     f"{other_name} рассказал, что видел «{target_agent_name}» "
@@ -3683,6 +3697,8 @@ def _bot_buy_hunt_intel_from_trader(
             "source_agent_id": trader.get("id", ""),
             "source_agent_name": trader_name,
             "price_paid": _HUNT_INTEL_PRICE,
+            # Trader network intel is more reliable than stalker word-of-mouth.
+            "confidence": 0.70,
         },
         summary=(
             f"Я купил у торговца «{trader_name}» информацию о местонахождении "
@@ -4463,12 +4479,38 @@ def _run_npc_brain_v3_decision_inner(
             "is_alive": target_belief.is_alive,
             "last_known_location_id": target_belief.last_known_location_id,
             "location_confidence": round(float(target_belief.location_confidence), 3),
+            "best_location_id": target_belief.best_location_id,
+            "best_location_confidence": round(float(target_belief.best_location_confidence), 3),
             "last_seen_turn": target_belief.last_seen_turn,
             "visible_now": target_belief.visible_now,
             "co_located": target_belief.co_located,
             "equipment_known": target_belief.equipment_known,
             "combat_strength": target_belief.combat_strength,
             "combat_strength_confidence": round(float(target_belief.combat_strength_confidence), 3),
+            "possible_locations": [
+                {
+                    "location_id": hypothesis.location_id,
+                    "probability": round(float(hypothesis.probability), 3),
+                    "confidence": round(float(hypothesis.confidence), 3),
+                    "freshness": round(float(hypothesis.freshness), 3),
+                    "reason": hypothesis.reason,
+                    "source_refs": list(hypothesis.source_refs),
+                }
+                for hypothesis in target_belief.possible_locations
+            ],
+            "likely_routes": [
+                {
+                    "from_location_id": route.from_location_id,
+                    "to_location_id": route.to_location_id,
+                    "confidence": round(float(route.confidence), 3),
+                    "freshness": round(float(route.freshness), 3),
+                    "reason": route.reason,
+                    "source_refs": list(route.source_refs),
+                }
+                for route in target_belief.likely_routes
+            ],
+            "exhausted_locations": list(target_belief.exhausted_locations),
+            "lead_count": int(target_belief.lead_count),
             "route_hints": list(target_belief.route_hints),
             "source_refs": list(target_belief.source_refs),
         } if target_belief.target_id else None,

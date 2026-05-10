@@ -37,6 +37,44 @@ export interface StalkerAgent {
     target_id?: string;
     turns_remaining?: number;
   } | null;
+  brain_v3_context?: {
+    objective_key?: string | null;
+    hunt_target_belief?: {
+      target_id: string;
+      best_location_id: string | null;
+      best_location_confidence: number;
+      possible_locations: Array<{
+        location_id: string;
+        probability: number;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      likely_routes: Array<{
+        from_location_id: string | null;
+        to_location_id: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      exhausted_locations: string[];
+      lead_count: number;
+    } | null;
+  } | null;
+  memory_v3?: {
+    records?: Record<string, {
+      id: string;
+      kind: string;
+      layer: string;
+      summary: string;
+      details?: Record<string, unknown>;
+      location_id?: string | null;
+      confidence?: number;
+      created_turn?: number;
+    }>;
+  } | null;
 }
 
 export interface ZoneMapState {
@@ -84,6 +122,115 @@ export interface ZoneMapState {
   auto_tick_speed?: string | null;
   /** @deprecated Legacy slow-mode flag (kept for backward compat) */
   auto_tick_slow_mode?: boolean;
+  debug?: {
+    hunt_search_by_agent?: Record<string, {
+      hunter_id: string;
+      hunter_name: string;
+      target_id: string;
+      target_name?: string;
+      best_location_id?: string | null;
+      best_location_confidence?: number;
+      possible_locations?: Array<{
+        location_id: string;
+        probability: number;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      likely_routes?: Array<{
+        from_location_id: string | null;
+        to_location_id: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      exhausted_locations?: string[];
+      lead_count?: number;
+      current_objective?: string | null;
+      current_plan_target_location_id?: string | null;
+    }>;
+    location_hunt_traces?: Record<string, {
+      location_id: string;
+      positive_leads: Array<{
+        id: string;
+        kind: string;
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        summary: string;
+        confidence: number;
+        freshness: number;
+        turn: number;
+        source_ref: string;
+      }>;
+      negative_leads: Array<{
+        id: string;
+        kind: string;
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        source_kind?: string | null;
+        summary: string;
+        confidence: number;
+        freshness: number;
+        turn: number;
+        source_ref: string;
+        failed_search_count?: number;
+        cooldown_until_turn?: number | null;
+      }>;
+      routes_in: Array<{
+        hunter_id: string;
+        target_id?: string | null;
+        from_location_id: string | null;
+        to_location_id: string | null;
+        source_agent_id?: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_ref: string;
+        turn: number;
+      }>;
+      routes_out: Array<{
+        hunter_id: string;
+        target_id?: string | null;
+        from_location_id: string | null;
+        to_location_id: string | null;
+        source_agent_id?: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_ref: string;
+        turn: number;
+      }>;
+      is_exhausted_for: Array<{
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        source_kind?: string | null;
+        failed_search_count?: number;
+        cooldown_until_turn?: number | null;
+        source_ref?: string;
+        turn?: number;
+        freshness?: number;
+      }>;
+      combat_hunt_events?: Array<{
+        kind: string;
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        summary: string;
+        confidence: number;
+        freshness: number;
+        turn: number;
+        source_ref: string;
+      }>;
+      lead_count?: number;
+      route_count?: number;
+      event_count?: number;
+    }>;
+  };
 }
 
 export interface DebugMapPageProps {

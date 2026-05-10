@@ -161,12 +161,32 @@ interface StalkerAgent {
       is_alive: boolean | null;
       last_known_location_id: string | null;
       location_confidence: number;
+      best_location_id: string | null;
+      best_location_confidence: number;
       last_seen_turn: number | null;
       visible_now: boolean;
       co_located: boolean;
       equipment_known: boolean;
       combat_strength: number | null;
       combat_strength_confidence: number;
+      possible_locations: Array<{
+        location_id: string;
+        probability: number;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      likely_routes: Array<{
+        from_location_id: string | null;
+        to_location_id: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      exhausted_locations: string[];
+      lead_count: number;
       route_hints: string[];
       source_refs: string[];
     } | null;
@@ -203,6 +223,115 @@ interface ZoneMapState {
   game_over: boolean;
   auto_tick_enabled?: boolean;
   auto_tick_speed?: string | null;
+  debug?: {
+    hunt_search_by_agent?: Record<string, {
+      hunter_id: string;
+      hunter_name: string;
+      target_id: string;
+      target_name?: string;
+      best_location_id?: string | null;
+      best_location_confidence?: number;
+      possible_locations?: Array<{
+        location_id: string;
+        probability: number;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      likely_routes?: Array<{
+        from_location_id: string | null;
+        to_location_id: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_refs: string[];
+      }>;
+      exhausted_locations?: string[];
+      lead_count?: number;
+      current_objective?: string | null;
+      current_plan_target_location_id?: string | null;
+    }>;
+    location_hunt_traces?: Record<string, {
+      location_id: string;
+      positive_leads: Array<{
+        id: string;
+        kind: string;
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        summary: string;
+        confidence: number;
+        freshness: number;
+        turn: number;
+        source_ref: string;
+      }>;
+      negative_leads: Array<{
+        id: string;
+        kind: string;
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        source_kind?: string | null;
+        summary: string;
+        confidence: number;
+        freshness: number;
+        turn: number;
+        source_ref: string;
+        failed_search_count?: number;
+        cooldown_until_turn?: number | null;
+      }>;
+      routes_in: Array<{
+        hunter_id: string;
+        target_id?: string | null;
+        from_location_id: string | null;
+        to_location_id: string | null;
+        source_agent_id?: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_ref: string;
+        turn: number;
+      }>;
+      routes_out: Array<{
+        hunter_id: string;
+        target_id?: string | null;
+        from_location_id: string | null;
+        to_location_id: string | null;
+        source_agent_id?: string | null;
+        confidence: number;
+        freshness: number;
+        reason: string;
+        source_ref: string;
+        turn: number;
+      }>;
+      is_exhausted_for: Array<{
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        source_kind?: string | null;
+        failed_search_count?: number;
+        cooldown_until_turn?: number | null;
+        source_ref?: string;
+        turn?: number;
+        freshness?: number;
+      }>;
+      combat_hunt_events?: Array<{
+        kind: string;
+        hunter_id: string;
+        target_id?: string | null;
+        source_agent_id?: string | null;
+        summary: string;
+        confidence: number;
+        freshness: number;
+        turn: number;
+        source_ref: string;
+      }>;
+      lead_count?: number;
+      route_count?: number;
+      event_count?: number;
+    }>;
+  };
 }
 
 interface ZoneEventState {
@@ -1249,11 +1378,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                   )}
                   {stalker.brain_v3_context?.hunt_target_belief && (() => {
                     const tb = stalker.brain_v3_context!.hunt_target_belief!;
+                    const topLead = tb.possible_locations?.[0];
                     return (
                       <div style={{fontSize: 11, color: '#cca', marginTop: 3, background: '#1a1800', borderRadius: 4, padding: '3px 6px'}}>
-                        🎯 Hunt: {tb.co_located ? '🔴 со-лоц' : tb.last_known_location_id ? `📍 ${tb.last_known_location_id} (${(tb.location_confidence * 100).toFixed(0)}%)` : '❓ локация неизв.'}
+                        🎯 Hunt: {tb.co_located ? '🔴 со-лоц' : tb.best_location_id ? `📍 ${tb.best_location_id} (${(tb.best_location_confidence * 100).toFixed(0)}%)` : '❓ локация неизв.'}
                         {tb.is_alive === false && <span style={{color: '#5f5', marginLeft: 4}}>✅ ликвидирован</span>}
                         {tb.combat_strength != null && <span style={{color: '#f88', marginLeft: 4}}>💪 {(tb.combat_strength * 100).toFixed(0)}%</span>}
+                        {topLead && <span style={{color: '#9ad', marginLeft: 4}}>🧩 {topLead.reason}</span>}
+                        {tb.exhausted_locations?.length > 0 && <span style={{color: '#f7b', marginLeft: 4}}>⛔ {tb.exhausted_locations.length}</span>}
+                        {tb.lead_count > 0 && <span style={{color: '#888', marginLeft: 4}}>leads: {tb.lead_count}</span>}
                       </div>
                     );
                   })()}

@@ -18,6 +18,25 @@ interface NpcBrainPanelProps {
     target_id: string;
     final_target_id?: string;
   } | null;
+  huntTargetBelief?: {
+    target_id: string;
+    best_location_id: string | null;
+    best_location_confidence: number;
+    possible_locations: Array<{
+      location_id: string;
+      confidence: number;
+      freshness: number;
+      reason: string;
+    }>;
+    likely_routes: Array<{
+      from_location_id: string | null;
+      to_location_id: string | null;
+      confidence: number;
+      reason: string;
+    }>;
+    exhausted_locations: string[];
+    lead_count: number;
+  } | null;
 }
 
 export function NpcBrainPanel({
@@ -26,6 +45,7 @@ export function NpcBrainPanel({
   latestDecisionEvent,
   currentObjective,
   scheduledAction,
+  huntTargetBelief,
 }: NpcBrainPanelProps) {
   if (!brainTrace) return null;
 
@@ -119,6 +139,31 @@ export function NpcBrainPanel({
             <div style={st.reasonBlock}>
               <span style={st.memoryLabel}>Последнее решение:</span>{' '}
               {latestDecisionEvent.summary}
+            </div>
+          )}
+
+          {huntTargetBelief?.target_id && (
+            <div style={st.huntBlock}>
+              <div style={st.huntTitle}>Hunt Search</div>
+              <div style={st.huntLine}>
+                🎯 target: {huntTargetBelief.target_id}
+              </div>
+              <div style={st.huntLine}>
+                📍 best: {huntTargetBelief.best_location_id ?? '—'} ({pct(huntTargetBelief.best_location_confidence)})
+              </div>
+              <div style={st.huntLine}>
+                🔎 leads: {huntTargetBelief.lead_count} · possible: {huntTargetBelief.possible_locations?.length ?? 0} · routes: {huntTargetBelief.likely_routes?.length ?? 0}
+              </div>
+              {huntTargetBelief.exhausted_locations?.length > 0 && (
+                <div style={st.huntLine}>
+                  ⛔ exhausted: {huntTargetBelief.exhausted_locations.join(', ')}
+                </div>
+              )}
+              {huntTargetBelief.possible_locations?.slice(0, 3).map((loc) => (
+                <div key={`hunt-loc-${loc.location_id}`} style={st.huntSubLine}>
+                  • {loc.location_id} — {pct(loc.confidence)} · {loc.reason}
+                </div>
+              ))}
             </div>
           )}
 
@@ -275,6 +320,30 @@ const st: Record<string, React.CSSProperties> = {
     fontStyle: 'italic',
     borderTop: '1px solid #1e293b',
     paddingTop: 4,
+  },
+  huntBlock: {
+    marginTop: 4,
+    borderTop: '1px solid #1e293b',
+    paddingTop: 6,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  huntTitle: {
+    color: '#67e8f9',
+    fontSize: '0.72rem',
+    fontWeight: 700,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em',
+  },
+  huntLine: {
+    color: '#94a3b8',
+    fontSize: '0.72rem',
+  },
+  huntSubLine: {
+    color: '#64748b',
+    fontSize: '0.7rem',
+    paddingLeft: 6,
   },
   memoryLabel: {
     color: '#64748b',

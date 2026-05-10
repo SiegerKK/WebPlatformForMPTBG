@@ -105,14 +105,38 @@ export type CompactNpcHistoryExport = {
     archived?: number;
     top_layers?: Array<{ layer: string; count: number }>;
     top_kinds?: Array<{ kind: string; count: number }>;
-    recently_accessed?: Array<{
+      recently_accessed?: Array<{
       id: string;
       kind: string;
       layer: string;
       summary: string;
       confidence?: number;
       last_accessed_turn?: number | null;
+      }>;
+  };
+  hunt_search?: {
+    target_id?: string;
+    target_name?: string;
+    best_location_id?: string | null;
+    best_location_confidence?: number;
+    possible_locations?: Array<{
+      location_id: string;
+      probability: number;
+      confidence: number;
+      freshness: number;
+      reason: string;
+      source_refs: string[];
     }>;
+    likely_routes?: Array<{
+      from_location_id: string | null;
+      to_location_id: string | null;
+      confidence: number;
+      freshness: number;
+      reason: string;
+      source_refs: string[];
+    }>;
+    exhausted_locations?: string[];
+    lead_count?: number;
   };
 };
 
@@ -426,6 +450,24 @@ export const buildCompactNpcHistoryExport = (
     wealth_goal_reached: wealthGoalTarget != null ? liquidWealth >= wealthGoalTarget : undefined,
     global_goal_achieved: Boolean(agent.global_goal_achieved),
   };
+  const huntBelief = agent.brain_v3_context?.hunt_target_belief;
+  const targetName = huntBelief?.target_id
+    ? (displayMemory
+        .slice()
+        .reverse()
+        .find((mem) => {
+          const effects = mem.effects ?? {};
+          const actionKind = typeof effects.action_kind === 'string' ? effects.action_kind : '';
+          if (actionKind !== 'target_seen' && actionKind !== 'target_intel') return false;
+          const targetId = typeof effects.target_id === 'string'
+            ? effects.target_id
+            : typeof effects.target_agent_id === 'string'
+            ? effects.target_agent_id
+            : '';
+          return targetId === huntBelief.target_id;
+        })
+        ?.effects?.target_name as string | undefined)
+    : undefined;
 
   return {
     export_schema: 'npc_history_v1',
@@ -502,6 +544,18 @@ export const buildCompactNpcHistoryExport = (
     },
     story_timeline: storyTimeline,
     memory_v3_summary: buildMemoryV3Summary(agent.memory_v3),
+    hunt_search: huntBelief
+      ? {
+          target_id: huntBelief.target_id,
+          target_name: targetName,
+          best_location_id: huntBelief.best_location_id,
+          best_location_confidence: huntBelief.best_location_confidence,
+          possible_locations: (huntBelief.possible_locations ?? []).slice(0, 5),
+          likely_routes: (huntBelief.likely_routes ?? []).slice(0, 5),
+          exhausted_locations: huntBelief.exhausted_locations ?? [],
+          lead_count: huntBelief.lead_count,
+        }
+      : undefined,
   };
 };
 
