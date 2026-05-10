@@ -72,7 +72,7 @@ Do not do here:
 
 ```text
 - change objective scoring semantics;
-- rewrite PR6 hunt mechanics;
+- rewrite hunt mechanics;
 - rewrite active plan system;
 - change combat mechanics;
 - remove memory model.
@@ -245,7 +245,7 @@ trade result
 agent global_goal/current_goal change
 ```
 
-Important PR6-specific invalidators:
+Important hunt-specific invalidators:
 
 ```text
 target_seen:
@@ -439,7 +439,7 @@ Brain Runtime
   decision_revision
 ```
 
-This is important so skipped decisions do not look like NPC “tупит”.
+This is important so skipped decisions do not look like the NPC is unresponsive.
 
 Debug export should include compact brain_runtime.
 
@@ -533,7 +533,7 @@ Run:
 [ ] Urgent decisions bypass budget.
 [ ] Normal decisions are capped per tick.
 [ ] No starvation.
-[ ] PR6 hunt behavior remains correct.
+[ ] Hunt behavior remains correct.
 [ ] Get-rich behavior remains correct.
 [ ] Emission/combat/critical needs remain responsive.
 [ ] NPC profile exposes brain_runtime.
@@ -588,4 +588,4 @@ npc_brain_total_ms reduced
 urgent decisions still immediate
 ```
 
-This is the PR that should make Brain v3 scalable.
+This is the PR that makes Brain v3 scalable.
