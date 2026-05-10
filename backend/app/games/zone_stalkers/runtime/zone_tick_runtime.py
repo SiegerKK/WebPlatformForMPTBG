@@ -151,7 +151,7 @@ class ZoneTickRuntime(TickRuntime):
 
     def mutable_agent_list(self, agent_id: str, key: str) -> list[Any]:
         agent = self.agent(agent_id)
-        value = list(agent.get(key) or [])
+        value = list(agent.get(key, []))
         agent[key] = value
         self.mark_agent_dirty(agent_id)
         self._inc_nested_copy()
@@ -159,7 +159,7 @@ class ZoneTickRuntime(TickRuntime):
 
     def mutable_agent_dict(self, agent_id: str, key: str) -> dict[str, Any]:
         agent = self.agent(agent_id)
-        value = dict(agent.get(key) or {})
+        value = dict(agent.get(key, {}))
         agent[key] = value
         self.mark_agent_dirty(agent_id)
         self._inc_nested_copy()
@@ -167,7 +167,7 @@ class ZoneTickRuntime(TickRuntime):
 
     def mutable_location_list(self, location_id: str, key: str) -> list[Any]:
         location = self.location(location_id)
-        value = list(location.get(key) or [])
+        value = list(location.get(key, []))
         location[key] = value
         self.mark_location_dirty(location_id)
         self._inc_nested_copy()
@@ -175,7 +175,7 @@ class ZoneTickRuntime(TickRuntime):
 
     def mutable_location_dict(self, location_id: str, key: str) -> dict[str, Any]:
         location = self.location(location_id)
-        value = dict(location.get(key) or {})
+        value = dict(location.get(key, {}))
         location[key] = value
         self.mark_location_dirty(location_id)
         self._inc_nested_copy()
@@ -183,7 +183,7 @@ class ZoneTickRuntime(TickRuntime):
 
     def mutable_trader_list(self, trader_id: str, key: str) -> list[Any]:
         trader = self.trader(trader_id)
-        value = list(trader.get(key) or [])
+        value = list(trader.get(key, []))
         trader[key] = value
         self.mark_trader_dirty(trader_id)
         self._inc_nested_copy()
@@ -191,7 +191,7 @@ class ZoneTickRuntime(TickRuntime):
 
     def mutable_trader_dict(self, trader_id: str, key: str) -> dict[str, Any]:
         trader = self.trader(trader_id)
-        value = dict(trader.get(key) or {})
+        value = dict(trader.get(key, {}))
         trader[key] = value
         self.mark_trader_dirty(trader_id)
         self._inc_nested_copy()
