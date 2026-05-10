@@ -210,54 +210,128 @@ def _project_zone_game(state: dict[str, Any]) -> dict[str, Any]:
 
 def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
     """
-    Lightweight debug-map projection.
+    Lightweight debug-map projection — built selectively without deepcopy.
 
     Like debug-map but excludes heavy data (full location_hunt_traces,
     full hunt_search_by_agent). Debug detail comes via scoped endpoints.
+    Avoids full deepcopy of the state (which can be 1-5 MB) by constructing
+    only the fields needed by the frontend.
     """
-    projected = copy.deepcopy(state)
-    # Strip agent heavy fields
-    for agent in (projected.get("agents") or {}).values():
+    # ── Agents: compact per-agent dict (exclude memory, memory_v3) ────────
+    agents_raw = state.get("agents") or {}
+    agents_out: dict[str, Any] = {}
+    for agent_id, agent in agents_raw.items():
         if not isinstance(agent, dict):
+            agents_out[agent_id] = agent
             continue
-        agent.pop("memory", None)
-        agent.pop("memory_v3", None)
         compact_ctx = _compact_brain_context(agent)
+        # Only include keys present in the agent dict (skip None to avoid size bloat)
+        _agent_fields = {
+            "id": agent.get("id"),
+            "name": agent.get("name"),
+            "archetype": agent.get("archetype"),
+            "controller": agent.get("controller"),
+            "location_id": agent.get("location_id"),
+            "is_alive": agent.get("is_alive"),
+            "has_left_zone": agent.get("has_left_zone"),
+            "hp": agent.get("hp"),
+            "max_hp": agent.get("max_hp"),
+            "radiation": agent.get("radiation"),
+            "hunger": agent.get("hunger"),
+            "thirst": agent.get("thirst"),
+            "sleepiness": agent.get("sleepiness"),
+            "money": agent.get("money"),
+            "faction": agent.get("faction"),
+            "reputation": agent.get("reputation"),
+            "experience": agent.get("experience"),
+            "skills": agent.get("skills"),
+            "global_goal": agent.get("global_goal"),
+            "current_goal": agent.get("current_goal"),
+            "risk_tolerance": agent.get("risk_tolerance"),
+            "action_used": agent.get("action_used"),
+            "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action")),
+            "active_plan_summary": _compact_active_plan(agent.get("active_plan_v3")),
+            "equipment_summary": _compact_equipment(agent.get("equipment")),
+            "inventory_summary": _compact_inventory(agent.get("inventory")),
+            "equipment": agent.get("equipment"),
+            "inventory": agent.get("inventory"),
+        }
+        agent_dict: dict[str, Any] = {k: v for k, v in _agent_fields.items() if v is not None}
         if compact_ctx is not None:
-            agent["brain_v3_context"] = compact_ctx
-        else:
-            agent.pop("brain_v3_context", None)
-    # Strip trader heavy fields
-    for trader in (projected.get("traders") or {}).values():
+            agent_dict["brain_v3_context"] = compact_ctx
+        agents_out[agent_id] = agent_dict
+
+    # ── Traders: compact per-trader dict (exclude memory, memory_v3, brain_trace) ─
+    traders_raw = state.get("traders") or {}
+    traders_out: dict[str, Any] = {}
+    for trader_id, trader in traders_raw.items():
         if not isinstance(trader, dict):
+            traders_out[trader_id] = trader
             continue
-        trader.pop("memory", None)
-        trader.pop("memory_v3", None)
-        trader.pop("brain_trace", None)
-    # Strip heavy debug data — keep only summary counts
-    debug = projected.get("debug")
-    if isinstance(debug, dict):
-        # Replace full location_hunt_traces with counts-only
-        lht = debug.get("location_hunt_traces")
+        traders_out[trader_id] = {
+            "id": trader.get("id"),
+            "name": trader.get("name"),
+            "archetype": trader.get("archetype"),
+            "location_id": trader.get("location_id"),
+            "is_alive": trader.get("is_alive"),
+            "money": trader.get("money"),
+            "inventory": trader.get("inventory"),
+            "prices": trader.get("prices"),
+        }
+
+    # ── Debug: compact version with summary counts only ───────────────────
+    debug_raw = state.get("debug")
+    debug_out: dict[str, Any] | None = None
+    if isinstance(debug_raw, dict):
+        debug_out = {}
+        lht = debug_raw.get("location_hunt_traces")
         if isinstance(lht, dict):
-            debug["location_hunt_traces_count"] = len(lht)
-            debug["location_hunt_traces"] = {}  # Stripped: too large for initial load; count preserved; details available via /debug/hunt-search/locations/{id}
-        # Replace full hunt_search_by_agent with compact version
-        hsba = debug.get("hunt_search_by_agent")
+            debug_out["location_hunt_traces_count"] = len(lht)
+            debug_out["location_hunt_traces"] = {}  # stripped: details available via /debug/hunt-search/locations/{id}
+        hsba = debug_raw.get("hunt_search_by_agent")
         if isinstance(hsba, dict):
-            debug["hunt_search_by_agent"] = {
-                agent_id: {
+            debug_out["hunt_search_by_agent"] = {
+                aid: {
                     "target_id": v.get("target_id") if isinstance(v, dict) else None,
                     "best_location_id": v.get("best_location_id") if isinstance(v, dict) else None,
                     "best_location_confidence": v.get("best_location_confidence") if isinstance(v, dict) else None,
                     "lead_count": v.get("lead_count") if isinstance(v, dict) else None,
                 }
-                for agent_id, v in hsba.items()
+                for aid, v in hsba.items()
             }
-    # Include revision fields
-    projected["state_revision"] = state.get("state_revision", 0)
-    projected["map_revision"] = state.get("map_revision", 0)
-    return projected
+
+    # ── Top-level scalars and collections ─────────────────────────────────
+    # Only include keys present in state (skip None to avoid size bloat on minimal states)
+    _top_fields = {
+        "context_type": state.get("context_type"),
+        "world_turn": state.get("world_turn"),
+        "world_day": state.get("world_day"),
+        "world_hour": state.get("world_hour"),
+        "world_minute": state.get("world_minute"),
+        "game_over": state.get("game_over"),
+        "emission_active": state.get("emission_active"),
+        "emission_scheduled_turn": state.get("emission_scheduled_turn"),
+        "emission_ends_turn": state.get("emission_ends_turn"),
+        "auto_tick_enabled": state.get("auto_tick_enabled"),
+        "auto_tick_speed": state.get("auto_tick_speed"),
+        "debug_auto_tick": state.get("debug_auto_tick"),
+        "player_agents": state.get("player_agents"),
+        "active_events": state.get("active_events"),
+        "debug_hunt_traces_enabled": state.get("debug_hunt_traces_enabled"),
+        "debug_layout": state.get("debug_layout"),
+        "max_turns": state.get("max_turns"),
+    }
+    result: dict[str, Any] = {k: v for k, v in _top_fields.items() if v is not None}
+    # Always include revision and collection fields
+    result["state_revision"] = state.get("state_revision", 0)
+    result["map_revision"] = state.get("map_revision", 0)
+    result["agents"] = agents_out
+    result["traders"] = traders_out
+    result["locations"] = _project_locations_game(state.get("locations", {}))
+    result["mutants"] = state.get("mutants", {})
+    if debug_out is not None:
+        result["debug"] = debug_out
+    return result
 
 
 def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[str, Any]:

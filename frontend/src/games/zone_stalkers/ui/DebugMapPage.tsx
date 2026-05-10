@@ -58,7 +58,7 @@ function getRegionColors(
   );
 }
 
-export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId }: DebugMapPageProps) {
+export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId, debugState, subscribeZoneDebug: _subscribeZoneDebug, unsubscribeZoneDebug: _unsubscribeZoneDebug }: DebugMapPageProps) {
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [mapOverlayMode, setMapOverlayMode] = useState<'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes' | 'combat_hunt_events'>('default');
@@ -1136,7 +1136,14 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     persistMap(effectivePosRef.current, localConnsRef.current, next);
   }, [persistMap]);
 
-  const huntSearchByAgent = zoneState.debug?.hunt_search_by_agent ?? {};
+  // Use live debug state from WebSocket deltas when available, fall back to projection
+  // TODO(next-step): adopt map-static/map-dynamic endpoints for full static/dynamic split
+  type HuntSearchEntry = NonNullable<NonNullable<typeof zoneState.debug>['hunt_search_by_agent']>[string];
+  const huntSearchByAgent = (
+    (debugState && Object.keys(debugState.huntSearchByAgent).length > 0)
+      ? debugState.huntSearchByAgent
+      : (zoneState.debug?.hunt_search_by_agent ?? {})
+  ) as Record<string, HuntSearchEntry>;
   const huntOverlayCandidates = useMemo(
     () => Object.values(huntSearchByAgent),
     [huntSearchByAgent],

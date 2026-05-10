@@ -222,6 +222,8 @@ class ZoneStalkerRuleSet(RuleSet):
             "events_emitted": len(emitted),
             "new_events": new_events_for_ws,
             "zone_delta": zone_delta,
+            "old_state": old_state,
+            "new_state": new_state,
         }
 
     # ── Command validation / resolution ──────────────────────────────────────

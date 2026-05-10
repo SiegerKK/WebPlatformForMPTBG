@@ -30,6 +30,8 @@ class ConnectionManager:
     def __init__(self) -> None:
         # match_id (str) → set of active WebSocket objects
         self._connections: Dict[str, Set[WebSocket]] = {}
+        # conn_id (str(id(ws))) → WebSocket — reverse map for per-connection sends
+        self._conn_id_to_ws: Dict[str, WebSocket] = {}
         # Event loop reference stored at startup for thread-safe scheduling.
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -44,19 +46,26 @@ class ConnectionManager:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def connect(self, match_id: str, ws: WebSocket) -> None:
-        """Accept *ws* and register it under *match_id*."""
-        await ws.accept()
+        """Register *ws* under *match_id*. The caller must have already accepted the WebSocket."""
+        conn_id = str(id(ws))
+        self._conn_id_to_ws[conn_id] = ws
         self._connections.setdefault(match_id, set()).add(ws)
         logger.debug("WS connect: match=%s total=%d", match_id, len(self._connections[match_id]))
 
     def disconnect(self, match_id: str, ws: WebSocket) -> None:
         """Remove *ws* from the registry (safe to call if not registered)."""
+        conn_id = str(id(ws))
+        self._conn_id_to_ws.pop(conn_id, None)
         sockets = self._connections.get(match_id)
         if sockets:
             sockets.discard(ws)
             if not sockets:
                 del self._connections[match_id]
         logger.debug("WS disconnect: match=%s", match_id)
+
+    def get_connection(self, conn_id: str) -> WebSocket | None:
+        """Return the WebSocket for a given connection id, or None if not found."""
+        return self._conn_id_to_ws.get(conn_id)
 
     # ── Broadcast ─────────────────────────────────────────────────────────────
 
@@ -72,6 +81,13 @@ class ConnectionManager:
                 dead.append(ws)
         for ws in dead:
             self.disconnect(match_id, ws)
+
+    async def send_to(self, ws: WebSocket, data: dict) -> None:
+        """Send *data* as JSON to a single WebSocket connection."""
+        try:
+            await ws.send_json(data)
+        except Exception as exc:
+            logger.debug("WS send_to failed: %s", exc)
 
     def notify(self, match_id: str, data: Dict[str, Any]) -> None:
         """

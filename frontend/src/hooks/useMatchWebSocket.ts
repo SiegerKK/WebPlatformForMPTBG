@@ -41,7 +41,7 @@ export function useMatchWebSocket(
   matchId: string,
   token: string | null,
   onMessage: (msg: WsMessage) => void,
-): { connected: boolean } {
+): { connected: boolean; sendMessage: (msg: Record<string, unknown>) => void } {
   const [connected, setConnected] = useState(false);
 
   // Stable ref to the latest onMessage callback — avoids restarting the effect
@@ -137,5 +137,12 @@ export function useMatchWebSocket(
     };
   }, [matchId, token, connect]);
 
-  return { connected };
+  const sendMessage = useCallback((msg: Record<string, unknown>) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  }, []); // wsRef is a ref, stable reference
+
+  return { connected, sendMessage };
 }

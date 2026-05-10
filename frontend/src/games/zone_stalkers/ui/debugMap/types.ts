@@ -1,4 +1,6 @@
 // ─── Shared types for the Debug Map ─────────────────────────────────────────
+import type { ZoneDebugState, ZoneDebugSubscription } from '../../state/types';
+export type { ZoneDebugState, ZoneDebugSubscription };
 
 export interface LocationConn {
   to: string;
@@ -242,4 +244,10 @@ export interface DebugMapPageProps {
   sendCommand: (cmd: string, payload: Record<string, unknown>) => Promise<void>;
   /** Zone-map context ID — forwarded to AgentProfileModal for on-demand memory loading. */
   contextId?: string;
+  /** Live debug state populated by zone_debug_delta WebSocket messages. */
+  debugState?: ZoneDebugState;
+  /** Subscribe to zone debug deltas via WebSocket. */
+  subscribeZoneDebug?: (subscription: ZoneDebugSubscription) => void;
+  /** Unsubscribe from zone debug deltas. */
+  unsubscribeZoneDebug?: () => void;
 }

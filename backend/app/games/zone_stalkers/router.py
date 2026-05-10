@@ -466,6 +466,20 @@ def get_debug_hunt_search(
     debug = state.get("debug") or {}
     hsba = debug.get("hunt_search_by_agent") or {}
 
+    # Build on-demand if cache is empty
+    if not hsba:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            hsba = debug.get("hunt_search_by_agent") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
     result = {}
     count = 0
     for agent_id, v in hsba.items():
@@ -518,6 +532,21 @@ def get_debug_hunt_search_agent(
     state = load_context_state(ctx.id, ctx)
     debug = state.get("debug") or {}
     hsba = debug.get("hunt_search_by_agent") or {}
+
+    # Build on-demand if cache is empty
+    if not hsba:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            hsba = debug.get("hunt_search_by_agent") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
     entry = hsba.get(agent_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"No hunt search data for agent {agent_id}")
@@ -562,6 +591,21 @@ def get_debug_hunt_search_location(
     state = load_context_state(ctx.id, ctx)
     debug = state.get("debug") or {}
     lht = debug.get("location_hunt_traces") or {}
+
+    # Build on-demand if cache is empty
+    if not lht:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            lht = debug.get("location_hunt_traces") or {}
+        except Exception:
+            pass  # Return empty result gracefully
+
     loc_trace = lht.get(location_id)
     if loc_trace is None:
         return {
@@ -608,6 +652,20 @@ def get_debug_hunt_search_target(
     state = load_context_state(ctx.id, ctx)
     debug = state.get("debug") or {}
     hsba = debug.get("hunt_search_by_agent") or {}
+
+    # Build on-demand if cache is empty
+    if not hsba:
+        try:
+            from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload
+            from app.core.state_cache.service import save_context_state
+            state = build_hunt_debug_payload(state=state, world_turn=state.get("world_turn", 0))
+            state["debug_hunt_traces_enabled"] = True
+            state["_debug_hunt_traces_built_turn"] = state.get("world_turn", 0)
+            save_context_state(ctx.id, state, ctx)
+            debug = state.get("debug") or {}
+            hsba = debug.get("hunt_search_by_agent") or {}
+        except Exception:
+            pass  # Return empty result gracefully
 
     result = {}
     for agent_id, v in hsba.items():

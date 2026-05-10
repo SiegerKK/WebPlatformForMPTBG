@@ -7,7 +7,7 @@ import type { AgentForProfile } from './AgentProfileModal';
 import { useMatchWebSocket } from '../../../hooks/useMatchWebSocket';
 import { applyZoneDelta } from '../state/applyZoneDelta';
 import { applyZoneDebugDelta } from '../state/applyZoneDebugDelta';
-import type { ZoneDelta, ZoneDebugDelta, ZoneDebugState } from '../state/types';
+import type { ZoneDelta, ZoneDebugDelta, ZoneDebugState, ZoneDebugSubscription } from '../state/types';
 
 // ─── DebugTimeControl ────────────────────────────────────────────────────────
 function DebugTimeControl({
@@ -509,7 +509,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [debugTab, setDebugTab] = useState<'map' | 'characters' | 'global'>('map');
   // debugState is populated by zone_debug_delta WebSocket messages;
   // it will be wired to debug components in subsequent iterations.
-  const [_debugState, setDebugState] = useState<ZoneDebugState>({
+  const [debugState, setDebugState] = useState<ZoneDebugState>({
     huntSearchByAgent: {},
     locationHuntTraces: {},
     selectedAgentProfile: null,
@@ -744,7 +744,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // ─── WebSocket push — replaces polling when connected ────────────────────
   const wsToken = localStorage.getItem('access_token');
-  const { connected: wsConnected } = useMatchWebSocket(
+  const { connected: wsConnected, sendMessage: wsSendMessage } = useMatchWebSocket(
     match.id,
     wsToken,
     useCallback((msg) => {
@@ -885,6 +885,20 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
       }
     }, [refresh, refreshGame, triggerThrottledRefresh, loadAgentMemory]), // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  // ─── Zone debug delta subscription helpers ──────────────────────────────
+  const subscribeZoneDebug = useCallback((subscription: ZoneDebugSubscription) => {
+    if (context?.id) {
+      wsSendMessage({
+        type: 'subscribe_zone_debug',
+        subscription: { ...subscription, context_id: context.id },
+      });
+    }
+  }, [context?.id, wsSendMessage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const unsubscribeZoneDebug = useCallback(() => {
+    wsSendMessage({ type: 'unsubscribe_zone_debug' });
+  }, [wsSendMessage]);
 
   // ─── ensure zone_map context exists ─────────────────────────────────────
   const ensureContext = useCallback(async () => {
@@ -2388,7 +2402,16 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         </div>
 
         {debugTab === 'map' && (
-          <DebugMapPage matchId={match.id} zoneState={zoneState} currentLocId={currentLocId} sendCommand={sendCommand} contextId={context?.id} />
+          <DebugMapPage
+            matchId={match.id}
+            zoneState={zoneState}
+            currentLocId={currentLocId}
+            sendCommand={sendCommand}
+            contextId={context?.id}
+            debugState={debugState}
+            subscribeZoneDebug={subscribeZoneDebug}
+            unsubscribeZoneDebug={unsubscribeZoneDebug}
+          />
         )}
 
         {debugTab === 'characters' && renderCharactersDebug()}
