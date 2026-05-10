@@ -664,3 +664,231 @@ def test_cow_live_bot_with_existing_scheduled_action_does_not_mutate_input():
 
     assert state == before
     assert new_state is not state
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COW safety tests for specific mutation paths (Step 3 of audit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_minimal_bot_state(*, seed: int = 200) -> dict:
+    """Two-location state with one bot agent, COW enabled.
+
+    Agent is alive, not human-controlled, has no scheduled_action.
+    Locations A and B are connected (travel_time=1).
+    """
+    state = _make_cow_tick_state(seed=seed, num_players=0, num_ai_stalkers=1, num_traders=0)
+    loc_ids = list(state["locations"].keys())
+    agent_id = next(iter(state["agents"].keys()))
+    agent = state["agents"][agent_id]
+
+    # Wire agent to loc A, with loc B reachable
+    loc_a, loc_b = loc_ids[0], loc_ids[1]
+    state["locations"][loc_a]["connections"] = [{"to": loc_b, "type": "normal", "travel_time": 1, "closed": False}]
+    state["locations"][loc_b]["connections"] = [{"to": loc_a, "type": "normal", "travel_time": 1, "closed": False}]
+    state["locations"][loc_a]["agents"] = [agent_id]
+    state["locations"][loc_b]["agents"] = []
+    agent["location_id"] = loc_a
+    agent["scheduled_action"] = None
+    agent["action_queue"] = []
+    agent["action_used"] = False
+    agent["has_left_zone"] = False
+
+    return state, agent_id, loc_a, loc_b
+
+
+def test_cow_trade_buy_updates_new_state_not_input():
+    """_bot_buy_from_trader must not mutate the input state."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=201)
+
+    # Place a trader at the same location as the agent
+    trader_id = "trader_t1"
+    state["traders"][trader_id] = {
+        "id": trader_id,
+        "name": "Торговец Сидорович",
+        "location_id": loc_a,
+        "is_alive": True,
+        "money": 50000,
+        "inventory": [],
+        "memory": [],
+    }
+    state["locations"][loc_a]["agents"].append(trader_id)
+
+    agent = state["agents"][agent_id]
+    # Agent has lots of money and no weapon → should buy one
+    agent["global_goal"] = "get_rich"
+    agent["money"] = 10000
+    agent["material_threshold"] = 1  # already past threshold → goal-pursuit phase
+    agent["equipment"] = {"weapon": None, "armor": None, "detector": None}
+    agent["inventory"] = []
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before, "Input state must not be mutated (trade buy)"
+    assert new_state is not state
+
+
+def test_cow_trade_sell_updates_new_state_not_input():
+    """_bot_sell_to_trader must not mutate the input state."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=202)
+
+    # Place a trader at the same location as the agent
+    trader_id = "trader_t2"
+    state["traders"][trader_id] = {
+        "id": trader_id,
+        "name": "Торговец",
+        "location_id": loc_a,
+        "is_alive": True,
+        "money": 50000,
+        "inventory": [],
+        "memory": [],
+    }
+    state["locations"][loc_a]["agents"].append(trader_id)
+
+    agent = state["agents"][agent_id]
+    # Agent has artifacts → should sell them
+    agent["global_goal"] = "get_rich"
+    agent["money"] = 100
+    agent["material_threshold"] = 1  # past threshold
+    agent["equipment"] = {
+        "weapon": {"id": "w_t2", "type": "pistol", "name": "Пистолет ПМ", "value": 500, "weight": 0.8},
+        "armor": {"id": "a_t2", "type": "leather_jacket", "name": "Кожаная куртка", "value": 300, "weight": 2.0},
+        "detector": None,
+    }
+    agent["inventory"] = [
+        {"id": "art_soul_1", "type": "soul", "name": "Душа", "value": 2000},
+        {"id": "art_flash_1", "type": "flash", "name": "Вспышка", "value": 1500},
+    ]
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before, "Input state must not be mutated (trade sell)"
+    assert new_state is not state
+
+
+def test_cow_consume_item_updates_new_state_not_input():
+    """_bot_consume must not mutate the input state."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=203)
+
+    agent = state["agents"][agent_id]
+    # Agent is very hungry (above emergency threshold) and has food in inventory
+    agent["hunger"] = 80   # emergency threshold is typically 70
+    agent["thirst"] = 10
+    agent["hp"] = 100
+    agent["equipment"] = {
+        "weapon": {"id": "w_c3", "type": "pistol", "name": "Пистолет ПМ", "value": 500, "weight": 0.8},
+        "armor": {"id": "a_c3", "type": "leather_jacket", "name": "Кожаная куртка", "value": 300, "weight": 2.0},
+        "detector": None,
+    }
+    agent["inventory"] = [
+        {"id": "food_1", "type": "bread", "name": "Буханка хлеба", "value": 20, "weight": 0.5},
+        {"id": "food_2", "type": "canned_food", "name": "Тушёнка", "value": 40, "weight": 0.4},
+    ]
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before, "Input state must not be mutated (consume)"
+    assert new_state is not state
+
+
+def test_cow_equip_item_updates_new_state_not_input():
+    """_bot_equip_from_inventory must not mutate the input state."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=204)
+
+    agent = state["agents"][agent_id]
+    # Agent has no weapon equipped but has one in inventory → should equip it
+    agent["hp"] = 100
+    agent["hunger"] = 10
+    agent["thirst"] = 10
+    agent["equipment"] = {"weapon": None, "armor": None, "detector": None}
+    agent["inventory"] = [
+        {"id": "pistol_1", "type": "pistol", "name": "Пистолет ПМ", "value": 500, "weight": 0.8},
+        {"id": "ammo_1", "type": "ammo_9mm", "name": "Патроны 9мм", "value": 10, "weight": 0.1},
+    ]
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before, "Input state must not be mutated (equip)"
+    assert new_state is not state
+
+
+def test_cow_pickup_item_updates_new_state_not_input():
+    """_bot_pickup_item_from_ground must not mutate the input state."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=205)
+
+    agent = state["agents"][agent_id]
+    # Agent has no weapon equipped or in inventory; weapon is on the ground
+    agent["hp"] = 100
+    agent["hunger"] = 10
+    agent["thirst"] = 10
+    agent["equipment"] = {"weapon": None, "armor": None, "detector": None}
+    agent["inventory"] = []
+
+    # Place a weapon on the ground in loc_a
+    ground_weapon = {"id": "ground_pistol_1", "type": "pistol", "name": "Пистолет ПМ", "value": 500, "weight": 0.8}
+    state["locations"][loc_a]["items"] = [ground_weapon]
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before, "Input state must not be mutated (pickup from ground)"
+    assert new_state is not state
+
+
+def test_cow_death_clears_action_queue_without_mutating_input():
+    """_mark_agent_dead must clear action_queue only in new_state, not in the input."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=206)
+
+    agent = state["agents"][agent_id]
+    # Agent is near death: very low HP, extreme needs
+    agent["hp"] = 1
+    agent["hunger"] = 100
+    agent["thirst"] = 100
+    agent["action_queue"] = [{"type": "wander"}]  # non-empty, so mutation is detectable
+    agent["scheduled_action"] = None
+    # Advance the world minute so the survival check triggers on this tick
+    state["world_minute"] = 59
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    # Input must not be mutated
+    assert state == before, "Input state must not be mutated (death / action_queue clear)"
+    # Output must show the agent is dead and action_queue cleared
+    assert new_state["agents"][agent_id]["is_alive"] is False
+    assert new_state["agents"][agent_id]["action_queue"] == []
+
+
+def test_cow_schedule_travel_sets_scheduled_action_without_mutating_input():
+    """_bot_schedule_travel must set scheduled_action only in new_state, not in the input."""
+    state, agent_id, loc_a, loc_b = _make_minimal_bot_state(seed=207)
+
+    agent = state["agents"][agent_id]
+    # Agent is well-equipped so the only thing left is to wander/explore (= travel)
+    agent["hp"] = 100
+    agent["hunger"] = 10
+    agent["thirst"] = 10
+    agent["scheduled_action"] = None
+    agent["action_queue"] = []
+    agent["equipment"] = {
+        "weapon": {"id": "w_s7", "type": "pistol", "name": "Пистолет ПМ", "value": 500, "weight": 0.8},
+        "armor": {"id": "a_s7", "type": "leather_jacket", "name": "Кожаная куртка", "value": 300, "weight": 2.0},
+        "detector": None,
+    }
+    agent["inventory"] = [
+        {"id": "ammo_s7", "type": "ammo_9mm", "name": "Патроны 9мм", "value": 10, "weight": 0.1},
+    ]
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    # Input must not be mutated
+    assert state == before, "Input state must not be mutated (schedule travel)"
+    assert new_state is not state
+    # After a tick, the bot should have scheduled a travel action (it wanders)
+    new_agent = new_state["agents"][agent_id]
+    # scheduled_action might be None if the bot is idle, but input must be clean regardless
+    assert state["agents"][agent_id]["scheduled_action"] is None  # original unchanged

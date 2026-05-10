@@ -395,6 +395,51 @@ def _runtime_mutable_location_list(state: Dict[str, Any], location_id: str, key:
     return val
 
 
+def _runtime_set_trader_field(state: Dict[str, Any], trader_id: str, key: str, value: Any) -> None:
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            runtime.set_trader_field(trader_id, key, value)
+            return
+        except Exception:
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                trader = runtime.trader(trader_id)
+                if trader.get(key) != value:
+                    trader[key] = value
+                    runtime.mark_trader_dirty(trader_id)
+                return
+            except Exception:
+                return
+    trader = state.get("traders", {}).get(trader_id)
+    if trader is not None:
+        trader[key] = value
+
+
+def _runtime_mutable_trader_list(state: Dict[str, Any], trader_id: str, key: str) -> list:
+    runtime = _cow_runtime()
+    if runtime is not None:
+        try:
+            return runtime.mutable_trader_list(trader_id, key)
+        except Exception:
+            _runtime_inc_counter("cow_mutation_fallback_errors")
+            try:
+                trader = runtime.trader(trader_id)
+                value = copy.deepcopy(trader.get(key, []))
+                if not isinstance(value, list):
+                    value = []
+                trader[key] = value
+                runtime.mark_trader_dirty(trader_id)
+                return value
+            except Exception:
+                pass
+    trader = state.get("traders", {}).get(trader_id, {})
+    val = trader.get(key, [])
+    if not isinstance(val, list):
+        val = []
+    trader[key] = val
+    return val
+
 def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Advance the world by one turn.
@@ -1055,7 +1100,7 @@ def _mark_agent_dead(
         )
         clear_active_plan(agent)
     _runtime_set_agent_field(agent_id, "scheduled_action", None, agent)
-    agent["action_queue"] = []
+    _runtime_set_agent_field(agent_id, "action_queue", [], agent)
     _runtime_set_agent_field(agent_id, "action_used", False, agent)
 
     _add_memory(
@@ -2851,6 +2896,15 @@ def _bot_sell_to_trader(
     if not artifacts:
         return events
 
+    # COW the trader so mutations stay in the runtime copy
+    _trader_id_st = trader.get("id", "")
+    _rt_st = _cow_runtime()
+    if _rt_st is not None and _trader_id_st:
+        try:
+            trader = _rt_st.trader(_trader_id_st)
+        except Exception:
+            _rt_st = None
+    agent_money_st = agent.get("money", 0)
     sell_price_total = 0
     sold_items = []
     for art in artifacts:
@@ -2858,14 +2912,17 @@ def _bot_sell_to_trader(
         trader_money = trader.get("money", 0)
         if trader_money < sell_price:
             continue  # trader too poor; skip this item
-        # Transfer money
-        agent["money"] = agent.get("money", 0) + sell_price
+        # Transfer money (agent money accumulated locally; trader updated in-place on COW copy)
+        agent_money_st += sell_price
         trader["money"] = trader_money - sell_price
         sell_price_total += sell_price
         # Transfer item
         sold_item = dict(art)
         sold_item["stock"] = 1
-        trader.setdefault("inventory", []).append(sold_item)
+        if _rt_st is not None and _trader_id_st:
+            _rt_st.mutable_trader_list(_trader_id_st, "inventory").append(sold_item)
+        else:
+            trader.setdefault("inventory", []).append(sold_item)
         sold_items.append(art)
         events.append({
             "event_type": "bot_sold_artifact",
@@ -2881,9 +2938,10 @@ def _bot_sell_to_trader(
     if not sold_items:
         return events
 
-    # Remove sold items from inventory
+    # Remove sold items from inventory; commit accumulated agent money
     sold_ids = {i["id"] for i in sold_items}
-    agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] not in sold_ids]
+    _runtime_set_agent_field(agent_id, "money", agent_money_st, agent)
+    _runtime_set_agent_field(agent_id, "inventory", [i for i in agent.get("inventory", []) if i["id"] not in sold_ids], agent)
     _runtime_set_action_used(agent, True)
 
     # ── Stalker memory (Step 7) ───────────────────────────────────
@@ -2900,6 +2958,11 @@ def _bot_sell_to_trader(
 
     # ── Trader memory ─────────────────────────────────────────────
     stalker_name = agent.get("name", agent_id)
+    if _rt_st is not None and _trader_id_st:
+        try:
+            _rt_st.mutable_trader_list(_trader_id_st, "memory")
+        except Exception:
+            pass
     _add_trader_memory(
         trader, world_turn, state, "trade_buy",
         f"Купил {item_names} у сталкера {stalker_name}",
@@ -2980,12 +3043,22 @@ def _bot_sell_items_for_cash(
         _runtime_set_action_used(agent, True)
         return []
 
+    # COW the trader so mutations stay in the runtime copy
+    _trader_id_sfc = trader.get("id", "")
+    _rt_sfc = _cow_runtime()
+    if _rt_sfc is not None and _trader_id_sfc:
+        try:
+            trader = _rt_sfc.trader(_trader_id_sfc)
+        except Exception:
+            _rt_sfc = None
+    agent_money_sfc = agent.get("money", 0)
+
     events: List[Dict[str, Any]] = []
     sold_items: List[Dict[str, Any]] = []
     total_earned = 0
 
     for item in candidates:
-        if target_amount is not None and agent.get("money", 0) >= target_amount:
+        if target_amount is not None and agent_money_sfc >= target_amount:
             break
         t = item.get("type", "")
         val = item.get("value", _IT.get(t, {}).get("value", 0))
@@ -2994,12 +3067,15 @@ def _bot_sell_items_for_cash(
             continue
         if trader.get("money", 0) < sell_price:
             continue  # trader cannot afford this item
-        agent["money"] = agent.get("money", 0) + sell_price
+        agent_money_sfc += sell_price
         trader["money"] = trader.get("money", 0) - sell_price
         total_earned += sell_price
         sold_item = dict(item)
         sold_item["stock"] = 1
-        trader.setdefault("inventory", []).append(sold_item)
+        if _rt_sfc is not None and _trader_id_sfc:
+            _rt_sfc.mutable_trader_list(_trader_id_sfc, "inventory").append(sold_item)
+        else:
+            trader.setdefault("inventory", []).append(sold_item)
         sold_items.append(item)
         events.append({
             "event_type": "bot_sold_item",
@@ -3015,9 +3091,10 @@ def _bot_sell_items_for_cash(
         _runtime_set_action_used(agent, True)
         return []
 
-    # Remove sold items (compare by object identity)
+    # Remove sold items (compare by object identity); commit accumulated agent money
     sold_obj_ids = {id(i) for i in sold_items}
-    agent["inventory"] = [i for i in agent.get("inventory", []) if id(i) not in sold_obj_ids]
+    _runtime_set_agent_field(agent_id, "money", agent_money_sfc, agent)
+    _runtime_set_agent_field(agent_id, "inventory", [i for i in agent.get("inventory", []) if id(i) not in sold_obj_ids], agent)
     _runtime_set_action_used(agent, True)
 
     item_names = ", ".join(
@@ -3046,6 +3123,11 @@ def _bot_sell_items_for_cash(
     )
 
     stalker_name = agent.get("name", agent_id)
+    if _rt_sfc is not None and _trader_id_sfc:
+        try:
+            _rt_sfc.mutable_trader_list(_trader_id_sfc, "memory")
+        except Exception:
+            pass
     _add_trader_memory(
         trader, world_turn, state, "trade_buy",
         f"Купил {item_names} у сталкера {stalker_name}",
@@ -3095,7 +3177,7 @@ def _bot_schedule_travel(
     }
     if emergency_flee:
         sched["emergency_flee"] = True
-    agent["scheduled_action"] = sched
+    _runtime_set_agent_field(agent_id, "scheduled_action", sched, agent)
     _runtime_set_action_used(agent, True)
     return [{
         "event_type": "agent_travel_started",
@@ -3223,6 +3305,15 @@ def _bot_buy_from_trader(
     if trader is None:
         return []
 
+    # COW the trader so mutations stay in the runtime copy
+    _trader_id_bt = trader.get("id", "")
+    _rt_bt = _cow_runtime()
+    if _rt_bt is not None and _trader_id_bt:
+        try:
+            trader = _rt_bt.trader(_trader_id_bt)
+        except Exception:
+            _rt_bt = None
+
     agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
 
     # Build scored candidate list: each entry is (item_key, base_value, item_risk, score).
@@ -3250,7 +3341,8 @@ def _bot_buy_from_trader(
         if agent.get("money", 0) < buy_price:
             continue
         # Transaction — deduct from agent, credit trader
-        agent["money"] = agent.get("money", 0) - buy_price
+        _runtime_set_agent_field(agent_id, "money", agent.get("money", 0) - buy_price, agent)
+        agent = _runtime_agent(agent_id, agent)
         trader["money"] = trader.get("money", 0) + buy_price
         # Create a fresh item instance and place it in agent inventory
         new_item: Dict[str, Any] = {
@@ -3259,7 +3351,10 @@ def _bot_buy_from_trader(
             "name": ITEM_TYPES[item_type].get("name", item_type),
             "value": base_value,
         }
-        agent.setdefault("inventory", []).append(new_item)
+        if _rt_bt is not None:
+            _rt_bt.mutable_agent_inventory(agent_id).append(new_item)
+        else:
+            agent.setdefault("inventory", []).append(new_item)
         _runtime_set_action_used(agent, True)
         item_name = ITEM_TYPES[item_type].get("name", item_type)
         trader_name = trader.get("name", trader.get("id", "trader"))
@@ -3306,6 +3401,11 @@ def _bot_buy_from_trader(
         # Trader memory: record the sale from the trader's perspective
         agent_name = agent.get("name", agent_id)
         loc_name = state.get("locations", {}).get(agent.get("location_id", ""), {}).get("name", "?")
+        if _rt_bt is not None and _trader_id_bt:
+            try:
+                _rt_bt.mutable_trader_list(_trader_id_bt, "memory")
+            except Exception:
+                pass
         _add_trader_memory(
             trader, world_turn, state, "trade_sale",
             f"Продал «{item_name}» сталкеру {agent_name}",
@@ -3341,7 +3441,7 @@ def _bot_consume(
     item_info = ITEM_TYPES.get(item["type"], {})
     effects = item_info.get("effects", {})
     _apply_item_effects(agent, effects)
-    agent["inventory"] = [i for i in agent.get("inventory", []) if i["id"] != item["id"]]
+    _runtime_set_agent_field(agent_id, "inventory", [i for i in agent.get("inventory", []) if i["id"] != item["id"]], agent)
     _runtime_set_action_used(agent, True)
     item_name = item_info.get("name", item.get("name", item["type"]))
     _add_memory(
@@ -3373,13 +3473,17 @@ def _bot_equip_from_inventory(
     item = next((i for i in inventory if i["type"] in item_types), None)
     if item is None:
         return []
-    equipment = agent.setdefault("equipment", {})
+    _rt_eq = _cow_runtime()
+    if _rt_eq is not None:
+        equipment = _rt_eq.mutable_agent_equipment(agent_id)
+    else:
+        equipment = agent.setdefault("equipment", {})
     # Return old equipment to inventory (if any)
     old_item = equipment.get(slot)
     if old_item:
-        agent["inventory"] = [i for i in inventory if i["id"] != item["id"]] + [old_item]
+        _runtime_set_agent_field(agent_id, "inventory", [i for i in inventory if i["id"] != item["id"]] + [old_item], agent)
     else:
-        agent["inventory"] = [i for i in inventory if i["id"] != item["id"]]
+        _runtime_set_agent_field(agent_id, "inventory", [i for i in inventory if i["id"] != item["id"]], agent)
     equipment[slot] = item
     _runtime_set_action_used(agent, True)
     item_name = item.get("name", item["type"])
@@ -3545,8 +3649,14 @@ def _bot_pickup_item_from_ground(
     item = next((i for i in ground_items if i.get("type") in item_types), None)
     if item is None:
         return []
-    loc["items"] = [i for i in ground_items if i["id"] != item["id"]]
-    agent.setdefault("inventory", []).append(item)
+    new_ground_items = [i for i in ground_items if i["id"] != item["id"]]
+    _runtime_set_location_field(state, loc_id, "items", new_ground_items)
+    _rt_pu = _cow_runtime()
+    if _rt_pu is not None:
+        _pu_inv = _rt_pu.mutable_agent_inventory(agent_id)
+    else:
+        _pu_inv = agent.setdefault("inventory", [])
+    _pu_inv.append(item)
     _runtime_set_action_used(agent, True)
     item_name = item.get("name", item["type"])
     loc_name = loc.get("name", loc_id)
@@ -3558,7 +3668,7 @@ def _bot_pickup_item_from_ground(
     )
     # If no more items of the requested types remain AND the caller has not asked to
     # suppress this note, record it so the agent won't plan another trip here.
-    remaining = loc.get("items", [])
+    remaining = new_ground_items
     if not suppress_not_found and not any(i.get("type") in item_types for i in remaining):
         _add_memory(
             agent, world_turn, state, "observation",
