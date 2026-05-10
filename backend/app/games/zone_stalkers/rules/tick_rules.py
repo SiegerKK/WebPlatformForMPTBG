@@ -10,6 +10,7 @@ Processes:
   - Random event spawning
 """
 import collections
+import contextlib
 import heapq
 import copy
 import random
@@ -256,7 +257,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _tick_profiler = None
     _tick_runtime = None
 
-    _copy_ctx = _tick_profiler.section("deepcopy_ms") if _tick_profiler else __import__("contextlib").nullcontext()
+    _copy_ctx = _tick_profiler.section("deepcopy_ms") if _tick_profiler else contextlib.nullcontext()
     with _copy_ctx:
         if not source_state.get("cpu_copy_on_write_enabled", True):
             state = copy.deepcopy(source_state)
