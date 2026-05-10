@@ -574,10 +574,16 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         bot_evs = _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
         events.extend(bot_evs)
 
+    debug_brain_trace_enabled = state.get("debug_brain_trace_enabled", False)
+    debug_brain_trace_agent_ids = set(state.get("debug_brain_trace_agent_ids") or [])
     for _agent in state.get("agents", {}).values():
         if not is_v3_monitored_bot(_agent):
             continue
-        ensure_brain_trace_for_tick(_agent, world_turn=world_turn, state=state)
+        if debug_brain_trace_enabled:
+            if not debug_brain_trace_agent_ids or _agent.get("id") in debug_brain_trace_agent_ids:
+                ensure_brain_trace_for_tick(_agent, world_turn=world_turn, state=state)
+        # When disabled: brain_trace is not grown; only latest_decision_summary
+        # (written inside _run_npc_brain_v3_decision) is kept.
 
     # 3b. Per-turn location observations for every alive stalker agent.
     # Writes a new observation entry only when content has changed since the last
@@ -642,11 +648,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         },
     })
     try:
-        if state.get("debug_hunt_traces_enabled"):
+        if state.get("debug_hunt_traces_enabled", False):
             from app.games.zone_stalkers.debug.hunt_search_debug import build_hunt_debug_payload  # noqa: PLC0415
-            interval = int(state.get("debug_hunt_traces_refresh_interval", 10))
-            last_turn = int(state.get("_debug_hunt_traces_built_turn", -999999))
-            if state["world_turn"] - last_turn >= interval:
+            refresh_interval = int(state.get("debug_hunt_traces_refresh_interval", 10))
+            last_built = int(state.get("_debug_hunt_traces_built_turn", -999999))
+            if state["world_turn"] - last_built >= refresh_interval:
                 debug_payload = build_hunt_debug_payload(
                     state=state,
                     world_turn=state["world_turn"],

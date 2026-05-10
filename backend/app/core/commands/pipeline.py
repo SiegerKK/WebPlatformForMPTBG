@@ -168,6 +168,9 @@ class CommandPipeline:
                     db.commit()
                     return CommandResult(command_id=command.id, status=CommandStatus.REJECTED, error=result.error)
 
+                # Capture old_state BEFORE resolve so we can build a delta afterward
+                old_state = state
+
                 # 7. Resolve
                 new_state, new_events = ruleset.resolve_command(
                     envelope.command_type,
@@ -177,6 +180,7 @@ class CommandPipeline:
                     str(player.id)
                 )
             else:
+                old_state = state
                 # Default handler for end_turn
                 if envelope.command_type == "end_turn":
                     new_events = [{"event_type": "turn_submitted", "payload": {"participant_id": str(player.id)}}]
@@ -212,11 +216,43 @@ class CommandPipeline:
             db.commit()
 
             # Notify connected WebSocket clients about the state change.
+            # For Zone Stalkers zone_map contexts, send a compact zone_delta
+            # so the frontend can update without an extra HTTP round-trip.
             from app.core.ws.manager import ws_manager
-            ws_manager.notify(str(envelope.match_id), {
-                "type": "state_updated",
-                "match_id": str(envelope.match_id),
-            })
+            match_id_str = str(envelope.match_id)
+            context_id_str = str(envelope.context_id)
+
+            _sent_delta = False
+            if (
+                match.game_id == "zone_stalkers"
+                and isinstance(new_state, dict)
+                and new_state.get("context_type") == "zone_map"
+            ):
+                try:
+                    from app.games.zone_stalkers.delta import build_zone_delta
+                    zone_delta = build_zone_delta(
+                        old_state=old_state,
+                        new_state=new_state,
+                        events=emitted,
+                    )
+                    ws_manager.notify(match_id_str, {
+                        "type": "zone_delta",
+                        "match_id": match_id_str,
+                        "context_id": context_id_str,
+                        **zone_delta,
+                    })
+                    _sent_delta = True
+                except Exception:
+                    logger.exception("Failed to build zone_delta after command; falling back to state_updated")
+
+            if not _sent_delta:
+                ws_manager.notify(match_id_str, {
+                    "type": "state_updated",
+                    "match_id": match_id_str,
+                    "context_id": context_id_str,
+                    "state_revision": new_state.get("state_revision") if isinstance(new_state, dict) else None,
+                    "requires_resync": True,
+                })
 
             return CommandResult(command_id=command.id, status=CommandStatus.RESOLVED, events=emitted)
 

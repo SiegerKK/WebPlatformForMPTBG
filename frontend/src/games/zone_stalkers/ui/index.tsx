@@ -6,7 +6,8 @@ import AgentRow from './AgentRow';
 import type { AgentForProfile } from './AgentProfileModal';
 import { useMatchWebSocket } from '../../../hooks/useMatchWebSocket';
 import { applyZoneDelta } from '../state/applyZoneDelta';
-import type { ZoneDelta } from '../state/types';
+import { applyZoneDebugDelta } from '../state/applyZoneDebugDelta';
+import type { ZoneDelta, ZoneDebugDelta, ZoneDebugState } from '../state/types';
 
 // ─── DebugTimeControl ────────────────────────────────────────────────────────
 function DebugTimeControl({
@@ -506,6 +507,15 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   const [showDebug, setShowDebug] = useState(false);
   // Sub-tab within the debug panel
   const [debugTab, setDebugTab] = useState<'map' | 'characters' | 'global'>('map');
+  // debugState is populated by zone_debug_delta WebSocket messages;
+  // it will be wired to debug components in subsequent iterations.
+  const [_debugState, setDebugState] = useState<ZoneDebugState>({
+    huntSearchByAgent: {},
+    locationHuntTraces: {},
+    selectedAgentProfile: null,
+    selectedLocationProfile: null,
+    debugRevision: 0,
+  });
 
   // Enter game as your own assigned character
   const enterGame = () => {
@@ -852,6 +862,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
         // profile / memory tab shows entries written during this tick.
         const visibleAgent = profileAgentIdRef.current ?? (activeTabRef.current === 'memory' ? myAgentIdRef.current : null);
         if (visibleAgent) loadAgentMemory(visibleAgent);
+      } else if (msg.type === 'zone_debug_delta') {
+        const debugDelta = msg as unknown as ZoneDebugDelta;
+        setDebugState((prev) => applyZoneDebugDelta(prev, debugDelta));
       } else if (msg.type === 'state_updated') {
         refresh();
       } else if (msg.type === 'auto_tick_changed') {

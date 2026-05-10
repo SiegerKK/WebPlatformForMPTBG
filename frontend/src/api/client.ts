@@ -140,4 +140,32 @@ export const locationsApi = {
     apiClient.delete(`/locations/${contextId}/${locationId}/image`),
 };
 
+export const zoneMapApi = {
+  /** Fetch static map data (topology, names, terrain, connections). Cached by map_revision. */
+  getMapStatic: (contextId: string) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/map-static`),
+  /** Fetch dynamic map data (agent positions, resource counts, anomaly activity). */
+  getMapDynamic: (contextId: string) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/map-dynamic`),
+};
+
+export const zoneDebugApi = {
+  /** Get compact hunt_search_by_agent summary (all or filtered). */
+  getHuntSearch: (contextId: string, params?: Record<string, unknown>) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/debug/hunt-search`, { params }),
+  /** Get full hunt_search data for a specific agent. */
+  getHuntSearchAgent: (contextId: string, agentId: string, params?: Record<string, unknown>) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/debug/hunt-search/agents/${agentId}`, { params }),
+  /** Get hunt traces for a specific location. */
+  getHuntSearchLocation: (contextId: string, locationId: string, params?: Record<string, unknown>) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/debug/hunt-search/locations/${locationId}`, { params }),
+  /** Get hunt search data for all hunters targeting a specific target. */
+  getHuntSearchTarget: (contextId: string, targetId: string, params?: Record<string, unknown>) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/debug/hunt-search/targets/${targetId}`, { params }),
+  /** Trigger a rebuild of hunt debug payload for the context. */
+  refreshHuntSearch: (contextId: string) =>
+    apiClient.post(`/zone-stalkers/contexts/${contextId}/debug/hunt-search/refresh`),
+};
+
+
 export default apiClient;

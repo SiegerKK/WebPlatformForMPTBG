@@ -97,3 +97,23 @@ class ConnectionManager:
 
 # ── Module-level singleton ─────────────────────────────────────────────────────
 ws_manager = ConnectionManager()
+
+
+# ── Debug subscription tracking ───────────────────────────────────────────────
+# {match_id: {connection_id: subscription_dict}}
+_debug_subscriptions: dict[str, dict[str, dict]] = {}
+
+
+def add_debug_subscription(match_id: str, connection_id: str, subscription: dict) -> None:
+    """Register a debug subscription for a connection."""
+    _debug_subscriptions.setdefault(match_id, {})[connection_id] = subscription
+
+
+def remove_debug_subscription(match_id: str, connection_id: str) -> None:
+    """Remove a debug subscription for a connection."""
+    _debug_subscriptions.get(match_id, {}).pop(connection_id, None)
+
+
+def get_debug_subscriptions(match_id: str) -> dict[str, dict]:
+    """Return a snapshot of active debug subscriptions for a match."""
+    return dict(_debug_subscriptions.get(match_id, {}))

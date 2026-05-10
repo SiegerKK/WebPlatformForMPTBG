@@ -4,7 +4,7 @@ import copy
 import json
 from typing import Any, Literal
 
-ProjectionMode = Literal["zone-lite", "game", "debug-map", "full"]
+ProjectionMode = Literal["zone-lite", "game", "debug-map", "debug-map-lite", "full"]
 
 INVENTORY_PREVIEW_LIMIT = 20
 
@@ -208,12 +208,67 @@ def _project_zone_game(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Lightweight debug-map projection.
+
+    Like debug-map but excludes heavy data (full location_hunt_traces,
+    full hunt_search_by_agent). Debug detail comes via scoped endpoints.
+    """
+    projected = copy.deepcopy(state)
+    # Strip agent heavy fields
+    for agent in (projected.get("agents") or {}).values():
+        if not isinstance(agent, dict):
+            continue
+        agent.pop("memory", None)
+        agent.pop("memory_v3", None)
+        compact_ctx = _compact_brain_context(agent)
+        if compact_ctx is not None:
+            agent["brain_v3_context"] = compact_ctx
+        else:
+            agent.pop("brain_v3_context", None)
+    # Strip trader heavy fields
+    for trader in (projected.get("traders") or {}).values():
+        if not isinstance(trader, dict):
+            continue
+        trader.pop("memory", None)
+        trader.pop("memory_v3", None)
+        trader.pop("brain_trace", None)
+    # Strip heavy debug data — keep only summary counts
+    debug = projected.get("debug")
+    if isinstance(debug, dict):
+        # Replace full location_hunt_traces with counts-only
+        lht = debug.get("location_hunt_traces")
+        if isinstance(lht, dict):
+            debug["location_hunt_traces_count"] = len(lht)
+            debug["location_hunt_traces"] = {}  # empty — load via endpoint
+        # Replace full hunt_search_by_agent with compact version
+        hsba = debug.get("hunt_search_by_agent")
+        if isinstance(hsba, dict):
+            debug["hunt_search_by_agent"] = {
+                agent_id: {
+                    "target_id": v.get("target_id") if isinstance(v, dict) else None,
+                    "best_location_id": v.get("best_location_id") if isinstance(v, dict) else None,
+                    "best_location_confidence": v.get("best_location_confidence") if isinstance(v, dict) else None,
+                    "lead_count": v.get("lead_count") if isinstance(v, dict) else None,
+                }
+                for agent_id, v in hsba.items()
+            }
+    # Include revision fields
+    projected["state_revision"] = state.get("state_revision", 0)
+    projected["map_revision"] = state.get("map_revision", 0)
+    return projected
+
+
 def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[str, Any]:
     if mode == "full":
         return copy.deepcopy(state)
 
     if mode in {"game", "zone-lite"}:
         return _project_zone_game(state)
+
+    if mode == "debug-map-lite":
+        return _project_zone_debug_map_lite(state)
 
     # debug-map: keep deepcopy approach (acceptable for now — called only on demand)
     projected = copy.deepcopy(state)
@@ -259,6 +314,7 @@ def build_zone_state_size_report(state: dict[str, Any]) -> dict[str, Any]:
         "zone_lite_size_bytes": _json_size_bytes(project_zone_state(state=state, mode="zone-lite")),
         "game_projection_size_bytes": _json_size_bytes(project_zone_state(state=state, mode="game")),
         "debug_map_projection_size_bytes": _json_size_bytes(project_zone_state(state=state, mode="debug-map")),
+        "debug_map_lite_projection_size_bytes": _json_size_bytes(project_zone_state(state=state, mode="debug-map-lite")),
         "full_projection_size_bytes": _json_size_bytes(project_zone_state(state=state, mode="full")),
         "debug_hunt_search_bytes": _json_size_bytes(debug.get("hunt_search_by_agent")),
         "location_hunt_traces_bytes": _json_size_bytes(debug.get("location_hunt_traces")),
