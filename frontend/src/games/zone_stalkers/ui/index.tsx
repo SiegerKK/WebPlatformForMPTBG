@@ -562,7 +562,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
   // When set, the next refresh() call will skip fetching events from the API
   // because they already arrived inline via the WS `ticked` message payload.
   const skipNextEventsRef = useRef(false);
-  // Track zone_map context id so refreshGame() can use projection endpoint.
+  // Track zone_map context id for refreshGame(), delta verification, and debug API calls.
   const contextIdRef = useRef<string | null>(null);
   // Track state_revision for WS delta sync — starts at 0 (before first projection load).
   const stateRevisionRef = useRef<number>(0);
@@ -798,9 +798,9 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
           }
         }
 
-        // Event preview from delta — we have compact info but no full ids;
-        // skip updating the events list (avoids duplicate compact entries).
-        // The next manual or throttled resync will fetch full events.
+        // Event preview from delta carries compact info but no stable IDs;
+        // signal that the next refreshGame() should skip fetching events
+        // since we already have a preview and a full fetch isn't yet needed.
         if (Array.isArray(delta.events?.preview) && delta.events.preview.length > 0) {
           skipNextEventsRef.current = true;
         }

@@ -241,7 +241,7 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
         lht = debug.get("location_hunt_traces")
         if isinstance(lht, dict):
             debug["location_hunt_traces_count"] = len(lht)
-            debug["location_hunt_traces"] = {}  # empty — load via endpoint
+            debug["location_hunt_traces"] = {}  # Stripped: too large for initial load; count preserved; details available via /debug/hunt-search/locations/{id}
         # Replace full hunt_search_by_agent with compact version
         hsba = debug.get("hunt_search_by_agent")
         if isinstance(hsba, dict):

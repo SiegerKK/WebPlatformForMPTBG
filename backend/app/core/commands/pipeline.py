@@ -243,7 +243,10 @@ class CommandPipeline:
                     })
                     _sent_delta = True
                 except Exception:
-                    logger.exception("Failed to build zone_delta after command; falling back to state_updated")
+                    logger.exception(
+                        "Failed to build zone_delta for match %s context %s; falling back to state_updated",
+                        match_id_str, context_id_str,
+                    )
 
             if not _sent_delta:
                 ws_manager.notify(match_id_str, {
