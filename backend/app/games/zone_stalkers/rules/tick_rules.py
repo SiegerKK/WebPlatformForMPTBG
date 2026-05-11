@@ -703,7 +703,20 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             if _needs_migrated:
                 _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
                 agent = _runtime_agent(agent_id, agent)
-            schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
+            _needs_state = agent.get("needs_state", {})
+            _needs_revision = int(_needs_state.get("revision", 0)) if isinstance(_needs_state, dict) else 0
+            _threshold_tasks = _needs_state.get("_threshold_tasks", {}) if isinstance(_needs_state, dict) else {}
+            _needs_reschedule = _needs_migrated
+            if not _needs_reschedule:
+                for _need_key in ("hunger", "thirst", "sleepiness"):
+                    for _threshold_name in ("soft", "critical"):
+                        if _threshold_tasks.get(f"{_need_key}:{_threshold_name}") != _needs_revision:
+                            _needs_reschedule = True
+                            break
+                    if _needs_reschedule:
+                        break
+            if _needs_reschedule:
+                schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
         sched = agent.get("scheduled_action")
         if sched:
             agent = _runtime_agent(agent_id, agent)
