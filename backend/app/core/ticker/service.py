@@ -225,13 +225,24 @@ def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
             _min_interval = 1.0 / max(0.1, _MAX_WS_UPDATES_PER_SECOND)
             _last = _last_ws_sent_ts.get(match_id_str, 0.0)
             _critical = _is_critical_batch_result(result)
+            _ws_started = time.perf_counter()
+            _ws_sent = False
             if _critical or (_now - _last >= _min_interval):
                 ws_manager.notify(match_id_str, ws_payload)
                 _last_ws_sent_ts[match_id_str] = _now
+                _ws_sent = True
+            batch_ws_ms = (time.perf_counter() - _ws_started) * 1000.0 if _ws_sent else 0.0
             try:
                 from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+                _rm = result.get("metrics", {}) or {}
                 record_tick_metrics(match_id_str, {
                     "tick_total_ms": round(tick_total_ms, 3),
+                    "batch_total_ms": round(tick_total_ms, 3),
+                    "batch_load_state_ms": _rm.get("batch_load_state_ms"),
+                    "batch_tick_logic_ms": _rm.get("batch_tick_logic_ms"),
+                    "batch_save_state_ms": _rm.get("batch_save_state_ms"),
+                    "batch_db_ms": _rm.get("batch_db_ms"),
+                    "batch_ws_ms": round(batch_ws_ms, 3),
                     "events_emitted": len(all_events),
                     "ticks_advanced": int(result.get("ticks_advanced", 0)),
                 })

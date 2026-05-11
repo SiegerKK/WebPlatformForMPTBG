@@ -266,6 +266,7 @@ class ZoneStalkerRuleSet(RuleSet):
 
     def tick_many(self, match_id: str, db: Any, max_ticks: int) -> dict:
         """Advance Zone Stalkers world by up to max_ticks in one load/save/commit cycle."""
+        import time
         from datetime import datetime
         from app.core.contexts.models import GameContext, ContextStatus
         from app.core.events.models import GameEvent
@@ -287,12 +288,16 @@ class ZoneStalkerRuleSet(RuleSet):
         if not zone_ctx:
             return {"error": "no active zone_map context found"}
 
+        _load_started = time.perf_counter()
         state = load_context_state(zone_ctx.id, zone_ctx)
+        batch_load_state_ms = (time.perf_counter() - _load_started) * 1000.0
         old_state = state
+        _tick_started = time.perf_counter()
         new_state, all_map_events, ticks_advanced, stop_reason = tick_zone_map_many(
             state,
             max(0, int(max_ticks)),
         )
+        batch_tick_logic_ms = (time.perf_counter() - _tick_started) * 1000.0
 
         new_state["state_revision"] = int(state.get("state_revision", 0)) + 1
         new_state["_debug_revision"] = int(state.get("_debug_revision", 0)) + 1
@@ -366,14 +371,18 @@ class ZoneStalkerRuleSet(RuleSet):
             save_context_state(evt_ctx.id, evt_state, evt_ctx, force_persist=True)
 
         game_over = bool(new_state.get("game_over"))
+        _save_started = time.perf_counter()
         state_db_written = save_context_state(zone_ctx.id, new_state, zone_ctx, force_persist=game_over)
+        batch_save_state_ms = (time.perf_counter() - _save_started) * 1000.0
         if game_over:
             match.status = MatchStatus.FINISHED
             match.finished_at = datetime.utcnow()
+        _db_started = time.perf_counter()
         if emitted or state_db_written or game_over or event_ctxs:
             db.commit()
         else:
             db.rollback()
+        batch_db_ms = (time.perf_counter() - _db_started) * 1000.0
 
         zone_delta = None
         try:
@@ -395,6 +404,12 @@ class ZoneStalkerRuleSet(RuleSet):
             "zone_delta": zone_delta,
             "old_state": old_state,
             "new_state": new_state,
+            "metrics": {
+                "batch_load_state_ms": round(batch_load_state_ms, 3),
+                "batch_tick_logic_ms": round(batch_tick_logic_ms, 3),
+                "batch_save_state_ms": round(batch_save_state_ms, 3),
+                "batch_db_ms": round(batch_db_ms, 3),
+            },
         }
 
     # ── Command validation / resolution ──────────────────────────────────────
