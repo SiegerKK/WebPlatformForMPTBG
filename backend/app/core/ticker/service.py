@@ -212,27 +212,14 @@ def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
             all_events: list[Any] = result.get("new_events", []) or []
             zone_delta = result.get("zone_delta")
             context_id_str = result.get("context_id")
-            if zone_delta is not None:
-                ws_payload = {
-                    "type": "zone_delta",
-                    "match_id": match_id_str,
-                    "context_id": context_id_str,
-                    **zone_delta,
-                }
-            else:
-                preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
-                ws_payload = {
-                    "type": "ticked",
-                    "match_id": match_id_str,
-                    "world_turn": result.get("world_turn"),
-                    "world_hour": result.get("world_hour"),
-                    "world_day": result.get("world_day"),
-                    "world_minute": result.get("world_minute"),
-                    "event_count": len(all_events),
-                    "new_events_preview": preview_events,
-                    "requires_resync": match.game_id == "zone_stalkers",
-                    "ticks_advanced": result.get("ticks_advanced", 0),
-                }
+            ws_payload = _build_batch_ws_payload(
+                match_id=match_id_str,
+                context_id=context_id_str,
+                result=result,
+                all_events=all_events,
+                zone_delta=zone_delta,
+                requires_resync=(match.game_id == "zone_stalkers"),
+            )
             # Coalesce non-critical WS updates in high-speed auto-run mode.
             _now = time.monotonic()
             _min_interval = 1.0 / max(0.1, _MAX_WS_UPDATES_PER_SECOND)
@@ -284,6 +271,34 @@ def _is_critical_batch_result(result: dict) -> bool:
         }:
             return True
     return False
+
+
+def _build_batch_ws_payload(
+    *,
+    match_id: str,
+    context_id: str | None,
+    result: dict,
+    all_events: list[Any],
+    zone_delta: dict | None,
+    requires_resync: bool,
+) -> dict:
+    preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+    common = {
+        "match_id": match_id,
+        "context_id": context_id,
+        "ticks_advanced": int(result.get("ticks_advanced", 0)),
+        "event_count": len(all_events),
+        "new_events_preview": preview_events,
+        "world_turn": result.get("world_turn"),
+        "world_hour": result.get("world_hour"),
+        "world_day": result.get("world_day"),
+        "world_minute": result.get("world_minute"),
+        "stop_reason": result.get("stop_reason"),
+        "requires_resync": bool(result.get("requires_resync", requires_resync)),
+    }
+    if zone_delta is not None:
+        return {"type": "zone_delta", **common, **zone_delta}
+    return {"type": "ticked", **common}
 
 
 def tick_all_active_matches(db: Session) -> dict:
@@ -467,4 +482,3 @@ def _compute_due_ticks(
     due = min(due_before_cap, max(1, int(max_ticks_per_batch)))
     accum -= due * 60.0
     return due, accum, due_before_cap
-
