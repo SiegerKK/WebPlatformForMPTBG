@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from app.games.zone_stalkers.decision.brain_runtime import (
     ensure_brain_runtime,
+    highest_invalidator_priority,
+    invalidate_brain,
     should_run_brain,
 )
 from app.games.zone_stalkers.rules.tick_rules import _add_memory, tick_zone_map
@@ -129,10 +131,43 @@ def test_target_seen_invalidates_and_runs_immediately() -> None:
 
 
 def test_emission_warning_invalidates_all_exposed_agents() -> None:
+    """Emission warning urgently invalidates agents via _add_memory."""
+    state = _base_state()
+    agent = _bot("bot1")
+    state["agents"]["bot1"] = agent
+    ensure_brain_runtime(agent, 100)
+
+    # Simulate emission-imminent memory (same action_kind the emission section writes).
+    _add_memory(
+        agent,
+        100,
+        state,
+        "observation",
+        "⚠️ Скоро выброс!",
+        {"action_kind": "emission_imminent", "turns_until": 10},
+    )
+
+    br = agent["brain_runtime"]
+    assert br["invalidated"] is True
+    assert any(inv.get("reason") == "emission_warning_started" for inv in br.get("invalidators", []))
+    assert highest_invalidator_priority(agent) == "urgent"
+
+
+def test_emission_warning_triggers_brain_run_bypassing_active_plan() -> None:
+    """After emission warning, agents with cached active plan still run brain (urgent bypass)."""
     state = _base_state()
     state["emission_scheduled_turn"] = 110
     state["emission_warning_offset"] = 10
-    state["agents"] = {"bot1": _bot("bot1"), "bot2": _bot("bot2")}
+    bots = {"bot1": _bot("bot1"), "bot2": _bot("bot2")}
+    for bot in bots.values():
+        # Pre-set a valid brain cache so the cache wouldn't expire this tick.
+        br = ensure_brain_runtime(bot, 100)
+        br["valid_until_turn"] = 200
+        br["last_decision_turn"] = 50
+        # Active plan would normally suppress brain re-evaluation.
+        bot["active_plan_v3"] = {"status": "active", "plan_key": "IDLE",
+                                 "current_step": 0, "steps": []}
+    state["agents"] = bots
     state["locations"]["loc_a"]["agents"] = ["bot1", "bot2"]
 
     new_state, events = tick_zone_map(state)
@@ -140,8 +175,117 @@ def test_emission_warning_invalidates_all_exposed_agents() -> None:
     assert any(ev.get("event_type") == "emission_warning" for ev in events)
     for agent_id in ("bot1", "bot2"):
         br = new_state["agents"][agent_id]["brain_runtime"]
-        assert br["invalidated"] is True
-        assert any(inv.get("reason") == "emission_warning_started" for inv in br.get("invalidators", []))
+        # Urgent bypass means brain runs this tick despite valid cache + active plan.
+        assert br["last_decision_turn"] == 100, (
+            f"{agent_id}: brain should have run due to emission urgency (got {br})"
+        )
+
+
+def test_urgent_invalidation_bypasses_scheduled_action() -> None:
+    """Urgently invalidated agents run the brain even when a scheduled_action is set."""
+    state = _base_state()
+    bot = _bot("bot1")
+    bot["scheduled_action"] = {
+        "type": "sleep",
+        "turns_remaining": 50,
+        "turns_total": 50,
+        "revision": 0,
+        "interruptible": True,
+        "started_turn": 50,
+        "ends_turn": 150,
+    }
+    ensure_brain_runtime(bot, 100)["valid_until_turn"] = 200
+    invalidate_brain(bot, None, reason="critical_thirst", priority="urgent", world_turn=100)
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    br = new_state["agents"]["bot1"]["brain_runtime"]
+    assert br["last_decision_turn"] == 100, (
+        f"Brain should have run despite scheduled_action (got {br})"
+    )
+
+
+def test_urgent_invalidation_bypasses_active_plan() -> None:
+    """Urgently invalidated agents run the brain even with an active plan in progress."""
+    state = _base_state()
+    bot = _bot("bot1")
+    bot["active_plan_v3"] = {"status": "active", "plan_key": "GET_RICH",
+                             "current_step": 0, "steps": []}
+    br = ensure_brain_runtime(bot, 100)
+    br["valid_until_turn"] = 500
+    br["last_decision_turn"] = 50
+    invalidate_brain(bot, None, reason="target_seen", priority="urgent", world_turn=100)
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    br_after = new_state["agents"]["bot1"]["brain_runtime"]
+    assert br_after["last_decision_turn"] == 100, (
+        f"Brain should have run despite active plan (got {br_after})"
+    )
+
+
+def test_non_urgent_invalidation_does_not_set_urgent_bypass() -> None:
+    """Normal-priority invalidation does not mark the agent as urgently invalidated."""
+    agent = _bot("bot1")
+    ensure_brain_runtime(agent, 100)["valid_until_turn"] = 500
+    invalidate_brain(agent, None, reason="trade_completed", priority="normal", world_turn=100)
+
+    # should_run is True because the agent is invalidated...
+    should_run, reason = should_run_brain(agent, 100)
+    assert should_run is True
+    assert reason == "invalidated"
+    # ...but the highest priority is "normal", not "urgent", so no bypass happens.
+    assert highest_invalidator_priority(agent) == "normal"
+
+
+def test_valid_cache_suppresses_brain_run() -> None:
+    """should_run_brain returns False when cache is valid and an active plan is present."""
+    agent = _bot("bot1")
+    br = ensure_brain_runtime(agent, 100)
+    br["valid_until_turn"] = 200
+    br["last_decision_turn"] = 50
+    # Active plan prevents the "no_plan_or_action" fallback.
+    agent["active_plan_v3"] = {"status": "active"}
+
+    should_run, reason = should_run_brain(agent, 100)
+    assert should_run is False
+    assert reason == "cached_until_valid"
+
+
+def test_stable_agents_with_valid_cache_dont_retrigger_brain(monkeypatch) -> None:
+    """Agents with valid brain cache should not retrigger brain each tick (E2E)."""
+    from app.games.zone_stalkers.rules import tick_rules as _tr
+
+    # Simulate active plan handling returning handled=True so the plan loop skips brain.
+    monkeypatch.setattr(_tr, "_process_active_plan_v3", lambda *a, **kw: (True, []))
+    monkeypatch.setattr(_tr, "_run_npc_brain_v3_decision", lambda aid, a, s, t: [])
+
+    state = _base_state()
+    agents_out: dict = {}
+    for i in range(5):
+        bot_id = f"stable_bot{i + 1}"
+        bot = _bot(bot_id)
+        br = ensure_brain_runtime(bot, 100)
+        br["valid_until_turn"] = 200
+        br["last_decision_turn"] = 90
+        bot["active_plan_v3"] = {"status": "active", "plan_key": "GET_RICH"}
+        agents_out[bot_id] = bot
+
+    state["agents"] = agents_out
+    state["locations"]["loc_a"]["agents"] = list(agents_out.keys())
+
+    new_state, _ = tick_zone_map(state)
+
+    ran = [
+        aid for aid, a in new_state["agents"].items()
+        if a.get("brain_runtime", {}).get("last_decision_turn") == 100
+    ]
+    # Stable cached agents should NOT have triggered a new brain decision this tick.
+    assert len(ran) == 0, f"Expected 0 brain runs from cached agents, got {len(ran)}: {ran}"
 
 
 def test_hunter_reacts_to_new_target_intel_even_with_cache() -> None:

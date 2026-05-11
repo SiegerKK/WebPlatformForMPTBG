@@ -129,6 +129,9 @@ def test_agent_is_not_starved_by_budget(monkeypatch) -> None:
 def test_critical_need_bypasses_budget(monkeypatch) -> None:
     monkeypatch.setattr(tick_rules, "_run_npc_brain_v3_decision", _stub_brain_decision)
     state = _base_state(bot_count=2)
+    # Set world_minute=59 so the next tick crosses the hour boundary, triggering survival
+    # need processing and the critical-thirst → urgent invalidation path.
+    state["world_minute"] = 59
     state["ai_budget"] = {
         "enabled": True,
         "max_normal_decisions_per_tick": 0,

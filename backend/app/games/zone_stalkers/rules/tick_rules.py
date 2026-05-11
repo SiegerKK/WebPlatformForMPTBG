@@ -1195,7 +1195,12 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             br["last_skip_reason"] = "left_zone"
             _npc_brain_skipped_count += 1
             continue
-        if agent.get("scheduled_action"):
+        # Urgent-invalidated agents bypass scheduled_action and active_plan skips so the
+        # brain can react immediately to critical events (combat, emission, critical needs).
+        _enqueue_urgent_invalidated = (
+            br.get("invalidated") and highest_invalidator_priority(agent) == "urgent"
+        )
+        if agent.get("scheduled_action") and not _enqueue_urgent_invalidated:
             br["last_skip_reason"] = "scheduled_action"
             _npc_brain_skipped_count += 1
             continue
@@ -1209,7 +1214,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             _npc_brain_skipped_count += 1
             continue
 
-        if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None:
+        if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None and not _enqueue_urgent_invalidated:
             handled, active_plan_events = _process_active_plan_v3(
                 agent_id,
                 agent,
@@ -1296,7 +1301,9 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             _blocked_reason = "dead"
         elif _agent.get("has_left_zone"):
             _blocked_reason = "left_zone"
-        elif _agent.get("scheduled_action"):
+        elif _agent.get("scheduled_action") and _priority != "urgent":
+            # Urgent priority bypasses scheduled_action so the brain can react
+            # immediately to critical events (combat, emission, critical needs).
             _blocked_reason = "scheduled_action"
         elif _agent.get("action_used"):
             _blocked_reason = "action_used"
@@ -2453,8 +2460,19 @@ def _add_memory(
         _inv_reason, _inv_priority = "target_location_exhausted", "high"
     elif _is_emission_interrupt:
         _inv_reason, _inv_priority = "emission_warning_started", "urgent"
-    elif _action_kind == "pickup" and effects.get("artifact_type"):
-        _inv_reason, _inv_priority = "artifact_found", "high"
+    elif _action_kind == "pickup":
+        if effects.get("artifact_type"):
+            _inv_reason, _inv_priority = "artifact_found", "high"
+        else:
+            _inv_reason, _inv_priority = "item_acquired", "low"
+    elif _action_kind in {"trade_sell", "trade_sell_for_cash", "trade_buy", "trade_decision"}:
+        _inv_reason, _inv_priority = "trade_completed", "normal"
+    elif _action_kind == "equip":
+        _inv_reason, _inv_priority = "equipment_changed", "normal"
+    elif _action_kind == "global_goal_completed":
+        _inv_reason, _inv_priority = "goal_completed", "normal"
+    elif _action_kind in {"exploration_interrupted", "travel_interrupted"} and not _is_emission_interrupt:
+        _inv_reason, _inv_priority = "action_interrupted", "high"
     elif _action_kind == "plan_monitor_abort":
         _pm_reason = str(effects.get("reason") or "")
         if _pm_reason in {"critical_hp", "critical_thirst", "critical_hunger"}:
