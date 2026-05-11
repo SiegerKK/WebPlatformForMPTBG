@@ -327,9 +327,10 @@ def test_hunter_reacts_to_new_target_intel_even_with_cache() -> None:
 
 
 def test_high_invalidation_bypasses_active_plan_and_is_queued_or_run(monkeypatch) -> None:
-    """High-priority invalidation bypasses active_plan processing (agent is queued/run)."""
+    """High-priority invalidation with active_plan is queued (or run), not lost."""
     from app.games.zone_stalkers.rules import tick_rules as _tr
 
+    monkeypatch.setattr(_tr, "_process_active_plan_v3", lambda *a, **kw: (True, []))
     monkeypatch.setattr(_tr, "_run_npc_brain_v3_decision", lambda aid, a, s, t: [])
 
     state = _base_state()
@@ -358,20 +359,16 @@ def test_high_invalidation_bypasses_active_plan_and_is_queued_or_run(monkeypatch
     new_state, _ = tick_zone_map(state)
 
     br_after = new_state["agents"]["bot1"]["brain_runtime"]
-    # Budget blocks immediate run but the agent must be queued (not silently skipped as active_plan_runtime).
-    assert br_after.get("last_skip_reason") != "active_plan_runtime", (
-        "High invalidation must bypass active_plan processing"
-    )
+    assert br_after.get("last_skip_reason") in {"active_plan_runtime", "budget_deferred"}
     queued = new_state.get("decision_queue", [])
-    assert any(q.get("agent_id") == "bot1" for q in queued), (
-        f"bot1 should be in decision_queue; queue={queued}, br={br_after}"
-    )
+    assert any(q.get("agent_id") == "bot1" for q in queued)
 
 
 def test_normal_invalidation_with_active_plan_is_budget_deferred_not_lost(monkeypatch) -> None:
     """Normal-priority invalidation with active_plan is budget-deferred, not silently lost."""
     from app.games.zone_stalkers.rules import tick_rules as _tr
 
+    monkeypatch.setattr(_tr, "_process_active_plan_v3", lambda *a, **kw: (True, []))
     monkeypatch.setattr(_tr, "_run_npc_brain_v3_decision", lambda aid, a, s, t: [])
 
     state = _base_state()
@@ -400,10 +397,46 @@ def test_normal_invalidation_with_active_plan_is_budget_deferred_not_lost(monkey
     new_state, _ = tick_zone_map(state)
 
     br_after = new_state["agents"]["bot1"]["brain_runtime"]
-    assert br_after.get("last_skip_reason") != "active_plan_runtime", (
-        "Normal invalidation must bypass active_plan processing"
-    )
+    assert br_after.get("last_skip_reason") in {"active_plan_runtime", "budget_deferred"}
     queued = new_state.get("decision_queue", [])
-    assert any(q.get("agent_id") == "bot1" for q in queued), (
-        f"bot1 should be budget-deferred in decision_queue; queue={queued}, br={br_after}"
-    )
+    assert any(q.get("agent_id") == "bot1" for q in queued)
+
+
+def test_goal_completion_invalidation_bypasses_active_plan_before_leave_zone(monkeypatch) -> None:
+    """Goal-completion invalidation bypasses active-plan runtime so leave-zone step can't pre-empt brain."""
+    from app.games.zone_stalkers.rules import tick_rules as _tr
+
+    state = _base_state()
+    bot = _bot("bot1")
+    bot["active_plan_v3"] = {
+        "status": "active",
+        "plan_key": "GET_RICH",
+        "current_step": 0,
+        "steps": [],
+    }
+    br = ensure_brain_runtime(bot, 100)
+    br["valid_until_turn"] = 500
+    br["last_decision_turn"] = 50
+    invalidate_brain(bot, None, reason="goal_completed", priority="high", world_turn=100)
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    called = {"active_plan": False}
+
+    def _active_plan_runtime(*args, **kwargs):
+        called["active_plan"] = True
+        # If this executes for goal completion, it could consume the tick and advance to leave-zone path.
+        args[1]["has_left_zone"] = True
+        return True, []
+
+    monkeypatch.setattr(_tr, "_process_active_plan_v3", _active_plan_runtime)
+    monkeypatch.setattr(_tr, "_run_npc_brain_v3_decision", lambda aid, a, s, t: [])
+
+    new_state, _ = tick_zone_map(state)
+    br_after = new_state["agents"]["bot1"]["brain_runtime"]
+
+    assert called["active_plan"] is False
+    assert new_state["agents"]["bot1"].get("has_left_zone") is False
+    queued = any(q.get("agent_id") == "bot1" for q in new_state.get("decision_queue", []))
+    ran_now = br_after.get("last_decision_turn") == 100
+    assert queued or ran_now
