@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from typing import Any
 
@@ -25,15 +26,55 @@ def _clamp_need(value: float) -> float:
     return max(0.0, min(100.0, float(value)))
 
 
-def ensure_needs_state(agent: dict[str, Any], world_turn: int) -> bool:
-    if isinstance(agent.get("needs_state"), dict):
-        return False
-    agent["needs_state"] = {
+def _initial_needs_state(agent: dict[str, Any], world_turn: int) -> dict[str, Any]:
+    return {
         "hunger": {"base": float(agent.get("hunger", 0.0)), "updated_turn": int(world_turn)},
         "thirst": {"base": float(agent.get("thirst", 0.0)), "updated_turn": int(world_turn)},
         "sleepiness": {"base": float(agent.get("sleepiness", 0.0)), "updated_turn": int(world_turn)},
         "revision": 1,
     }
+
+
+def _mutable_needs_state(
+    agent: dict[str, Any],
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    if runtime is not None and agent_id:
+        try:
+            if not isinstance(agent.get("needs_state"), dict):
+                runtime.set_agent_field(agent_id, "needs_state", _initial_needs_state(agent, world_turn))
+            needs_state = runtime.mutable_agent_dict(agent_id, "needs_state")
+            if isinstance(needs_state, dict):
+                return needs_state
+        except Exception:
+            pass
+    needs_state = agent.get("needs_state")
+    if not isinstance(needs_state, dict):
+        needs_state = _initial_needs_state(agent, world_turn)
+    else:
+        needs_state = copy.deepcopy(needs_state)
+    agent["needs_state"] = needs_state
+    return needs_state
+
+
+def ensure_needs_state(
+    agent: dict[str, Any],
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> bool:
+    if isinstance(agent.get("needs_state"), dict):
+        return False
+    new_state = _initial_needs_state(agent, world_turn)
+    if runtime is not None and agent_id:
+        try:
+            runtime.set_agent_field(agent_id, "needs_state", new_state)
+            return True
+        except Exception:
+            pass
+    agent["needs_state"] = new_state
     return True
 
 
@@ -59,13 +100,25 @@ def materialize_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float
     return values
 
 
-def set_need(agent: dict[str, Any], need_key: str, value: float, world_turn: int) -> None:
-    set_needs(agent, {need_key: value}, world_turn)
+def set_need(
+    agent: dict[str, Any],
+    need_key: str,
+    value: float,
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> None:
+    set_needs(agent, {need_key: value}, world_turn, runtime=runtime, agent_id=agent_id)
 
 
-def set_needs(agent: dict[str, Any], updates: dict[str, float], world_turn: int) -> None:
-    ensure_needs_state(agent, world_turn)
-    needs_state = agent["needs_state"]
+def set_needs(
+    agent: dict[str, Any],
+    updates: dict[str, float],
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> None:
+    needs_state = _mutable_needs_state(agent, world_turn, runtime=runtime, agent_id=agent_id)
     changed = False
     for need_key, value in updates.items():
         if need_key not in _NEED_RATES_PER_TURN:
@@ -86,8 +139,7 @@ def schedule_need_thresholds(
     agent: dict[str, Any],
     world_turn: int,
 ) -> None:
-    ensure_needs_state(agent, world_turn)
-    needs_state = agent["needs_state"]
+    needs_state = _mutable_needs_state(agent, world_turn, runtime=runtime, agent_id=agent_id)
     revision = int(needs_state.get("revision", 0))
     threshold_tasks = needs_state.setdefault("_threshold_tasks", {})
     for need_key, rate in _NEED_RATES_PER_TURN.items():

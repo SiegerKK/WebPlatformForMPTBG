@@ -348,3 +348,34 @@ def test_debug_map_lite_projection_uses_lazy_derived_needs():
     projected = project_zone_state(state=state, mode="debug-map-lite")
     agent = projected["agents"]["agent_test"]
     assert agent["hunger"] > 10.0
+
+
+def test_lazy_consume_reschedules_threshold_tasks_immediately():
+    from app.games.zone_stalkers.rules.tick_rules import _bot_consume
+
+    world_turn = 100
+    agent_id = "agent_test"
+    agent = {
+        "id": agent_id,
+        "is_alive": True,
+        "hunger": 80.0,
+        "thirst": 10.0,
+        "sleepiness": 10.0,
+        "inventory": [{"id": "food_1", "type": "bread", "name": "Буханка хлеба"}],
+        "memory": [],
+    }
+    ensure_needs_state(agent, world_turn)
+    state = {
+        "agents": {agent_id: agent},
+        "locations": {},
+        "scheduled_tasks": {},
+        "cpu_lazy_needs_enabled": True,
+    }
+
+    _bot_consume(agent_id, agent, agent["inventory"][0], world_turn, state, action_kind="consume_food")
+
+    assert any(
+        task.get("kind") == "need_threshold_crossed" and task.get("agent_id") == agent_id
+        for bucket in state["scheduled_tasks"].values()
+        for task in bucket
+    )

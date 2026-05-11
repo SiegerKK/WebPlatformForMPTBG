@@ -699,7 +699,8 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         if _lazy_needs_enabled(state):
             agent = _runtime_agent(agent_id, agent)
-            _needs_migrated = ensure_needs_state(agent, world_turn)
+            _rt_needs = _cow_runtime()
+            _needs_migrated = ensure_needs_state(agent, world_turn, runtime=_rt_needs, agent_id=agent_id)
             if _needs_migrated:
                 _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
                 agent = _runtime_agent(agent_id, agent)
@@ -716,7 +717,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     if _needs_reschedule:
                         break
             if _needs_reschedule:
-                schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
+                schedule_need_thresholds(state, _rt_needs, agent_id, agent, world_turn)
         sched = agent.get("scheduled_action")
         if sched:
             agent = _runtime_agent(agent_id, agent)
@@ -1890,11 +1891,12 @@ def _resolve_sleep(
     # so that gradual per-interval recovery is not bypassed artificially.
     if hours_slept >= 1.0:
         if _lazy_needs_enabled(state):
-            ensure_needs_state(agent, world_turn)
-            set_needs(agent, {"sleepiness": 0.0}, world_turn)
+            _rt_needs = _cow_runtime()
+            ensure_needs_state(agent, world_turn, runtime=_rt_needs, agent_id=agent_id)
+            set_needs(agent, {"sleepiness": 0.0}, world_turn, runtime=_rt_needs, agent_id=agent_id)
             if agent_id:
                 _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
-                schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
+                schedule_need_thresholds(state, _rt_needs, agent_id, agent, world_turn)
         else:
             agent["sleepiness"] = 0
     intervals = int(sched.get("sleep_intervals_applied", 0))
@@ -3681,15 +3683,16 @@ def _bot_consume(
     effects = item_info.get("effects", {})
     _apply_item_effects(agent, effects)
     if _lazy_needs_enabled(state):
-        ensure_needs_state(agent, world_turn)
+        _rt_needs = _cow_runtime()
+        ensure_needs_state(agent, world_turn, runtime=_rt_needs, agent_id=agent_id)
         _need_updates: dict[str, float] = {}
         for _need_key in ("hunger", "thirst", "sleepiness"):
             if _need_key in effects:
                 _need_updates[_need_key] = float(agent.get(_need_key, 0.0))
         if _need_updates:
-            set_needs(agent, _need_updates, world_turn)
+            set_needs(agent, _need_updates, world_turn, runtime=_rt_needs, agent_id=agent_id)
             _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
-        schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
+        schedule_need_thresholds(state, _rt_needs, agent_id, agent, world_turn)
     _runtime_set_agent_field(agent_id, "inventory", [i for i in agent.get("inventory", []) if i["id"] != item["id"]], agent)
     _runtime_set_action_used(agent, True)
     item_name = item_info.get("name", item.get("name", item["type"]))

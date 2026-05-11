@@ -77,6 +77,25 @@ def _mark_dirty(runtime: Any, agent_id: str) -> None:
             pass
 
 
+def _mutable_scheduled_action(
+    state: dict[str, Any],
+    runtime: Any,
+    agent_id: str,
+    agent: dict[str, Any],
+) -> dict[str, Any] | None:
+    if runtime is not None:
+        try:
+            return runtime.mutable_agent_scheduled_action(agent_id)
+        except Exception:
+            pass
+    sched = agent.get("scheduled_action")
+    if not isinstance(sched, dict):
+        return None
+    copied = dict(sched)
+    _set_agent_field(state, runtime, agent_id, "scheduled_action", copied)
+    return copied
+
+
 # ── Public helpers ────────────────────────────────────────────────────────────
 
 def interrupt_action(
@@ -93,7 +112,7 @@ def interrupt_action(
     Returns True if interrupted, False otherwise.
     Bumps revision before clearing so stale completion tasks are ignored.
     """
-    sched = agent.get("scheduled_action")
+    sched = _mutable_scheduled_action(state, runtime, agent_id, agent)
     if not isinstance(sched, dict):
         return False
     if not sched.get("interruptible", True):
@@ -305,6 +324,8 @@ def _handle_sleep_tick(
                 "thirst": new_thirst,
             },
             world_turn,
+            runtime=runtime,
+            agent_id=agent_id,
         )
         _set_agent_field(state, runtime, agent_id, "needs_state", agent.get("needs_state"))
         schedule_need_thresholds(state, runtime, agent_id, agent, world_turn)
