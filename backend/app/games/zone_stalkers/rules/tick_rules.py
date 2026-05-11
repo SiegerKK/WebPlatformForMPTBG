@@ -538,13 +538,13 @@ def _runtime_mutable_trader_list(state: Dict[str, Any], trader_id: str, key: str
     trader[key] = val
     return val
 
-def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Advance the world by one turn.
 
     Returns (new_state, events_emitted).
     """
-    source_state = state
+    source_state = copy.deepcopy(state) if copy_state else state
 
     # ── PR1/PR2: TickProfiler + TickRuntime/ZoneTickRuntime ─────────────────
     try:
@@ -1211,6 +1211,30 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
         _current_tick_runtime = previous_runtime
 
     return state, events
+
+
+def tick_zone_map_many(state: Dict[str, Any], max_ticks: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str | None]:
+    """
+    Advance world for up to max_ticks in-memory ticks with a single initial copy.
+    Returns (new_state, all_events, ticks_advanced, stop_reason).
+    """
+    if max_ticks <= 0:
+        return copy.deepcopy(state), [], 0, "no_ticks_due"
+
+    new_state = copy.deepcopy(state)
+    all_events: List[Dict[str, Any]] = []
+    ticks_advanced = 0
+    stop_reason: str | None = None
+
+    for _ in range(int(max_ticks)):
+        new_state, tick_events = tick_zone_map(new_state, copy_state=False)
+        all_events.extend(tick_events)
+        ticks_advanced += 1
+        if new_state.get("game_over"):
+            stop_reason = "game_over"
+            break
+
+    return new_state, all_events, ticks_advanced, stop_reason
 
 
 # ─────────────────────────────────────────────────────────────────

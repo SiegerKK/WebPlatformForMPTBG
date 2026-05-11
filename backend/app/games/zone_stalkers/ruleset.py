@@ -83,7 +83,7 @@ class ZoneStalkerRuleSet(RuleSet):
         from app.core.events.service import allocate_sequence_numbers
         from app.core.matches.models import Match, MatchStatus
         from app.core.state_cache.service import load_context_state, save_context_state
-        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map_many
         from app.games.zone_stalkers.rules.event_rules import start_event, bot_choose_option
 
         match = db.query(Match).filter(Match.id == match_id).first()
@@ -288,15 +288,10 @@ class ZoneStalkerRuleSet(RuleSet):
 
         state = load_context_state(zone_ctx.id, zone_ctx)
         old_state = state
-        new_state = state
-        all_map_events: list[dict] = []
-        ticks_advanced = 0
-        for _ in range(max(0, int(max_ticks))):
-            new_state, map_events = tick_zone_map(new_state)
-            all_map_events.extend(map_events)
-            ticks_advanced += 1
-            if new_state.get("game_over"):
-                break
+        new_state, all_map_events, ticks_advanced, stop_reason = tick_zone_map_many(
+            state,
+            max(0, int(max_ticks)),
+        )
 
         new_state["state_revision"] = int(state.get("state_revision", 0)) + 1
         new_state["_debug_revision"] = int(state.get("_debug_revision", 0)) + 1
@@ -370,11 +365,14 @@ class ZoneStalkerRuleSet(RuleSet):
             save_context_state(evt_ctx.id, evt_state, evt_ctx, force_persist=True)
 
         game_over = bool(new_state.get("game_over"))
-        save_context_state(zone_ctx.id, new_state, zone_ctx, force_persist=game_over)
+        state_db_written = save_context_state(zone_ctx.id, new_state, zone_ctx, force_persist=game_over)
         if game_over:
             match.status = MatchStatus.FINISHED
             match.finished_at = datetime.utcnow()
-        db.commit()
+        if emitted or state_db_written or game_over or event_ctxs:
+            db.commit()
+        else:
+            db.rollback()
 
         zone_delta = None
         try:
@@ -386,6 +384,7 @@ class ZoneStalkerRuleSet(RuleSet):
         return {
             "context_id": str(zone_ctx.id),
             "ticks_advanced": ticks_advanced,
+            "stop_reason": stop_reason,
             "world_turn": new_state.get("world_turn"),
             "world_hour": new_state.get("world_hour"),
             "world_day": new_state.get("world_day"),
