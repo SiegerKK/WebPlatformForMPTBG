@@ -54,6 +54,9 @@ def _compact_scheduled_action_delta(action: Any) -> dict[str, Any] | None:
         "turns_total": action.get("turns_total"),
         "target_id": action.get("target_id"),
         "started_turn": action.get("started_turn"),
+        "ends_turn": action.get("ends_turn"),
+        "revision": action.get("revision"),
+        "interruptible": action.get("interruptible"),
     }
 
 

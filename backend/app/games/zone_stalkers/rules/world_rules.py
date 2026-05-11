@@ -897,6 +897,9 @@ def resolve_world_command(
                 "final_target_id": target_loc_id,
                 "remaining_route": route[1:],
                 "started_turn": state.get("world_turn", 1),
+                "ends_turn": state.get("world_turn", 1) + hop_time,
+                "revision": 1,
+                "interruptible": True,
             }
             events.append({
                 "event_type": "travel_started",
@@ -918,6 +921,9 @@ def resolve_world_command(
             "turns_total": 1,
             "target_id": loc_id,
             "started_turn": state.get("world_turn", 1),
+            "ends_turn": state.get("world_turn", 1) + 1,
+            "revision": 1,
+            "interruptible": True,
         }
         events.append({
             "event_type": "exploration_started",
@@ -939,6 +945,9 @@ def resolve_world_command(
             "hours": hours,
             "target_id": agent["location_id"],
             "started_turn": state.get("world_turn", 1),
+            "ends_turn": state.get("world_turn", 1) + turns,
+            "revision": 1,
+            "interruptible": True,
         }
         events.append({
             "event_type": "sleep_started",
@@ -957,6 +966,9 @@ def resolve_world_command(
             "turns_total": 1,
             "target_id": event_ctx_id,
             "started_turn": state.get("world_turn", 1),
+            "ends_turn": state.get("world_turn", 1) + 1,
+            "revision": 1,
+            "interruptible": True,
         }
         events.append({
             "event_type": "event_joined",

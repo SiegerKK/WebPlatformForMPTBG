@@ -61,12 +61,19 @@ def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
 def _compact_scheduled_action(action: Any) -> dict[str, Any] | None:
     if not isinstance(action, dict):
         return None
+    turns_total = action.get("turns_total")
+    turns_remaining = action.get("turns_remaining")
+    if turns_remaining is None and action.get("ends_turn") is not None:
+        turns_remaining = max(0, int(action.get("ends_turn", 0)) - int(action.get("started_turn", 0)))
     return {
         "type": action.get("type"),
-        "turns_remaining": action.get("turns_remaining"),
-        "turns_total": action.get("turns_total"),
+        "turns_remaining": turns_remaining,
+        "turns_total": turns_total,
         "target_id": action.get("target_id"),
         "started_turn": action.get("started_turn"),
+        "ends_turn": action.get("ends_turn"),
+        "revision": action.get("revision"),
+        "interruptible": action.get("interruptible"),
     }
 
 

@@ -220,6 +220,10 @@ def _exec_sleep(
         "hours": hours,
         "turns_remaining": turns,
         "turns_total": turns,
+        "started_turn": world_turn,
+        "ends_turn": world_turn + turns,
+        "revision": 1,
+        "interruptible": True,
         "sleep_progress_turns": 0,
         "sleep_intervals_applied": 0,
         "sleep_turns_slept": 0,
@@ -250,6 +254,9 @@ def _exec_explore(
         "turns_remaining": EXPLORE_DURATION_TURNS,
         "turns_total": EXPLORE_DURATION_TURNS,
         "started_turn": world_turn,
+        "ends_turn": world_turn + EXPLORE_DURATION_TURNS,
+        "revision": 1,
+        "interruptible": True,
     }
     agent["action_used"] = True
     return [{"event_type": "exploration_started",
