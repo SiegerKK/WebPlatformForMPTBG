@@ -68,7 +68,10 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
         (_WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL)
         if weapon_missing else 0.0
     )
-    weapon_actionable, weapon_blocked_by = is_item_need_actionable(agent, "weapon")
+    if weapon_missing:
+        weapon_actionable, weapon_blocked_by = is_item_need_actionable(agent, "weapon")
+    else:
+        weapon_actionable, weapon_blocked_by = True, None
     weapon_urgency = raw_weapon_urgency if weapon_actionable else 0.0
     weapon_reason = ("Нет оружия (критично для охоты)" if global_goal == "kill_stalker"
                      else "Нет оружия") if weapon_missing else ""
@@ -93,7 +96,10 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     armor_min_price = _min_buy_price(ARMOR_ITEM_TYPES)
     armor_missing = 0 if has_armor else 1
     raw_armor_urgency = (0.70 if armor_missing else 0.0)
-    armor_actionable, armor_blocked_by = is_item_need_actionable(agent, "armor")
+    if armor_missing:
+        armor_actionable, armor_blocked_by = is_item_need_actionable(agent, "armor")
+    else:
+        armor_actionable, armor_blocked_by = True, None
     armor_urgency = raw_armor_urgency if armor_actionable else 0.0
     needs.append(
         ItemNeed(
@@ -125,7 +131,11 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
             ammo_count = sum(1 for i in inventory if i.get("type") == required_ammo)
             missing = max(0, DESIRED_AMMO_COUNT - ammo_count)
             raw_ammo_urgency = 0.60 * (missing / max(1, DESIRED_AMMO_COUNT))
-    ammo_actionable, ammo_blocked_by = is_item_need_actionable(agent, "ammo")
+    ammo_missing = max(0, DESIRED_AMMO_COUNT - ammo_count) if ammo_types else 0
+    if ammo_missing > 0:
+        ammo_actionable, ammo_blocked_by = is_item_need_actionable(agent, "ammo")
+    else:
+        ammo_actionable, ammo_blocked_by = True, None
     ammo_urgency = raw_ammo_urgency if ammo_actionable else 0.0
     ammo_min_price = _min_buy_price(ammo_types) if ammo_types else None
     needs.append(
@@ -133,7 +143,7 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
             key="ammo",
             desired_count=DESIRED_AMMO_COUNT,
             current_count=ammo_count,
-            missing_count=max(0, DESIRED_AMMO_COUNT - ammo_count) if ammo_types else 0,
+            missing_count=ammo_missing,
             urgency=ammo_urgency,
             raw_urgency=raw_ammo_urgency,
             actionable=ammo_actionable,

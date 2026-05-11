@@ -74,3 +74,31 @@ def test_non_hunter_phase1_armor_raw_need_exists_but_not_actionable() -> None:
     assert armor.urgency == 0.0
     assert armor.actionable is False
     assert armor.blocked_by == "phase1_material_gate"
+
+
+def test_phase1_existing_weapon_need_is_not_marked_blocked() -> None:
+    agent = make_agent(has_weapon=True, has_armor=True, has_ammo=True, money=100, material_threshold=3000)
+    needs = _eval(agent)
+    weapon = next(n for n in needs if n.key == "weapon")
+    assert weapon.missing_count == 0
+    assert weapon.raw_urgency == 0.0
+    assert weapon.urgency == 0.0
+    assert weapon.actionable is True
+    assert weapon.blocked_by is None
+
+
+def test_liquid_wealth_inventory_value_lifts_phase1_gate_for_weapon() -> None:
+    agent = make_agent(
+        has_weapon=False,
+        has_armor=True,
+        has_ammo=False,
+        money=100,
+        material_threshold=3000,
+        inventory=[{"id": "art1", "type": "soul", "value": 5000}],
+    )
+    needs = _eval(agent)
+    weapon = next(n for n in needs if n.key == "weapon")
+    assert weapon.raw_urgency == 0.65
+    assert weapon.urgency == 0.65
+    assert weapon.actionable is True
+    assert weapon.blocked_by is None

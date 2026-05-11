@@ -4,10 +4,16 @@ from typing import Any
 
 
 def get_economic_phase(agent: dict[str, Any]) -> str:
-    """Return current economic phase for autonomous bot planning."""
+    """Return current economic phase for autonomous bot planning.
+
+    Uses liquid wealth (money + inventory value) to stay consistent with the
+    wealth gate semantics in ``needs.py``.
+    """
     money = int(agent.get("money", 0))
+    inventory_value = sum(int(i.get("value", 0)) for i in agent.get("inventory", []))
+    liquid_wealth = money + inventory_value
     material_threshold = int(agent.get("material_threshold", 0))
-    if material_threshold > 0 and money < material_threshold:
+    if material_threshold > 0 and liquid_wealth < material_threshold:
         return "material_accumulation"
     return "goal_execution"
 
