@@ -63,3 +63,24 @@ def test_disabled_auto_tick_resets_runtime_accumulator(monkeypatch):
     ticker_service._auto_tick_runtime["ctx-1"] = {"last_real_ts": 1.0, "game_seconds_accum": 120.0, "running": False}
     ticker_service.tick_debug_auto_matches()
     assert "ctx-1" not in ticker_service._auto_tick_runtime
+
+
+def test_running_flag_cleared_after_tick_match_many_failure(monkeypatch):
+    monkeypatch.setattr(ticker_service, "_refresh_debug_context_cache", lambda db: {"ctx-1": "m-1"})
+    monkeypatch.setattr("app.database.SessionLocal", lambda: _DummyDB())
+    monkeypatch.setattr("app.core.state_cache.service.get_auto_tick_runtime", lambda ctx_id: {"enabled": True, "speed": "x600"})
+    monkeypatch.setattr("app.core.state_cache.service.get_context_flag", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.state_cache.service.set_auto_tick_runtime", lambda *args, **kwargs: None)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ticker_service, "tick_match_many", _boom)
+    ticker_service._auto_tick_runtime["ctx-1"] = {
+        "last_real_ts": 0.0,
+        "game_seconds_accum": 600.0,
+        "running": False,
+    }
+
+    ticker_service.tick_debug_auto_matches()
+    assert ticker_service._auto_tick_runtime["ctx-1"]["running"] is False
