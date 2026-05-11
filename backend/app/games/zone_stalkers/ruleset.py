@@ -252,6 +252,7 @@ class ZoneStalkerRuleSet(RuleSet):
             zone_delta = None
 
         return {
+            "context_id": str(zone_ctx.id),
             "world_turn": new_state.get("world_turn"),
             "world_hour": new_state.get("world_hour"),
             "world_day": new_state.get("world_day"),

@@ -103,8 +103,8 @@ def tick_match(match_id_str: str, db: Session) -> dict:
         zone_delta = result.get("zone_delta")
 
         # Resolve zone context id (needed for delta WS payload and metrics).
-        context_id_str: str | None = None
-        if match.game_id == "zone_stalkers":
+        context_id_str: str | None = result.get("context_id")
+        if context_id_str is None and match.game_id == "zone_stalkers":
             from app.core.contexts.models import ContextStatus, GameContext
             zone_ctx_for_ws = db.query(GameContext).filter(
                 GameContext.match_id == match.id,
