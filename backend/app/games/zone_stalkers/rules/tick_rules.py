@@ -1236,8 +1236,29 @@ def tick_zone_map_many(state: Dict[str, Any], max_ticks: int) -> Tuple[Dict[str,
         if new_state.get("game_over"):
             stop_reason = "game_over"
             break
+        stop_reason = _batch_stop_reason(new_state, tick_events)
+        if stop_reason:
+            break
 
     return new_state, all_events, ticks_advanced, stop_reason
+
+
+def _batch_stop_reason(state: Dict[str, Any], tick_events: List[Dict[str, Any]]) -> str | None:
+    if state.get("game_over"):
+        return "game_over"
+    critical_events = {
+        "emission_warning",
+        "emission_started",
+        "emission_ended",
+        "combat_started",
+        "agent_died",
+        "player_action_completed",
+        "zone_event_choice_required",
+    }
+    for ev in tick_events or []:
+        if ev.get("event_type") in critical_events:
+            return str(ev.get("event_type"))
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────

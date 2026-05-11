@@ -1,5 +1,5 @@
 from app.games.zone_stalkers.generators.zone_generator import generate_zone
-from app.games.zone_stalkers.rules.tick_rules import tick_zone_map_many
+from app.games.zone_stalkers.rules.tick_rules import _batch_stop_reason, tick_zone_map_many
 
 
 def test_tick_zone_map_many_advances_multiple_turns():
@@ -21,3 +21,8 @@ def test_tick_zone_map_many_does_not_mutate_input():
     _new_state, _events, _ticks_advanced, _stop_reason = tick_zone_map_many(state, 2)
 
     assert int(state.get("world_turn", 0)) == old_turn
+
+
+def test_batch_stop_reason_detects_critical_event():
+    reason = _batch_stop_reason({}, [{"event_type": "emission_started"}])
+    assert reason == "emission_started"

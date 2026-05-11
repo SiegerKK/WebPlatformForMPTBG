@@ -268,9 +268,20 @@ def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
 def _is_critical_batch_result(result: dict) -> bool:
     if bool(result.get("new_state", {}).get("game_over")):
         return True
+    if bool(result.get("requires_resync", False)):
+        return True
     for ev in (result.get("new_events") or []):
         et = ev.get("event_type")
-        if et in {"game_over", "emission_warning", "emission_started", "emission_ended", "agent_died"}:
+        if et in {
+            "game_over",
+            "emission_warning",
+            "emission_started",
+            "emission_ended",
+            "agent_died",
+            "combat_started",
+            "player_action_completed",
+            "zone_event_choice_required",
+        }:
             return True
     return False
 
