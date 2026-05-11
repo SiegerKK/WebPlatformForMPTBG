@@ -15,6 +15,7 @@ from app.games.zone_stalkers.needs.lazy_needs import (
     _SOFT_THRESHOLD,
     _CRITICAL_SLEEPINESS_THRESHOLD,
 )
+from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain
 from app.games.zone_stalkers.rules.tick_constants import (
     CRITICAL_HUNGER_THRESHOLD,
     CRITICAL_THIRST_THRESHOLD,
@@ -181,6 +182,23 @@ def _handle_need_threshold_crossed(
         },
     })
 
+    if threshold == "critical":
+        invalidate_brain(
+            agent,
+            runtime,
+            reason=f"critical_{need_key}",
+            priority="urgent",
+            world_turn=world_turn,
+        )
+    else:
+        invalidate_brain(
+            agent,
+            runtime,
+            reason="need_soft_threshold_crossed",
+            priority="normal",
+            world_turn=world_turn,
+        )
+
     # Critical hunger/thirst: interrupt travel action and schedule damage task
     if threshold == "critical" and need_key in ("hunger", "thirst"):
         # Re-fetch agent for latest scheduled_action
@@ -248,6 +266,22 @@ def _handle_need_damage(
     new_hp = max(0, current_hp - damage)
     _set_agent_field(state, runtime, agent_id, "hp", new_hp)
     _mark_dirty(runtime, agent_id)
+    agent = _get_agent(state, runtime, agent_id) or agent
+    invalidate_brain(
+        agent,
+        runtime,
+        reason=f"critical_{need_key}",
+        priority="urgent",
+        world_turn=world_turn,
+    )
+    if int(new_hp) <= max(1, int(agent.get("max_hp", 100) * 0.3)):
+        invalidate_brain(
+            agent,
+            runtime,
+            reason="critical_hp",
+            priority="urgent",
+            world_turn=world_turn,
+        )
 
     events.append({
         "event_type": "critical_need_damage",

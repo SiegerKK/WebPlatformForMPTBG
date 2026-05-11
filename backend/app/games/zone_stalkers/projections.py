@@ -51,6 +51,32 @@ def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
     return compact or None
 
 
+def _compact_brain_runtime(agent: dict[str, Any]) -> dict[str, Any] | None:
+    runtime = agent.get("brain_runtime")
+    if not isinstance(runtime, dict):
+        return None
+    compact: dict[str, Any] = {}
+    for key in (
+        "last_decision_turn",
+        "valid_until_turn",
+        "decision_revision",
+        "last_objective_key",
+        "last_intent_kind",
+        "last_plan_key",
+        "invalidated",
+        "queued",
+        "queued_turn",
+        "queued_priority",
+        "last_skip_reason",
+    ):
+        if key in runtime:
+            compact[key] = runtime.get(key)
+    invalidators = runtime.get("invalidators")
+    if isinstance(invalidators, list):
+        compact["invalidators"] = list(invalidators[-5:])
+    return compact or None
+
+
 # ── Explicit game projection helpers ─────────────────────────────────────────
 # These avoid a full deepcopy of the state dict by building output dicts
 # field-by-field.  Only the fields required by the frontend ZoneMapState
@@ -256,6 +282,7 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
         _lazy_enabled = isinstance(agent.get("needs_state"), dict)
         _needs = _project_agent_needs(agent, state.get("world_turn"), _lazy_enabled)
         compact_ctx = _compact_brain_context(agent)
+        compact_brain_runtime = _compact_brain_runtime(agent)
         # Only include keys present in the agent dict (skip None to avoid size bloat)
         _agent_fields = {
             "id": agent.get("id"),
@@ -290,6 +317,8 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
         agent_dict: dict[str, Any] = {k: v for k, v in _agent_fields.items() if v is not None}
         if compact_ctx is not None:
             agent_dict["brain_v3_context"] = compact_ctx
+        if compact_brain_runtime is not None:
+            agent_dict["brain_runtime"] = compact_brain_runtime
         agents_out[agent_id] = agent_dict
 
     # ── Traders: compact per-trader dict (exclude memory, memory_v3, brain_trace) ─
@@ -389,6 +418,11 @@ def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[s
                 agent["brain_v3_context"] = compact_ctx
             else:
                 agent.pop("brain_v3_context", None)
+            compact_runtime = _compact_brain_runtime(agent)
+            if compact_runtime is not None:
+                agent["brain_runtime"] = compact_runtime
+            else:
+                agent.pop("brain_runtime", None)
 
     traders = projected.get("traders")
     if isinstance(traders, dict):

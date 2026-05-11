@@ -41,6 +41,17 @@ from app.games.zone_stalkers.decision.active_plan_runtime import (
     write_active_plan_memory_event as _write_active_plan_memory_event,
     write_active_plan_trace_event as _write_active_plan_trace_event,
 )
+from app.games.zone_stalkers.decision.brain_runtime import (
+    clear_brain_invalidators,
+    ensure_brain_runtime,
+    highest_invalidator_priority,
+    invalidate_brain,
+    latest_invalidator_reason,
+    max_priority,
+    normalize_priority,
+    promote_priority,
+    should_run_brain,
+)
 from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep
 from app.games.zone_stalkers.decision.plan_monitor import (
     PlanMonitorResult,
@@ -79,6 +90,7 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 2000
 PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
+MAX_DECISION_QUEUE_SIZE = 512
 
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
@@ -148,6 +160,12 @@ _OBJECTIVE_TO_GOAL: Dict[str, str] = {
     "ENGAGE_TARGET": "kill_stalker",
     "CONFIRM_KILL": "kill_stalker",
     "IDLE": "idle",
+}
+
+
+_INTENT_TO_OBJECTIVE_KEY_FALLBACK: Dict[str, str] = {
+    # Preserve canonical objective key when objective pipeline falls back to intent-only path.
+    "leave_zone": "LEAVE_ZONE",
 }
 
 
@@ -323,6 +341,117 @@ def _event_driven_actions_enabled(state: Dict[str, Any]) -> bool:
 
 def _lazy_needs_enabled(state: Dict[str, Any]) -> bool:
     return bool(state.get("cpu_lazy_needs_enabled", False))
+
+
+def _ensure_ai_budget_config(state: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = state.get("ai_budget")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    defaults = {
+        "enabled": True,
+        "max_normal_decisions_per_tick": 5,
+        "max_background_decisions_per_tick": 2,
+        "urgent_decisions_ignore_budget": True,
+        "max_decision_delay_turns": 10,
+    }
+    changed = False
+    for key, value in defaults.items():
+        if key not in cfg:
+            cfg[key] = value
+            changed = True
+    if changed or state.get("ai_budget") is not cfg:
+        _runtime_set_state_field(state, "ai_budget", cfg)
+    return cfg
+
+
+def _ensure_decision_queue_state(state: Dict[str, Any]) -> list[dict[str, Any]]:
+    queue = state.get("decision_queue")
+    if not isinstance(queue, list):
+        queue = []
+        _runtime_set_state_field(state, "decision_queue", queue)
+    return queue
+
+
+def _brain_priority_from_run_reason(agent: Dict[str, Any], run_reason: str) -> tuple[str, str]:
+    if run_reason == "invalidated":
+        return highest_invalidator_priority(agent), latest_invalidator_reason(agent) or run_reason
+    if run_reason == "expired":
+        return "normal", "cache_expired"
+    if run_reason == "no_plan_or_action":
+        return "normal", "no_plan_or_action"
+    return "low", run_reason
+
+
+_GOAL_COMPLETION_INVALIDATION_REASONS = {
+    "goal_completed",
+    "global_goal_completed",
+    "target_death_confirmed",
+    "goal_achieved",
+}
+
+
+def _enqueue_brain_decision(
+    queue_by_agent: dict[str, dict[str, Any]],
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    world_turn: int,
+    reason: str | None = None,
+    priority: str | None = None,
+) -> None:
+    entry_priority = normalize_priority(priority or highest_invalidator_priority(agent))
+    entry_reason = str(reason or latest_invalidator_reason(agent) or "invalidated")
+    existing = queue_by_agent.get(agent_id)
+    if existing is not None:
+        entry_priority = max_priority(entry_priority, existing.get("priority"))
+        existing_queued_turn = existing.get("queued_turn")
+        queued_turn = int(existing_queued_turn) if existing_queued_turn is not None else world_turn
+        queued_turn = min(queued_turn, world_turn)
+    else:
+        queued_turn = world_turn
+    queue_by_agent[agent_id] = {
+        "agent_id": agent_id,
+        "priority": normalize_priority(entry_priority),
+        "reason": entry_reason,
+        "queued_turn": int(queued_turn),
+    }
+
+
+def _brain_valid_until_turn(agent: Dict[str, Any], world_turn: int) -> int:
+    objective_key = str((agent.get("brain_v3_context") or {}).get("objective_key") or "")
+    if objective_key in {"ENGAGE_TARGET", "REACH_SAFE_SHELTER", "WAIT_IN_SHELTER"}:
+        return world_turn
+
+    sched = agent.get("scheduled_action")
+    if isinstance(sched, dict):
+        ends_turn = int(sched.get("ends_turn") or world_turn + 1)
+        return max(world_turn, min(ends_turn, world_turn + 60))
+
+    if objective_key in {"SELL_ARTIFACTS", "GET_MONEY_FOR_RESUPPLY", "RESUPPLY_AMMO", "RESUPPLY_WEAPON"}:
+        return world_turn + 20
+    if objective_key == "IDLE":
+        return world_turn + 60
+    return world_turn + 5
+
+
+def _post_brain_decision_runtime_update(agent: Dict[str, Any], world_turn: int) -> None:
+    br = ensure_brain_runtime(agent, world_turn)
+    clear_brain_invalidators(agent)
+    br["last_decision_turn"] = int(world_turn)
+    br["valid_until_turn"] = int(_brain_valid_until_turn(agent, world_turn))
+    br["decision_revision"] = int(br.get("decision_revision") or 0) + 1
+    ctx = agent.get("brain_v3_context") or {}
+    br["last_objective_key"] = ctx.get("objective_key") if isinstance(ctx, dict) else None
+    br["last_intent_kind"] = ctx.get("intent_kind") if isinstance(ctx, dict) else None
+    active_plan = agent.get("active_plan_v3") or {}
+    if isinstance(active_plan, dict) and active_plan.get("plan_key") is not None:
+        br["last_plan_key"] = active_plan.get("plan_key")
+    elif isinstance(ctx, dict):
+        br["last_plan_key"] = ctx.get("selected_plan_key")
+    br["queued"] = False
+    br["queued_turn"] = None
+    br["queued_priority"] = None
+    br["last_skip_reason"] = None
 
 
 def _scheduled_action_remaining_turns(sched: Dict[str, Any], world_turn: int) -> int:
@@ -853,6 +982,13 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                     agent,
                 )
                 agent = _runtime_agent(agent_id, agent)
+                invalidate_brain(
+                    agent,
+                    _cow_runtime(),
+                    reason="critical_thirst",
+                    priority="urgent",
+                    world_turn=world_turn,
+                )
             if _eff_hunger >= CRITICAL_HUNGER_THRESHOLD:
                 _runtime_set_agent_field(
                     agent_id,
@@ -861,6 +997,21 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                     agent,
                 )
                 agent = _runtime_agent(agent_id, agent)
+                invalidate_brain(
+                    agent,
+                    _cow_runtime(),
+                    reason="critical_hunger",
+                    priority="urgent",
+                    world_turn=world_turn,
+                )
+            if int(agent.get("hp", 0)) <= max(1, int(agent.get("max_hp", 100) * 0.3)):
+                invalidate_brain(
+                    agent,
+                    _cow_runtime(),
+                    reason="critical_hp",
+                    priority="urgent",
+                    world_turn=world_turn,
+                )
             if agent["hp"] <= 0 and agent.get("is_alive", True):
                 if _tick_runtime:
                     from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad3
@@ -1055,27 +1206,65 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     _pr_npc.__enter__()
     _npc_brain_decision_count = 0
     _npc_brain_skipped_count = 0
+    _npc_brain_budget_deferred_count = 0
+    _ai_budget = _ensure_ai_budget_config(state)
+    _existing_queue = _ensure_decision_queue_state(state)
+    _queue_by_agent: dict[str, dict[str, Any]] = {}
+    for _q in _existing_queue:
+        if not isinstance(_q, dict):
+            continue
+        _q_agent_id = str(_q.get("agent_id") or "")
+        if not _q_agent_id:
+            continue
+        _queue_by_agent[_q_agent_id] = {
+            "agent_id": _q_agent_id,
+            "priority": normalize_priority(str(_q.get("priority") or "normal")),
+            "reason": str(_q.get("reason") or "queued"),
+            "queued_turn": int(_q.get("queued_turn") or world_turn),
+        }
+
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
         if agent.get("controller", {}).get("kind") != "bot":
             continue
+
+        agent = _runtime_agent(agent_id, agent)
+        br = ensure_brain_runtime(agent, world_turn)
+
         if agent.get("has_left_zone"):
+            br["last_skip_reason"] = "left_zone"
             _npc_brain_skipped_count += 1
             continue
-        if agent.get("scheduled_action"):
+        # Urgent-invalidated agents bypass scheduled_action so the brain can react
+        # immediately to critical events (combat, emission, critical needs).
+        _enqueue_urgent_invalidated = (
+            br.get("invalidated") and highest_invalidator_priority(agent) == "urgent"
+        )
+        # Track any invalidation so plan-running agents are still enqueued for brain re-eval.
+        _enqueue_invalidated = bool(br.get("invalidated"))
+        _goal_completion_invalidated = _enqueue_invalidated and any(
+            isinstance(inv, dict)
+            and str(inv.get("reason") or "") in _GOAL_COMPLETION_INVALIDATION_REASONS
+            for inv in br.get("invalidators", [])
+        )
+        _should_bypass_active_plan_for_brain = _enqueue_urgent_invalidated or _goal_completion_invalidated
+        if agent.get("scheduled_action") and not _enqueue_urgent_invalidated:
+            br["last_skip_reason"] = "scheduled_action"
             _npc_brain_skipped_count += 1
             continue
         if agent.get("action_used"):
+            br["last_skip_reason"] = "action_used"
             _npc_brain_skipped_count += 1
             continue
         # Skip bot decisions for agents in active combat (not fled)
         if _agent_in_active_combat(agent_id, state):
+            br["last_skip_reason"] = "active_combat"
             _npc_brain_skipped_count += 1
             continue
 
-        agent = _runtime_agent(agent_id, agent)
-        if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None:
+        _has_active_plan = is_v3_monitored_bot(agent) and get_active_plan(agent) is not None
+        if _has_active_plan and not _should_bypass_active_plan_for_brain:
             handled, active_plan_events = _process_active_plan_v3(
                 agent_id,
                 agent,
@@ -1085,12 +1274,149 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             )
             events.extend(active_plan_events)
             if handled:
+                br["last_skip_reason"] = "active_plan_runtime"
                 _npc_brain_skipped_count += 1
+                # Per PR4 spec: "NPC follows plan until invalidated". Even when the active
+                # plan advances its current step, a non-urgent invalidation must still
+                # produce a queued brain re-evaluation so the invalidation is not silently
+                # lost. The plan step runs now; the brain re-evaluates later (budget allows).
+                if _enqueue_invalidated:
+                    _enqueue_brain_decision(
+                        _queue_by_agent,
+                        agent_id=agent_id,
+                        agent=agent,
+                        world_turn=world_turn,
+                    )
                 continue
 
-        bot_evs = _run_npc_brain_v3_decision(agent_id, agent, state, world_turn)
+        should_run, run_reason = should_run_brain(agent, world_turn)
+        if not should_run:
+            br["last_skip_reason"] = run_reason
+            _npc_brain_skipped_count += 1
+            continue
+
+        priority, queue_reason = _brain_priority_from_run_reason(agent, run_reason)
+        if run_reason == "invalidated":
+            priority = max_priority(priority, highest_invalidator_priority(agent))
+        _enqueue_brain_decision(
+            _queue_by_agent,
+            agent_id=agent_id,
+            agent=agent,
+            world_turn=world_turn,
+            reason=str(queue_reason),
+            priority=priority,
+        )
+
+    _queue_items: list[dict[str, Any]] = []
+    _max_delay = max(1, int(_ai_budget.get("max_decision_delay_turns", 10)))
+    for _entry in _queue_by_agent.values():
+        _agent_id = _entry["agent_id"]
+        _agent = _runtime_agent(_agent_id, state.get("agents", {}).get(_agent_id, {}))
+        _br = ensure_brain_runtime(_agent, world_turn)
+        _priority = normalize_priority(_entry.get("priority"))
+        _queued_turn = int(_entry.get("queued_turn") or world_turn)
+        _delay = max(0, world_turn - _queued_turn)
+        _promotions = _delay // _max_delay
+        for _ in range(_promotions):
+            _priority = promote_priority(_priority)
+            if _priority == "urgent":
+                break
+        _entry["effective_priority"] = _priority
+        _br["queued"] = True
+        _br["queued_turn"] = _queued_turn
+        _br["queued_priority"] = _priority
+        _queue_items.append(_entry)
+
+    _queue_items.sort(
+        key=lambda item: (
+            -{"low": 0, "normal": 1, "high": 2, "urgent": 3}[normalize_priority(item.get("effective_priority"))],
+            int(item.get("queued_turn") or world_turn),
+            str(item.get("agent_id") or ""),
+        )
+    )
+
+    _budget_enabled = bool(_ai_budget.get("enabled", True))
+    _max_normal = max(0, int(_ai_budget.get("max_normal_decisions_per_tick", 5)))
+    _max_background = max(0, int(_ai_budget.get("max_background_decisions_per_tick", 2)))
+    _urgent_bypass = bool(_ai_budget.get("urgent_decisions_ignore_budget", True))
+    _normal_used = 0
+    _background_used = 0
+    _next_queue: list[dict[str, Any]] = []
+
+    for _entry in _queue_items:
+        _agent_id = str(_entry.get("agent_id") or "")
+        if not _agent_id:
+            continue
+        _agent = _runtime_agent(_agent_id, state.get("agents", {}).get(_agent_id, {}))
+        _br = ensure_brain_runtime(_agent, world_turn)
+        _priority = normalize_priority(_entry.get("effective_priority"))
+
+        _blocked_reason = None
+        if not _agent.get("is_alive", True):
+            _blocked_reason = "dead"
+        elif _agent.get("has_left_zone"):
+            _blocked_reason = "left_zone"
+        elif _agent.get("scheduled_action") and _priority != "urgent":
+            # Urgent priority bypasses scheduled_action so the brain can react
+            # immediately to critical events (combat, emission, critical needs).
+            _blocked_reason = "scheduled_action"
+        elif _agent.get("action_used"):
+            _blocked_reason = "action_used"
+        elif _agent.get("controller", {}).get("kind") != "bot":
+            _blocked_reason = "not_bot"
+        elif _agent_in_active_combat(_agent_id, state):
+            _blocked_reason = "active_combat"
+
+        if _blocked_reason is not None:
+            _br["last_skip_reason"] = _blocked_reason
+            _npc_brain_skipped_count += 1
+            _next_queue.append(
+                {
+                    "agent_id": _agent_id,
+                    "priority": _priority,
+                    "reason": _entry.get("reason"),
+                    "queued_turn": int(_entry.get("queued_turn") or world_turn),
+                }
+            )
+            continue
+
+        _run_now = True
+        if _budget_enabled:
+            if _priority == "urgent" and _urgent_bypass:
+                _run_now = True
+            elif _priority in {"high", "normal"}:
+                _run_now = _normal_used < _max_normal
+            else:
+                _run_now = _background_used < _max_background
+
+        if not _run_now:
+            _br["last_skip_reason"] = "budget_deferred"
+            _npc_brain_skipped_count += 1
+            _npc_brain_budget_deferred_count += 1
+            _next_queue.append(
+                {
+                    "agent_id": _agent_id,
+                    "priority": _priority,
+                    "reason": _entry.get("reason"),
+                    "queued_turn": int(_entry.get("queued_turn") or world_turn),
+                }
+            )
+            continue
+
+        bot_evs = _run_npc_brain_v3_decision(_agent_id, _agent, state, world_turn)
         _npc_brain_decision_count += 1
         events.extend(bot_evs)
+        _agent = _runtime_agent(_agent_id, _agent)
+        _post_brain_decision_runtime_update(_agent, world_turn)
+
+        if _budget_enabled:
+            if _priority in {"high", "normal"}:
+                _normal_used += 1
+            elif _priority == "low":
+                _background_used += 1
+
+    # Hard cap queue size to prevent unbounded state growth across long runs.
+    _runtime_set_state_field(state, "decision_queue", _next_queue[:MAX_DECISION_QUEUE_SIZE])
 
     _pr_npc.__exit__(None, None, None)
 
@@ -1201,6 +1527,8 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             )
             _tick_profiler.set_counter("npc_brain_decision_count", _npc_brain_decision_count)
             _tick_profiler.set_counter("npc_brain_skipped_count", _npc_brain_skipped_count)
+            _tick_profiler.set_counter("npc_brain_budget_deferred_count", _npc_brain_budget_deferred_count)
+            _tick_profiler.set_counter("npc_brain_queue_size", len(state.get("decision_queue", [])))
             _tick_profiler.set_counter("dirty_agents_count", len(_tick_runtime.dirty_agents) if _tick_runtime else 0)
             _tick_profiler.set_counter("dirty_locations_count", len(_tick_runtime.dirty_locations) if _tick_runtime else 0)
             if _tick_runtime is not None and hasattr(_tick_runtime, "to_debug_counters"):
@@ -2156,6 +2484,69 @@ def _add_memory(
     else:
         mem = agent.setdefault("memory", [])
     mem.append(memory_entry)
+
+    _action_kind = str(effects.get("action_kind") or "")
+    _observed_kind = str(effects.get("observed") or "")
+    _is_emission_interrupt = (
+        _action_kind in {"travel_interrupted", "exploration_interrupted"}
+        and effects.get("reason") == "emission_warning"
+    )
+    _inv_reason: str | None = None
+    _inv_priority = "normal"
+    if _action_kind == "emission_imminent":
+        _inv_reason, _inv_priority = "emission_warning_started", "urgent"
+    elif _action_kind == "emission_started":
+        _inv_reason, _inv_priority = "emission_started", "urgent"
+    elif _action_kind == "target_seen":
+        _inv_reason, _inv_priority = "target_seen", "urgent"
+    elif _action_kind in {"target_intel", "intel_from_stalker", "intel_from_trader"}:
+        _inv_reason, _inv_priority = "target_intel_received", "high"
+    elif _action_kind == "target_not_found":
+        _inv_reason, _inv_priority = "target_not_found", "high"
+    elif _action_kind == "travel_arrived":
+        _inv_reason, _inv_priority = "agent_arrived", "high"
+    elif _action_kind == "active_plan_completed":
+        _inv_reason, _inv_priority = "plan_completed", "high"
+    elif _action_kind in {"active_plan_aborted", "active_plan_step_failed"}:
+        _inv_reason, _inv_priority = "plan_failed", "high"
+    elif _action_kind in {"combat_initiated", "combat_joined"}:
+        _inv_reason, _inv_priority = "combat_started", "urgent"
+    elif _action_kind == "witness_source_exhausted":
+        _inv_reason, _inv_priority = "target_location_exhausted", "high"
+    elif _is_emission_interrupt:
+        _inv_reason, _inv_priority = "emission_warning_started", "urgent"
+    elif _action_kind == "pickup":
+        if effects.get("artifact_type"):
+            _inv_reason, _inv_priority = "artifact_found", "high"
+        else:
+            _inv_reason, _inv_priority = "item_acquired", "low"
+    elif _action_kind in {"trade_sell", "trade_sell_for_cash", "trade_buy", "trade_decision"}:
+        _inv_reason, _inv_priority = "trade_completed", "normal"
+    elif _action_kind == "equip":
+        _inv_reason, _inv_priority = "equipment_changed", "normal"
+    elif _action_kind in {"global_goal_completed", "goal_achieved", "target_death_confirmed"}:
+        _inv_reason, _inv_priority = "goal_completed", "high"
+    elif _action_kind in {"exploration_interrupted", "travel_interrupted"}:
+        if not _is_emission_interrupt:
+            _inv_reason, _inv_priority = "action_interrupted", "high"
+    elif _action_kind == "plan_monitor_abort":
+        _pm_reason = str(effects.get("reason") or "")
+        if _pm_reason in {"critical_hp", "critical_thirst", "critical_hunger"}:
+            _inv_reason, _inv_priority = _pm_reason, "urgent"
+        elif _pm_reason in {"emission_interrupt", "emission_threat"}:
+            _inv_reason, _inv_priority = "emission_warning_started", "urgent"
+    elif _observed_kind == "combat_wounded":
+        _inv_reason, _inv_priority = "combat_damage_taken", "urgent"
+
+    if _inv_reason:
+        invalidate_brain(
+            agent,
+            _cow,
+            reason=_inv_reason,
+            priority=_inv_priority,
+            world_turn=world_turn,
+        )
+
     # Keep only the last MAX_AGENT_MEMORY memory entries
     if len(mem) > MAX_AGENT_MEMORY:
         _runtime_set_agent_field(resolved_agent_id, "memory", mem[-MAX_AGENT_MEMORY:], agent)
@@ -5415,7 +5806,10 @@ def _run_npc_brain_v3_decision_inner(
     _selected_objective_key = (
         selected_objective.key
         if selected_objective is not None
-        else ((intent.metadata or {}).get("objective_key") if isinstance(intent.metadata, dict) else None)
+        else (
+            ((intent.metadata or {}).get("objective_key") if isinstance(intent.metadata, dict) else None)
+            or _INTENT_TO_OBJECTIVE_KEY_FALLBACK.get(intent.kind)
+        )
     )
     _selected_objective_score = (
         round(float(selected_objective_score.final_score), 3)
@@ -6186,6 +6580,20 @@ def _compat_initiate_combat(
         f"⚔️ Атакую цель «{target_name}»",
         {"action_kind": "combat_initiated", "target_id": target_id, "combat_id": cid},
         summary=f"Начинаю боевое взаимодействие с «{target_name}»",
+    )
+    invalidate_brain(
+        agent,
+        _cow_runtime(),
+        reason="combat_started",
+        priority="urgent",
+        world_turn=world_turn,
+    )
+    invalidate_brain(
+        target,
+        _cow_runtime(),
+        reason="combat_started",
+        priority="urgent",
+        world_turn=world_turn,
     )
     _runtime_set_action_used(agent, True)
     return [{"event_type": "combat_initiated",
