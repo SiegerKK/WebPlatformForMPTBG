@@ -1243,9 +1243,10 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         )
         # Track any invalidation so plan-running agents are still enqueued for brain re-eval.
         _enqueue_invalidated = bool(br.get("invalidated"))
-        _latest_invalidator = str(latest_invalidator_reason(agent) or "")
-        _goal_completion_invalidated = (
-            _enqueue_invalidated and _latest_invalidator in _GOAL_COMPLETION_INVALIDATION_REASONS
+        _goal_completion_invalidated = _enqueue_invalidated and any(
+            isinstance(inv, dict)
+            and str(inv.get("reason") or "") in _GOAL_COMPLETION_INVALIDATION_REASONS
+            for inv in br.get("invalidators", [])
         )
         _should_bypass_active_plan_for_brain = _enqueue_urgent_invalidated or _goal_completion_invalidated
         if agent.get("scheduled_action") and not _enqueue_urgent_invalidated:
