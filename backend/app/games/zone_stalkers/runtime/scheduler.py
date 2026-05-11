@@ -3,9 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 
+def _turn_key(turn: Any) -> str:
+    # Keep JSON-compatible string keys in state["scheduled_tasks"].
+    return str(turn)
+
+
 def schedule_task(state: dict[str, Any], runtime: Any, turn: int, task: dict[str, Any]) -> None:
     tasks = state.setdefault("scheduled_tasks", {})
-    bucket = tasks.setdefault(str(int(turn)), [])
+    bucket = tasks.setdefault(_turn_key(turn), [])
     bucket.append(dict(task))
     if runtime is not None:
         try:
@@ -16,7 +21,7 @@ def schedule_task(state: dict[str, Any], runtime: Any, turn: int, task: dict[str
 
 def pop_due_tasks(state: dict[str, Any], runtime: Any, world_turn: int) -> list[dict[str, Any]]:
     tasks = state.setdefault("scheduled_tasks", {})
-    due = tasks.pop(str(int(world_turn)), [])
+    due = tasks.pop(_turn_key(world_turn), [])
     if due and runtime is not None:
         try:
             runtime.mark_state_dirty("scheduled_tasks")

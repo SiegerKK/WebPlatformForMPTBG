@@ -1294,6 +1294,8 @@ def _process_scheduled_action(
     # ── Per-tick sleep interval processing ──────────────────────────────────
     # Apply effects every 30 turns regardless of whether the action completes
     # this tick.  This ensures partial recovery on abort.
+    # Event-driven mode avoids per-tick sleep polling; sleep completion resolves
+    # aggregate sleep effects using action timing at the due turn.
     if action_type == "sleep" and not _event_driven_actions_enabled(state):
         events.extend(_process_sleep_tick(agent_id, agent, sched, state, world_turn))
         # _process_sleep_tick may force early wake-up when sleepiness reaches 0.

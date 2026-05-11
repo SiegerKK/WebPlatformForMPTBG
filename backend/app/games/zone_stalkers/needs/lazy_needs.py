@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from app.games.zone_stalkers.rules.tick_constants import (
@@ -90,7 +91,7 @@ def schedule_need_thresholds(
                 continue
             if current >= threshold_value:
                 continue
-            turns_until = int((threshold_value - current) / rate)
+            turns_until = math.ceil((threshold_value - current) / rate)
             schedule_task(
                 state,
                 runtime,
