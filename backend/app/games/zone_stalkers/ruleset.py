@@ -263,6 +263,140 @@ class ZoneStalkerRuleSet(RuleSet):
             "new_state": new_state,
         }
 
+    def tick_many(self, match_id: str, db: Any, max_ticks: int) -> dict:
+        """Advance Zone Stalkers world by up to max_ticks in one load/save/commit cycle."""
+        from datetime import datetime
+        from app.core.contexts.models import GameContext, ContextStatus
+        from app.core.events.models import GameEvent
+        from app.core.events.service import allocate_sequence_numbers
+        from app.core.matches.models import Match, MatchStatus
+        from app.core.state_cache.service import load_context_state, save_context_state
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+        from app.games.zone_stalkers.rules.event_rules import start_event, bot_choose_option
+
+        match = db.query(Match).filter(Match.id == match_id).first()
+        if not match:
+            return {"error": "match not found"}
+
+        zone_ctx = db.query(GameContext).filter(
+            GameContext.match_id == match.id,
+            GameContext.context_type == "zone_map",
+            GameContext.status == ContextStatus.ACTIVE,
+        ).first()
+        if not zone_ctx:
+            return {"error": "no active zone_map context found"}
+
+        state = load_context_state(zone_ctx.id, zone_ctx)
+        old_state = state
+        new_state = state
+        all_map_events: list[dict] = []
+        ticks_advanced = 0
+        for _ in range(max(0, int(max_ticks))):
+            new_state, map_events = tick_zone_map(new_state)
+            all_map_events.extend(map_events)
+            ticks_advanced += 1
+            if new_state.get("game_over"):
+                break
+
+        new_state["state_revision"] = int(state.get("state_revision", 0)) + 1
+        new_state["_debug_revision"] = int(state.get("_debug_revision", 0)) + 1
+
+        emitted = []
+        new_events_for_ws = []
+        if all_map_events:
+            import uuid as _uuid_mod
+            from datetime import datetime as _dt_cls
+            seq_range = allocate_sequence_numbers(zone_ctx.id, len(all_map_events), db)
+            for ev_data, seq in zip(all_map_events, seq_range):
+                _ev_id = _uuid_mod.uuid4()
+                _ev_created = _dt_cls.utcnow()
+                ev = GameEvent(
+                    id=_ev_id,
+                    match_id=match.id,
+                    context_id=zone_ctx.id,
+                    event_type=ev_data.get("event_type", "tick"),
+                    payload=ev_data.get("payload", {}),
+                    sequence_no=seq,
+                    created_at=_ev_created,
+                )
+                db.add(ev)
+                emitted.append(ev_data)
+                new_events_for_ws.append({
+                    "id": str(_ev_id),
+                    "match_id": str(match.id),
+                    "context_id": str(zone_ctx.id),
+                    "event_type": ev_data.get("event_type", "tick"),
+                    "payload": ev_data.get("payload", {}),
+                    "sequence_no": seq,
+                    "created_at": _ev_created.isoformat(),
+                })
+
+        if new_state.get("active_events"):
+            event_ctxs = db.query(GameContext).filter(
+                GameContext.match_id == match.id,
+                GameContext.context_type == "zone_event",
+                GameContext.status == ContextStatus.ACTIVE,
+            ).all()
+        else:
+            event_ctxs = []
+
+        for evt_ctx in event_ctxs:
+            evt_state = load_context_state(evt_ctx.id, evt_ctx)
+            if evt_state.get("phase") == "waiting":
+                participants = evt_state.get("participants", {})
+                if participants:
+                    evt_state, start_evs = start_event(evt_state)
+                    _emit_events(evt_ctx, match, start_evs, emitted, db)
+
+            if evt_state.get("phase") == "active":
+                for pid, p in evt_state.get("participants", {}).items():
+                    if p.get("status") == "active" and p.get("choice") is None:
+                        agent_id = new_state.get("player_agents", {}).get(pid)
+                        if agent_id:
+                            agent = new_state.get("agents", {}).get(agent_id, {})
+                            if agent.get("controller", {}).get("kind") == "bot":
+                                evt_state, bot_evs = bot_choose_option(evt_state, pid)
+                                _emit_events(evt_ctx, match, bot_evs, emitted, db)
+
+            if evt_state.get("phase") == "ended":
+                active_events = new_state.get("active_events", [])
+                event_ctx_id = str(evt_ctx.id)
+                if event_ctx_id in active_events:
+                    active_events.remove(event_ctx_id)
+                new_state["active_events"] = active_events
+                evt_ctx.status = ContextStatus.FINISHED
+                evt_ctx.finished_at = datetime.utcnow()
+
+            save_context_state(evt_ctx.id, evt_state, evt_ctx, force_persist=True)
+
+        game_over = bool(new_state.get("game_over"))
+        save_context_state(zone_ctx.id, new_state, zone_ctx, force_persist=game_over)
+        if game_over:
+            match.status = MatchStatus.FINISHED
+            match.finished_at = datetime.utcnow()
+        db.commit()
+
+        zone_delta = None
+        try:
+            from app.games.zone_stalkers.delta import build_zone_delta
+            zone_delta = build_zone_delta(old_state=old_state, new_state=new_state, events=new_events_for_ws)
+        except Exception:
+            zone_delta = None
+
+        return {
+            "context_id": str(zone_ctx.id),
+            "ticks_advanced": ticks_advanced,
+            "world_turn": new_state.get("world_turn"),
+            "world_hour": new_state.get("world_hour"),
+            "world_day": new_state.get("world_day"),
+            "world_minute": new_state.get("world_minute"),
+            "events_emitted": len(emitted),
+            "new_events": new_events_for_ws,
+            "zone_delta": zone_delta,
+            "old_state": old_state,
+            "new_state": new_state,
+        }
+
     # ── Command validation / resolution ──────────────────────────────────────
 
     def validate_command(

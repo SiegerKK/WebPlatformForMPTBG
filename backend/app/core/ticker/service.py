@@ -189,6 +189,60 @@ def tick_match(match_id_str: str, db: Session) -> dict:
 
 
 def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
+    match = db.query(Match).filter(Match.id == match_id_str).first()
+    if not match:
+        return {"error": "match not found"}
+    if match.status != MatchStatus.ACTIVE:
+        return {"error": f"match status is {match.status}, not active"}
+
+    from app.core.commands.pipeline import get_ruleset
+    ruleset = get_ruleset(match.game_id)
+    if not ruleset:
+        return {"error": f"no ruleset registered for game '{match.game_id}'"}
+
+    if hasattr(ruleset, "tick_many"):
+        _started = time.perf_counter()
+        result = ruleset.tick_many(match_id_str, db, max_ticks=max(0, int(max_ticks)))
+        tick_total_ms = (time.perf_counter() - _started) * 1000.0
+        if "error" not in result:
+            # Reuse same WS + metrics side-effects as single tick.
+            from app.core.ws.manager import ws_manager
+            all_events: list[Any] = result.get("new_events", []) or []
+            zone_delta = result.get("zone_delta")
+            context_id_str = result.get("context_id")
+            if zone_delta is not None:
+                ws_payload = {
+                    "type": "zone_delta",
+                    "match_id": match_id_str,
+                    "context_id": context_id_str,
+                    **zone_delta,
+                }
+            else:
+                preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+                ws_payload = {
+                    "type": "ticked",
+                    "match_id": match_id_str,
+                    "world_turn": result.get("world_turn"),
+                    "world_hour": result.get("world_hour"),
+                    "world_day": result.get("world_day"),
+                    "world_minute": result.get("world_minute"),
+                    "event_count": len(all_events),
+                    "new_events_preview": preview_events,
+                    "requires_resync": match.game_id == "zone_stalkers",
+                    "ticks_advanced": result.get("ticks_advanced", 0),
+                }
+            ws_manager.notify(match_id_str, ws_payload)
+            try:
+                from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+                record_tick_metrics(match_id_str, {
+                    "tick_total_ms": round(tick_total_ms, 3),
+                    "events_emitted": len(all_events),
+                    "ticks_advanced": int(result.get("ticks_advanced", 0)),
+                })
+            except Exception:
+                pass
+        return result
+
     total = 0
     last: dict = {}
     for _ in range(max(0, int(max_ticks))):
