@@ -142,11 +142,14 @@ class ZoneStalkerRuleSet(RuleSet):
                 })
 
         # ── Process active zone_event child contexts ──────────────────
-        event_ctxs = db.query(GameContext).filter(
-            GameContext.match_id == match.id,
-            GameContext.context_type == "zone_event",
-            GameContext.status == ContextStatus.ACTIVE,
-        ).all()
+        if new_state.get("active_events"):
+            event_ctxs = db.query(GameContext).filter(
+                GameContext.match_id == match.id,
+                GameContext.context_type == "zone_event",
+                GameContext.status == ContextStatus.ACTIVE,
+            ).all()
+        else:
+            event_ctxs = []
 
         for evt_ctx in event_ctxs:
             evt_state = load_context_state(evt_ctx.id, evt_ctx)
