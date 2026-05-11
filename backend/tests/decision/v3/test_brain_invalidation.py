@@ -324,3 +324,86 @@ def test_hunter_reacts_to_new_target_intel_even_with_cache() -> None:
     assert should_run is True
     assert reason == "invalidated"
     assert hunter["brain_runtime"]["invalidators"][-1]["reason"] == "target_intel_received"
+
+
+def test_high_invalidation_bypasses_active_plan_and_is_queued_or_run(monkeypatch) -> None:
+    """High-priority invalidation bypasses active_plan processing (agent is queued/run)."""
+    from app.games.zone_stalkers.rules import tick_rules as _tr
+
+    monkeypatch.setattr(_tr, "_run_npc_brain_v3_decision", lambda aid, a, s, t: [])
+
+    state = _base_state()
+    state["ai_budget"] = {
+        "enabled": True,
+        "max_normal_decisions_per_tick": 0,
+        "max_background_decisions_per_tick": 0,
+        "urgent_decisions_ignore_budget": True,
+        "max_decision_delay_turns": 10,
+    }
+    bot = _bot("bot1")
+    bot["active_plan_v3"] = {
+        "status": "active",
+        "plan_key": "GET_RICH",
+        "current_step": 0,
+        "steps": [],
+    }
+    br = ensure_brain_runtime(bot, 100)
+    br["valid_until_turn"] = 500
+    br["last_decision_turn"] = 50
+    # High-priority invalidation — should NOT be silently suppressed by active_plan handler.
+    invalidate_brain(bot, None, reason="target_intel_received", priority="high", world_turn=100)
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    br_after = new_state["agents"]["bot1"]["brain_runtime"]
+    # Budget blocks immediate run but the agent must be queued (not silently skipped as active_plan_runtime).
+    assert br_after.get("last_skip_reason") != "active_plan_runtime", (
+        "High invalidation must bypass active_plan processing"
+    )
+    queued = new_state.get("decision_queue", [])
+    assert any(q.get("agent_id") == "bot1" for q in queued), (
+        f"bot1 should be in decision_queue; queue={queued}, br={br_after}"
+    )
+
+
+def test_normal_invalidation_with_active_plan_is_budget_deferred_not_lost(monkeypatch) -> None:
+    """Normal-priority invalidation with active_plan is budget-deferred, not silently lost."""
+    from app.games.zone_stalkers.rules import tick_rules as _tr
+
+    monkeypatch.setattr(_tr, "_run_npc_brain_v3_decision", lambda aid, a, s, t: [])
+
+    state = _base_state()
+    state["ai_budget"] = {
+        "enabled": True,
+        "max_normal_decisions_per_tick": 0,
+        "max_background_decisions_per_tick": 0,
+        "urgent_decisions_ignore_budget": True,
+        "max_decision_delay_turns": 10,
+    }
+    bot = _bot("bot1")
+    bot["active_plan_v3"] = {
+        "status": "active",
+        "plan_key": "GET_RICH",
+        "current_step": 0,
+        "steps": [],
+    }
+    br = ensure_brain_runtime(bot, 100)
+    br["valid_until_turn"] = 500
+    br["last_decision_turn"] = 50
+    # Normal-priority invalidation — should enter budget queue, not be silently dropped.
+    invalidate_brain(bot, None, reason="trade_completed", priority="normal", world_turn=100)
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    br_after = new_state["agents"]["bot1"]["brain_runtime"]
+    assert br_after.get("last_skip_reason") != "active_plan_runtime", (
+        "Normal invalidation must bypass active_plan processing"
+    )
+    queued = new_state.get("decision_queue", [])
+    assert any(q.get("agent_id") == "bot1" for q in queued), (
+        f"bot1 should be budget-deferred in decision_queue; queue={queued}, br={br_after}"
+    )

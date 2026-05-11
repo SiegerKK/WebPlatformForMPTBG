@@ -1195,11 +1195,13 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             br["last_skip_reason"] = "left_zone"
             _npc_brain_skipped_count += 1
             continue
-        # Urgent-invalidated agents bypass scheduled_action and active_plan skips so the
-        # brain can react immediately to critical events (combat, emission, critical needs).
+        # Urgent-invalidated agents bypass scheduled_action so the brain can react
+        # immediately to critical events (combat, emission, critical needs).
         _enqueue_urgent_invalidated = (
             br.get("invalidated") and highest_invalidator_priority(agent) == "urgent"
         )
+        # Track any invalidation so plan-running agents are still enqueued for brain re-eval.
+        _enqueue_invalidated = bool(br.get("invalidated"))
         if agent.get("scheduled_action") and not _enqueue_urgent_invalidated:
             br["last_skip_reason"] = "scheduled_action"
             _npc_brain_skipped_count += 1
@@ -1216,6 +1218,40 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
 
         _has_active_plan = is_v3_monitored_bot(agent) and get_active_plan(agent) is not None
         if _has_active_plan and not _enqueue_urgent_invalidated:
+            handled, active_plan_events = _process_active_plan_v3(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                add_memory=_add_memory,
+            )
+            events.extend(active_plan_events)
+            if handled:
+                br["last_skip_reason"] = "active_plan_runtime"
+                _npc_brain_skipped_count += 1
+                # Per PR4 spec: "NPC follows plan until invalidated". Even when the active
+                # plan advances its current step, a non-urgent invalidation must still
+                # produce a queued brain re-evaluation so the invalidation is not silently
+                # lost. The plan step runs now; the brain re-evaluates later (budget allows).
+                if _enqueue_invalidated:
+                    _ap_priority = highest_invalidator_priority(agent)
+                    _ap_reason = latest_invalidator_reason(agent) or "invalidated"
+                    _ap_existing = _queue_by_agent.get(agent_id)
+                    if _ap_existing is not None:
+                        _ap_priority = max_priority(_ap_priority, _ap_existing.get("priority"))
+                        _ap_qt = _ap_existing.get("queued_turn")
+                        _ap_queued_turn = min(
+                            int(_ap_qt) if _ap_qt is not None else world_turn, world_turn
+                        )
+                    else:
+                        _ap_queued_turn = world_turn
+                    _queue_by_agent[agent_id] = {
+                        "agent_id": agent_id,
+                        "priority": normalize_priority(_ap_priority),
+                        "reason": _ap_reason,
+                        "queued_turn": _ap_queued_turn,
+                    }
+                continue
             handled, active_plan_events = _process_active_plan_v3(
                 agent_id,
                 agent,
