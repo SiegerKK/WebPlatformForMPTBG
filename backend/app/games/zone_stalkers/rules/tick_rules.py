@@ -2931,31 +2931,35 @@ def _bot_sell_to_trader(
             trader = _rt_st.trader(_trader_id_st)
         except Exception:
             _rt_st = None
+    trader_id_resolved = str(trader.get("id") or _trader_id_st or "")
+    trader_inventory_st = (
+        _rt_st.mutable_trader_list(_trader_id_st, "inventory")
+        if _rt_st is not None and _trader_id_st
+        else trader.setdefault("inventory", [])
+    )
     agent_money_st = agent.get("money", 0)
+    trader_money_st = int(trader.get("money", 0))
     sell_price_total = 0
     sold_items = []
     for art in artifacts:
         sell_price = int(art.get("value", 0) * 0.6)  # 60% of base value
-        trader_money = trader.get("money", 0)
-        if trader_money < sell_price:
+        if trader_money_st < sell_price:
             continue  # trader too poor; skip this item
         # Transfer money (agent money accumulated locally; trader updated in-place on COW copy)
         agent_money_st += sell_price
-        trader["money"] = trader_money - sell_price
+        trader_money_st -= sell_price
+        _runtime_set_trader_field(state, trader_id_resolved, "money", trader_money_st)
         sell_price_total += sell_price
         # Transfer item
         sold_item = dict(art)
         sold_item["stock"] = 1
-        if _rt_st is not None and _trader_id_st:
-            _rt_st.mutable_trader_list(_trader_id_st, "inventory").append(sold_item)
-        else:
-            trader.setdefault("inventory", []).append(sold_item)
+        trader_inventory_st.append(sold_item)
         sold_items.append(art)
         events.append({
             "event_type": "bot_sold_artifact",
             "payload": {
                 "agent_id": agent_id,
-                "trader_id": trader["id"],
+                "trader_id": trader_id_resolved,
                 "item_id": art["id"],
                 "item_type": art["type"],
                 "price": sell_price,
@@ -2973,13 +2977,13 @@ def _bot_sell_to_trader(
 
     # ── Stalker memory (Step 7) ───────────────────────────────────
     item_names = ", ".join(i.get("name", i.get("type", "?")) for i in sold_items)
-    trader_name = trader.get("name", trader["id"])
+    trader_name = trader.get("name", trader_id_resolved)
     loc_name = state.get("locations", {}).get(agent.get("location_id", ""), {}).get("name", "?")
     _add_memory(
         agent, world_turn, state, "action",
         f"Продал {len(sold_items)} артефактов на {sell_price_total} денег",
         {"action_kind": "trade_sell", "money_gained": sell_price_total,
-         "items_sold": [i["type"] for i in sold_items], "trader_id": trader["id"]},
+         "items_sold": [i["type"] for i in sold_items], "trader_id": trader_id_resolved},
         summary=f"Продал {item_names} торговцу {trader_name} в «{loc_name}» за {sell_price_total} денег",
     )
 
@@ -3078,7 +3082,14 @@ def _bot_sell_items_for_cash(
             trader = _rt_sfc.trader(_trader_id_sfc)
         except Exception:
             _rt_sfc = None
+    trader_id_resolved = str(trader.get("id") or _trader_id_sfc or "")
+    trader_inventory_sfc = (
+        _rt_sfc.mutable_trader_list(_trader_id_sfc, "inventory")
+        if _rt_sfc is not None and _trader_id_sfc
+        else trader.setdefault("inventory", [])
+    )
     agent_money_sfc = agent.get("money", 0)
+    trader_money_sfc = int(trader.get("money", 0))
 
     events: List[Dict[str, Any]] = []
     sold_items: List[Dict[str, Any]] = []
@@ -3092,23 +3103,21 @@ def _bot_sell_items_for_cash(
         sell_price = int(val * _SELL_RATIO)
         if sell_price <= 0:
             continue
-        if trader.get("money", 0) < sell_price:
+        if trader_money_sfc < sell_price:
             continue  # trader cannot afford this item
         agent_money_sfc += sell_price
-        trader["money"] = trader.get("money", 0) - sell_price
+        trader_money_sfc -= sell_price
+        _runtime_set_trader_field(state, trader_id_resolved, "money", trader_money_sfc)
         total_earned += sell_price
         sold_item = dict(item)
         sold_item["stock"] = 1
-        if _rt_sfc is not None and _trader_id_sfc:
-            _rt_sfc.mutable_trader_list(_trader_id_sfc, "inventory").append(sold_item)
-        else:
-            trader.setdefault("inventory", []).append(sold_item)
+        trader_inventory_sfc.append(sold_item)
         sold_items.append(item)
         events.append({
             "event_type": "bot_sold_item",
             "payload": {
                 "agent_id": agent_id,
-                "trader_id": trader.get("id", ""),
+                "trader_id": trader_id_resolved,
                 "item_type": t,
                 "price": sell_price,
             },
@@ -3141,7 +3150,7 @@ def _bot_sell_items_for_cash(
             "action_kind": "trade_sell_for_cash",
             "money_gained": total_earned,
             "items_sold": [i.get("type") for i in sold_items],
-            "trader_id": trader.get("id", ""),
+            "trader_id": trader_id_resolved,
         },
         summary=(
             f"Продал {item_names} торговцу {trader_name} в «{loc_name}» "
@@ -3340,6 +3349,7 @@ def _bot_buy_from_trader(
             trader = _rt_bt.trader(_trader_id_bt)
         except Exception:
             _rt_bt = None
+    _trader_id_bt_resolved = str(trader.get("id") or _trader_id_bt or "")
 
     agent_risk = float(agent.get("risk_tolerance", DEFAULT_RISK_TOLERANCE))
 
@@ -3370,7 +3380,8 @@ def _bot_buy_from_trader(
         # Transaction — deduct from agent, credit trader
         _runtime_set_agent_field(agent_id, "money", agent.get("money", 0) - buy_price, agent)
         agent = _runtime_agent(agent_id, agent)
-        trader["money"] = trader.get("money", 0) + buy_price
+        _trader_money_new = int(trader.get("money", 0)) + buy_price
+        _runtime_set_trader_field(state, _trader_id_bt_resolved, "money", _trader_money_new)
         # Create a fresh item instance and place it in agent inventory
         new_item: Dict[str, Any] = {
             "id": f"{item_type}_{agent_id}_{world_turn}",
@@ -3445,7 +3456,7 @@ def _bot_buy_from_trader(
         return [{
             "event_type": "bot_bought_item",
             "payload": {
-                "agent_id": agent_id, "trader_id": trader.get("id", "trader"),
+                "agent_id": agent_id, "trader_id": (_trader_id_bt_resolved or "trader"),
                 "item_type": item_type, "price": buy_price,
                 "agent_risk_tolerance": agent_risk, "item_risk_tolerance": item_risk,
                 "score": round(score, 3),
@@ -5395,15 +5406,30 @@ def _check_global_goal_completion(
                     )
                 agent["global_goal_achieved"] = True
                 target_name = target_agent.get("name", target_id) if target_agent else target_id
+                _goal_summary = f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!"
+                _goal_common = {
+                    "goal": "kill_stalker",
+                    "global_goal": "kill_stalker",
+                    "target_id": target_id,
+                }
                 _add_memory(
                     agent, world_turn, state, "observation",
                     f"⚔️ Цель достигнута: «{target_name}» устранён!",
                     {
                         "action_kind": "goal_achieved",
-                        "goal": "kill_stalker",
-                        "target_id": target_id,
+                        **_goal_common,
+                        "legacy_action_kind": "global_goal_completed",
                     },
-                    summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
+                    summary=_goal_summary,
+                )
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"⚔️ Цель достигнута: «{target_name}» устранён!",
+                    {
+                        "action_kind": "global_goal_completed",
+                        **_goal_common,
+                    },
+                    summary=_goal_summary,
                 )
 
 
