@@ -1697,8 +1697,6 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
     rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
-    # Ensure sleepiness is reset to 0 on sleep completion.
-    agent["sleepiness"] = 0
     intervals = int(sched.get("sleep_intervals_applied", 0))
     _add_memory(
         agent,
@@ -2153,6 +2151,13 @@ def _combat_shoot(
                      "target_id": target_id, "target_name": target_name,
                      "combat_id": cid},
                     summary=f"Я выполнил охотничье задание — уничтожил «{target_name}» в бою",
+                )
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"✅ Подтверждена ликвидация цели: «{target_name}»",
+                    {"action_kind": "target_death_confirmed",
+                     "target_id": target_id, "target_name": target_name},
+                    summary=f"Цель подтверждена мёртвой — «{target_name}»",
                 )
             _add_memory(
                 target, world_turn, state, "observation",
@@ -4966,6 +4971,7 @@ def _run_npc_brain_v3_decision_inner(
             active_plan_summary=_build_active_plan_summary(agent),
             personality=agent,
             target_belief=target_belief,
+            location_state=ctx.location_state,
         )
         objective_candidates = generate_objectives(objective_ctx)
         objective_decision = choose_objective(
@@ -5389,14 +5395,14 @@ def _check_global_goal_completion(
                         return True
                 return False
 
-            if target_is_dead:
+            if target_is_dead and _has_target_death_confirmed():
                 agent["global_goal_achieved"] = True
                 target_name = target_agent.get("name", target_id)
                 _add_memory(
                     agent, world_turn, state, "observation",
                     f"⚔️ Цель достигнута: «{target_name}» устранён!",
                     {
-                        "action_kind": "goal_achieved",
+                        "action_kind": "global_goal_completed",
                         "goal": "kill_stalker",
                         "target_id": target_id,
                     },

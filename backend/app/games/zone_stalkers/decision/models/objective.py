@@ -57,3 +57,4 @@ class ObjectiveGenerationContext:
     active_plan_summary: dict[str, Any] | None
     personality: dict[str, Any]
     target_belief: "TargetBelief | None" = None
+    location_state: dict[str, Any] = field(default_factory=dict)

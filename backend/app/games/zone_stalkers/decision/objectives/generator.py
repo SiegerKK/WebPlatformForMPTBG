@@ -410,15 +410,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         )
 
     dominant_item_urgency = 0.0
-    _agent_money = int(agent.get("money", 0))
-    _material_threshold = int(agent.get("material_threshold", 0))
-    _in_phase1 = _material_threshold > 0 and _agent_money < _material_threshold
     for item_need in need_result.item_needs:
         objective_key = ITEM_NEED_TO_OBJECTIVE.get(item_need.key)
         if objective_key is None or item_need.urgency <= 0:
-            continue
-        # Phase-1 gate: don't chase weapon/armor while still in the wealth-building phase.
-        if _in_phase1 and item_need.key in ("weapon", "armor"):
             continue
         dominant_item_urgency = max(dominant_item_urgency, float(item_need.urgency))
 

@@ -38,15 +38,12 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     drink_count = sum(1 for i in inventory if i.get("type") in DRINK_ITEM_TYPES)
     medicine_count = sum(1 for i in inventory if i.get("type") in HEAL_ITEM_TYPES)
 
-    # Scale stock urgency by actual need level so that low-hunger/thirst agents
-    # do not over-prioritise resupply over their primary goal (e.g. find_artifacts).
-    _hunger = float(agent.get("hunger", 0))
-    _thirst = float(agent.get("thirst", 0))
-    _hp = float(agent.get("hp", 100))
-    _max_hp = float(agent.get("max_hp", 100)) or 100.0
-    _food_urgency = 0.55 * max(0.15, min(1.0, _hunger / 60.0))
-    _drink_urgency = 0.55 * max(0.15, min(1.0, _thirst / 60.0))
-    _medicine_urgency = 0.45 * max(0.15, 1.0 - _hp / _max_hp)
+    # Fixed urgency scores for stock needs — not scaled by hunger/thirst/hp.
+    # The immediate_needs pipeline already handles critical survival drives;
+    # item_needs tracks *missing stock* regardless of current stat levels.
+    _food_urgency = 0.55
+    _drink_urgency = 0.55
+    _medicine_urgency = 0.45
 
     needs: list[ItemNeed] = [
         _build_stock_need("food", desired_food, food_count, _food_urgency, FOOD_ITEM_TYPES, priority=30,
@@ -57,9 +54,6 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
                           reason="Недостаточный запас медикаментов", agent_money=agent_money),
     ]
 
-    _material_threshold = int(agent.get("material_threshold", 0))
-    _in_phase1 = _material_threshold > 0 and agent_money < _material_threshold
-
     has_weapon = equipment.get("weapon") is not None
     has_armor = equipment.get("armor") is not None
 
@@ -67,10 +61,11 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     weapon_missing = 0 if has_weapon else 1
     # For hunters (kill_stalker goal) a missing weapon is critical — boost urgency
     # so that the resupply drive clearly dominates get_rich or unravel drives.
+    # Note: urgency applies unconditionally when weapon is missing — there is no
+    # phase-1 gate here because a weapon is always essential for survival.
     weapon_urgency = (
-        (_WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL)
-        if weapon_missing and not _in_phase1 else 0.0
-    )
+        _WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL
+    ) if weapon_missing else 0.0
     weapon_reason = ("Нет оружия (критично для охоты)" if global_goal == "kill_stalker"
                      else "Нет оружия") if weapon_missing else ""
     needs.append(
@@ -96,7 +91,7 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
             desired_count=1,
             current_count=0 if not has_armor else 1,
             missing_count=armor_missing,
-            urgency=0.70 if armor_missing and not _in_phase1 else 0.0,
+            urgency=0.70 if armor_missing else 0.0,
             compatible_item_types=ARMOR_ITEM_TYPES,
             priority=35,
             reason="Нет брони" if armor_missing else "",

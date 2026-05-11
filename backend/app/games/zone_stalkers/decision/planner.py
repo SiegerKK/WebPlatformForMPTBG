@@ -1423,6 +1423,42 @@ def _plan_hunt_target(
             created_turn=world_turn,
         )
 
+    # If target is actually co-located right now, engage immediately regardless of objective_key.
+    if target_id:
+        _live_target = state.get("agents", {}).get(target_id)
+        if (
+            isinstance(_live_target, dict)
+            and _live_target.get("is_alive", True)
+            and _live_target.get("location_id") == agent_loc
+        ):
+            weapon = (ctx.self_state.get("equipment", {}) or {}).get("weapon")
+            if isinstance(weapon, dict):
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[
+                        PlanStep(
+                            STEP_START_COMBAT,
+                            {"target_id": target_id, "reason": "hunt_target_co_located"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                        PlanStep(
+                            STEP_MONITOR_COMBAT,
+                            {"target_id": target_id, "reason": "hunt_target_co_located"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                        PlanStep(
+                            STEP_CONFIRM_KILL,
+                            {"target_id": target_id, "reason": "confirm_after_hunt"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                    ],
+                    confidence=0.85,
+                    created_turn=world_turn,
+                )
+
     # GATHER_INTEL / LOCATE_TARGET fallback hunt behavior.
     trader_loc = _nearest_trader_location(ctx, state, used_for="find_trader")
     if trader_loc and trader_loc != agent_loc:
