@@ -76,6 +76,7 @@ def schedule_need_thresholds(
     ensure_needs_state(agent, world_turn)
     needs_state = agent["needs_state"]
     revision = int(needs_state.get("revision", 0))
+    threshold_tasks = needs_state.setdefault("_threshold_tasks", {})
     for need_key, rate in _NEED_RATES_PER_TURN.items():
         if rate <= 0:
             continue
@@ -84,6 +85,9 @@ def schedule_need_thresholds(
             ("soft", _SOFT_THRESHOLD),
             ("critical", _CRITICAL_THRESHOLD),
         ):
+            dedupe_key = f"{need_key}:{threshold_name}"
+            if threshold_tasks.get(dedupe_key) == revision:
+                continue
             if current >= threshold_value:
                 continue
             turns_until = int((threshold_value - current) / rate)
@@ -99,3 +103,4 @@ def schedule_need_thresholds(
                     "needs_revision": revision,
                 },
             )
+            threshold_tasks[dedupe_key] = revision

@@ -58,13 +58,13 @@ def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
 # never copied.
 
 
-def _compact_scheduled_action(action: Any) -> dict[str, Any] | None:
+def _compact_scheduled_action(action: Any, world_turn: int | None = None) -> dict[str, Any] | None:
     if not isinstance(action, dict):
         return None
     turns_total = action.get("turns_total")
     turns_remaining = action.get("turns_remaining")
-    if turns_remaining is None and action.get("ends_turn") is not None:
-        turns_remaining = max(0, int(action.get("ends_turn", 0)) - int(action.get("started_turn", 0)))
+    if turns_remaining is None and action.get("ends_turn") is not None and world_turn is not None:
+        turns_remaining = max(0, int(action.get("ends_turn", 0)) - int(world_turn))
     return {
         "type": action.get("type"),
         "turns_remaining": turns_remaining,
@@ -112,7 +112,7 @@ def _compact_inventory(inventory: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _project_agent_game(agent: dict[str, Any]) -> dict[str, Any]:
+def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
     return {
         "id": agent.get("id"),
         "name": agent.get("name"),
@@ -136,7 +136,7 @@ def _project_agent_game(agent: dict[str, Any]) -> dict[str, Any]:
         "current_goal": agent.get("current_goal"),
         "risk_tolerance": agent.get("risk_tolerance"),
         "action_used": agent.get("action_used"),
-        "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action")),
+        "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action"), world_turn),
         "active_plan_summary": _compact_active_plan(agent.get("active_plan_v3")),
         "equipment_summary": _compact_equipment(agent.get("equipment")),
         "inventory_summary": _compact_inventory(agent.get("inventory")),
@@ -207,7 +207,11 @@ def _project_zone_game(state: dict[str, Any]) -> dict[str, Any]:
         "max_turns": state.get("max_turns"),
         "state_revision": state.get("state_revision", 0),
         "map_revision": state.get("map_revision", 0),
-        "agents": {id_: _project_agent_game(a) for id_, a in agents_raw.items() if isinstance(a, dict)},
+        "agents": {
+            id_: _project_agent_game(a, state.get("world_turn"))
+            for id_, a in agents_raw.items()
+            if isinstance(a, dict)
+        },
         "traders": {id_: _project_trader_game(t) for id_, t in traders_raw.items() if isinstance(t, dict)},
         "locations": _project_locations_game(state.get("locations", {})),
         # mutants are small dicts, safe to pass through directly
