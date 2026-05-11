@@ -290,9 +290,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           batchTotalMs: Number.isFinite(batchTotalMs) ? batchTotalMs : null,
         });
       } catch {
-        if (!cancelled) {
-          setAutoTickPerf((prev) => prev);
-        }
+        return;
       }
     };
     loadPerf();

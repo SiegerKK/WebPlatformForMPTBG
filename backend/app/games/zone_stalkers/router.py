@@ -41,26 +41,48 @@ def _normalize_media_url(rel_path: str) -> str:
     return "/media/" + rel_path.replace(os.sep, "/")
 
 
-def _abs_media_path(rel_path: str) -> str:
-    return os.path.join(MEDIA_ROOT, rel_path)
+def _safe_location_segment(location_id: str) -> str:
+    if not location_id or location_id in {".", ".."} or "/" in location_id or "\\" in location_id:
+        raise HTTPException(status_code=400, detail="Invalid location_id for media path")
+    return location_id
+
+
+def _resolve_media_path(rel_path: str) -> str:
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    candidate_abs = os.path.realpath(os.path.join(media_root_abs, rel_path))
+    if os.path.commonpath([media_root_abs, candidate_abs]) != media_root_abs:
+        raise ValueError("media path escapes MEDIA_ROOT")
+    return candidate_abs
+
+
+def _abs_media_path(rel_path: str) -> str | None:
+    try:
+        return _resolve_media_path(rel_path)
+    except ValueError:
+        return None
 
 
 def _delete_location_images(records: list) -> None:
+    removed_abs_paths: list[str] = []
     for existing in records:
         old_abs = _abs_media_path(existing.file_path)
+        if old_abs is None:
+            continue
         try:
             os.remove(old_abs)
         except FileNotFoundError:
             pass
+        removed_abs_paths.append(old_abs)
+    _cleanup_parent_dirs(removed_abs_paths)
 
 
-def _cleanup_empty_location_dir(*, context_id: uuid.UUID, location_id: str) -> None:
-    loc_dir = os.path.join(MEDIA_ROOT, "locations", str(context_id), location_id)
-    try:
-        if os.path.isdir(loc_dir) and not os.listdir(loc_dir):
+def _cleanup_parent_dirs(abs_paths: list[str]) -> None:
+    for abs_path in abs_paths:
+        loc_dir = os.path.dirname(abs_path)
+        try:
             os.rmdir(loc_dir)
-    except OSError:
-        pass
+        except OSError:
+            pass
 
 
 @router.post("/locations/{context_id}/{location_id}/image")
@@ -92,6 +114,7 @@ async def upload_location_image(
     loc = locations.get(location_id)
     if not isinstance(loc, dict):
         raise HTTPException(status_code=404, detail="Location not found in zone state")
+    location_segment = _safe_location_segment(location_id)
 
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_TYPES:
@@ -111,12 +134,14 @@ async def upload_location_image(
 
     ext = _EXT_MAP[content_type]
     image_id = uuid.uuid4().hex
-    rel_dir = os.path.join("locations", str(context_id), location_id)
+    rel_dir = os.path.join("locations", str(context_id), location_segment)
     rel_path = os.path.join(rel_dir, f"{image_id}{ext}")
-    abs_dir = os.path.join(MEDIA_ROOT, rel_dir)
-    abs_path = os.path.join(MEDIA_ROOT, rel_path)
+    abs_dir = _resolve_media_path(rel_dir)
+    abs_path = _resolve_media_path(rel_path)
 
     # Remove any existing image files for this location (may differ in extension)
+    # Keep .all() here to clean up potential legacy duplicates that existed
+    # before the DB unique constraint was introduced.
     existing_records = (
         db.query(LocationImage)
         .filter(
@@ -182,7 +207,10 @@ def delete_location_image(
     loc = state.get("locations", {}).get(location_id)
     if not isinstance(loc, dict):
         raise HTTPException(status_code=404, detail="Location not found in zone state")
+    _safe_location_segment(location_id)
 
+    # Keep .all() here to clean up potential legacy duplicates that existed
+    # before the DB unique constraint was introduced.
     existing_records = (
         db.query(LocationImage)
         .filter(
@@ -204,8 +232,6 @@ def delete_location_image(
     state["map_revision"] = int(state.get("map_revision", 0)) + 1
     save_context_state(ctx.id, state, ctx, force_persist=True)
     db.commit()
-    _cleanup_empty_location_dir(context_id=context_id, location_id=location_id)
-
     return {
         "status": "deleted",
         "location_id": location_id,
