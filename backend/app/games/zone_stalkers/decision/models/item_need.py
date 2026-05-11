@@ -13,6 +13,9 @@ class ItemNeed:
     current_count: int
     missing_count: int
     urgency: float
+    raw_urgency: float = 0.0
+    actionable: bool = True
+    blocked_by: str | None = None
     compatible_item_types: frozenset[str] = field(default_factory=frozenset)
     reason: str = ""
     priority: int = 100

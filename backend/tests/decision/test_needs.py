@@ -153,31 +153,31 @@ class TestSleep:
 class TestReloadOrRearm:
     def test_no_weapon_only_armor_present_is_065(self):
         """No weapon but armor is present → 0.65 (weapon gap drives score)."""
-        agent = make_agent(has_weapon=False, has_armor=True)
+        agent = make_agent(has_weapon=False, has_armor=True, material_threshold=0)
         needs = _needs_for(agent=agent)
         assert needs.reload_or_rearm == 0.65
 
     def test_no_armor_is_0_7(self):
-        agent = make_agent(has_weapon=True, has_armor=False, has_ammo=False)
+        agent = make_agent(has_weapon=True, has_armor=False, has_ammo=False, material_threshold=0)
         needs = _needs_for(agent=agent)
         assert abs(needs.reload_or_rearm - 0.7) < 1e-9
 
     def test_has_weapon_and_armor_and_no_ammo(self):
         """With weapon=pistol+armor but 0 ammo → ammo gap score ≈ 0.60 > 0.5."""
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, material_threshold=0)
         needs = _needs_for(agent=agent)
         assert needs.reload_or_rearm > 0.5
 
     def test_fully_equipped_and_stocked(self):
         """weapon + armor + 3 ammo + 2 food + 2 drink + 3 medicine → 0.0."""
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, material_threshold=0)
         agent["inventory"] = _full_supplies()
         needs = _needs_for(agent=agent)
         assert needs.reload_or_rearm == 0.0
 
     def test_no_food_stock_triggers_resupply(self):
         """Agent with weapon+armor+ammo but no food → reload_or_rearm = 0.55."""
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, material_threshold=0)
         # Only ammo and drink/medicine in inventory (no food)
         agent["inventory"] = [
             {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
@@ -194,7 +194,7 @@ class TestReloadOrRearm:
 
     def test_no_drink_stock_triggers_resupply(self):
         """Agent with weapon+armor+ammo but no drink → reload_or_rearm = 0.55."""
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, material_threshold=0)
         agent["inventory"] = [
             {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
             {"id": "ammo_1", "type": "ammo_9mm", "value": 60},
@@ -210,7 +210,7 @@ class TestReloadOrRearm:
 
     def test_ammo_count_below_3_triggers_resupply(self):
         """Agent with 1 ammo item (< DESIRED_AMMO_COUNT=3) → reload_or_rearm ≈ 0.40."""
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, material_threshold=0)
         agent["inventory"] = [
             {"id": "ammo_0", "type": "ammo_9mm", "value": 60},
             # Only 1 ammo item — also add food/drink/medicine to isolate ammo score
@@ -313,7 +313,7 @@ class TestGetRich:
         Item values are set to 0 so that liquid wealth stays at exactly 0 for a
         clean formula check.
         """
-        agent = make_agent(money=0, material_threshold=3000,
+        agent = make_agent(money=0, material_threshold=0,
                            has_weapon=True, has_armor=True, has_ammo=False)
         agent["inventory"] = [{**i, "value": 0} for i in _full_supplies()]
         needs = _needs_for(agent=agent)
@@ -346,7 +346,7 @@ class TestEquipmentGateOnGetRich:
 
         Agent has armor but no weapon.  The weapon gap (0.65) drives the score.
         """
-        agent = make_agent(money=0, material_threshold=3000,
+        agent = make_agent(money=0, material_threshold=0,
                            has_weapon=False, has_armor=True, has_ammo=False)
         needs = _needs_for(agent=agent)
         # reload_or_rearm = 0.65 (weapon gap); suppression = (1 - 0.65) = 0.35
@@ -357,7 +357,7 @@ class TestEquipmentGateOnGetRich:
 
     def test_no_armor_suppresses_get_rich(self):
         """Missing armor (reload_or_rearm=0.70) suppresses get_rich below resupply score."""
-        agent = make_agent(money=0, material_threshold=3000,
+        agent = make_agent(money=0, material_threshold=0,
                            has_weapon=True, has_armor=False, has_ammo=False)
         agent["inventory"] = [{"type": "ammo_9mm", "quantity": 20, "value": 0}]
         needs = _needs_for(agent=agent)
@@ -367,7 +367,7 @@ class TestEquipmentGateOnGetRich:
 
     def test_no_ammo_suppresses_get_rich(self):
         """Missing ammo (reload_or_rearm=0.60) suppresses get_rich below resupply score."""
-        agent = make_agent(money=0, material_threshold=3000,
+        agent = make_agent(money=0, material_threshold=0,
                            has_weapon=True, has_armor=True, has_ammo=False)
         needs = _needs_for(agent=agent)
         # reload_or_rearm=0.60; suppression factor=0.40; base get_rich=0.70
@@ -376,7 +376,7 @@ class TestEquipmentGateOnGetRich:
 
     def test_fully_stocked_no_suppression(self):
         """Fully stocked agent → reload_or_rearm=0 → get_rich is not suppressed."""
-        agent = make_agent(money=0, material_threshold=3000,
+        agent = make_agent(money=0, material_threshold=0,
                            has_weapon=True, has_armor=True, has_ammo=False)
         agent["inventory"] = [{**i, "value": 0} for i in _full_supplies()]
         needs = _needs_for(agent=agent)
@@ -388,11 +388,25 @@ class TestEquipmentGateOnGetRich:
         # Agent has weapon (value=300) + armor (value=200) but zero money/inventory.
         # Old behaviour: wealth=500, ratio=500/3000=0.167, get_rich=0.583.
         # New behaviour: liquid_wealth=0, ratio=0, base get_rich=0.70 (then suppressed).
-        agent = make_agent(money=0, material_threshold=3000,
+        agent = make_agent(money=0, material_threshold=0,
                            has_weapon=True, has_armor=True, has_ammo=False)
         needs = _needs_for(agent=agent)
         # reload_or_rearm=0.60 (ammo gap), liquid_wealth=0 → base=0.70, suppressed: 0.70*0.40=0.28
         assert abs(needs.get_rich - 0.70 * 0.40) < 1e-9
+
+    def test_phase1_reload_or_rearm_excludes_blocked_equipment(self):
+        """Phase-1 non-hunter keeps get_rich active despite weapon gap."""
+        agent = make_agent(
+            money=100,
+            material_threshold=3000,
+            has_weapon=False,
+            has_armor=True,
+            has_ammo=False,
+            global_goal="get_rich",
+        )
+        needs = _needs_for(agent=agent)
+        assert needs.reload_or_rearm == 0.0
+        assert needs.get_rich > 0.0
 
 
 # ── hunt_target ───────────────────────────────────────────────────────────────

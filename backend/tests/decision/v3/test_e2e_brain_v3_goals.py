@@ -246,7 +246,7 @@ def test_e2e_kill_stalker_live_target_to_leave_zone() -> None:
     assert hunter.get("global_goal_achieved") is True
     assert hunter.get("has_left_zone") is True
     assert any_memory(hunter, "target_death_confirmed")
-    assert any_memory(hunter, "global_goal_completed")
+    assert any_memory(hunter, "goal_achieved")
     assert any_memory(hunter, "left_zone")
     assert any_objective_decision(hunter, "LEAVE_ZONE")
 
@@ -311,7 +311,7 @@ def test_e2e_kill_stalker_prepares_before_engage_when_no_ammo() -> None:
     # (Early-turn purchase memories may be pruned after 1400 ticks; ammo-before-engage
     # ordering is a unit-level guarantee in test_hunt_kill_stalker_goal.py.)
     assert any_memory(hunter, "target_death_confirmed"), "Hunter must confirm the kill"
-    assert any_memory(hunter, "global_goal_completed"), "Hunter must record goal completion"
+    assert any_memory(hunter, "goal_achieved"), "Hunter must record goal completion"
     assert any_objective_decision(hunter, "LEAVE_ZONE"), "Hunter must decide to leave the zone"
     assert hunter.get("has_left_zone") is True, "Hunter must have actually left the zone"
 
@@ -420,7 +420,7 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
     assert any_memory(hunter, "target_death_confirmed") or _any_memory_v3_kind("target_death_confirmed"), (
         "Hunter must record target_death_confirmed"
     )
-    assert any_memory(hunter, "global_goal_completed") or _any_memory_v3_kind("global_goal_completed"), (
+    assert any_memory(hunter, "goal_achieved") or _any_memory_v3_kind("goal_achieved"), (
         "Hunter must record global_goal_completed"
     )
     # Hunter must decide to leave and then actually leave.

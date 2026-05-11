@@ -408,7 +408,7 @@ class TestResupplyWeaponGuard:
         from app.games.zone_stalkers.decision.needs import evaluate_needs
         from app.games.zone_stalkers.decision.context_builder import build_agent_context
         # has_armor=True so that armor gap doesn't mask the weapon score (armor=0.70 > weapon=0.65)
-        agent = make_agent(has_weapon=False, has_armor=True, has_ammo=False)
+        agent = make_agent(has_weapon=False, has_armor=True, has_ammo=False, material_threshold=0)
         state = make_minimal_state(agent=agent)
         ctx = build_agent_context("bot1", agent, state)
         needs = evaluate_needs(ctx, state)
@@ -519,7 +519,7 @@ class TestResupplyPriorityOrder:
         """2 ammo items (< DESIRED_AMMO_COUNT=3) + all other supplies → buys ammo."""
         from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
         from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
-        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, money=500)
+        agent = make_agent(has_weapon=True, has_armor=True, has_ammo=False, money=500, material_threshold=0)
         agent["inventory"] = [
             {"id": "a0", "type": "ammo_9mm", "value": 60},
             {"id": "a1", "type": "ammo_9mm", "value": 60},  # only 2 ammo < 3 desired

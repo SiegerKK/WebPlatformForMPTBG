@@ -152,7 +152,7 @@ def test_weapon_urgency_boosted_for_kill_stalker_goal() -> None:
 
 
 def test_weapon_urgency_standard_for_get_rich_goal() -> None:
-    """Normal agent without weapon gets standard urgency 0.65."""
+    """Phase-1 get_rich agent keeps raw urgency but blocks actionable pressure."""
     agent = _make_agent(has_weapon=False, global_goal="get_rich")
     state = _make_state(agent)
     ctx = _ctx(agent, state)
@@ -160,9 +160,10 @@ def test_weapon_urgency_standard_for_get_rich_goal() -> None:
     item_needs = evaluate_item_needs(ctx, state)
     weapon_need = next(n for n in item_needs if n.key == "weapon")
 
-    assert weapon_need.urgency == 0.65, (
-        f"get_rich weapon urgency must be 0.65, got {weapon_need.urgency}"
-    )
+    assert weapon_need.raw_urgency == 0.65
+    assert weapon_need.urgency == 0.0
+    assert weapon_need.actionable is False
+    assert weapon_need.blocked_by == "phase1_material_gate"
 
 
 def test_weapon_urgency_zero_when_weapon_present() -> None:

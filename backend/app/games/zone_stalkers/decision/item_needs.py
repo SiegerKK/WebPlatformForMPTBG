@@ -13,6 +13,7 @@ from app.games.zone_stalkers.balance.items import (
 )
 
 from .constants import DESIRED_AMMO_COUNT
+from .economic_phase import is_item_need_actionable
 from .models.agent_context import AgentContext
 from .models.item_need import ItemNeed
 
@@ -38,12 +39,19 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     drink_count = sum(1 for i in inventory if i.get("type") in DRINK_ITEM_TYPES)
     medicine_count = sum(1 for i in inventory if i.get("type") in HEAL_ITEM_TYPES)
 
+    # Fixed urgency scores for stock needs — not scaled by hunger/thirst/hp.
+    # The immediate_needs pipeline already handles critical survival drives;
+    # item_needs tracks *missing stock* regardless of current stat levels.
+    _food_urgency = 0.55
+    _drink_urgency = 0.55
+    _medicine_urgency = 0.45
+
     needs: list[ItemNeed] = [
-        _build_stock_need("food", desired_food, food_count, 0.55, FOOD_ITEM_TYPES, priority=30,
+        _build_stock_need("food", desired_food, food_count, _food_urgency, FOOD_ITEM_TYPES, priority=30,
                           reason="Недостаточный запас еды", agent_money=agent_money),
-        _build_stock_need("drink", desired_drink, drink_count, 0.55, DRINK_ITEM_TYPES, priority=20,
+        _build_stock_need("drink", desired_drink, drink_count, _drink_urgency, DRINK_ITEM_TYPES, priority=20,
                           reason="Недостаточный запас воды", agent_money=agent_money),
-        _build_stock_need("medicine", desired_medicine, medicine_count, 0.45, HEAL_ITEM_TYPES, priority=60,
+        _build_stock_need("medicine", desired_medicine, medicine_count, _medicine_urgency, HEAL_ITEM_TYPES, priority=60,
                           reason="Недостаточный запас медикаментов", agent_money=agent_money),
     ]
 
@@ -54,10 +62,17 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     weapon_missing = 0 if has_weapon else 1
     # For hunters (kill_stalker goal) a missing weapon is critical — boost urgency
     # so that the resupply drive clearly dominates get_rich or unravel drives.
-    weapon_urgency = (
+    # Phase-1 gate: suppress weapon urgency for non-hunter agents in Phase 1
+    # so they gather resources instead of seeking a trader.
+    raw_weapon_urgency = (
         (_WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL)
         if weapon_missing else 0.0
     )
+    if weapon_missing:
+        weapon_actionable, weapon_blocked_by = is_item_need_actionable(agent, "weapon")
+    else:
+        weapon_actionable, weapon_blocked_by = True, None
+    weapon_urgency = raw_weapon_urgency if weapon_actionable else 0.0
     weapon_reason = ("Нет оружия (критично для охоты)" if global_goal == "kill_stalker"
                      else "Нет оружия") if weapon_missing else ""
     needs.append(
@@ -67,6 +82,9 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
             current_count=0 if not has_weapon else 1,
             missing_count=weapon_missing,
             urgency=weapon_urgency,
+            raw_urgency=raw_weapon_urgency,
+            actionable=weapon_actionable,
+            blocked_by=weapon_blocked_by,
             compatible_item_types=WEAPON_ITEM_TYPES,
             priority=40,
             reason=weapon_reason,
@@ -77,13 +95,22 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
 
     armor_min_price = _min_buy_price(ARMOR_ITEM_TYPES)
     armor_missing = 0 if has_armor else 1
+    raw_armor_urgency = (0.70 if armor_missing else 0.0)
+    if armor_missing:
+        armor_actionable, armor_blocked_by = is_item_need_actionable(agent, "armor")
+    else:
+        armor_actionable, armor_blocked_by = True, None
+    armor_urgency = raw_armor_urgency if armor_actionable else 0.0
     needs.append(
         ItemNeed(
             key="armor",
             desired_count=1,
             current_count=0 if not has_armor else 1,
             missing_count=armor_missing,
-            urgency=0.70 if armor_missing else 0.0,
+            urgency=armor_urgency,
+            raw_urgency=raw_armor_urgency,
+            actionable=armor_actionable,
+            blocked_by=armor_blocked_by,
             compatible_item_types=ARMOR_ITEM_TYPES,
             priority=35,
             reason="Нет брони" if armor_missing else "",
@@ -94,7 +121,7 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
 
     ammo_types: frozenset[str] = frozenset()
     ammo_count = 0
-    ammo_urgency = 0.0
+    raw_ammo_urgency = 0.0
     if has_weapon:
         weapon = equipment.get("weapon")
         weapon_type = weapon.get("type") if isinstance(weapon, dict) else None
@@ -103,20 +130,29 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
             ammo_types = frozenset([required_ammo])
             ammo_count = sum(1 for i in inventory if i.get("type") == required_ammo)
             missing = max(0, DESIRED_AMMO_COUNT - ammo_count)
-            ammo_urgency = 0.60 * (missing / max(1, DESIRED_AMMO_COUNT))
+            raw_ammo_urgency = 0.60 * (missing / max(1, DESIRED_AMMO_COUNT))
+    ammo_missing = max(0, DESIRED_AMMO_COUNT - ammo_count) if ammo_types else 0
+    if ammo_missing > 0:
+        ammo_actionable, ammo_blocked_by = is_item_need_actionable(agent, "ammo")
+    else:
+        ammo_actionable, ammo_blocked_by = True, None
+    ammo_urgency = raw_ammo_urgency if ammo_actionable else 0.0
     ammo_min_price = _min_buy_price(ammo_types) if ammo_types else None
     needs.append(
         ItemNeed(
             key="ammo",
             desired_count=DESIRED_AMMO_COUNT,
             current_count=ammo_count,
-            missing_count=max(0, DESIRED_AMMO_COUNT - ammo_count) if ammo_types else 0,
+            missing_count=ammo_missing,
             urgency=ammo_urgency,
+            raw_urgency=raw_ammo_urgency,
+            actionable=ammo_actionable,
+            blocked_by=ammo_blocked_by,
             compatible_item_types=ammo_types,
             priority=50,
-            reason="Недостаточно патронов" if ammo_urgency > 0 else "",
+            reason="Недостаточно патронов" if raw_ammo_urgency > 0 else "",
             expected_min_price=ammo_min_price,
-            affordability_hint=_affordability_hint(agent_money, ammo_min_price) if ammo_urgency > 0 else None,
+            affordability_hint=_affordability_hint(agent_money, ammo_min_price) if raw_ammo_urgency > 0 else None,
         )
     )
 
@@ -127,6 +163,7 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
             current_count=0,
             missing_count=0,
             urgency=0.0,
+            raw_urgency=0.0,
             priority=200,
             reason="Upgrade debug-only в PR2",
         )
@@ -136,7 +173,10 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
 
 
 def choose_dominant_item_need(item_needs: list[ItemNeed]) -> ItemNeed | None:
-    candidates = [n for n in item_needs if n.urgency > 0 and n.key != "upgrade"]
+    candidates = [
+        n for n in item_needs
+        if n.urgency > 0 and n.key != "upgrade" and getattr(n, "actionable", True)
+    ]
     if not candidates:
         return None
     candidates.sort(key=lambda n: (-n.urgency, n.priority, n.key))
@@ -166,6 +206,8 @@ def _build_stock_need(
         current_count=current,
         missing_count=missing,
         urgency=urgency_when_missing if missing > 0 else 0.0,
+        raw_urgency=urgency_when_missing if missing > 0 else 0.0,
+        actionable=True,
         compatible_item_types=item_types,
         priority=priority,
         reason=reason if missing > 0 else "",

@@ -149,10 +149,10 @@ def _exec_travel(
     elif reason in ("heal_self", "emergency_heal", "seek_medical", "buy_heal"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "medical", target_id,
                             emergency=True)
-    elif reason in ("seek_food", "emergency_food", "buy_food"):
+    elif reason in ("seek_food", "emergency_food", "buy_food", "buy_food_survival", "buy_food_stock"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "food", target_id,
                             emergency=True)
-    elif reason in ("seek_drink", "emergency_drink", "buy_drink"):
+    elif reason in ("seek_drink", "emergency_drink", "buy_drink", "buy_drink_survival", "buy_drink_stock"):
         _write_once_by_dest(agent, world_turn, state, "seek_item", "drink", target_id,
                             emergency=True)
     elif reason in ("sell_artifacts", "sell_artifacts_get_rich"):
@@ -182,6 +182,21 @@ def _exec_travel(
                  "target_location_id": target_id},
                 summary=f"Отправляюсь искать артефакты в «{_target_loc_name}»",
             )
+
+    # If agent has artifacts and destination is a trader location, record sell intent
+    # (anti-spam: _write_once_decision skips if already written this turn)
+    if reason not in ("sell_artifacts", "sell_artifacts_get_rich", "flee_emission"):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART_TYPES_CHK
+        from app.games.zone_stalkers.rules.tick_rules import _find_trader_at_location
+        _art_set_chk = frozenset(_ART_TYPES_CHK.keys())
+        _has_arts = any(i.get("type") in _art_set_chk for i in agent.get("inventory", []))
+        if _has_arts and _find_trader_at_location(target_id, state) is not None:
+            _arts_cnt = sum(1 for i in agent.get("inventory", []) if i.get("type") in _art_set_chk)
+            _write_once_decision(agent, world_turn, state,
+                "🎁 Иду продавать артефакты",
+                {"action_kind": "sell_artifacts", "artifacts_count": _arts_cnt,
+                 "destination": target_id},
+                f"Иду к торговцу в {target_id} продавать {_arts_cnt} артефакт(ов)")
 
     return _bot_schedule_travel(agent_id, agent, target_id, state, world_turn,
                                 emergency_flee=emergency_flee)
@@ -1050,7 +1065,8 @@ def _exec_wait(
         _write_once_decision(agent, world_turn, state,
             "⚠️ Нет выхода: застрял на опасной местности",
             {"action_kind": "trapped_on_dangerous_terrain"},
-            "Все соседние локации тоже опасны — укрыться негде")
+            "Все соседние локации тоже опасны — укрыться негде",
+            check_all=True)
     return []
 
 
@@ -1107,16 +1123,22 @@ def _write_once_decision(
     title: str,
     effects: dict[str, Any],
     summary: str,
+    check_all: bool = False,
 ) -> None:
     """Write a decision memory entry but only if one with the same action_kind is not
-    already the most recent decision (anti-spam)."""
+    already present (anti-spam).
+
+    When *check_all* is True every decision entry is scanned, not just the most recent one.
+    Use check_all=True for decisions that should never repeat (e.g. trapped_on_dangerous_terrain).
+    """
     from app.games.zone_stalkers.rules.tick_rules import _add_memory
     action_kind = effects.get("action_kind")
     for mem in reversed(agent.get("memory", [])):
         if mem.get("type") == "decision":
             if mem.get("effects", {}).get("action_kind") == action_kind:
-                return  # already last decision is the same kind
-            break  # last decision is different — safe to write
+                return  # already written this kind
+            if not check_all:
+                break  # last decision is different — safe to write
     _add_memory(agent, world_turn, state, "decision", title, effects, summary=summary)
 
 

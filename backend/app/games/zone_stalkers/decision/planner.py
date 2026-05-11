@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
+from .economic_phase import is_item_need_actionable
 from .item_needs import choose_dominant_item_need, evaluate_item_needs
 from .liquidity import evaluate_affordability, find_liquidity_options
 from .models.agent_context import AgentContext
@@ -773,6 +774,21 @@ def _desired_supply_count(risk_tolerance: float, min_count: int, max_count: int)
     return min_count + round((1.0 - risk_tolerance) * (max_count - min_count))
 
 
+def _resupply_need_key_from_category(category: str | None) -> str | None:
+    if category is None:
+        return None
+    return {
+        "food": "food",
+        "drink": "drink",
+        "medical": "medicine",
+        "medicine": "medicine",
+        "weapon": "weapon",
+        "armor": "armor",
+        "ammo": "ammo",
+        "upgrade": "upgrade",
+    }.get(str(category).strip().lower())
+
+
 def _plan_resupply(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
     need_result: NeedEvaluationResult | None = None
@@ -844,7 +860,45 @@ def _plan_resupply(
                 )
 
             trader_loc = _nearest_trader_location(ctx, state)
+            _need_key = _resupply_need_key_from_category(_buy_category)
+            _is_actionable, _blocked_by = (
+                is_item_need_actionable(agent, _need_key) if _need_key else (True, None)
+            )
+
+            if not _is_actionable:
+                _phase1_fb = Intent(
+                    kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                    reason=(
+                        "Пополнение отложено политикой "
+                        f"({_blocked_by or 'phase_gate'}). "
+                        "Перехожу к сбору артефактов."
+                    ),
+                    created_turn=world_turn,
+                )
+                return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
+
             if trader_loc and trader_loc != agent_loc:
+                # Phase-1 gate: non-hunter agents below material_threshold should
+                # NOT travel to a remote trader to buy supplies.  They should
+                # explore and gather resources (artifacts) instead.
+                _p1_money = agent.get("money", 0)
+                _p1_threshold = agent.get("material_threshold", 0)
+                _p1_goal = agent.get("global_goal", "")
+                if (
+                    _p1_goal != "kill_stalker"
+                    and _p1_threshold > 0
+                    and _p1_money < _p1_threshold
+                ):
+                    _phase1_fb = Intent(
+                        kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                        reason=(
+                            "Phase-1: пополнение запасов желательно, "
+                            "но поход к трейдеру отложен до достижения порога богатства. "
+                            "Перехожу к сбору артефактов."
+                        ),
+                        created_turn=world_turn,
+                    )
+                    return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
                 return Plan(
                     intent_kind=intent.kind,
                     steps=[
@@ -918,6 +972,21 @@ def _plan_resupply(
 
     if not buy_category:
         return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
+
+    _dominant_actionable, _dominant_blocked_by = is_item_need_actionable(agent, dominant.key)
+    if not _dominant_actionable:
+        _phase_fb = Intent(
+            kind=INTENT_GET_RICH,
+            score=0.5,
+            source_goal="get_rich",
+            reason=(
+                "Пополнение отложено политикой "
+                f"({_dominant_blocked_by or 'phase_gate'}). "
+                "Перехожу к сбору артефактов."
+            ),
+            created_turn=world_turn,
+        )
+        return _plan_get_rich(ctx, _phase_fb, state, world_turn, need_result)
 
     # a) Try memory pickup first
     mem_loc = _find_item_memory_location(agent, need_types, state) if need_types else None
@@ -997,6 +1066,26 @@ def _plan_resupply(
             )
 
     if trader_loc and trader_loc != agent_loc:
+        # Phase-1 gate: non-hunter agents below material_threshold should
+        # NOT travel to a remote trader to buy supplies.
+        _p1r2_money = agent.get("money", 0)
+        _p1r2_threshold = agent.get("material_threshold", 0)
+        _p1r2_goal = agent.get("global_goal", "")
+        if (
+            _p1r2_goal != "kill_stalker"
+            and _p1r2_threshold > 0
+            and _p1r2_money < _p1r2_threshold
+        ):
+            _p1r2_intent = Intent(
+                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                reason=(
+                    "Phase-1: пополнение запасов желательно, "
+                    "но поход к трейдеру отложен до достижения порога богатства. "
+                    "Перехожу к сбору артефактов."
+                ),
+                created_turn=world_turn,
+            )
+            return _plan_get_rich(ctx, _p1r2_intent, state, world_turn, need_result)
         buy_payload: dict[str, Any] = {
             "item_category": buy_category,
             "reason": f"buy_{buy_category}_resupply",
@@ -1422,6 +1511,42 @@ def _plan_hunt_target(
             confidence=0.85,
             created_turn=world_turn,
         )
+
+    # If target is actually co-located right now, engage immediately regardless of objective_key.
+    if target_id:
+        _live_target = state.get("agents", {}).get(target_id)
+        if (
+            isinstance(_live_target, dict)
+            and _live_target.get("is_alive", True)
+            and _live_target.get("location_id") == agent_loc
+        ):
+            weapon = (ctx.self_state.get("equipment", {}) or {}).get("weapon")
+            if isinstance(weapon, dict):
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[
+                        PlanStep(
+                            STEP_START_COMBAT,
+                            {"target_id": target_id, "reason": "hunt_target_co_located"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                        PlanStep(
+                            STEP_MONITOR_COMBAT,
+                            {"target_id": target_id, "reason": "hunt_target_co_located"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                        PlanStep(
+                            STEP_CONFIRM_KILL,
+                            {"target_id": target_id, "reason": "confirm_after_hunt"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                    ],
+                    confidence=0.85,
+                    created_turn=world_turn,
+                )
 
     # GATHER_INTEL / LOCATE_TARGET fallback hunt behavior.
     trader_loc = _nearest_trader_location(ctx, state, used_for="find_trader")

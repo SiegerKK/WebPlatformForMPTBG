@@ -196,7 +196,14 @@ def _immediate_urgency(immediate_needs: list[Any], key: str) -> float:
 
 
 def _item_need_max_urgency(item_needs: list[Any]) -> float:
-    return max((float(n.urgency) for n in item_needs if n.key != "upgrade"), default=0.0)
+    return max(
+        (
+            float(n.urgency)
+            for n in item_needs
+            if n.key != "upgrade" and getattr(n, "actionable", True)
+        ),
+        default=0.0,
+    )
 
 
 # ── Score helpers ─────────────────────────────────────────────────────────────

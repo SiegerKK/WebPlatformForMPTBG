@@ -711,12 +711,14 @@ class TestHuntExecutors:
 
 class TestKillStalkerGoalCompletion:
     def test_kill_target_requires_death_confirmation_to_set_goal_achieved(self) -> None:
+        # New behaviour: _check_global_goal_completion writes target_death_confirmed
+        # and sets global_goal_achieved=True in the same call when the target is dead.
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
 
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
         state = _make_state_with_target(agent=agent, target_alive=False)
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
-        assert agent.get("global_goal_achieved") is not True
+        assert agent.get("global_goal_achieved") is True
 
     def test_target_death_confirmed_sets_kill_goal_achieved(self) -> None:
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion, _add_memory
@@ -759,7 +761,7 @@ class TestKillStalkerGoalCompletion:
         )
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
         memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
-        assert "global_goal_completed" in memory_kinds
+        assert "goal_achieved" in memory_kinds
 
     def test_objective_generation_confirms_kill_after_goal_achieved(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1",

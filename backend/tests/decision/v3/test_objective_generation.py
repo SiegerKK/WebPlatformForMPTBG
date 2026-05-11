@@ -63,8 +63,8 @@ def test_generate_objectives_from_immediate_item_emission_and_goal() -> None:
     keys = {obj.key for obj in objectives}
 
     assert OBJECTIVE_RESTORE_WATER in keys
-    assert OBJECTIVE_RESUPPLY_WEAPON in keys
-    assert OBJECTIVE_GET_MONEY_FOR_RESUPPLY in keys
+    assert OBJECTIVE_RESUPPLY_WEAPON not in keys
+    assert OBJECTIVE_FIND_ARTIFACTS in keys
     assert OBJECTIVE_REACH_SAFE_SHELTER in keys
 
 
@@ -110,7 +110,7 @@ def test_unaffordable_resupply_weapon_prefers_get_money_objective() -> None:
     objectives = generate_objectives(_make_ctx(agent, state))
     decision = choose_objective(objectives, personality=agent)
 
-    assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
+    assert decision.selected.key == OBJECTIVE_FIND_ARTIFACTS
 
 
 def test_artifact_in_inventory_generates_sell_artifacts_objective() -> None:
@@ -166,7 +166,29 @@ def test_soft_restore_objectives_are_not_generated_below_thresholds() -> None:
     assert OBJECTIVE_RESTORE_WATER not in keys
 
     decision = choose_objective(objectives, personality=agent)
-    assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
+    assert decision.selected.key == OBJECTIVE_FIND_ARTIFACTS
+
+
+def test_phase1_non_hunter_does_not_generate_resupply_weapon_objective() -> None:
+    agent = make_agent(has_weapon=False, global_goal="get_rich", money=100, material_threshold=3000)
+    state = make_minimal_state(agent=agent)
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+    assert OBJECTIVE_RESUPPLY_WEAPON not in keys
+    assert OBJECTIVE_FIND_ARTIFACTS in keys
+
+
+def test_phase1_hunter_can_generate_weapon_resupply_objective() -> None:
+    agent = make_agent(
+        has_weapon=False,
+        global_goal="kill_stalker",
+        money=100,
+        material_threshold=3000,
+    )
+    state = make_minimal_state(agent=agent)
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+    assert OBJECTIVE_RESUPPLY_WEAPON in keys
 
 
 def test_soft_restore_food_uses_soft_need_source_and_dynamic_expected_value() -> None:
