@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.games.zone_stalkers.generators.zone_generator import generate_zone
+from app.games.zone_stalkers.rules.tick_constants import SLEEP_EFFECT_INTERVAL_TURNS
 from app.games.zone_stalkers.rules.tick_rules import _add_memory, tick_zone_map
 from app.games.zone_stalkers.needs.lazy_needs import ensure_needs_state, get_need
 from tests.decision.v3.e2e_helpers import any_memory, any_objective_decision, run_until
@@ -365,8 +366,6 @@ def test_sleep_tick_scheduled_during_sleep_action():
     state = _make_pr3_state(seed=55, num_ai_stalkers=1)
     agent_id, agent = next(iter(state["agents"].items()))
     world_turn = int(state["world_turn"])
-
-    from app.games.zone_stalkers.rules.tick_constants import SLEEP_EFFECT_INTERVAL_TURNS
 
     # Set up a sleep action
     sleep_turns = 180  # 3 hours of sleep
