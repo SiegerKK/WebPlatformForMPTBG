@@ -5396,8 +5396,8 @@ def _check_global_goal_completion(
                     agent, world_turn, state, "observation",
                     f"⚔️ Цель достигнута: «{target_name}» устранён!",
                     {
-                        "action_kind": "global_goal_completed",
-                        "global_goal": "kill_stalker",
+                        "action_kind": "goal_achieved",
+                        "goal": "kill_stalker",
                         "target_id": target_id,
                     },
                     summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",

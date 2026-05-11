@@ -1050,7 +1050,8 @@ def _exec_wait(
         _write_once_decision(agent, world_turn, state,
             "⚠️ Нет выхода: застрял на опасной местности",
             {"action_kind": "trapped_on_dangerous_terrain"},
-            "Все соседние локации тоже опасны — укрыться негде")
+            "Все соседние локации тоже опасны — укрыться негде",
+            check_all=True)
     return []
 
 
@@ -1107,16 +1108,22 @@ def _write_once_decision(
     title: str,
     effects: dict[str, Any],
     summary: str,
+    check_all: bool = False,
 ) -> None:
     """Write a decision memory entry but only if one with the same action_kind is not
-    already the most recent decision (anti-spam)."""
+    already present (anti-spam).
+
+    When *check_all* is True every decision entry is scanned, not just the most recent one.
+    Use check_all=True for decisions that should never repeat (e.g. trapped_on_dangerous_terrain).
+    """
     from app.games.zone_stalkers.rules.tick_rules import _add_memory
     action_kind = effects.get("action_kind")
     for mem in reversed(agent.get("memory", [])):
         if mem.get("type") == "decision":
             if mem.get("effects", {}).get("action_kind") == action_kind:
-                return  # already last decision is the same kind
-            break  # last decision is different — safe to write
+                return  # already written this kind
+            if not check_all:
+                break  # last decision is different — safe to write
     _add_memory(agent, world_turn, state, "decision", title, effects, summary=summary)
 
 
