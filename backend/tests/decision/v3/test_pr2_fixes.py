@@ -568,14 +568,15 @@ def test_potsik_stabilised_needs_evaluated() -> None:
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
     # Hunger=50 and thirst=57 are below critical threshold (80), so no survival
-    # ImmediateNeed is triggered; reload_or_rearm (0.65) wins.
+    # ImmediateNeed is triggered. In Phase-1 non-hunter flow weapon resupply is
+    # policy-blocked, so intent should stay on economic accumulation.
     assert not any(n.trigger_context == "survival" for n in need_result.immediate_needs), (
         "hunger=50 / thirst=57 must not trigger critical survival ImmediateNeed"
     )
     intent = select_intent(ctx, need_result.scores, 100, need_result=need_result)
-    # resupply is the correct dominant intent here (no weapon, score=0.65)
-    assert intent.kind == INTENT_RESUPPLY, (
-        f"With non-critical hunger/thirst and no weapon, resupply should dominate, got {intent.kind}"
+    assert intent.kind in {INTENT_GET_RICH, INTENT_SEEK_WATER}, (
+        "With Phase-1 policy and no weapon, intent must stay non-resupply "
+        f"(got {intent.kind})"
     )
 
 
@@ -816,6 +817,7 @@ def test_resupply_drink_objective_forces_drink_purchase() -> None:
 def test_resupply_ammo_objective_forces_ammo_purchase() -> None:
     agent = make_agent(
         money=500,
+        material_threshold=0,
         has_weapon=True,
         has_armor=True,
         has_ammo=False,

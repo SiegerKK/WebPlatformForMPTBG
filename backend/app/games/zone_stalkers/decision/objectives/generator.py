@@ -411,6 +411,8 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
 
     dominant_item_urgency = 0.0
     for item_need in need_result.item_needs:
+        if not getattr(item_need, "actionable", True):
+            continue
         objective_key = ITEM_NEED_TO_OBJECTIVE.get(item_need.key)
         if objective_key is None or item_need.urgency <= 0:
             continue

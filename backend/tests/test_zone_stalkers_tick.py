@@ -1785,6 +1785,26 @@ class TestEquipmentMaintenance:
                 f"it should gather resources instead. Target: {final_target!r}"
             )
 
+    def test_phase1_non_hunter_at_current_trader_does_not_buy_equipment(self):
+        """Phase-1 non-hunter should not buy weapon/armor even when co-located with trader."""
+        state, sid, _ = _make_bare_stalker_state(with_trader=True)
+        state["agents"][sid]["money"] = 100
+        state["agents"][sid]["material_threshold"] = 3000
+        state["agents"][sid]["global_goal"] = "get_rich"
+
+        new_state, events = self._tick(state)
+        agent = new_state["agents"][sid]
+
+        equipment_types = {"pistol", "shotgun", "assault_rifle", "sniper_rifle", "leather_jacket", "stalker_suit", "military_armor"}
+        bought_equipment = [
+            e for e in events
+            if e.get("event_type") == "bot_bought_item"
+            and str(e.get("payload", {}).get("item_type", "")) in equipment_types
+        ]
+        assert not bought_equipment
+        assert agent.get("equipment", {}).get("weapon") is None
+        assert agent.get("equipment", {}).get("armor") is None
+
     def test_buy_weapon_from_local_trader(self):
         """Bot should buy a weapon from a local trader when wealth >= threshold."""
         state, sid, loc_id = _make_bare_stalker_state(with_trader=True)
