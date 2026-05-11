@@ -16,7 +16,7 @@ _NEED_RATES_PER_TURN = {
     "sleepiness": SLEEPINESS_INCREASE_PER_HOUR / 60.0,
 }
 _SOFT_THRESHOLD = 70.0
-_CRITICAL_THRESHOLD = 90.0
+_CRITICAL_SLEEPINESS_THRESHOLD = 90.0  # hunger/thirst use tick_constants values
 
 
 def _clamp_need(value: float) -> float:
@@ -84,7 +84,7 @@ def schedule_need_thresholds(
         current = get_need(agent, need_key, world_turn)
         for threshold_name, threshold_value in (
             ("soft", _SOFT_THRESHOLD),
-            ("critical", _CRITICAL_THRESHOLD),
+            ("critical", _CRITICAL_SLEEPINESS_THRESHOLD),
         ):
             dedupe_key = f"{need_key}:{threshold_name}"
             if threshold_tasks.get(dedupe_key) == revision:
@@ -113,9 +113,7 @@ def project_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float]:
 
     Same as materialize_needs but does NOT write back to the agent dict.
     """
-    import copy as _copy
-    # Use a shallow copy of needs_state to avoid mutating ensure_needs_state side effects
-    # Actually get_need calls ensure_needs_state which mutates if no needs_state exists,
+    # get_need calls ensure_needs_state which mutates if no needs_state exists,
     # but we should NOT call ensure_needs_state here since we don't want to mutate.
     needs_state = agent.get("needs_state")
     if not isinstance(needs_state, dict):

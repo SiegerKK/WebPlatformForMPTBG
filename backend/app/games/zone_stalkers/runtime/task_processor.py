@@ -8,7 +8,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.games.zone_stalkers.runtime.scheduler import pop_due_tasks, schedule_task
-from app.games.zone_stalkers.needs.lazy_needs import get_need
+from app.games.zone_stalkers.needs.lazy_needs import (
+    get_need,
+    _SOFT_THRESHOLD,
+    _CRITICAL_SLEEPINESS_THRESHOLD,
+)
 from app.games.zone_stalkers.rules.tick_constants import (
     CRITICAL_HUNGER_THRESHOLD,
     CRITICAL_THIRST_THRESHOLD,
@@ -30,10 +34,6 @@ ACTION_TYPE_TO_TASK_KIND: dict[str, str] = {
 
 # All task kinds that represent action completion (including backward-compat kind).
 _ACTION_COMPLETION_KINDS: frozenset[str] = frozenset(ACTION_TYPE_TO_TASK_KIND.values()) | {"scheduled_action_complete"}
-
-_SOFT_THRESHOLD = 70.0
-_CRITICAL_SLEEPINESS_THRESHOLD = 90.0
-
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 

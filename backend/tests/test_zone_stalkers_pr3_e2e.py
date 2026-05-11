@@ -31,7 +31,7 @@ def _advance_ticks(state, n):
 
 
 def test_get_rich_e2e_with_event_driven_actions_and_lazy_needs():
-    """E2E test: runs with PR3 flags enabled, should complete within 1200 ticks without errors."""
+    """E2E test: runs with PR3 flags enabled for 120 ticks without errors."""
     state = generate_zone(seed=42, num_players=0, num_ai_stalkers=2, num_mutants=0, num_traders=1)
     state["cpu_copy_on_write_enabled"] = True
     state["cpu_copy_on_write_legacy_bridge_enabled"] = False
