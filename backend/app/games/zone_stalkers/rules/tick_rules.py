@@ -1214,7 +1214,8 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             _npc_brain_skipped_count += 1
             continue
 
-        if is_v3_monitored_bot(agent) and get_active_plan(agent) is not None and not _enqueue_urgent_invalidated:
+        _has_active_plan = is_v3_monitored_bot(agent) and get_active_plan(agent) is not None
+        if _has_active_plan and not _enqueue_urgent_invalidated:
             handled, active_plan_events = _process_active_plan_v3(
                 agent_id,
                 agent,
@@ -2471,8 +2472,9 @@ def _add_memory(
         _inv_reason, _inv_priority = "equipment_changed", "normal"
     elif _action_kind == "global_goal_completed":
         _inv_reason, _inv_priority = "goal_completed", "normal"
-    elif _action_kind in {"exploration_interrupted", "travel_interrupted"} and not _is_emission_interrupt:
-        _inv_reason, _inv_priority = "action_interrupted", "high"
+    elif _action_kind in {"exploration_interrupted", "travel_interrupted"}:
+        if not _is_emission_interrupt:
+            _inv_reason, _inv_priority = "action_interrupted", "high"
     elif _action_kind == "plan_monitor_abort":
         _pm_reason = str(effects.get("reason") or "")
         if _pm_reason in {"critical_hp", "critical_thirst", "critical_hunger"}:

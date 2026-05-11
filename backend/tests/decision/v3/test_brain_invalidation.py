@@ -165,8 +165,12 @@ def test_emission_warning_triggers_brain_run_bypassing_active_plan() -> None:
         br["valid_until_turn"] = 200
         br["last_decision_turn"] = 50
         # Active plan would normally suppress brain re-evaluation.
-        bot["active_plan_v3"] = {"status": "active", "plan_key": "IDLE",
-                                 "current_step": 0, "steps": []}
+        bot["active_plan_v3"] = {
+            "status": "active",
+            "plan_key": "IDLE",
+            "current_step": 0,
+            "steps": [],
+        }
     state["agents"] = bots
     state["locations"]["loc_a"]["agents"] = ["bot1", "bot2"]
 
@@ -211,8 +215,12 @@ def test_urgent_invalidation_bypasses_active_plan() -> None:
     """Urgently invalidated agents run the brain even with an active plan in progress."""
     state = _base_state()
     bot = _bot("bot1")
-    bot["active_plan_v3"] = {"status": "active", "plan_key": "GET_RICH",
-                             "current_step": 0, "steps": []}
+    bot["active_plan_v3"] = {
+        "status": "active",
+        "plan_key": "GET_RICH",
+        "current_step": 0,
+        "steps": [],
+    }
     br = ensure_brain_runtime(bot, 100)
     br["valid_until_turn"] = 500
     br["last_decision_turn"] = 50
