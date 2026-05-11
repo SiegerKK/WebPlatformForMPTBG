@@ -361,11 +361,11 @@ def _migrate_scheduled_action_timing(
         sched.setdefault("interruptible", True)
 
     if _event_driven_actions_enabled(state):
-        from app.games.zone_stalkers.runtime.task_processor import ACTION_TYPE_TO_TASK_KIND as _ATTK  # noqa: PLC0415
+        from app.games.zone_stalkers.runtime.task_processor import ACTION_TYPE_TO_TASK_KIND as _ACTION_TASK_MAPPING  # noqa: PLC0415
         action_type = str(sched.get("type") or "")
         revision = int(sched.get("revision", 0))
         ends_turn = int(sched.get("ends_turn", world_turn))
-        completion_kind = _ATTK.get(action_type, "scheduled_action_complete")
+        completion_kind = _ACTION_TASK_MAPPING.get(action_type, "scheduled_action_complete")
         if (
             sched.get("_completion_task_revision") != revision
             or int(sched.get("_completion_task_turn", -1)) != ends_turn
@@ -684,9 +684,9 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     _event_driven_actions = _event_driven_actions_enabled(state)
     _due_action_tasks: dict[str, set[int]] = {}
     if _event_driven_actions:
-        from app.games.zone_stalkers.runtime.task_processor import process_due_tasks as _proc_tasks  # noqa: PLC0415
+        from app.games.zone_stalkers.runtime.task_processor import process_due_tasks as _process_due_tasks  # noqa: PLC0415
         cleanup_old_tasks(state, _cow_runtime(), world_turn)
-        _task_events, _due_action_tasks = _proc_tasks(state, _cow_runtime(), world_turn, profiler=_tick_profiler)
+        _task_events, _due_action_tasks = _process_due_tasks(state, _cow_runtime(), world_turn, profiler=_tick_profiler)
         events.extend(_task_events)
 
     # 1. Process scheduled actions for each alive stalker agent

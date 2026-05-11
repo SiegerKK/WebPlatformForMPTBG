@@ -159,8 +159,7 @@ def test_emission_interrupts_travel_in_event_driven_mode():
     target = state["locations"][origin]["connections"][0]["to"]
     start_turn = int(state["world_turn"])
 
-    # Make sure the terrain is NOT a shelter (use plain if not already)
-    # The emission interrupt happens when type in ("explore_anomaly_location", "travel") and _is_emission_threat
+    # The interrupt path requires only a long action type and active emission threat.
     agent["scheduled_action"] = {
         "type": "travel",
         "turns_remaining": 5,
