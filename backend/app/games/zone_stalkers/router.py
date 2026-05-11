@@ -128,6 +128,8 @@ async def upload_location_image(
     _delete_location_images(existing_records)
     for existing in existing_records:
         db.delete(existing)
+    if existing_records:
+        db.flush()
 
     # Save file to disk
     os.makedirs(abs_dir, exist_ok=True)

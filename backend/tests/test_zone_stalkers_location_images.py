@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from app.games.zone_stalkers.models import LocationImage  # noqa: F401
+
 
 def _media_path(media_root: Path, url: str) -> Path:
     rel = url.removeprefix("/media/").replace("/", os.sep)
@@ -28,6 +30,7 @@ def zone_context(test_client, auth_headers, db_session):
     assert ctx_resp.status_code == 200
     context_id = ctx_resp.json()["id"]
 
+    db_session.expire_all()
     ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
     state = load_context_state(ctx.id, ctx)
     location_id = next(iter(state.get("locations", {}).keys()))
@@ -82,6 +85,7 @@ def test_upload_same_location_returns_unique_url_and_updates_state(
     assert len(rows) == 1
     assert rows[0].file_path.replace(os.sep, "/") in second_url
 
+    db_session.expire_all()
     ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
     state = load_context_state(ctx.id, ctx)
     assert state["locations"][location_id]["image_url"] == second_url
