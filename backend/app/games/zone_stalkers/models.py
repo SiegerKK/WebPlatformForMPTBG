@@ -4,7 +4,7 @@ outside the main game-state JSON blob.
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey
+from sqlalchemy import Column, String, DateTime, ForeignKey, UniqueConstraint
 from app.database import Base, UUIDType
 
 
@@ -18,6 +18,9 @@ class LocationImage(Base):
     """
 
     __tablename__ = "location_images"
+    __table_args__ = (
+        UniqueConstraint("context_id", "location_id", name="uq_location_images_context_location"),
+    )
 
     id = Column(UUIDType, primary_key=True, default=uuid.uuid4)
     context_id = Column(UUIDType, ForeignKey("game_contexts.id"), nullable=False)

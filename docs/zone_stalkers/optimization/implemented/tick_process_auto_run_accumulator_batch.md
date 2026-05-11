@@ -2,34 +2,37 @@
 
 ## Scope
 
-This document tracks what is **already implemented** in PR #21 and what is still planned to reach the full optimization plan.
+This document tracks what is implemented in PR #21/#22 and the currently known boundaries.
 
 It is **not** an empty-map fast path. Changes are general for debug-map / NPC maps / events / emissions / high-speed auto-run.
 
 ## Implemented
 
-- Accumulator-based auto-tick scheduler (`x10/x100/x600` via multipliers).
-- Lightweight Redis runtime key for auto-tick (`ctx:auto_tick:<context_id>`).
-- Batch APIs:
+- Accumulator scheduler for auto-run speed control (`x10/x100/x600` multipliers).
+- Configurable catch-up limits and runtime settings:
+  - `AUTO_TICK_MAX_TICKS_PER_BATCH`
+  - `AUTO_TICK_MAX_ACCUMULATED_TICKS`
+  - `AUTO_TICK_MAX_WS_UPDATES_PER_SECOND`
+  - `AUTO_TICK_MAX_CATCHUP_BATCHES_PER_LOOP`
+  - `AUTO_TICK_CATCHUP_MODE` (`accurate` / `smooth`).
+- Lightweight Redis auto-tick settings key (`ctx:auto_tick:<context_id>`).
+- Batch tick advancement pipeline:
   - `tick_match_many(...)`
   - `ZoneStalkerRuleSet.tick_many(...)`
-  - `tick_zone_map_many(...)`
-- Batch behavior:
-  - one initial copy for batch path,
-  - one save/commit cycle for batched tick_many path,
-  - one aggregated delta/WS cycle per batch.
-- Basic WS coalescing with critical-event bypass.
-- Configurable Redis state compression level (`STATE_CACHE_COMPRESSION_LEVEL`).
-- Basic stop conditions in batch mode (game_over + critical event classes).
-- Basic effective-speed and batch metrics for auto-tick.
+  - `tick_zone_map_many(...)`.
+- Batch overhead reduction behavior:
+  - one state load and one state save per batch,
+  - one delta build and one WS cycle per batch (with coalescing),
+  - one commit/rollback cycle per batch.
+- Effective speed metrics in backend and debug UI target/effective speed display.
+- Player-aware batch stop semantics for human/view-relevant events.
 
 ## Known limitations / follow-ups
 
 - Concurrency protection is **process-local** (`running` flag in runtime map).  
   Multi-worker deployments still need distributed locking (e.g. Redis lock).
-- Some stop-condition semantics can still be refined for player/view-specific cases.
-- Full static/runtime state split is not part of this PR.
-- Brain v3 CPU optimization remains a separate line of work.
+- Full static/runtime state split is not part of these PRs.
+- Brain v3 CPU optimizations remain separate work.
 
 ## Verification baseline
 

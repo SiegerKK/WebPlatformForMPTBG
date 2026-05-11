@@ -123,12 +123,18 @@ export const usersApi = {
 export const locationsApi = {
   /**
    * Upload an image for a zone-map location.
-   * Returns `{ url: string }` — the public path to the uploaded image.
+   * Returns a payload with the public URL and optional revision metadata.
    */
   uploadImage: (contextId: string, locationId: string, file: File) => {
     const formData = new FormData();
     formData.append('file', file);
-    return apiClient.post<{ url: string }>(
+    return apiClient.post<{
+      url: string;
+      image_url?: string;
+      location_id?: string;
+      state_revision?: number;
+      map_revision?: number;
+    }>(
       `/locations/${contextId}/${locationId}/image`,
       formData,
       { headers: { 'Content-Type': 'multipart/form-data' } },
@@ -137,7 +143,12 @@ export const locationsApi = {
 
   /** Delete the image attached to a location. */
   deleteImage: (contextId: string, locationId: string) =>
-    apiClient.delete(`/locations/${contextId}/${locationId}/image`),
+    apiClient.delete<{
+      status: 'deleted';
+      location_id: string;
+      state_revision?: number;
+      map_revision?: number;
+    }>(`/locations/${contextId}/${locationId}/image`),
 };
 
 export const zoneMapApi = {
@@ -150,6 +161,9 @@ export const zoneMapApi = {
 };
 
 export const zoneDebugApi = {
+  /** Get recent backend tick performance metrics for a match. */
+  getPerformance: (matchId: string, params?: { limit?: number }) =>
+    apiClient.get(`/zone-stalkers/debug/performance/${matchId}`, { params }),
   /** Get compact hunt_search_by_agent summary (all or filtered). */
   getHuntSearch: (contextId: string, params?: Record<string, unknown>) =>
     apiClient.get(`/zone-stalkers/contexts/${contextId}/debug/hunt-search`, { params }),

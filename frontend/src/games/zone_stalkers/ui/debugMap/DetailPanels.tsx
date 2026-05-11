@@ -126,6 +126,7 @@ export function LocationDetailPanel({
       {loc.image_url && (
         <Section label="🖼 Изображение">
           <img
+            key={loc.image_url}
             src={loc.image_url}
             alt={loc.name}
             style={{ width: '100%', borderRadius: 6, objectFit: 'cover', maxHeight: 200, border: '1px solid #1e3a5f' }}
