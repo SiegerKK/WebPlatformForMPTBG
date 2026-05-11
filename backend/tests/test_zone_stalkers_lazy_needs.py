@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.games.zone_stalkers.needs.lazy_needs import (
     ensure_needs_state,
     get_need,
+    get_need_readonly,
     materialize_needs,
     set_need,
     set_needs,
@@ -53,6 +54,31 @@ def test_set_needs_batch_bumps_revision_once():
     assert get_need(agent, "hunger", world_turn=20) == 33.0
     assert get_need(agent, "thirst", world_turn=20) == 22.0
     assert get_need(agent, "sleepiness", world_turn=20) == 11.0
+
+
+def test_get_need_readonly_does_not_create_needs_state_for_legacy_agent():
+    agent = {"hunger": 12.0, "thirst": 34.0, "sleepiness": 56.0}
+
+    hunger = get_need_readonly(agent, "hunger", world_turn=100)
+
+    assert hunger == 12.0
+    assert "needs_state" not in agent
+
+
+def test_get_need_readonly_uses_needs_state_projection_without_mutation():
+    agent = {"hunger": 10.0, "thirst": 20.0, "sleepiness": 30.0}
+    ensure_needs_state(agent, world_turn=100)
+
+    before = {
+        "hunger": dict(agent["needs_state"]["hunger"]),
+        "thirst": dict(agent["needs_state"]["thirst"]),
+        "sleepiness": dict(agent["needs_state"]["sleepiness"]),
+        "revision": agent["needs_state"]["revision"],
+    }
+    hunger = get_need_readonly(agent, "hunger", world_turn=160)
+
+    assert hunger > 10.0
+    assert agent["needs_state"] == before
 
 
 from app.games.zone_stalkers.needs.lazy_needs import project_needs, schedule_need_thresholds
