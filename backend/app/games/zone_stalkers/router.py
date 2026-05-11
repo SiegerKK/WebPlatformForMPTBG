@@ -11,6 +11,7 @@ from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth.service import get_current_user
@@ -147,6 +148,7 @@ async def upload_location_image(
     rel_path = os.path.join(rel_dir, f"{image_id}{ext}")
     abs_dir = _resolve_media_path(rel_dir)
     abs_path = _resolve_media_path(rel_path)
+    written_abs_path: str | None = None
 
     # Remove any existing image files for this location (may differ in extension)
     # Keep .all() here to clean up potential legacy duplicates that existed
@@ -169,6 +171,7 @@ async def upload_location_image(
     os.makedirs(abs_dir, exist_ok=True)
     with open(abs_path, "wb") as f:
         f.write(contents)
+    written_abs_path = abs_path
 
     # Persist metadata
     record = LocationImage(
@@ -184,8 +187,36 @@ async def upload_location_image(
     loc["image_url"] = url
     state["state_revision"] = int(state.get("state_revision", 0)) + 1
     state["map_revision"] = int(state.get("map_revision", 0)) + 1
-    save_context_state(ctx.id, state, ctx, force_persist=True)
-    db.commit()
+    try:
+        save_context_state(ctx.id, state, ctx, force_persist=True)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        cleanup_abs_paths: list[str] = []
+        if written_abs_path:
+            try:
+                os.remove(written_abs_path)
+            except FileNotFoundError:
+                pass
+            else:
+                cleanup_abs_paths.append(written_abs_path)
+        _cleanup_parent_dirs(cleanup_abs_paths)
+        raise HTTPException(
+            status_code=409,
+            detail="Location image was updated concurrently; retry upload",
+        )
+    except Exception:
+        db.rollback()
+        cleanup_abs_paths = []
+        if written_abs_path:
+            try:
+                os.remove(written_abs_path)
+            except FileNotFoundError:
+                pass
+            else:
+                cleanup_abs_paths.append(written_abs_path)
+        _cleanup_parent_dirs(cleanup_abs_paths)
+        raise
 
     return {
         "url": url,

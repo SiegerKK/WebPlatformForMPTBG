@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.games.zone_stalkers.models import LocationImage  # noqa: F401
 
@@ -185,3 +186,66 @@ def test_delete_image_removes_state_only_legacy_file_without_db_row(
     delete = test_client.delete(f"/api/locations/{context_id}/{location_id}/image", headers=auth_headers)
     assert delete.status_code == 200
     assert not legacy_abs.exists()
+
+
+def test_upload_cleans_new_file_if_save_context_state_fails(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    def _boom(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("save failed")
+
+    monkeypatch.setattr("app.core.state_cache.service.save_context_state", _boom)
+
+    with pytest.raises(RuntimeError, match="save failed"):
+        test_client.post(
+            f"/api/locations/{context_id}/{location_id}/image",
+            headers=auth_headers,
+            files={"file": ("img.jpg", b"img-data", "image/jpeg")},
+        )
+
+    loc_dir = tmp_path / "locations" / str(context_id) / location_id
+    assert (not loc_dir.exists()) or (not any(loc_dir.iterdir()))
+    rows = (
+        db_session.query(LocationImage)
+        .filter(LocationImage.context_id == context_id, LocationImage.location_id == location_id)
+        .all()
+    )
+    assert rows == []
+
+
+def test_upload_integrity_error_cleans_file_and_returns_409(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    def _integrity_error(*args, **kwargs):  # noqa: ARG001
+        raise IntegrityError("INSERT", {}, Exception("unique violation"))
+
+    monkeypatch.setattr("sqlalchemy.orm.session.Session.commit", _integrity_error)
+
+    response = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("img.jpg", b"img-data", "image/jpeg")},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Location image was updated concurrently; retry upload"
+
+    loc_dir = tmp_path / "locations" / str(context_id) / location_id
+    assert (not loc_dir.exists()) or (not any(loc_dir.iterdir()))
+    rows = (
+        db_session.query(LocationImage)
+        .filter(LocationImage.context_id == context_id, LocationImage.location_id == location_id)
+        .all()
+    )
+    assert rows == []
