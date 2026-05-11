@@ -400,17 +400,16 @@ def tick_debug_auto_matches() -> dict:
                 elapsed = max(0.0, now - float(rt["last_real_ts"]))
                 rt["last_real_ts"] = now
                 speed_multiplier = AUTO_TICK_SPEED_MULTIPLIERS.get(str(speed), 100)
-                rt["game_seconds_accum"] = float(rt["game_seconds_accum"]) + elapsed * speed_multiplier
-                max_game_seconds = _MAX_ACCUMULATED_TICKS * 60.0
-                if rt["game_seconds_accum"] > max_game_seconds:
-                    rt["game_seconds_accum"] = max_game_seconds
-
-                due_ticks = int(float(rt["game_seconds_accum"]) // 60.0)
+                due_ticks, new_accum, due_ticks_before_cap = _compute_due_ticks(
+                    accumulated_game_seconds=float(rt["game_seconds_accum"]),
+                    elapsed_real_seconds=elapsed,
+                    speed_multiplier=speed_multiplier,
+                    max_ticks_per_batch=_MAX_TICKS_PER_BATCH,
+                    max_accumulated_ticks=_MAX_ACCUMULATED_TICKS,
+                )
+                rt["game_seconds_accum"] = new_accum
                 if due_ticks <= 0:
                     continue
-                due_ticks_before_cap = due_ticks
-                due_ticks = min(due_ticks, _MAX_TICKS_PER_BATCH)
-                rt["game_seconds_accum"] = float(rt["game_seconds_accum"]) - due_ticks * 60.0
 
                 rt["running"] = True
                 try:
@@ -448,3 +447,24 @@ def tick_debug_auto_matches() -> dict:
         return {"ticked": ticked}
     finally:
         db.close()
+def _compute_due_ticks(
+    *,
+    accumulated_game_seconds: float,
+    elapsed_real_seconds: float,
+    speed_multiplier: int,
+    max_ticks_per_batch: int,
+    max_accumulated_ticks: int,
+) -> tuple[int, float, int]:
+    """
+    Pure accumulator math helper.
+    Returns (due_ticks_after_cap, new_accumulated_game_seconds, due_before_cap).
+    """
+    accum = max(0.0, float(accumulated_game_seconds)) + max(0.0, float(elapsed_real_seconds)) * max(1, int(speed_multiplier))
+    max_game_seconds = max(1, int(max_accumulated_ticks)) * 60.0
+    if accum > max_game_seconds:
+        accum = max_game_seconds
+    due_before_cap = int(accum // 60.0)
+    due = min(due_before_cap, max(1, int(max_ticks_per_batch)))
+    accum -= due * 60.0
+    return due, accum, due_before_cap
+
