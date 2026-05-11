@@ -378,16 +378,36 @@ def tick_debug_auto_matches() -> dict:
                 due_ticks = int(float(rt["game_seconds_accum"]) // 60.0)
                 if due_ticks <= 0:
                     continue
+                due_ticks_before_cap = due_ticks
                 due_ticks = min(due_ticks, _MAX_TICKS_PER_BATCH)
                 rt["game_seconds_accum"] = float(rt["game_seconds_accum"]) - due_ticks * 60.0
 
                 rt["running"] = True
                 try:
+                    batch_started = time.perf_counter()
                     result = tick_match_many(match_id, db, due_ticks)
+                    batch_elapsed = max(0.000001, time.perf_counter() - batch_started)
                 finally:
                     rt["running"] = False
                 if "error" not in result:
-                    ticked += int(result.get("ticks_advanced", 0))
+                    ticks_advanced = int(result.get("ticks_advanced", 0))
+                    ticked += ticks_advanced
+                    try:
+                        from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+                        speed_multiplier = AUTO_TICK_SPEED_MULTIPLIERS.get(str(speed), 100)
+                        effective_speed = (ticks_advanced * 60.0) / batch_elapsed
+                        record_tick_metrics(match_id, {
+                            "context_id": ctx_id,
+                            "auto_tick_speed_target": speed_multiplier,
+                            "auto_tick_effective_speed": round(effective_speed, 3),
+                            "ticks_due": due_ticks_before_cap,
+                            "ticks_advanced": ticks_advanced,
+                            "ticks_dropped_or_capped": max(0, due_ticks_before_cap - due_ticks),
+                            "batch_size": due_ticks,
+                            "accumulator_game_seconds": round(float(rt["game_seconds_accum"]), 3),
+                        })
+                    except Exception:
+                        pass
                 else:
                     # Match or context no longer valid — force cache refresh.
                     global _debug_ctx_cache_ts
