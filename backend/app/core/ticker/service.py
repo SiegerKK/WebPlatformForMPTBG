@@ -497,6 +497,7 @@ def tick_debug_auto_matches() -> dict:
                 try:
                     ticks_advanced = 0
                     batch_elapsed = 0.0
+                    result: dict = {"ticks_advanced": 0}
                     current_due_ticks = due_ticks
                     current_due_before_cap = due_ticks_before_cap
                     for _batch_idx in range(max_catchup_batches_per_loop):
@@ -521,7 +522,7 @@ def tick_debug_auto_matches() -> dict:
                         rt["game_seconds_accum"] = next_accum
                 finally:
                     rt["running"] = False
-                if "error" not in result:
+                if ticks_advanced > 0:
                     ticked += ticks_advanced
                     try:
                         from app.games.zone_stalkers.performance_metrics import record_tick_metrics
@@ -539,7 +540,7 @@ def tick_debug_auto_matches() -> dict:
                         })
                     except Exception:
                         pass
-                else:
+                if "error" in result:
                     # Match or context no longer valid — force cache refresh.
                     global _debug_ctx_cache_ts
                     _debug_ctx_cache_ts = 0.0
