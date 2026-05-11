@@ -41,6 +41,8 @@ AUTO_TICK_SPEED_MULTIPLIERS: Dict[str, int] = {
 _MAX_TICKS_PER_BATCH = 30
 _MAX_ACCUMULATED_TICKS = 60
 _auto_tick_runtime: Dict[str, Dict[str, float | bool]] = {}
+_last_ws_sent_ts: Dict[str, float] = {}
+_MAX_WS_UPDATES_PER_SECOND = 4.0
 
 # ── WebSocket tick payload compaction ─────────────────────────────────────────
 # Limits the number of events sent inline with every WS tick notification.
@@ -231,7 +233,14 @@ def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
                     "requires_resync": match.game_id == "zone_stalkers",
                     "ticks_advanced": result.get("ticks_advanced", 0),
                 }
-            ws_manager.notify(match_id_str, ws_payload)
+            # Coalesce non-critical WS updates in high-speed auto-run mode.
+            _now = time.monotonic()
+            _min_interval = 1.0 / max(0.1, _MAX_WS_UPDATES_PER_SECOND)
+            _last = _last_ws_sent_ts.get(match_id_str, 0.0)
+            _critical = _is_critical_batch_result(result)
+            if _critical or (_now - _last >= _min_interval):
+                ws_manager.notify(match_id_str, ws_payload)
+                _last_ws_sent_ts[match_id_str] = _now
             try:
                 from app.games.zone_stalkers.performance_metrics import record_tick_metrics
                 record_tick_metrics(match_id_str, {
@@ -254,6 +263,16 @@ def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
         return {"ticks_advanced": 0}
     last["ticks_advanced"] = total
     return last
+
+
+def _is_critical_batch_result(result: dict) -> bool:
+    if bool(result.get("new_state", {}).get("game_over")):
+        return True
+    for ev in (result.get("new_events") or []):
+        et = ev.get("event_type")
+        if et in {"game_over", "emission_warning", "emission_started", "emission_ended", "agent_died"}:
+            return True
+    return False
 
 
 def tick_all_active_matches(db: Session) -> dict:
