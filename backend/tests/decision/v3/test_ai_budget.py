@@ -106,6 +106,8 @@ def test_urgent_decisions_ignore_budget(monkeypatch) -> None:
 
 def test_agent_is_not_starved_by_budget(monkeypatch) -> None:
     monkeypatch.setattr(tick_rules, "_run_npc_brain_v3_decision", _stub_brain_decision)
+    # Force all fresh scheduling decisions to "skip", leaving only the persisted
+    # queue entry to exercise delay-based priority promotion/starvation prevention.
     monkeypatch.setattr(tick_rules, "should_run_brain", lambda _a, _t: (False, "cached_until_valid"))
     state = _base_state(bot_count=1)
     state["ai_budget"] = {
