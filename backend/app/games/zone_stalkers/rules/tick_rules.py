@@ -61,7 +61,7 @@ from app.games.zone_stalkers.rules.tick_constants import (
     THIRST_INCREASE_PER_SLEEP_INTERVAL,
 )
 from app.games.zone_stalkers.runtime.scheduler import cleanup_old_tasks, pop_due_tasks, schedule_task
-from app.games.zone_stalkers.needs.lazy_needs import ensure_needs_state
+from app.games.zone_stalkers.needs.lazy_needs import ensure_needs_state, get_need
 
 # 1 game turn = 1 real minute
 MINUTES_PER_TURN = 1
@@ -356,8 +356,11 @@ def _migrate_scheduled_action_timing(
         sched.setdefault("interruptible", True)
 
     if _event_driven_actions_enabled(state):
+        from app.games.zone_stalkers.runtime.task_processor import ACTION_TYPE_TO_TASK_KIND as _ATTK  # noqa: PLC0415
+        action_type = str(sched.get("type") or "")
         revision = int(sched.get("revision", 0))
         ends_turn = int(sched.get("ends_turn", world_turn))
+        completion_kind = _ATTK.get(action_type, "scheduled_action_complete")
         if (
             sched.get("_completion_task_revision") != revision
             or int(sched.get("_completion_task_turn", -1)) != ends_turn
@@ -367,13 +370,32 @@ def _migrate_scheduled_action_timing(
                 _cow_runtime(),
                 ends_turn,
                 {
-                    "kind": "scheduled_action_complete",
+                    "kind": completion_kind,
                     "agent_id": agent_id,
                     "scheduled_action_revision": revision,
                 },
             )
             sched["_completion_task_revision"] = revision
             sched["_completion_task_turn"] = ends_turn
+            changed = True
+
+        # Schedule sleep tick tasks for sleep actions
+        if action_type == "sleep" and sched.get("_sleep_ticks_scheduled_revision") != revision:
+            started_turn_v = int(sched.get("started_turn", world_turn))
+            ends_turn_v = int(sched.get("ends_turn", world_turn + 1))
+            elapsed = max(0, int(world_turn) - started_turn_v)
+            next_idx = elapsed // SLEEP_EFFECT_INTERVAL_TURNS + 1
+            tick_turn = started_turn_v + next_idx * SLEEP_EFFECT_INTERVAL_TURNS
+            count = 0
+            while tick_turn < ends_turn_v and count < 100:
+                schedule_task(state, _cow_runtime(), tick_turn, {
+                    "kind": "sleep_tick",
+                    "agent_id": agent_id,
+                    "scheduled_action_revision": revision,
+                })
+                tick_turn += SLEEP_EFFECT_INTERVAL_TURNS
+                count += 1
+            sched["_sleep_ticks_scheduled_revision"] = revision
             changed = True
 
     if changed:
@@ -657,15 +679,10 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
     _event_driven_actions = _event_driven_actions_enabled(state)
     _due_action_tasks: dict[str, set[int]] = {}
     if _event_driven_actions:
+        from app.games.zone_stalkers.runtime.task_processor import process_due_tasks as _proc_tasks  # noqa: PLC0415
         cleanup_old_tasks(state, _cow_runtime(), world_turn)
-        for _task in pop_due_tasks(state, _cow_runtime(), world_turn):
-            if _task.get("kind") != "scheduled_action_complete":
-                continue
-            _task_agent_id = str(_task.get("agent_id") or "")
-            if not _task_agent_id:
-                continue
-            _task_revision = int(_task.get("scheduled_action_revision", -1))
-            _due_action_tasks.setdefault(_task_agent_id, set()).add(_task_revision)
+        _task_events, _due_action_tasks = _proc_tasks(state, _cow_runtime(), world_turn, profiler=_tick_profiler)
+        events.extend(_task_events)
 
     # 1. Process scheduled actions for each alive stalker agent
     _pr_sched = _tick_profiler.section("scheduled_actions_ms") if _tick_profiler else __import__("contextlib").nullcontext()
@@ -765,30 +782,46 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 continue
             if agent.get("has_left_zone"):  # departed agents need no hunger/thirst/sleep degradation
                 continue
-            _runtime_set_agent_field(
-                agent_id,
-                "hunger",
-                min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR),
-                agent,
-            )
-            _runtime_set_agent_field(
-                agent_id,
-                "thirst",
-                min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR),
-                agent,
-            )
-            _runtime_set_agent_field(
-                agent_id,
-                "sleepiness",
-                min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR),
-                agent,
-            )
-            agent = _runtime_agent(agent_id, agent)
+
+            if not _lazy_needs_enabled(state):
+                # Legacy: increment needs each hour
+                _runtime_set_agent_field(
+                    agent_id,
+                    "hunger",
+                    min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR),
+                    agent,
+                )
+                _runtime_set_agent_field(
+                    agent_id,
+                    "thirst",
+                    min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR),
+                    agent,
+                )
+                _runtime_set_agent_field(
+                    agent_id,
+                    "sleepiness",
+                    min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR),
+                    agent,
+                )
+                agent = _runtime_agent(agent_id, agent)
+
+            # Critical damage: skip if event-driven+lazy (handled by need_damage tasks)
+            if _lazy_needs_enabled(state) and _event_driven_actions_enabled(state):
+                continue
+
+            # Determine effective need values for damage checks
+            if _lazy_needs_enabled(state):
+                _eff_thirst = get_need(agent, "thirst", world_turn)
+                _eff_hunger = get_need(agent, "hunger", world_turn)
+            else:
+                _eff_thirst = agent.get("thirst", 0)
+                _eff_hunger = agent.get("hunger", 0)
+
             if _tick_runtime:
                 from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad
                 _mad(_tick_runtime, agent_id)
             # Critical thirst causes HP damage faster than hunger
-            if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
+            if _eff_thirst >= CRITICAL_THIRST_THRESHOLD:
                 _runtime_set_agent_field(
                     agent_id,
                     "hp",
@@ -796,7 +829,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     agent,
                 )
                 agent = _runtime_agent(agent_id, agent)
-            if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
+            if _eff_hunger >= CRITICAL_HUNGER_THRESHOLD:
                 _runtime_set_agent_field(
                     agent_id,
                     "hp",

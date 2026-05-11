@@ -116,7 +116,21 @@ def _compact_inventory(inventory: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _project_agent_needs(agent: dict[str, Any], world_turn: int | None, lazy_enabled: bool) -> dict[str, Any]:
+    """Compute projected needs without mutating the agent."""
+    if lazy_enabled and world_turn is not None and isinstance(agent.get("needs_state"), dict):
+        from app.games.zone_stalkers.needs.lazy_needs import project_needs as _pn  # noqa: PLC0415
+        return _pn(agent, world_turn)
+    return {
+        "hunger": agent.get("hunger"),
+        "thirst": agent.get("thirst"),
+        "sleepiness": agent.get("sleepiness"),
+    }
+
+
 def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
+    _lazy_enabled = isinstance(agent.get("needs_state"), dict)
+    _needs = _project_agent_needs(agent, world_turn, _lazy_enabled)
     return {
         "id": agent.get("id"),
         "name": agent.get("name"),
@@ -128,9 +142,9 @@ def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) ->
         "hp": agent.get("hp"),
         "max_hp": agent.get("max_hp"),
         "radiation": agent.get("radiation"),
-        "hunger": agent.get("hunger"),
-        "thirst": agent.get("thirst"),
-        "sleepiness": agent.get("sleepiness"),
+        "hunger": _needs["hunger"],
+        "thirst": _needs["thirst"],
+        "sleepiness": _needs["sleepiness"],
         "money": agent.get("money"),
         "faction": agent.get("faction"),
         "reputation": agent.get("reputation"),

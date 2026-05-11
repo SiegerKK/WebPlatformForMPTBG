@@ -105,3 +105,35 @@ def schedule_need_thresholds(
                 },
             )
             threshold_tasks[dedupe_key] = revision
+
+
+def project_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float]:
+    """
+    Compute current hunger/thirst/sleepiness without mutating the agent.
+
+    Same as materialize_needs but does NOT write back to the agent dict.
+    """
+    import copy as _copy
+    # Use a shallow copy of needs_state to avoid mutating ensure_needs_state side effects
+    # Actually get_need calls ensure_needs_state which mutates if no needs_state exists,
+    # but we should NOT call ensure_needs_state here since we don't want to mutate.
+    needs_state = agent.get("needs_state")
+    if not isinstance(needs_state, dict):
+        # Fallback: use raw fields without creating needs_state
+        return {
+            "hunger": float(agent.get("hunger", 0.0)),
+            "thirst": float(agent.get("thirst", 0.0)),
+            "sleepiness": float(agent.get("sleepiness", 0.0)),
+        }
+    result: dict[str, float] = {}
+    for need_key in ("hunger", "thirst", "sleepiness"):
+        node = needs_state.get(need_key, {})
+        if not isinstance(node, dict):
+            result[need_key] = float(agent.get(need_key, 0.0))
+            continue
+        base = float(node.get("base", agent.get(need_key, 0.0)))
+        updated_turn = int(node.get("updated_turn", world_turn))
+        elapsed = max(0, int(world_turn) - updated_turn)
+        rate = float(_NEED_RATES_PER_TURN.get(need_key, 0.0))
+        result[need_key] = _clamp_need(base + elapsed * rate)
+    return result

@@ -97,9 +97,16 @@ def _compact_inventory_delta(inventory: Any) -> list[dict[str, Any]]:
     return result
 
 
-def compact_agent_for_delta(agent: dict[str, Any]) -> dict[str, Any]:
+def compact_agent_for_delta(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
     """Build a compact agent dict containing only hot fields for delta comparison."""
     patch: dict[str, Any] = {f: agent.get(f) for f in _AGENT_DELTA_FIELDS}
+    # Overlay derived needs if lazy needs are active
+    if world_turn is not None and isinstance(agent.get("needs_state"), dict):
+        from app.games.zone_stalkers.needs.lazy_needs import project_needs as _pn  # noqa: PLC0415
+        _derived = _pn(agent, world_turn)
+        patch["hunger"] = _derived["hunger"]
+        patch["thirst"] = _derived["thirst"]
+        patch["sleepiness"] = _derived["sleepiness"]
     patch["scheduled_action"] = _compact_scheduled_action_delta(agent.get("scheduled_action"))
     patch["active_plan_summary"] = _compact_active_plan_delta(agent.get("active_plan_v3"))
     # Include equipment/inventory summary if present
@@ -182,7 +189,7 @@ def build_zone_delta(
                 changed = True
                 break
         if changed:
-            agent_changes[agent_id] = compact_agent_for_delta(new_agent)
+            agent_changes[agent_id] = compact_agent_for_delta(new_agent, world_turn=new_state.get("world_turn"))
 
     # --- Location changes ---
     old_locs = old_state.get("locations", {}) or {}
