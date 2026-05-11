@@ -40,11 +40,11 @@ def cleanup_old_tasks(
     if not isinstance(tasks, dict):
         state["scheduled_tasks"] = {}
         return
-    min_turn = int(current_turn) - int(max_age)
+    cutoff_turn = int(current_turn) - int(max_age)
     to_drop = []
     for key in tasks.keys():
         try:
-            if int(key) < min_turn:
+            if int(key) < cutoff_turn:
                 to_drop.append(key)
         except Exception:
             continue
