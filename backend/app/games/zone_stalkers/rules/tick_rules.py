@@ -1252,18 +1252,6 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                         "queued_turn": _ap_queued_turn,
                     }
                 continue
-            handled, active_plan_events = _process_active_plan_v3(
-                agent_id,
-                agent,
-                state,
-                world_turn,
-                add_memory=_add_memory,
-            )
-            events.extend(active_plan_events)
-            if handled:
-                br["last_skip_reason"] = "active_plan_runtime"
-                _npc_brain_skipped_count += 1
-                continue
 
         should_run, run_reason = should_run_brain(agent, world_turn)
         if not should_run:
