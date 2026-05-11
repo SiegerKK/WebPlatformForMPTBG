@@ -892,3 +892,155 @@ def test_cow_schedule_travel_sets_scheduled_action_without_mutating_input():
     new_agent = new_state["agents"][agent_id]
     # scheduled_action might be None if the bot is idle, but input must be clean regardless
     assert state["agents"][agent_id]["scheduled_action"] is None  # original unchanged
+
+
+def test_pr3_interrupt_action_does_not_mutate_input_scheduled_action_revision():
+    from app.games.zone_stalkers.runtime.scheduler import schedule_task
+
+    state = _make_cow_tick_state(seed=301, num_players=1, num_ai_stalkers=0, num_traders=0)
+    state["cpu_event_driven_actions_enabled"] = True
+    state["cpu_lazy_needs_enabled"] = True
+    world_turn = int(state.get("world_turn", 2))
+    agent_id = next(iter(state["agents"].keys()))
+    for aid, agent in state["agents"].items():
+        agent["has_left_zone"] = aid != agent_id
+        agent["controller"] = {"kind": "human", "participant_id": None}
+        agent["action_queue"] = []
+        agent["action_used"] = False
+    agent = state["agents"][agent_id]
+    agent["scheduled_action"] = {
+        "type": "travel",
+        "revision": 1,
+        "interruptible": True,
+        "ends_turn": world_turn + 10,
+    }
+    agent["needs_state"] = {
+        "hunger": {"base": 10.0, "updated_turn": world_turn},
+        "thirst": {"base": 95.0, "updated_turn": world_turn},
+        "sleepiness": {"base": 10.0, "updated_turn": world_turn},
+        "revision": 1,
+    }
+    schedule_task(
+        state,
+        runtime=None,
+        turn=world_turn,
+        task={
+            "kind": "need_threshold_crossed",
+            "agent_id": agent_id,
+            "need": "thirst",
+            "threshold": "critical",
+            "needs_revision": 1,
+        },
+    )
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state["agents"][agent_id]["scheduled_action"] == before["agents"][agent_id]["scheduled_action"]
+    assert state["agents"][agent_id]["needs_state"] == before["agents"][agent_id]["needs_state"]
+    assert new_state["agents"][agent_id].get("scheduled_action") is None
+
+
+def test_pr3_schedule_need_thresholds_does_not_mutate_input_needs_state():
+    state = _make_cow_tick_state(seed=302, num_players=1, num_ai_stalkers=0, num_traders=0)
+    state["cpu_lazy_needs_enabled"] = True
+    world_turn = int(state.get("world_turn", 2))
+    agent_id = next(iter(state["agents"].keys()))
+    for aid, agent in state["agents"].items():
+        agent["has_left_zone"] = aid != agent_id
+        agent["controller"] = {"kind": "human", "participant_id": None}
+        agent["action_queue"] = []
+        agent["action_used"] = False
+    state["agents"][agent_id]["needs_state"] = {
+        "hunger": {"base": 10.0, "updated_turn": world_turn},
+        "thirst": {"base": 10.0, "updated_turn": world_turn},
+        "sleepiness": {"base": 10.0, "updated_turn": world_turn},
+        "revision": 1,
+    }
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state == before
+    assert "_threshold_tasks" in new_state["agents"][agent_id]["needs_state"]
+
+
+def test_pr3_sleep_tick_does_not_mutate_input_needs_state():
+    from app.games.zone_stalkers.runtime.scheduler import schedule_task
+
+    state = _make_cow_tick_state(seed=303, num_players=1, num_ai_stalkers=0, num_traders=0)
+    state["cpu_event_driven_actions_enabled"] = True
+    state["cpu_lazy_needs_enabled"] = True
+    world_turn = int(state.get("world_turn", 2))
+    agent_id = next(iter(state["agents"].keys()))
+    for aid, agent in state["agents"].items():
+        agent["has_left_zone"] = aid != agent_id
+        agent["controller"] = {"kind": "human", "participant_id": None}
+        agent["action_queue"] = []
+        agent["action_used"] = False
+    agent = state["agents"][agent_id]
+    agent["needs_state"] = {
+        "hunger": {"base": 10.0, "updated_turn": world_turn},
+        "thirst": {"base": 10.0, "updated_turn": world_turn},
+        "sleepiness": {"base": 80.0, "updated_turn": world_turn},
+        "revision": 1,
+    }
+    agent["scheduled_action"] = {
+        "type": "sleep",
+        "revision": 1,
+        "interruptible": True,
+        "ends_turn": world_turn + 60,
+        "sleep_intervals_applied": 0,
+    }
+    schedule_task(
+        state,
+        runtime=None,
+        turn=world_turn,
+        task={"kind": "sleep_tick", "agent_id": agent_id, "scheduled_action_revision": 1},
+    )
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state["agents"][agent_id]["needs_state"] == before["agents"][agent_id]["needs_state"]
+    assert (
+        int(new_state["agents"][agent_id]["needs_state"]["revision"])
+        == int(before["agents"][agent_id]["needs_state"]["revision"]) + 1
+    )
+
+
+def test_pr3_need_damage_does_not_mutate_input_agent_hp_or_needs_state():
+    from app.games.zone_stalkers.runtime.scheduler import schedule_task
+    from app.games.zone_stalkers.rules.tick_constants import HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER
+
+    state = _make_cow_tick_state(seed=304, num_players=1, num_ai_stalkers=0, num_traders=0)
+    state["cpu_event_driven_actions_enabled"] = True
+    state["cpu_lazy_needs_enabled"] = True
+    world_turn = int(state.get("world_turn", 2))
+    agent_id = next(iter(state["agents"].keys()))
+    for aid, agent in state["agents"].items():
+        agent["has_left_zone"] = aid != agent_id
+        agent["controller"] = {"kind": "human", "participant_id": None}
+        agent["action_queue"] = []
+        agent["action_used"] = False
+    agent = state["agents"][agent_id]
+    agent["hp"] = 100
+    agent["needs_state"] = {
+        "hunger": {"base": 95.0, "updated_turn": world_turn},
+        "thirst": {"base": 10.0, "updated_turn": world_turn},
+        "sleepiness": {"base": 10.0, "updated_turn": world_turn},
+        "revision": 1,
+    }
+    schedule_task(
+        state,
+        runtime=None,
+        turn=world_turn,
+        task={"kind": "need_damage", "agent_id": agent_id, "need": "hunger", "needs_revision": 1},
+    )
+
+    before = copy.deepcopy(state)
+    new_state, _events = tick_zone_map(state)
+
+    assert state["agents"][agent_id]["hp"] == before["agents"][agent_id]["hp"]
+    assert state["agents"][agent_id]["needs_state"] == before["agents"][agent_id]["needs_state"]
+    assert new_state["agents"][agent_id]["hp"] == 100 - HP_DAMAGE_PER_HOUR_CRITICAL_HUNGER

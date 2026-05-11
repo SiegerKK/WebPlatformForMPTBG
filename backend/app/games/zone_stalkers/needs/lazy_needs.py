@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import copy
+import math
+from typing import Any
+
+from app.games.zone_stalkers.rules.tick_constants import (
+    CRITICAL_HUNGER_THRESHOLD,
+    CRITICAL_THIRST_THRESHOLD,
+    HUNGER_INCREASE_PER_HOUR,
+    SLEEPINESS_INCREASE_PER_HOUR,
+    THIRST_INCREASE_PER_HOUR,
+)
+from app.games.zone_stalkers.runtime.scheduler import schedule_task
+
+_NEED_RATES_PER_TURN = {
+    "hunger": HUNGER_INCREASE_PER_HOUR / 60.0,
+    "thirst": THIRST_INCREASE_PER_HOUR / 60.0,
+    "sleepiness": SLEEPINESS_INCREASE_PER_HOUR / 60.0,
+}
+_SOFT_THRESHOLD = 70.0
+_CRITICAL_SLEEPINESS_THRESHOLD = 90.0  # hunger/thirst use tick_constants values
+
+
+def _clamp_need(value: float) -> float:
+    return max(0.0, min(100.0, float(value)))
+
+
+def _initial_needs_state(agent: dict[str, Any], world_turn: int) -> dict[str, Any]:
+    return {
+        "hunger": {"base": float(agent.get("hunger", 0.0)), "updated_turn": int(world_turn)},
+        "thirst": {"base": float(agent.get("thirst", 0.0)), "updated_turn": int(world_turn)},
+        "sleepiness": {"base": float(agent.get("sleepiness", 0.0)), "updated_turn": int(world_turn)},
+        "revision": 1,
+    }
+
+
+def _mutable_needs_state(
+    agent: dict[str, Any],
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    if runtime is not None and agent_id:
+        try:
+            if not isinstance(agent.get("needs_state"), dict):
+                runtime.set_agent_field(agent_id, "needs_state", _initial_needs_state(agent, world_turn))
+            needs_state = runtime.mutable_agent_dict(agent_id, "needs_state")
+            if isinstance(needs_state, dict):
+                return needs_state
+        except Exception:
+            pass
+    needs_state = agent.get("needs_state")
+    if not isinstance(needs_state, dict):
+        needs_state = _initial_needs_state(agent, world_turn)
+    else:
+        needs_state = copy.deepcopy(needs_state)
+    agent["needs_state"] = needs_state
+    return needs_state
+
+
+def ensure_needs_state(
+    agent: dict[str, Any],
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> bool:
+    if isinstance(agent.get("needs_state"), dict):
+        return False
+    new_state = _initial_needs_state(agent, world_turn)
+    if runtime is not None and agent_id:
+        try:
+            runtime.set_agent_field(agent_id, "needs_state", new_state)
+            return True
+        except Exception:
+            pass
+    agent["needs_state"] = new_state
+    return True
+
+
+def get_need(agent: dict[str, Any], need_key: str, world_turn: int) -> float:
+    ensure_needs_state(agent, world_turn)
+    return get_need_readonly(agent, need_key, world_turn)
+
+
+def get_need_readonly(agent: dict[str, Any], need_key: str, world_turn: int) -> float:
+    needs_state = agent.get("needs_state", {})
+    if not isinstance(needs_state, dict):
+        return _clamp_need(float(agent.get(need_key, 0.0)))
+    node = needs_state.get(need_key, {})
+    base = float(node.get("base", agent.get(need_key, 0.0)))
+    updated_turn = int(node.get("updated_turn", world_turn))
+    elapsed = max(0, int(world_turn) - updated_turn)
+    rate = float(_NEED_RATES_PER_TURN.get(need_key, 0.0))
+    return _clamp_need(base + elapsed * rate)
+
+
+def materialize_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float]:
+    values = {
+        "hunger": get_need(agent, "hunger", world_turn),
+        "thirst": get_need(agent, "thirst", world_turn),
+        "sleepiness": get_need(agent, "sleepiness", world_turn),
+    }
+    for key, value in values.items():
+        agent[key] = value
+    return values
+
+
+def set_need(
+    agent: dict[str, Any],
+    need_key: str,
+    value: float,
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> None:
+    set_needs(agent, {need_key: value}, world_turn, runtime=runtime, agent_id=agent_id)
+
+
+def set_needs(
+    agent: dict[str, Any],
+    updates: dict[str, float],
+    world_turn: int,
+    runtime: Any | None = None,
+    agent_id: str | None = None,
+) -> None:
+    needs_state = _mutable_needs_state(agent, world_turn, runtime=runtime, agent_id=agent_id)
+    changed = False
+    for need_key, value in updates.items():
+        if need_key not in _NEED_RATES_PER_TURN:
+            continue
+        node = needs_state.setdefault(need_key, {})
+        node["base"] = _clamp_need(value)
+        node["updated_turn"] = int(world_turn)
+        agent[need_key] = node["base"]
+        changed = True
+    if changed:
+        needs_state["revision"] = int(needs_state.get("revision", 0)) + 1
+
+
+def schedule_need_thresholds(
+    state: dict[str, Any],
+    runtime: Any,
+    agent_id: str,
+    agent: dict[str, Any],
+    world_turn: int,
+) -> None:
+    needs_state = _mutable_needs_state(agent, world_turn, runtime=runtime, agent_id=agent_id)
+    revision = int(needs_state.get("revision", 0))
+    threshold_tasks = needs_state.setdefault("_threshold_tasks", {})
+    for need_key, rate in _NEED_RATES_PER_TURN.items():
+        if rate <= 0:
+            continue
+        current = get_need_readonly(agent, need_key, world_turn)
+        for threshold_name, threshold_value in (
+            ("soft", _SOFT_THRESHOLD),
+            ("critical", _critical_threshold_for_need(need_key)),
+        ):
+            dedupe_key = f"{need_key}:{threshold_name}"
+            if threshold_tasks.get(dedupe_key) == revision:
+                continue
+            if current >= threshold_value:
+                continue
+            turns_until = math.ceil((threshold_value - current) / rate)
+            schedule_task(
+                state,
+                runtime,
+                int(world_turn) + max(1, turns_until),
+                {
+                    "kind": "need_threshold_crossed",
+                    "agent_id": agent_id,
+                    "need": need_key,
+                    "threshold": threshold_name,
+                    "needs_revision": revision,
+                },
+            )
+            threshold_tasks[dedupe_key] = revision
+
+
+def _critical_threshold_for_need(need_key: str) -> float:
+    if need_key == "hunger":
+        return float(CRITICAL_HUNGER_THRESHOLD)
+    if need_key == "thirst":
+        return float(CRITICAL_THIRST_THRESHOLD)
+    return float(_CRITICAL_SLEEPINESS_THRESHOLD)
+
+
+def project_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float]:
+    """
+    Compute current hunger/thirst/sleepiness without mutating the agent.
+
+    Same as materialize_needs but does NOT write back to the agent dict.
+    """
+    return {
+        "hunger": get_need_readonly(agent, "hunger", world_turn),
+        "thirst": get_need_readonly(agent, "thirst", world_turn),
+        "sleepiness": get_need_readonly(agent, "sleepiness", world_turn),
+    }

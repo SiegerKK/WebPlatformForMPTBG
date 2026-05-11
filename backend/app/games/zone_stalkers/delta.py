@@ -54,6 +54,9 @@ def _compact_scheduled_action_delta(action: Any) -> dict[str, Any] | None:
         "turns_total": action.get("turns_total"),
         "target_id": action.get("target_id"),
         "started_turn": action.get("started_turn"),
+        "ends_turn": action.get("ends_turn"),
+        "revision": action.get("revision"),
+        "interruptible": action.get("interruptible"),
     }
 
 
@@ -94,9 +97,16 @@ def _compact_inventory_delta(inventory: Any) -> list[dict[str, Any]]:
     return result
 
 
-def compact_agent_for_delta(agent: dict[str, Any]) -> dict[str, Any]:
+def compact_agent_for_delta(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
     """Build a compact agent dict containing only hot fields for delta comparison."""
     patch: dict[str, Any] = {f: agent.get(f) for f in _AGENT_DELTA_FIELDS}
+    # Overlay derived needs if lazy needs are active
+    if world_turn is not None and isinstance(agent.get("needs_state"), dict):
+        from app.games.zone_stalkers.needs.lazy_needs import project_needs as _pn  # noqa: PLC0415
+        _derived = _pn(agent, world_turn)
+        patch["hunger"] = _derived["hunger"]
+        patch["thirst"] = _derived["thirst"]
+        patch["sleepiness"] = _derived["sleepiness"]
     patch["scheduled_action"] = _compact_scheduled_action_delta(agent.get("scheduled_action"))
     patch["active_plan_summary"] = _compact_active_plan_delta(agent.get("active_plan_v3"))
     # Include equipment/inventory summary if present
@@ -172,14 +182,18 @@ def build_zone_delta(
             old_agent = {}
         if not isinstance(new_agent, dict):
             continue  # agent removed — skip for MVP
-        # Check if any hot field changed
+        # Check if any hot field changed.
+        # NOTE (PR3 lazy-needs minimal mode):
+        # derived hunger/thirst/sleepiness are overlaid only after an agent is already
+        # selected for delta by a hot-field change. Pure time-based lazy growth alone
+        # does not emit deltas every tick (intentional CPU-friendly trade-off).
         changed = False
         for f in _AGENT_HOT_FIELDS:
             if old_agent.get(f) != new_agent.get(f):
                 changed = True
                 break
         if changed:
-            agent_changes[agent_id] = compact_agent_for_delta(new_agent)
+            agent_changes[agent_id] = compact_agent_for_delta(new_agent, world_turn=new_state.get("world_turn"))
 
     # --- Location changes ---
     old_locs = old_state.get("locations", {}) or {}

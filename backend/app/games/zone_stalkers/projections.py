@@ -58,15 +58,26 @@ def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
 # never copied.
 
 
-def _compact_scheduled_action(action: Any) -> dict[str, Any] | None:
+def _compact_scheduled_action(action: Any, world_turn: int | None = None) -> dict[str, Any] | None:
     if not isinstance(action, dict):
         return None
+    turns_total = action.get("turns_total")
+    turns_remaining = action.get("turns_remaining")
+    ends_turn = action.get("ends_turn")
+    if turns_remaining is None and ends_turn is not None and world_turn is not None:
+        try:
+            turns_remaining = max(0, int(ends_turn) - int(world_turn))
+        except (TypeError, ValueError):
+            turns_remaining = None
     return {
         "type": action.get("type"),
-        "turns_remaining": action.get("turns_remaining"),
-        "turns_total": action.get("turns_total"),
+        "turns_remaining": turns_remaining,
+        "turns_total": turns_total,
         "target_id": action.get("target_id"),
         "started_turn": action.get("started_turn"),
+        "ends_turn": action.get("ends_turn"),
+        "revision": action.get("revision"),
+        "interruptible": action.get("interruptible"),
     }
 
 
@@ -105,7 +116,21 @@ def _compact_inventory(inventory: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _project_agent_game(agent: dict[str, Any]) -> dict[str, Any]:
+def _project_agent_needs(agent: dict[str, Any], world_turn: int | None, lazy_enabled: bool) -> dict[str, Any]:
+    """Compute projected needs without mutating the agent."""
+    if lazy_enabled and world_turn is not None and isinstance(agent.get("needs_state"), dict):
+        from app.games.zone_stalkers.needs.lazy_needs import project_needs as _pn  # noqa: PLC0415
+        return _pn(agent, world_turn)
+    return {
+        "hunger": agent.get("hunger"),
+        "thirst": agent.get("thirst"),
+        "sleepiness": agent.get("sleepiness"),
+    }
+
+
+def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
+    _lazy_enabled = isinstance(agent.get("needs_state"), dict)
+    _needs = _project_agent_needs(agent, world_turn, _lazy_enabled)
     return {
         "id": agent.get("id"),
         "name": agent.get("name"),
@@ -117,9 +142,9 @@ def _project_agent_game(agent: dict[str, Any]) -> dict[str, Any]:
         "hp": agent.get("hp"),
         "max_hp": agent.get("max_hp"),
         "radiation": agent.get("radiation"),
-        "hunger": agent.get("hunger"),
-        "thirst": agent.get("thirst"),
-        "sleepiness": agent.get("sleepiness"),
+        "hunger": _needs["hunger"],
+        "thirst": _needs["thirst"],
+        "sleepiness": _needs["sleepiness"],
         "money": agent.get("money"),
         "faction": agent.get("faction"),
         "reputation": agent.get("reputation"),
@@ -129,7 +154,7 @@ def _project_agent_game(agent: dict[str, Any]) -> dict[str, Any]:
         "current_goal": agent.get("current_goal"),
         "risk_tolerance": agent.get("risk_tolerance"),
         "action_used": agent.get("action_used"),
-        "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action")),
+        "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action"), world_turn),
         "active_plan_summary": _compact_active_plan(agent.get("active_plan_v3")),
         "equipment_summary": _compact_equipment(agent.get("equipment")),
         "inventory_summary": _compact_inventory(agent.get("inventory")),
@@ -200,7 +225,11 @@ def _project_zone_game(state: dict[str, Any]) -> dict[str, Any]:
         "max_turns": state.get("max_turns"),
         "state_revision": state.get("state_revision", 0),
         "map_revision": state.get("map_revision", 0),
-        "agents": {id_: _project_agent_game(a) for id_, a in agents_raw.items() if isinstance(a, dict)},
+        "agents": {
+            id_: _project_agent_game(a, state.get("world_turn"))
+            for id_, a in agents_raw.items()
+            if isinstance(a, dict)
+        },
         "traders": {id_: _project_trader_game(t) for id_, t in traders_raw.items() if isinstance(t, dict)},
         "locations": _project_locations_game(state.get("locations", {})),
         # mutants are small dicts, safe to pass through directly
@@ -224,6 +253,8 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(agent, dict):
             agents_out[agent_id] = agent
             continue
+        _lazy_enabled = isinstance(agent.get("needs_state"), dict)
+        _needs = _project_agent_needs(agent, state.get("world_turn"), _lazy_enabled)
         compact_ctx = _compact_brain_context(agent)
         # Only include keys present in the agent dict (skip None to avoid size bloat)
         _agent_fields = {
@@ -237,9 +268,9 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
             "hp": agent.get("hp"),
             "max_hp": agent.get("max_hp"),
             "radiation": agent.get("radiation"),
-            "hunger": agent.get("hunger"),
-            "thirst": agent.get("thirst"),
-            "sleepiness": agent.get("sleepiness"),
+            "hunger": _needs["hunger"],
+            "thirst": _needs["thirst"],
+            "sleepiness": _needs["sleepiness"],
             "money": agent.get("money"),
             "faction": agent.get("faction"),
             "reputation": agent.get("reputation"),

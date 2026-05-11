@@ -60,6 +60,13 @@ from app.games.zone_stalkers.rules.tick_constants import (
     HUNGER_INCREASE_PER_SLEEP_INTERVAL,
     THIRST_INCREASE_PER_SLEEP_INTERVAL,
 )
+from app.games.zone_stalkers.runtime.scheduler import cleanup_old_tasks, pop_due_tasks, schedule_task
+from app.games.zone_stalkers.needs.lazy_needs import (
+    ensure_needs_state,
+    get_need,
+    schedule_need_thresholds,
+    set_needs,
+)
 
 # 1 game turn = 1 real minute
 MINUTES_PER_TURN = 1
@@ -308,6 +315,97 @@ def _runtime_set_state_field(state: Dict[str, Any], key: str, value: Any) -> Non
             except Exception:
                 return
     state[key] = value
+
+
+def _event_driven_actions_enabled(state: Dict[str, Any]) -> bool:
+    return bool(state.get("cpu_event_driven_actions_enabled", False))
+
+
+def _lazy_needs_enabled(state: Dict[str, Any]) -> bool:
+    return bool(state.get("cpu_lazy_needs_enabled", False))
+
+
+def _scheduled_action_remaining_turns(sched: Dict[str, Any], world_turn: int) -> int:
+    if "ends_turn" in sched:
+        return max(0, int(sched.get("ends_turn", world_turn)) - int(world_turn))
+    return max(0, int(sched.get("turns_remaining", 0)))
+
+
+def _migrate_scheduled_action_timing(
+    agent_id: str,
+    agent: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+) -> bool:
+    sched = agent.get("scheduled_action")
+    if not isinstance(sched, dict):
+        return False
+    changed = False
+    if "ends_turn" not in sched:
+        turns_remaining = max(0, int(sched.get("turns_remaining", 0)))
+        turns_total = max(1, int(sched.get("turns_total", turns_remaining or 1)))
+        started_turn = int(
+            sched.get(
+                "started_turn",
+                int(world_turn) - max(0, turns_total - turns_remaining),
+            )
+        )
+        sched["started_turn"] = started_turn
+        sched["ends_turn"] = int(world_turn) + turns_remaining
+        sched["turns_total"] = turns_total
+        sched["revision"] = int(sched.get("revision", 0)) + 1
+        sched.setdefault("interruptible", True)
+        changed = True
+    else:
+        sched.setdefault("revision", 1)
+        sched.setdefault("interruptible", True)
+
+    if _event_driven_actions_enabled(state):
+        from app.games.zone_stalkers.runtime.task_processor import ACTION_TYPE_TO_TASK_KIND as _ACTION_TASK_MAPPING  # noqa: PLC0415
+        action_type = str(sched.get("type") or "")
+        revision = int(sched.get("revision", 0))
+        ends_turn = int(sched.get("ends_turn", world_turn))
+        completion_kind = _ACTION_TASK_MAPPING.get(action_type, "scheduled_action_complete")
+        if (
+            sched.get("_completion_task_revision") != revision
+            or int(sched.get("_completion_task_turn", -1)) != ends_turn
+        ):
+            schedule_task(
+                state,
+                _cow_runtime(),
+                ends_turn,
+                {
+                    "kind": completion_kind,
+                    "agent_id": agent_id,
+                    "scheduled_action_revision": revision,
+                },
+            )
+            sched["_completion_task_revision"] = revision
+            sched["_completion_task_turn"] = ends_turn
+            changed = True
+
+        # Schedule sleep tick tasks for sleep actions
+        if action_type == "sleep" and sched.get("_sleep_ticks_scheduled_revision") != revision:
+            started_turn_v = int(sched.get("started_turn", world_turn))
+            ends_turn_v = int(sched.get("ends_turn", world_turn + 1))
+            elapsed = max(0, int(world_turn) - started_turn_v)
+            next_idx = elapsed // SLEEP_EFFECT_INTERVAL_TURNS + 1
+            tick_turn = started_turn_v + next_idx * SLEEP_EFFECT_INTERVAL_TURNS
+            count = 0
+            while tick_turn < ends_turn_v and count < 100:
+                schedule_task(state, _cow_runtime(), tick_turn, {
+                    "kind": "sleep_tick",
+                    "agent_id": agent_id,
+                    "scheduled_action_revision": revision,
+                })
+                tick_turn += SLEEP_EFFECT_INTERVAL_TURNS
+                count += 1
+            sched["_sleep_ticks_scheduled_revision"] = revision
+            changed = True
+
+    if changed:
+        _runtime_set_agent_field(agent_id, "scheduled_action", sched, agent)
+    return changed
 
 
 def _runtime_mutable_location_agents(state: Dict[str, Any], location_id: str) -> list[str]:
@@ -583,6 +681,14 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 _runtime_set_location_field(state, _loc_id, "terrain_type", "plain")
         _runtime_set_state_field(state, "_terrain_migrated_v3", True)
 
+    _event_driven_actions = _event_driven_actions_enabled(state)
+    _due_action_tasks: dict[str, set[int]] = {}
+    if _event_driven_actions:
+        from app.games.zone_stalkers.runtime.task_processor import process_due_tasks as _process_due_tasks  # noqa: PLC0415
+        cleanup_old_tasks(state, _cow_runtime(), world_turn)
+        _task_events, _due_action_tasks = _process_due_tasks(state, _cow_runtime(), world_turn, profiler=_tick_profiler)
+        events.extend(_task_events)
+
     # 1. Process scheduled actions for each alive stalker agent
     _pr_sched = _tick_profiler.section("scheduled_actions_ms") if _tick_profiler else __import__("contextlib").nullcontext()
     _pr_sched.__enter__()
@@ -591,8 +697,48 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         if agent.get("has_left_zone"):
             continue
+        if _lazy_needs_enabled(state):
+            agent = _runtime_agent(agent_id, agent)
+            _rt_needs = _cow_runtime()
+            _needs_migrated = ensure_needs_state(agent, world_turn, runtime=_rt_needs, agent_id=agent_id)
+            if _needs_migrated:
+                _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
+                agent = _runtime_agent(agent_id, agent)
+            _needs_state = agent.get("needs_state", {})
+            _needs_revision = int(_needs_state.get("revision", 0)) if isinstance(_needs_state, dict) else 0
+            _threshold_tasks = _needs_state.get("_threshold_tasks", {}) if isinstance(_needs_state, dict) else {}
+            _needs_reschedule = _needs_migrated
+            if not _needs_reschedule:
+                for _need_key in ("hunger", "thirst", "sleepiness"):
+                    for _threshold_name in ("soft", "critical"):
+                        if _threshold_tasks.get(f"{_need_key}:{_threshold_name}") != _needs_revision:
+                            _needs_reschedule = True
+                            break
+                    if _needs_reschedule:
+                        break
+            if _needs_reschedule:
+                schedule_need_thresholds(state, _rt_needs, agent_id, agent, world_turn)
         sched = agent.get("scheduled_action")
         if sched:
+            agent = _runtime_agent(agent_id, agent)
+            _migrate_scheduled_action_timing(agent_id, agent, world_turn, state)
+            agent = _runtime_agent(agent_id, agent)
+            sched = agent.get("scheduled_action")
+            if not isinstance(sched, dict):
+                continue
+            if _event_driven_actions:
+                sched_revision = int(sched.get("revision", 0))
+                due_revisions = _due_action_tasks.get(agent_id, set())
+                if sched_revision not in due_revisions:
+                    if (
+                        sched.get("type") in ("explore_anomaly_location", "travel")
+                        and not sched.get("emergency_flee")
+                        and _is_emission_threat(agent, state)
+                        and sched.get("interruptible", True)
+                    ):
+                        sched["revision"] = sched_revision + 1
+                        _runtime_set_agent_field(agent_id, "scheduled_action", None, agent)
+                    continue
             if is_v3_monitored_bot(agent):
                 try:
                     monitor_result = assess_scheduled_action_v3(
@@ -657,30 +803,46 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                 continue
             if agent.get("has_left_zone"):  # departed agents need no hunger/thirst/sleep degradation
                 continue
-            _runtime_set_agent_field(
-                agent_id,
-                "hunger",
-                min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR),
-                agent,
-            )
-            _runtime_set_agent_field(
-                agent_id,
-                "thirst",
-                min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR),
-                agent,
-            )
-            _runtime_set_agent_field(
-                agent_id,
-                "sleepiness",
-                min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR),
-                agent,
-            )
-            agent = _runtime_agent(agent_id, agent)
+
+            if not _lazy_needs_enabled(state):
+                # Legacy: increment needs each hour
+                _runtime_set_agent_field(
+                    agent_id,
+                    "hunger",
+                    min(100, agent.get("hunger", 0) + HUNGER_INCREASE_PER_HOUR),
+                    agent,
+                )
+                _runtime_set_agent_field(
+                    agent_id,
+                    "thirst",
+                    min(100, agent.get("thirst", 0) + THIRST_INCREASE_PER_HOUR),
+                    agent,
+                )
+                _runtime_set_agent_field(
+                    agent_id,
+                    "sleepiness",
+                    min(100, agent.get("sleepiness", 0) + SLEEPINESS_INCREASE_PER_HOUR),
+                    agent,
+                )
+                agent = _runtime_agent(agent_id, agent)
+
+            # Critical damage: skip if event-driven+lazy (handled by need_damage tasks)
+            if _lazy_needs_enabled(state) and _event_driven_actions_enabled(state):
+                continue
+
+            # Determine effective need values for damage checks
+            if _lazy_needs_enabled(state):
+                _eff_thirst = get_need(agent, "thirst", world_turn)
+                _eff_hunger = get_need(agent, "hunger", world_turn)
+            else:
+                _eff_thirst = agent.get("thirst", 0)
+                _eff_hunger = agent.get("hunger", 0)
+
             if _tick_runtime:
                 from app.games.zone_stalkers.runtime.dirty import mark_agent_dirty as _mad
                 _mad(_tick_runtime, agent_id)
             # Critical thirst causes HP damage faster than hunger
-            if agent.get("thirst", 0) >= CRITICAL_THIRST_THRESHOLD:
+            if _eff_thirst >= CRITICAL_THIRST_THRESHOLD:
                 _runtime_set_agent_field(
                     agent_id,
                     "hp",
@@ -688,7 +850,7 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
                     agent,
                 )
                 agent = _runtime_agent(agent_id, agent)
-            if agent.get("hunger", 0) >= CRITICAL_HUNGER_THRESHOLD:
+            if _eff_hunger >= CRITICAL_HUNGER_THRESHOLD:
                 _runtime_set_agent_field(
                     agent_id,
                     "hp",
@@ -1164,13 +1326,31 @@ def _process_scheduled_action(
         except Exception:
             pass
     action_type = sched["type"]
-    turns_remaining = sched["turns_remaining"] - 1
-    sched["turns_remaining"] = turns_remaining
+    if _event_driven_actions_enabled(state):
+        ends_turn = int(sched.get("ends_turn", world_turn))
+        started_turn = int(sched.get("started_turn", world_turn))
+        turns_remaining = _scheduled_action_remaining_turns(sched, world_turn)
+        turns_total = int(
+            sched.get(
+                "turns_total",
+                max(
+                    1,
+                    ends_turn - started_turn,
+                ),
+            )
+        )
+        sched["turns_total"] = max(1, turns_total)
+        sched["turns_remaining"] = turns_remaining
+    else:
+        turns_remaining = sched["turns_remaining"] - 1
+        sched["turns_remaining"] = turns_remaining
 
     # ── Per-tick sleep interval processing ──────────────────────────────────
     # Apply effects every 30 turns regardless of whether the action completes
     # this tick.  This ensures partial recovery on abort.
-    if action_type == "sleep":
+    # Event-driven mode avoids per-tick sleep polling; sleep completion resolves
+    # aggregate sleep effects using action timing at the due turn.
+    if action_type == "sleep" and not _event_driven_actions_enabled(state):
         events.extend(_process_sleep_tick(agent_id, agent, sched, state, world_turn))
         # _process_sleep_tick may force early wake-up when sleepiness reaches 0.
         if sched.pop("wake_due_to_rested", False):
@@ -1337,6 +1517,9 @@ def _process_scheduled_action(
                     "final_target_id": final_target,
                     "remaining_route": remaining_route[1:],
                     "started_turn": world_turn,
+                    "ends_turn": world_turn + hop_time,
+                    "revision": int(sched.get("revision", 0)) + 1,
+                    "interruptible": True,
                 }
                 # Carry over the emergency_flee flag so that each hop of an
                 # emission-flee journey is never interrupted by the emission
@@ -1412,7 +1595,7 @@ def _process_scheduled_action(
         events.extend(result_evs)
 
     elif action_type == "sleep":
-        _resolve_sleep(agent, sched, world_turn, state)
+        _resolve_sleep(agent, sched, world_turn, state, agent_id=agent_id)
         turns_slept = int(
             sched.get(
                 "sleep_turns_slept",
@@ -1666,7 +1849,13 @@ def _process_sleep_tick(
     return events
 
 
-def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int, state: Dict[str, Any]) -> None:
+def _resolve_sleep(
+    agent: Dict[str, Any],
+    sched: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    agent_id: str | None = None,
+) -> None:
     """Write sleep-completion memory.
 
     Interval effects (sleepiness, hunger, thirst) were already applied during
@@ -1701,7 +1890,15 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     # 1 full in-game hour.  Very short sleeps (< 1 h) leave residual sleepiness
     # so that gradual per-interval recovery is not bypassed artificially.
     if hours_slept >= 1.0:
-        agent["sleepiness"] = 0
+        if _lazy_needs_enabled(state):
+            _rt_needs = _cow_runtime()
+            ensure_needs_state(agent, world_turn, runtime=_rt_needs, agent_id=agent_id)
+            set_needs(agent, {"sleepiness": 0.0}, world_turn, runtime=_rt_needs, agent_id=agent_id)
+            if agent_id:
+                _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
+                schedule_need_thresholds(state, _rt_needs, agent_id, agent, world_turn)
+        else:
+            agent["sleepiness"] = 0
     intervals = int(sched.get("sleep_intervals_applied", 0))
     _add_memory(
         agent,
@@ -2028,6 +2225,9 @@ def _combat_flee(
             "final_target_id": prev_loc_id,
             "remaining_route": [],
             "started_turn": world_turn,
+            "ends_turn": world_turn + flee_time,
+            "revision": 1,
+            "interruptible": True,
             "combat_flee": True,
         }
         events.append({
@@ -3210,6 +3410,9 @@ def _bot_schedule_travel(
         "final_target_id": target_loc_id,
         "remaining_route": route[1:],
         "started_turn": world_turn,
+        "ends_turn": world_turn + hop_time,
+        "revision": 1,
+        "interruptible": True,
     }
     if emergency_flee:
         sched["emergency_flee"] = True
@@ -3479,6 +3682,17 @@ def _bot_consume(
     item_info = ITEM_TYPES.get(item["type"], {})
     effects = item_info.get("effects", {})
     _apply_item_effects(agent, effects)
+    if _lazy_needs_enabled(state):
+        _rt_needs = _cow_runtime()
+        ensure_needs_state(agent, world_turn, runtime=_rt_needs, agent_id=agent_id)
+        _need_updates: dict[str, float] = {}
+        for _need_key in ("hunger", "thirst", "sleepiness"):
+            if _need_key in effects:
+                _need_updates[_need_key] = float(agent.get(_need_key, 0.0))
+        if _need_updates:
+            set_needs(agent, _need_updates, world_turn, runtime=_rt_needs, agent_id=agent_id)
+            _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
+        schedule_need_thresholds(state, _rt_needs, agent_id, agent, world_turn)
     _runtime_set_agent_field(agent_id, "inventory", [i for i in agent.get("inventory", []) if i["id"] != item["id"]], agent)
     _runtime_set_action_used(agent, True)
     item_name = item_info.get("name", item.get("name", item["type"]))
@@ -6038,6 +6252,9 @@ def _compat_pursue_get_rich(
             "turns_remaining": EXPLORE_DURATION_TURNS,
             "turns_total": EXPLORE_DURATION_TURNS,
             "started_turn": world_turn,
+            "ends_turn": world_turn + EXPLORE_DURATION_TURNS,
+            "revision": 1,
+            "interruptible": True,
         }
         _runtime_set_action_used(agent, True)
         return [{"event_type": "exploration_started",
