@@ -1273,13 +1273,15 @@ def _process_scheduled_action(
             pass
     action_type = sched["type"]
     if _event_driven_actions_enabled(state):
+        ends_turn = int(sched.get("ends_turn", world_turn))
+        started_turn = int(sched.get("started_turn", world_turn))
         turns_remaining = _scheduled_action_remaining_turns(sched, world_turn)
         turns_total = int(
             sched.get(
                 "turns_total",
                 max(
                     1,
-                    int(sched.get("ends_turn", world_turn)) - int(sched.get("started_turn", world_turn)),
+                    ends_turn - started_turn,
                 ),
             )
         )

@@ -63,8 +63,9 @@ def _compact_scheduled_action(action: Any, world_turn: int | None = None) -> dic
         return None
     turns_total = action.get("turns_total")
     turns_remaining = action.get("turns_remaining")
-    if turns_remaining is None and action.get("ends_turn") is not None and world_turn is not None:
-        turns_remaining = max(0, int(action.get("ends_turn", 0)) - int(world_turn))
+    ends_turn = action.get("ends_turn")
+    if turns_remaining is None and ends_turn is not None and world_turn is not None:
+        turns_remaining = max(0, int(ends_turn) - int(world_turn))
     return {
         "type": action.get("type"),
         "turns_remaining": turns_remaining,
