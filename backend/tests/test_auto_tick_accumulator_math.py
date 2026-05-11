@@ -38,3 +38,17 @@ def test_due_ticks_capped_by_batch_limit():
     assert before >= 30
     assert due == 30
     assert rem >= 0.0
+
+
+def test_accumulated_ticks_cap_is_enforced():
+    due, rem, before = _compute_due_ticks(
+        accumulated_game_seconds=0.0,
+        elapsed_real_seconds=100.0,
+        speed_multiplier=600,
+        max_ticks_per_batch=30,
+        max_accumulated_ticks=60,
+    )
+    # with cap=60 ticks, due_before_cap cannot exceed 60
+    assert before == 60
+    assert due == 30
+    assert rem == 1800.0
