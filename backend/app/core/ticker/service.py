@@ -32,17 +32,15 @@ _DEBUG_CACHE_TTL: float = 5.0  # seconds between DB refreshes
 # Thread-safety note: tick_debug_auto_matches() is invoked exclusively from
 # the single _debug_auto_ticker background task (via asyncio.to_thread), so
 # only one call runs at a time.  No locking is required.
-_tick_last: Dict[str, float] = {}
-
-# Minimum real-time gap (seconds) between consecutive ticks at each named speed.
-# 1 tick == 1 game-minute, so "realtime" maps game-time 1:1 to real time.
-# Keys must match AUTO_TICK_VALID_SPEEDS in app.core.commands.pipeline.
-_TICK_INTERVALS: Dict[str, float] = {
-    "realtime": 60.0,  # 1 tick/min — 1 game-minute per real minute (true 1:1)
-    "x10":       6.0,  # 10× realtime — 1 tick per 6 real seconds
-    "x100":      0.6,  # 100× realtime — 1 tick per 0.6 real seconds
-    "x600":      0.1,  # 600× realtime — 1 tick per 0.1 real seconds
+AUTO_TICK_SPEED_MULTIPLIERS: Dict[str, int] = {
+    "realtime": 1,
+    "x10": 10,
+    "x100": 100,
+    "x600": 600,
 }
+_MAX_TICKS_PER_BATCH = 30
+_MAX_ACCUMULATED_TICKS = 60
+_auto_tick_runtime: Dict[str, Dict[str, float | bool]] = {}
 
 # ── WebSocket tick payload compaction ─────────────────────────────────────────
 # Limits the number of events sent inline with every WS tick notification.
@@ -190,6 +188,20 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     return result
 
 
+def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
+    total = 0
+    last: dict = {}
+    for _ in range(max(0, int(max_ticks))):
+        last = tick_match(match_id_str, db)
+        if "error" in last:
+            break
+        total += 1
+    if not last:
+        return {"ticks_advanced": 0}
+    last["ticks_advanced"] = total
+    return last
+
+
 def tick_all_active_matches(db: Session) -> dict:
     """Tick all active matches. Called by the background scheduler."""
     matches = db.query(Match).filter(Match.status == MatchStatus.ACTIVE).all()
@@ -260,7 +272,7 @@ def tick_debug_auto_matches() -> dict:
     Uses ``get_context_flag`` for an efficient single Redis GET per match
     (no full state deserialisation unless the flag is set).
     """
-    from app.core.state_cache.service import get_context_flag
+    from app.core.state_cache.service import get_context_flag, get_auto_tick_runtime, set_auto_tick_runtime
     from app.database import SessionLocal
 
     db = SessionLocal()
@@ -270,32 +282,58 @@ def tick_debug_auto_matches() -> dict:
             return {"ticked": 0}
 
         ticked = 0
+        now = time.monotonic()
         for ctx_id, match_id in ctx_map.items():
             try:
-                # Support both the generic core flag and the legacy game flag.
-                if not (get_context_flag(ctx_id, "auto_tick_enabled", default=False)
-                        or get_context_flag(ctx_id, "debug_auto_tick", default=False)):
+                auto_cfg = get_auto_tick_runtime(ctx_id)
+                if auto_cfg is None:
+                    enabled = bool(
+                        get_context_flag(ctx_id, "auto_tick_enabled", default=False)
+                        or get_context_flag(ctx_id, "debug_auto_tick", default=False)
+                    )
+                    speed = get_context_flag(ctx_id, "auto_tick_speed", default=None)
+                    if speed is None and get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
+                        speed = "realtime"
+                    if speed is None:
+                        speed = "x100"
+                    set_auto_tick_runtime(ctx_id, enabled=enabled, speed=speed, updated_at=now)
+                else:
+                    enabled = bool(auto_cfg.get("enabled", False))
+                    speed = auto_cfg.get("speed") or "x100"
+
+                if not enabled:
+                    _auto_tick_runtime.pop(ctx_id, None)
                     continue
 
-                # Determine the desired speed and apply throttle accordingly.
-                speed = get_context_flag(ctx_id, "auto_tick_speed", default=None)
-                if speed is None:
-                    # Backward compat: legacy slow_mode boolean
-                    if get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
-                        speed = "realtime"
-                    else:
-                        speed = "x100"
+                rt = _auto_tick_runtime.setdefault(ctx_id, {
+                    "last_real_ts": now,
+                    "game_seconds_accum": 0.0,
+                    "running": False,
+                })
+                if rt["running"]:
+                    continue
 
-                interval = _TICK_INTERVALS.get(speed, 0.0)
-                if interval > 0.0:
-                    now = time.monotonic()
-                    if now - _tick_last.get(ctx_id, 0.0) < interval:
-                        continue
-                    _tick_last[ctx_id] = now
+                elapsed = max(0.0, now - float(rt["last_real_ts"]))
+                rt["last_real_ts"] = now
+                speed_multiplier = AUTO_TICK_SPEED_MULTIPLIERS.get(str(speed), 100)
+                rt["game_seconds_accum"] = float(rt["game_seconds_accum"]) + elapsed * speed_multiplier
+                max_game_seconds = _MAX_ACCUMULATED_TICKS * 60.0
+                if rt["game_seconds_accum"] > max_game_seconds:
+                    rt["game_seconds_accum"] = max_game_seconds
 
-                result = tick_match(match_id, db)
+                due_ticks = int(float(rt["game_seconds_accum"]) // 60.0)
+                if due_ticks <= 0:
+                    continue
+                due_ticks = min(due_ticks, _MAX_TICKS_PER_BATCH)
+                rt["game_seconds_accum"] = float(rt["game_seconds_accum"]) - due_ticks * 60.0
+
+                rt["running"] = True
+                try:
+                    result = tick_match_many(match_id, db, due_ticks)
+                finally:
+                    rt["running"] = False
                 if "error" not in result:
-                    ticked += 1
+                    ticked += int(result.get("ticks_advanced", 0))
                 else:
                     # Match or context no longer valid — force cache refresh.
                     global _debug_ctx_cache_ts

@@ -1,5 +1,6 @@
 import logging
 import uuid
+import time
 from datetime import datetime
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
@@ -82,7 +83,11 @@ class CommandPipeline:
 
             # Load state once from Redis (or DB fallback) so all three passes
             # (validate, resolve, persist) see the same authoritative state.
-            from app.core.state_cache.service import load_context_state, save_context_state
+            from app.core.state_cache.service import (
+                load_context_state,
+                save_context_state,
+                set_auto_tick_runtime,
+            )
             state = load_context_state(context.id, context)
             new_state = state
 
@@ -125,6 +130,12 @@ class CommandPipeline:
                     "slow_mode": new_state["auto_tick_slow_mode"],
                 }}]
                 save_context_state(context.id, new_state, context, force_persist=True)
+                set_auto_tick_runtime(
+                    context.id,
+                    enabled=enabled,
+                    speed=speed,
+                    updated_at=time.monotonic(),
+                )
 
                 seq_range = allocate_sequence_numbers(context.id, len(new_events), db)
                 for ev_data, seq in zip(new_events, seq_range):
