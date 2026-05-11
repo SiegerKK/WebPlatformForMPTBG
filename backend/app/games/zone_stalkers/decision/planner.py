@@ -845,6 +845,27 @@ def _plan_resupply(
 
             trader_loc = _nearest_trader_location(ctx, state)
             if trader_loc and trader_loc != agent_loc:
+                # Phase-1 gate: non-hunter agents below material_threshold should
+                # NOT travel to a remote trader to buy supplies.  They should
+                # explore and gather resources (artifacts) instead.
+                _p1_money = agent.get("money", 0)
+                _p1_threshold = agent.get("material_threshold", 0)
+                _p1_goal = agent.get("global_goal", "")
+                if (
+                    _p1_goal != "kill_stalker"
+                    and _p1_threshold > 0
+                    and _p1_money < _p1_threshold
+                ):
+                    _phase1_fb = Intent(
+                        kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                        reason=(
+                            "Phase-1: пополнение запасов желательно, "
+                            "но поход к трейдеру отложен до достижения порога богатства. "
+                            "Перехожу к сбору артефактов."
+                        ),
+                        created_turn=world_turn,
+                    )
+                    return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
                 return Plan(
                     intent_kind=intent.kind,
                     steps=[
@@ -997,6 +1018,26 @@ def _plan_resupply(
             )
 
     if trader_loc and trader_loc != agent_loc:
+        # Phase-1 gate: non-hunter agents below material_threshold should
+        # NOT travel to a remote trader to buy supplies.
+        _p1r2_money = agent.get("money", 0)
+        _p1r2_threshold = agent.get("material_threshold", 0)
+        _p1r2_goal = agent.get("global_goal", "")
+        if (
+            _p1r2_goal != "kill_stalker"
+            and _p1r2_threshold > 0
+            and _p1r2_money < _p1r2_threshold
+        ):
+            _p1r2_intent = Intent(
+                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                reason=(
+                    "Phase-1: пополнение запасов желательно, "
+                    "но поход к трейдеру отложен до достижения порога богатства. "
+                    "Перехожу к сбору артефактов."
+                ),
+                created_turn=world_turn,
+            )
+            return _plan_get_rich(ctx, _p1r2_intent, state, world_turn, need_result)
         buy_payload: dict[str, Any] = {
             "item_category": buy_category,
             "reason": f"buy_{buy_category}_resupply",

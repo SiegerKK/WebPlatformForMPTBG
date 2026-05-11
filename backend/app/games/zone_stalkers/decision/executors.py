@@ -183,6 +183,21 @@ def _exec_travel(
                 summary=f"Отправляюсь искать артефакты в «{_target_loc_name}»",
             )
 
+    # If agent has artifacts and destination is a trader location, record sell intent
+    # (anti-spam: _write_once_decision skips if already written this turn)
+    if reason not in ("sell_artifacts", "sell_artifacts_get_rich", "flee_emission"):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART_TYPES_CHK
+        from app.games.zone_stalkers.rules.tick_rules import _find_trader_at_location
+        _art_set_chk = frozenset(_ART_TYPES_CHK.keys())
+        _has_arts = any(i.get("type") in _art_set_chk for i in agent.get("inventory", []))
+        if _has_arts and _find_trader_at_location(target_id, state) is not None:
+            _arts_cnt = sum(1 for i in agent.get("inventory", []) if i.get("type") in _art_set_chk)
+            _write_once_decision(agent, world_turn, state,
+                "🎁 Иду продавать артефакты",
+                {"action_kind": "sell_artifacts", "artifacts_count": _arts_cnt,
+                 "destination": target_id},
+                f"Иду к торговцу в {target_id} продавать {_arts_cnt} артефакт(ов)")
+
     return _bot_schedule_travel(agent_id, agent, target_id, state, world_turn,
                                 emergency_flee=emergency_flee)
 

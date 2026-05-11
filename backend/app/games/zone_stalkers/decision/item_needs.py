@@ -57,15 +57,27 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
     has_weapon = equipment.get("weapon") is not None
     has_armor = equipment.get("armor") is not None
 
+    # Phase-1 gate: non-hunter agents should not travel to a trader to buy
+    # equipment while their wealth is below their material_threshold (Phase 1).
+    # Only kill_stalker hunters bypass this gate because a weapon is critical
+    # for their primary goal.
+    material_threshold: int = agent.get("material_threshold", 0)
+    _in_phase1 = (
+        global_goal != "kill_stalker"
+        and material_threshold > 0
+        and agent_money < material_threshold
+    )
+
     weapon_min_price = _min_buy_price(WEAPON_ITEM_TYPES)
     weapon_missing = 0 if has_weapon else 1
     # For hunters (kill_stalker goal) a missing weapon is critical — boost urgency
     # so that the resupply drive clearly dominates get_rich or unravel drives.
-    # Note: urgency applies unconditionally when weapon is missing — there is no
-    # phase-1 gate here because a weapon is always essential for survival.
+    # Phase-1 gate: suppress weapon urgency for non-hunter agents in Phase 1
+    # so they gather resources instead of seeking a trader.
     weapon_urgency = (
-        _WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL
-    ) if weapon_missing else 0.0
+        (_WEAPON_URGENCY_HUNT if global_goal == "kill_stalker" else _WEAPON_URGENCY_NORMAL)
+        if weapon_missing else 0.0
+    )
     weapon_reason = ("Нет оружия (критично для охоты)" if global_goal == "kill_stalker"
                      else "Нет оружия") if weapon_missing else ""
     needs.append(
@@ -85,13 +97,14 @@ def evaluate_item_needs(ctx: AgentContext, state: dict[str, Any]) -> list[ItemNe
 
     armor_min_price = _min_buy_price(ARMOR_ITEM_TYPES)
     armor_missing = 0 if has_armor else 1
+    _armor_urgency = (0.70 if armor_missing else 0.0)
     needs.append(
         ItemNeed(
             key="armor",
             desired_count=1,
             current_count=0 if not has_armor else 1,
             missing_count=armor_missing,
-            urgency=0.70 if armor_missing else 0.0,
+            urgency=_armor_urgency,
             compatible_item_types=ARMOR_ITEM_TYPES,
             priority=35,
             reason="Нет брони" if armor_missing else "",

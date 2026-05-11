@@ -1697,6 +1697,11 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
     rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
+    # Reset sleepiness to 0 on sleep completion when the agent slept for at least
+    # 1 full in-game hour.  Very short sleeps (< 1 h) leave residual sleepiness
+    # so that gradual per-interval recovery is not bypassed artificially.
+    if hours_slept >= 1.0:
+        agent["sleepiness"] = 0
     intervals = int(sched.get("sleep_intervals_applied", 0))
     _add_memory(
         agent,
@@ -5372,42 +5377,35 @@ def _check_global_goal_completion(
             target_agent = state.get("agents", {}).get(target_id, {})
             target_is_dead = not target_agent.get("is_alive", True) if target_agent else False
 
-            def _has_target_death_confirmed() -> bool:
-                for mem in reversed(agent.get("memory", [])):
-                    effects = mem.get("effects", {}) if isinstance(mem, dict) else {}
-                    if effects.get("action_kind") != "target_death_confirmed":
-                        continue
-                    if str(effects.get("target_id") or "") == str(target_id):
-                        return True
-                memory_v3 = agent.get("memory_v3", {}) if isinstance(agent.get("memory_v3"), dict) else {}
-                records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
-                if not isinstance(records, dict):
-                    return False
-                for rec in records.values():
-                    if not isinstance(rec, dict):
-                        continue
-                    if rec.get("status") in {"stale", "archived"}:
-                        continue
-                    if str(rec.get("kind") or "") != "target_death_confirmed":
-                        continue
-                    details = rec.get("details", {}) if isinstance(rec.get("details"), dict) else {}
-                    if str(details.get("target_id") or "") == str(target_id):
-                        return True
-                return False
-
-            if target_is_dead and _has_target_death_confirmed():
+            if target_is_dead:
+                # Write target_death_confirmed memory if not already present
+                _already_confirmed = any(
+                    isinstance(m, dict)
+                    and m.get("effects", {}).get("action_kind") == "target_death_confirmed"
+                    and str(m.get("effects", {}).get("target_id") or "") == str(target_id)
+                    for m in agent.get("memory", [])
+                )
+                if not _already_confirmed:
+                    target_name_c = target_agent.get("name", target_id) if target_agent else target_id
+                    _add_memory(
+                        agent, world_turn, state, "observation",
+                        f"💀 {target_name_c} мёртв",
+                        {"action_kind": "target_death_confirmed", "target_id": target_id},
+                        summary=f"Подтверждена гибель цели {target_name_c}",
+                    )
                 agent["global_goal_achieved"] = True
-                target_name = target_agent.get("name", target_id)
+                target_name = target_agent.get("name", target_id) if target_agent else target_id
                 _add_memory(
                     agent, world_turn, state, "observation",
                     f"⚔️ Цель достигнута: «{target_name}» устранён!",
                     {
-                        "action_kind": "global_goal_completed",
+                        "action_kind": "goal_achieved",
                         "goal": "kill_stalker",
                         "target_id": target_id,
                     },
                     summary=f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!",
                 )
+
 
 
 def _bot_route_to_exit(
@@ -5983,6 +5981,16 @@ def _compat_pursue_get_rich(
                 if trader:
                     return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn)
             else:
+                from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART_COMPAT
+                _art_count_compat = sum(1 for i in agent.get("inventory", []) if i.get("type") in frozenset(_ART_COMPAT.keys()))
+                _add_memory(
+                    agent, world_turn, state, "decision",
+                    "🎁 Иду продавать артефакты",
+                    {"action_kind": "sell_artifacts",
+                     "artifacts_count": _art_count_compat,
+                     "destination": nearest_trader_loc},
+                    summary=f"Иду к торговцу в {nearest_trader_loc} продавать {_art_count_compat} артефакт(ов)",
+                )
                 _runtime_set_action_used(agent, True)
                 return _bot_schedule_travel(agent_id, agent, nearest_trader_loc, state, world_turn)
 
