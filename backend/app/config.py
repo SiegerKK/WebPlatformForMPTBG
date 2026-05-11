@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # - 10 = write to DB every 10 ticks (90 % fewer DB writes; up to 9 ticks lost on crash)
     # Ignored when Redis is unavailable — DB is always written in that case.
     STATE_PERSIST_INTERVAL_TICKS: int = 5
+    # Compression level for Redis cached state payload (1..9).
+    # Lower values reduce CPU at the cost of larger payloads.
+    STATE_CACHE_COMPRESSION_LEVEL: int = 6
 
     class Config:
         env_file = ".env"

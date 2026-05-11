@@ -68,9 +68,16 @@ def _auto_tick_key(context_id: Any) -> str:
 
 
 def _compress(state: Dict[str, Any]) -> bytes:
+    level = 6
+    try:
+        from app.config import settings
+        level = int(getattr(settings, "STATE_CACHE_COMPRESSION_LEVEL", 6))
+    except Exception:
+        level = 6
+    level = max(1, min(9, level))
     return zlib.compress(
         json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-        level=6,
+        level=level,
     )
 
 
