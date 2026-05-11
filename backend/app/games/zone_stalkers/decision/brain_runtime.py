@@ -5,6 +5,7 @@ from typing import Any
 
 _PRIORITY_ORDER: tuple[str, ...] = ("low", "normal", "high", "urgent")
 _PRIORITY_RANK: dict[str, int] = {name: idx for idx, name in enumerate(_PRIORITY_ORDER)}
+_INVALIDATORS_HISTORY_LIMIT = 20
 
 
 def normalize_priority(priority: str | None) -> str:
@@ -77,8 +78,9 @@ def invalidate_brain(
             "world_turn": int(world_turn) if world_turn is not None else None,
         }
     )
-    if len(invalidators) > 20:
-        del invalidators[:-20]
+    # Keep a compact tail only to avoid unbounded per-agent state growth.
+    if len(invalidators) > _INVALIDATORS_HISTORY_LIMIT:
+        del invalidators[:-_INVALIDATORS_HISTORY_LIMIT]
     br["queued_priority"] = max_priority(br.get("queued_priority"), inv_priority)
 
     try:

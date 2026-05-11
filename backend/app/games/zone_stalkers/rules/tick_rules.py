@@ -90,6 +90,7 @@ DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no
 # Agent memory cap — oldest entries are dropped when this limit is exceeded.
 MAX_AGENT_MEMORY = 2000
 PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
+MAX_DECISION_QUEUE_SIZE = 512
 
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
@@ -1350,7 +1351,8 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             elif _priority == "low":
                 _background_used += 1
 
-    _runtime_set_state_field(state, "decision_queue", _next_queue[:512])
+    # Hard cap queue size to prevent unbounded state growth across long runs.
+    _runtime_set_state_field(state, "decision_queue", _next_queue[:MAX_DECISION_QUEUE_SIZE])
 
     _pr_npc.__exit__(None, None, None)
 
@@ -2421,6 +2423,10 @@ def _add_memory(
 
     _action_kind = str(effects.get("action_kind") or "")
     _observed_kind = str(effects.get("observed") or "")
+    _is_emission_interrupt = (
+        _action_kind in {"travel_interrupted", "exploration_interrupted"}
+        and effects.get("reason") == "emission_warning"
+    )
     _inv_reason: str | None = None
     _inv_priority = "normal"
     if _action_kind == "emission_imminent":
@@ -2443,7 +2449,7 @@ def _add_memory(
         _inv_reason, _inv_priority = "combat_started", "urgent"
     elif _action_kind == "witness_source_exhausted":
         _inv_reason, _inv_priority = "target_location_exhausted", "high"
-    elif _action_kind in {"travel_interrupted", "exploration_interrupted"} and effects.get("reason") == "emission_warning":
+    elif _is_emission_interrupt:
         _inv_reason, _inv_priority = "emission_warning_started", "urgent"
     elif _action_kind == "pickup" and effects.get("artifact_type"):
         _inv_reason, _inv_priority = "artifact_found", "high"
