@@ -153,6 +153,7 @@ def _compact_agent_brain_summary(agent: dict[str, Any]) -> dict[str, Any]:
     steps = plan.get("steps", []) if isinstance(plan, dict) else []
     current_step_idx = plan.get("current_step_index", 0) if isinstance(plan, dict) else 0
     current_step = steps[current_step_idx] if steps and 0 <= current_step_idx < len(steps) else None
+    brain_runtime = agent.get("brain_runtime") if isinstance(agent.get("brain_runtime"), dict) else {}
     return {
         "agent_id": agent.get("id"),
         "location_id": agent.get("location_id"),
@@ -167,4 +168,13 @@ def _compact_agent_brain_summary(agent: dict[str, Any]) -> dict[str, Any]:
         "current_step_kind": current_step.get("kind") if isinstance(current_step, dict) else None,
         "current_step_index": current_step_idx,
         "steps_count": len(steps),
+        "brain_runtime": {
+            "last_decision_turn": brain_runtime.get("last_decision_turn"),
+            "valid_until_turn": brain_runtime.get("valid_until_turn"),
+            "invalidated": brain_runtime.get("invalidated"),
+            "queued": brain_runtime.get("queued"),
+            "queued_priority": brain_runtime.get("queued_priority"),
+            "last_skip_reason": brain_runtime.get("last_skip_reason"),
+            "invalidators": list((brain_runtime.get("invalidators") or [])[-3:]),
+        },
     }
