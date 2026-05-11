@@ -7,7 +7,6 @@ pollute the generic platform core.
 """
 import os
 import uuid
-import shutil
 from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
@@ -38,6 +37,31 @@ _EXT_MAP = {
 
 
 # ── Location image upload / delete ────────────────────────────────────────────
+def _normalize_media_url(rel_path: str) -> str:
+    return "/media/" + rel_path.replace(os.sep, "/")
+
+
+def _abs_media_path(rel_path: str) -> str:
+    return os.path.join(MEDIA_ROOT, rel_path)
+
+
+def _delete_location_images(records: list) -> None:
+    for existing in records:
+        old_abs = _abs_media_path(existing.file_path)
+        try:
+            os.remove(old_abs)
+        except FileNotFoundError:
+            pass
+
+
+def _cleanup_empty_location_dir(*, context_id: uuid.UUID, location_id: str) -> None:
+    loc_dir = os.path.join(MEDIA_ROOT, "locations", str(context_id), location_id)
+    try:
+        if os.path.isdir(loc_dir) and not os.listdir(loc_dir):
+            os.rmdir(loc_dir)
+    except OSError:
+        pass
+
 
 @router.post("/locations/{context_id}/{location_id}/image")
 async def upload_location_image(
@@ -56,11 +80,18 @@ async def upload_location_image(
     """
     from app.core.contexts.models import GameContext
     from app.games.zone_stalkers.models import LocationImage
+    from app.core.state_cache.service import load_context_state, save_context_state
 
     # Validate context exists
     ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
     if not ctx:
         raise HTTPException(status_code=404, detail="Context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    locations = state.get("locations", {})
+    loc = locations.get(location_id)
+    if not isinstance(loc, dict):
+        raise HTTPException(status_code=404, detail="Location not found in zone state")
 
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_TYPES:
@@ -79,24 +110,23 @@ async def upload_location_image(
         )
 
     ext = _EXT_MAP[content_type]
-    rel_dir = os.path.join("locations", str(context_id))
-    rel_path = os.path.join(rel_dir, f"{location_id}{ext}")
+    image_id = uuid.uuid4().hex
+    rel_dir = os.path.join("locations", str(context_id), location_id)
+    rel_path = os.path.join(rel_dir, f"{image_id}{ext}")
     abs_dir = os.path.join(MEDIA_ROOT, rel_dir)
     abs_path = os.path.join(MEDIA_ROOT, rel_path)
 
     # Remove any existing image files for this location (may differ in extension)
-    existing = (
+    existing_records = (
         db.query(LocationImage)
         .filter(
             LocationImage.context_id == context_id,
             LocationImage.location_id == location_id,
         )
-        .first()
+        .all()
     )
-    if existing:
-        old_abs = os.path.join(MEDIA_ROOT, existing.file_path)
-        if os.path.exists(old_abs):
-            os.remove(old_abs)
+    _delete_location_images(existing_records)
+    for existing in existing_records:
         db.delete(existing)
 
     # Save file to disk
@@ -108,44 +138,78 @@ async def upload_location_image(
     record = LocationImage(
         context_id=context_id,
         location_id=location_id,
-        filename=file.filename or f"{location_id}{ext}",
+        filename=file.filename or f"{image_id}{ext}",
         content_type=content_type,
         file_path=rel_path,
     )
     db.add(record)
+
+    url = _normalize_media_url(rel_path)
+    loc["image_url"] = url
+    state["state_revision"] = int(state.get("state_revision", 0)) + 1
+    state["map_revision"] = int(state.get("map_revision", 0)) + 1
+    save_context_state(ctx.id, state, ctx, force_persist=True)
     db.commit()
 
-    url = f"/media/{rel_path}"
-    return {"url": url}
+    return {
+        "url": url,
+        "image_url": url,
+        "location_id": location_id,
+        "state_revision": state.get("state_revision"),
+        "map_revision": state.get("map_revision"),
+    }
 
 
-@router.delete("/locations/{context_id}/{location_id}/image", status_code=204)
+@router.delete("/locations/{context_id}/{location_id}/image")
 def delete_location_image(
     context_id: uuid.UUID,
     location_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete the image attached to a location."""
+    """Delete the image attached to a location and clear it from zone state."""
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state, save_context_state
     from app.games.zone_stalkers.models import LocationImage
 
-    existing = (
+    ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    loc = state.get("locations", {}).get(location_id)
+    if not isinstance(loc, dict):
+        raise HTTPException(status_code=404, detail="Location not found in zone state")
+
+    existing_records = (
         db.query(LocationImage)
         .filter(
             LocationImage.context_id == context_id,
             LocationImage.location_id == location_id,
         )
-        .first()
+        .all()
     )
-    if not existing:
+    has_image_url = bool(loc.get("image_url"))
+    if not existing_records and not has_image_url:
         raise HTTPException(status_code=404, detail="No image found for this location")
 
-    abs_path = os.path.join(MEDIA_ROOT, existing.file_path)
-    if os.path.exists(abs_path):
-        os.remove(abs_path)
+    _delete_location_images(existing_records)
+    for existing in existing_records:
+        db.delete(existing)
 
-    db.delete(existing)
+    loc["image_url"] = None
+    state["state_revision"] = int(state.get("state_revision", 0)) + 1
+    state["map_revision"] = int(state.get("map_revision", 0)) + 1
+    save_context_state(ctx.id, state, ctx, force_persist=True)
     db.commit()
+    _cleanup_empty_location_dir(context_id=context_id, location_id=location_id)
+
+    return {
+        "status": "deleted",
+        "location_id": location_id,
+        "state_revision": state.get("state_revision"),
+        "map_revision": state.get("map_revision"),
+    }
 
 
 class ZoneEventCreate(BaseModel):

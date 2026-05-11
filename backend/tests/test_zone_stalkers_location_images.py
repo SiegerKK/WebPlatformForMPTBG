@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+
+def _media_path(media_root: Path, url: str) -> Path:
+    rel = url.removeprefix("/media/").replace("/", os.sep)
+    return media_root / rel
+
+
+@pytest.fixture
+def zone_context(test_client, auth_headers, db_session):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    match_resp = test_client.post("/api/matches", json={"game_id": "zone_stalkers"}, headers=auth_headers)
+    assert match_resp.status_code == 200
+    match_id = match_resp.json()["id"]
+
+    ctx_resp = test_client.post(
+        "/api/contexts",
+        json={"match_id": match_id, "context_type": "zone_map"},
+        headers=auth_headers,
+    )
+    assert ctx_resp.status_code == 200
+    context_id = ctx_resp.json()["id"]
+
+    ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
+    state = load_context_state(ctx.id, ctx)
+    location_id = next(iter(state.get("locations", {}).keys()))
+
+    return {"context_id": context_id, "location_id": location_id}
+
+
+def test_upload_same_location_returns_unique_url_and_updates_state(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+    from app.games.zone_stalkers.models import LocationImage
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    res1 = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("first.jpg", b"image-a", "image/jpeg")},
+    )
+    assert res1.status_code == 200
+    payload1 = res1.json()
+    first_url = payload1["url"]
+    first_path = _media_path(tmp_path, first_url)
+    assert first_path.exists()
+
+    res2 = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("second.jpg", b"image-b", "image/jpeg")},
+    )
+    assert res2.status_code == 200
+    payload2 = res2.json()
+    second_url = payload2["url"]
+    second_path = _media_path(tmp_path, second_url)
+
+    assert second_url != first_url
+    assert payload2["image_url"] == second_url
+    assert payload2["location_id"] == location_id
+    assert not first_path.exists()
+    assert second_path.exists()
+
+    rows = (
+        db_session.query(LocationImage)
+        .filter(LocationImage.context_id == context_id, LocationImage.location_id == location_id)
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].file_path.replace(os.sep, "/") in second_url
+
+    ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
+    state = load_context_state(ctx.id, ctx)
+    assert state["locations"][location_id]["image_url"] == second_url
+
+
+def test_upload_rejects_missing_location(test_client, auth_headers, monkeypatch, tmp_path, zone_context):
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+
+    response = test_client.post(
+        f"/api/locations/{context_id}/missing_loc/image",
+        headers=auth_headers,
+        files={"file": ("x.jpg", b"x", "image/jpeg")},
+    )
+    assert response.status_code == 404
+
+
+def test_delete_image_clears_state_and_files(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+    from app.games.zone_stalkers.models import LocationImage
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    upload = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("img.png", b"png-data", "image/png")},
+    )
+    assert upload.status_code == 200
+    image_url = upload.json()["url"]
+    image_path = _media_path(tmp_path, image_url)
+    assert image_path.exists()
+
+    loc_dir = tmp_path / "locations" / str(context_id) / location_id
+    assert loc_dir.exists()
+
+    delete = test_client.delete(f"/api/locations/{context_id}/{location_id}/image", headers=auth_headers)
+    assert delete.status_code == 200
+    delete_payload = delete.json()
+    assert delete_payload["status"] == "deleted"
+    assert delete_payload["location_id"] == location_id
+
+    assert not image_path.exists()
+    assert (not loc_dir.exists()) or (not any(loc_dir.iterdir()))
+
+    rows = (
+        db_session.query(LocationImage)
+        .filter(LocationImage.context_id == context_id, LocationImage.location_id == location_id)
+        .all()
+    )
+    assert len(rows) == 0
+
+    ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
+    state = load_context_state(ctx.id, ctx)
+    assert state["locations"][location_id].get("image_url") is None

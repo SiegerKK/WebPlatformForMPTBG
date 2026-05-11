@@ -52,3 +52,17 @@ def test_accumulated_ticks_cap_is_enforced():
     assert before == 60
     assert due == 30
     assert rem == 1800.0
+
+
+def test_smooth_catchup_mode_drops_excess_lag_remainder():
+    due, rem, before = _compute_due_ticks(
+        accumulated_game_seconds=0.0,
+        elapsed_real_seconds=100.0,
+        speed_multiplier=600,
+        max_ticks_per_batch=30,
+        max_accumulated_ticks=60,
+        catchup_mode="smooth",
+    )
+    assert before == 60
+    assert due == 30
+    assert rem < 60.0

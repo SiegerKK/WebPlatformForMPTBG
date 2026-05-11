@@ -25,7 +25,7 @@ import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from '
 import { LocationModal } from './debugMap/Modals';
 import AgentProfileModal from './AgentProfileModal';
 import type { AgentForProfile } from './AgentProfileModal';
-import { locationsApi } from '../../../api/client';
+import { locationsApi, zoneDebugApi } from '../../../api/client';
 import JSZip from 'jszip';
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -59,6 +59,17 @@ function getRegionColors(
 }
 
 export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCommand, contextId, debugState, subscribeZoneDebug, unsubscribeZoneDebug }: DebugMapPageProps) {
+  const [autoTickPerf, setAutoTickPerf] = useState<{
+    targetSpeed: number | null;
+    effectiveSpeed: number | null;
+    batchSize: number | null;
+    batchTotalMs: number | null;
+  }>({
+    targetSpeed: null,
+    effectiveSpeed: null,
+    batchSize: null,
+    batchTotalMs: null,
+  });
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [mapOverlayMode, setMapOverlayMode] = useState<'default' | 'hunt_leads' | 'target_search' | 'exhausted_locations' | 'target_routes' | 'combat_hunt_events'>('default');
@@ -251,6 +262,46 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // When running but no speed is stored (legacy state from old clients), the
   // backend defaults to no throttle which matches "x100" behaviour.
   const activeSpeed = autoRunning ? (zoneState.auto_tick_speed ?? 'x100') : null;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!autoRunning || !matchId) {
+      setAutoTickPerf({
+        targetSpeed: null,
+        effectiveSpeed: null,
+        batchSize: null,
+        batchTotalMs: null,
+      });
+      return;
+    }
+    const loadPerf = async () => {
+      try {
+        const resp = await zoneDebugApi.getPerformance(matchId, { limit: 1 });
+        const latest = (resp.data?.latest ?? resp.data?.items?.[0]) as Record<string, unknown> | undefined;
+        if (cancelled || !latest) return;
+        const target = Number(latest.auto_tick_speed_target);
+        const effective = Number(latest.auto_tick_effective_speed);
+        const batchSize = Number(latest.batch_size);
+        const batchTotalMs = Number(latest.batch_total_ms ?? latest.tick_total_ms);
+        setAutoTickPerf({
+          targetSpeed: Number.isFinite(target) ? target : null,
+          effectiveSpeed: Number.isFinite(effective) ? effective : null,
+          batchSize: Number.isFinite(batchSize) ? batchSize : null,
+          batchTotalMs: Number.isFinite(batchTotalMs) ? batchTotalMs : null,
+        });
+      } catch {
+        if (!cancelled) {
+          setAutoTickPerf((prev) => prev);
+        }
+      }
+    };
+    loadPerf();
+    const intervalId = window.setInterval(loadPerf, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [autoRunning, matchId]);
 
   const handleSetSpeed = useCallback(async (speed: 'realtime' | 'x10' | 'x100' | 'x600') => {
     if (activeSpeed === speed) {
@@ -789,7 +840,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   const mime = mimeMap[ext] ?? 'application/octet-stream';
                   const imgFile = new File([imgBuf], imageFilePath.split('/').pop() ?? `${locId}.jpg`, { type: mime });
                   const resp = await locationsApi.uploadImage(contextId, locId, imgFile);
-                  imageUrlMap[locId] = resp.data.url;
+                  imageUrlMap[locId] = resp.data.image_url ?? resp.data.url;
                 } catch {
                   failedImageLocs.push(locId);
                 }
@@ -1024,7 +1075,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       if (data.imageFile instanceof File && contextId) {
         // Upload new image
         const response = await locationsApi.uploadImage(contextId, editingLocId, data.imageFile);
-        imageUrl = response.data.url;
+        imageUrl = response.data.image_url ?? response.data.url;
       } else if (data.imageFile === null) {
         // Explicit removal
         if (contextId) {
@@ -1290,6 +1341,13 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 ) : (
                   <span style={{ color: '#f59e0b', fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
                     ⚡ через {formatTurns(Math.max(0, (zoneState.emission_scheduled_turn ?? 0) - zoneState.world_turn))}
+                  </span>
+                )}
+                {autoRunning && (
+                  <span style={{ color: '#93c5fd', fontSize: '0.62rem', whiteSpace: 'nowrap' }}>
+                    ⚙ Target x{autoTickPerf.targetSpeed ?? '—'} · Effective x{autoTickPerf.effectiveSpeed ?? '—'}
+                    {autoTickPerf.batchSize !== null ? ` · Batch ${autoTickPerf.batchSize}` : ''}
+                    {autoTickPerf.batchTotalMs !== null ? ` · ${Math.round(autoTickPerf.batchTotalMs)}ms` : ''}
                   </span>
                 )}
               </div>
