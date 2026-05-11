@@ -32,17 +32,19 @@ _DEBUG_CACHE_TTL: float = 5.0  # seconds between DB refreshes
 # Thread-safety note: tick_debug_auto_matches() is invoked exclusively from
 # the single _debug_auto_ticker background task (via asyncio.to_thread), so
 # only one call runs at a time.  No locking is required.
-_tick_last: Dict[str, float] = {}
-
-# Minimum real-time gap (seconds) between consecutive ticks at each named speed.
-# 1 tick == 1 game-minute, so "realtime" maps game-time 1:1 to real time.
-# Keys must match AUTO_TICK_VALID_SPEEDS in app.core.commands.pipeline.
-_TICK_INTERVALS: Dict[str, float] = {
-    "realtime": 60.0,  # 1 tick/min — 1 game-minute per real minute (true 1:1)
-    "x10":       6.0,  # 10× realtime — 1 tick per 6 real seconds
-    "x100":      0.6,  # 100× realtime — 1 tick per 0.6 real seconds
-    "x600":      0.1,  # 600× realtime — 1 tick per 0.1 real seconds
+AUTO_TICK_SPEED_MULTIPLIERS: Dict[str, int] = {
+    "realtime": 1,
+    "x10": 10,
+    "x100": 100,
+    "x600": 600,
 }
+_DEFAULT_MAX_TICKS_PER_BATCH = 30
+_DEFAULT_MAX_ACCUMULATED_TICKS = 60
+_auto_tick_runtime: Dict[str, Dict[str, float | bool]] = {}
+_last_ws_sent_ts: Dict[str, float] = {}
+_DEFAULT_MAX_WS_UPDATES_PER_SECOND = 4.0
+_DEFAULT_MAX_CATCHUP_BATCHES_PER_LOOP = 1
+_DEFAULT_CATCHUP_MODE = "accurate"
 
 # ── WebSocket tick payload compaction ─────────────────────────────────────────
 # Limits the number of events sent inline with every WS tick notification.
@@ -58,6 +60,20 @@ _WS_EVENT_PAYLOAD_KEEP_FIELDS: frozenset[str] = frozenset({
     "summary",
 })
 
+_CRITICAL_STOP_REASONS: frozenset[str] = frozenset({
+    "game_over",
+    "emission_warning",
+    "emission_started",
+    "emission_ended",
+    "human_action_completed",
+    "human_combat_started",
+    "human_agent_died",
+    "zone_event_choice_required",
+    "player_decision_required",
+    "requires_resync",
+    "error",
+})
+
 
 def _compact_event_payload(payload: dict) -> dict:
     """Return a compact subset of an event payload (drop heavy nested data)."""
@@ -70,6 +86,36 @@ def _compact_tick_event(event: dict) -> dict:
         "event_type": event.get("event_type"),
         "payload": _compact_event_payload(event.get("payload", {})),
     }
+
+
+def _get_auto_tick_limits() -> dict[str, int | float | str]:
+    try:
+        from app.config import settings
+
+        return {
+            "max_ticks_per_batch": max(1, int(getattr(settings, "AUTO_TICK_MAX_TICKS_PER_BATCH", _DEFAULT_MAX_TICKS_PER_BATCH))),
+            "max_accumulated_ticks": max(
+                1,
+                int(getattr(settings, "AUTO_TICK_MAX_ACCUMULATED_TICKS", _DEFAULT_MAX_ACCUMULATED_TICKS)),
+            ),
+            "max_ws_updates_per_second": max(
+                0.1,
+                float(getattr(settings, "AUTO_TICK_MAX_WS_UPDATES_PER_SECOND", _DEFAULT_MAX_WS_UPDATES_PER_SECOND)),
+            ),
+            "max_catchup_batches_per_loop": max(
+                1,
+                int(getattr(settings, "AUTO_TICK_MAX_CATCHUP_BATCHES_PER_LOOP", _DEFAULT_MAX_CATCHUP_BATCHES_PER_LOOP)),
+            ),
+            "catchup_mode": str(getattr(settings, "AUTO_TICK_CATCHUP_MODE", _DEFAULT_CATCHUP_MODE)),
+        }
+    except Exception:
+        return {
+            "max_ticks_per_batch": _DEFAULT_MAX_TICKS_PER_BATCH,
+            "max_accumulated_ticks": _DEFAULT_MAX_ACCUMULATED_TICKS,
+            "max_ws_updates_per_second": _DEFAULT_MAX_WS_UPDATES_PER_SECOND,
+            "max_catchup_batches_per_loop": _DEFAULT_MAX_CATCHUP_BATCHES_PER_LOOP,
+            "catchup_mode": _DEFAULT_CATCHUP_MODE,
+        }
 
 
 def tick_match(match_id_str: str, db: Session) -> dict:
@@ -103,8 +149,8 @@ def tick_match(match_id_str: str, db: Session) -> dict:
         zone_delta = result.get("zone_delta")
 
         # Resolve zone context id (needed for delta WS payload and metrics).
-        context_id_str: str | None = None
-        if match.game_id == "zone_stalkers":
+        context_id_str: str | None = result.get("context_id")
+        if context_id_str is None and match.game_id == "zone_stalkers":
             from app.core.contexts.models import ContextStatus, GameContext
             zone_ctx_for_ws = db.query(GameContext).filter(
                 GameContext.match_id == match.id,
@@ -190,6 +236,132 @@ def tick_match(match_id_str: str, db: Session) -> dict:
     return result
 
 
+def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
+    match = db.query(Match).filter(Match.id == match_id_str).first()
+    if not match:
+        return {"error": "match not found"}
+    if match.status != MatchStatus.ACTIVE:
+        return {"error": f"match status is {match.status}, not active"}
+
+    from app.core.commands.pipeline import get_ruleset
+    ruleset = get_ruleset(match.game_id)
+    if not ruleset:
+        return {"error": f"no ruleset registered for game '{match.game_id}'"}
+
+    if hasattr(ruleset, "tick_many"):
+        _started = time.perf_counter()
+        result = ruleset.tick_many(match_id_str, db, max_ticks=max(0, int(max_ticks)))
+        tick_total_ms = (time.perf_counter() - _started) * 1000.0
+        if "error" not in result:
+            # Reuse same WS + metrics side-effects as single tick.
+            from app.core.ws.manager import ws_manager
+            all_events: list[Any] = result.get("new_events", []) or []
+            zone_delta = result.get("zone_delta")
+            context_id_str = result.get("context_id")
+            ws_payload = _build_batch_ws_payload(
+                match_id=match_id_str,
+                context_id=context_id_str,
+                result=result,
+                all_events=all_events,
+                zone_delta=zone_delta,
+                requires_resync=(match.game_id == "zone_stalkers"),
+            )
+            # Coalesce non-critical WS updates in high-speed auto-run mode.
+            _now = time.monotonic()
+            _limits = _get_auto_tick_limits()
+            _min_interval = 1.0 / float(_limits["max_ws_updates_per_second"])
+            _last = _last_ws_sent_ts.get(match_id_str, 0.0)
+            _critical = _is_critical_batch_result(result)
+            _ws_started = time.perf_counter()
+            _ws_sent = False
+            if _critical or (_now - _last >= _min_interval):
+                ws_manager.notify(match_id_str, ws_payload)
+                _last_ws_sent_ts[match_id_str] = _now
+                _ws_sent = True
+            batch_ws_ms = (time.perf_counter() - _ws_started) * 1000.0 if _ws_sent else 0.0
+            try:
+                from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+                _rm = result.get("metrics", {}) or {}
+                record_tick_metrics(match_id_str, {
+                    "tick_total_ms": round(tick_total_ms, 3),
+                    "batch_total_ms": round(tick_total_ms, 3),
+                    "batch_load_state_ms": _rm.get("batch_load_state_ms"),
+                    "batch_tick_logic_ms": _rm.get("batch_tick_logic_ms"),
+                    "batch_save_state_ms": _rm.get("batch_save_state_ms"),
+                    "batch_db_ms": _rm.get("batch_db_ms"),
+                    "batch_ws_ms": round(batch_ws_ms, 3),
+                    "events_emitted": len(all_events),
+                    "ticks_advanced": int(result.get("ticks_advanced", 0)),
+                })
+            except Exception:
+                pass
+        return result
+
+    total = 0
+    last: dict = {}
+    for _ in range(max(0, int(max_ticks))):
+        last = tick_match(match_id_str, db)
+        if "error" in last:
+            break
+        total += 1
+    if not last:
+        return {"ticks_advanced": 0}
+    last["ticks_advanced"] = total
+    return last
+
+
+def _is_critical_batch_result(result: dict) -> bool:
+    if bool(result.get("requires_resync", False)):
+        return True
+    if result.get("stop_reason") in _CRITICAL_STOP_REASONS:
+        return True
+    if bool((result.get("new_state") or {}).get("game_over")):
+        return True
+    for ev in (result.get("new_events") or []):
+        et = ev.get("event_type")
+        if et in {
+            "emission_warning",
+            "emission_started",
+            "emission_ended",
+            "zone_event_choice_required",
+            "player_action_completed",
+            "human_action_completed",
+            "human_agent_died",
+            "human_combat_started",
+            "requires_resync",
+        }:
+            return True
+    return False
+
+
+def _build_batch_ws_payload(
+    *,
+    match_id: str,
+    context_id: str | None,
+    result: dict,
+    all_events: list[Any],
+    zone_delta: dict | None,
+    requires_resync: bool,
+) -> dict:
+    preview_events = [_compact_tick_event(e) for e in all_events[:WS_TICK_EVENT_PREVIEW_LIMIT]]
+    common = {
+        "match_id": match_id,
+        "context_id": context_id,
+        "ticks_advanced": int(result.get("ticks_advanced", 0)),
+        "event_count": len(all_events),
+        "new_events_preview": preview_events,
+        "world_turn": result.get("world_turn"),
+        "world_hour": result.get("world_hour"),
+        "world_day": result.get("world_day"),
+        "world_minute": result.get("world_minute"),
+        "stop_reason": result.get("stop_reason"),
+        "requires_resync": bool(result.get("requires_resync", requires_resync)),
+    }
+    if zone_delta is not None:
+        return {"type": "zone_delta", **common, **zone_delta}
+    return {"type": "ticked", **common}
+
+
 def tick_all_active_matches(db: Session) -> dict:
     """Tick all active matches. Called by the background scheduler."""
     matches = db.query(Match).filter(Match.status == MatchStatus.ACTIVE).all()
@@ -260,43 +432,115 @@ def tick_debug_auto_matches() -> dict:
     Uses ``get_context_flag`` for an efficient single Redis GET per match
     (no full state deserialisation unless the flag is set).
     """
-    from app.core.state_cache.service import get_context_flag
+    from app.core.state_cache.service import get_context_flag, get_auto_tick_runtime, set_auto_tick_runtime
     from app.database import SessionLocal
 
     db = SessionLocal()
     try:
+        limits = _get_auto_tick_limits()
+        max_ticks_per_batch = int(limits["max_ticks_per_batch"])
+        max_accumulated_ticks = int(limits["max_accumulated_ticks"])
+        max_catchup_batches_per_loop = int(limits["max_catchup_batches_per_loop"])
+        catchup_mode = str(limits["catchup_mode"])
         ctx_map = _refresh_debug_context_cache(db)
         if not ctx_map:
             return {"ticked": 0}
 
         ticked = 0
+        now = time.monotonic()
         for ctx_id, match_id in ctx_map.items():
             try:
-                # Support both the generic core flag and the legacy game flag.
-                if not (get_context_flag(ctx_id, "auto_tick_enabled", default=False)
-                        or get_context_flag(ctx_id, "debug_auto_tick", default=False)):
+                auto_cfg = get_auto_tick_runtime(ctx_id)
+                if auto_cfg is None:
+                    enabled = bool(
+                        get_context_flag(ctx_id, "auto_tick_enabled", default=False)
+                        or get_context_flag(ctx_id, "debug_auto_tick", default=False)
+                    )
+                    speed = get_context_flag(ctx_id, "auto_tick_speed", default=None)
+                    if speed is None and get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
+                        speed = "realtime"
+                    if speed is None:
+                        speed = "x100"
+                    set_auto_tick_runtime(ctx_id, enabled=enabled, speed=speed, updated_at=now)
+                else:
+                    enabled = bool(auto_cfg.get("enabled", False))
+                    speed = auto_cfg.get("speed") or "x100"
+
+                if not enabled:
+                    _auto_tick_runtime.pop(ctx_id, None)
                     continue
 
-                # Determine the desired speed and apply throttle accordingly.
-                speed = get_context_flag(ctx_id, "auto_tick_speed", default=None)
-                if speed is None:
-                    # Backward compat: legacy slow_mode boolean
-                    if get_context_flag(ctx_id, "auto_tick_slow_mode", default=False):
-                        speed = "realtime"
-                    else:
-                        speed = "x100"
+                rt = _auto_tick_runtime.setdefault(ctx_id, {
+                    "last_real_ts": now,
+                    "game_seconds_accum": 0.0,
+                    "running": False,
+                })
+                if rt["running"]:
+                    continue
 
-                interval = _TICK_INTERVALS.get(speed, 0.0)
-                if interval > 0.0:
-                    now = time.monotonic()
-                    if now - _tick_last.get(ctx_id, 0.0) < interval:
-                        continue
-                    _tick_last[ctx_id] = now
+                elapsed = max(0.0, now - float(rt["last_real_ts"]))
+                rt["last_real_ts"] = now
+                speed_multiplier = AUTO_TICK_SPEED_MULTIPLIERS.get(str(speed), 100)
+                due_ticks, new_accum, due_ticks_before_cap = _compute_due_ticks(
+                    accumulated_game_seconds=float(rt["game_seconds_accum"]),
+                    elapsed_real_seconds=elapsed,
+                    speed_multiplier=speed_multiplier,
+                    max_ticks_per_batch=max_ticks_per_batch,
+                    max_accumulated_ticks=max_accumulated_ticks,
+                    catchup_mode=catchup_mode,
+                )
+                rt["game_seconds_accum"] = new_accum
+                if due_ticks <= 0:
+                    continue
 
-                result = tick_match(match_id, db)
-                if "error" not in result:
-                    ticked += 1
-                else:
+                rt["running"] = True
+                try:
+                    ticks_advanced = 0
+                    batch_elapsed = 0.0
+                    result: dict = {"ticks_advanced": 0}
+                    current_due_ticks = due_ticks
+                    current_due_before_cap = due_ticks_before_cap
+                    for _batch_idx in range(max_catchup_batches_per_loop):
+                        if current_due_ticks <= 0:
+                            break
+                        batch_started = time.perf_counter()
+                        result = tick_match_many(match_id, db, current_due_ticks)
+                        batch_elapsed += max(0.000001, time.perf_counter() - batch_started)
+                        if "error" in result:
+                            break
+                        ticks_advanced += int(result.get("ticks_advanced", 0))
+                        if _batch_idx + 1 >= max_catchup_batches_per_loop:
+                            break
+                        current_due_ticks, next_accum, current_due_before_cap = _compute_due_ticks(
+                            accumulated_game_seconds=float(rt["game_seconds_accum"]),
+                            elapsed_real_seconds=0.0,
+                            speed_multiplier=speed_multiplier,
+                            max_ticks_per_batch=max_ticks_per_batch,
+                            max_accumulated_ticks=max_accumulated_ticks,
+                            catchup_mode=catchup_mode,
+                        )
+                        rt["game_seconds_accum"] = next_accum
+                finally:
+                    rt["running"] = False
+                if ticks_advanced > 0:
+                    ticked += ticks_advanced
+                    try:
+                        from app.games.zone_stalkers.performance_metrics import record_tick_metrics
+                        speed_multiplier = AUTO_TICK_SPEED_MULTIPLIERS.get(str(speed), 100)
+                        effective_speed = (ticks_advanced * 60.0) / batch_elapsed
+                        record_tick_metrics(match_id, {
+                            "context_id": ctx_id,
+                            "auto_tick_speed_target": speed_multiplier,
+                            "auto_tick_effective_speed": round(effective_speed, 3),
+                            "ticks_due": due_ticks_before_cap,
+                            "ticks_advanced": ticks_advanced,
+                            "ticks_dropped_or_capped": max(0, due_ticks_before_cap - due_ticks),
+                            "batch_size": due_ticks,
+                            "accumulator_game_seconds": round(float(rt["game_seconds_accum"]), 3),
+                        })
+                    except Exception:
+                        pass
+                if "error" in result:
                     # Match or context no longer valid — force cache refresh.
                     global _debug_ctx_cache_ts
                     _debug_ctx_cache_ts = 0.0
@@ -306,3 +550,26 @@ def tick_debug_auto_matches() -> dict:
         return {"ticked": ticked}
     finally:
         db.close()
+def _compute_due_ticks(
+    *,
+    accumulated_game_seconds: float,
+    elapsed_real_seconds: float,
+    speed_multiplier: int,
+    max_ticks_per_batch: int,
+    max_accumulated_ticks: int,
+    catchup_mode: str = "accurate",
+) -> tuple[int, float, int]:
+    """
+    Pure accumulator math helper.
+    Returns (due_ticks_after_cap, new_accumulated_game_seconds, due_before_cap).
+    """
+    accum = max(0.0, float(accumulated_game_seconds)) + max(0.0, float(elapsed_real_seconds)) * max(1, int(speed_multiplier))
+    max_game_seconds = max(1, int(max_accumulated_ticks)) * 60.0
+    if accum > max_game_seconds:
+        accum = max_game_seconds
+    due_before_cap = int(accum // 60.0)
+    due = min(due_before_cap, max(1, int(max_ticks_per_batch)))
+    accum -= due * 60.0
+    if str(catchup_mode).lower() == "smooth" and due_before_cap > due:
+        accum = min(accum, 59.999)
+    return due, accum, due_before_cap

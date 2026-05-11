@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 # Redis key prefixes
 _STATE_KEY_PREFIX = "ctx:state:"
 _TICKS_KEY_PREFIX = "ctx:ticks:"
+_AUTO_TICK_KEY_PREFIX = "ctx:auto_tick:"
 
 # Default TTL: 24 hours.  Enough to survive overnight without a tick.
 _STATE_TTL = 86400
@@ -62,10 +63,21 @@ def _ticks_key(context_id: Any) -> str:
     return f"{_TICKS_KEY_PREFIX}{context_id}"
 
 
+def _auto_tick_key(context_id: Any) -> str:
+    return f"{_AUTO_TICK_KEY_PREFIX}{context_id}"
+
+
 def _compress(state: Dict[str, Any]) -> bytes:
+    level = 6
+    try:
+        from app.config import settings
+        level = int(getattr(settings, "STATE_CACHE_COMPRESSION_LEVEL", 6))
+    except Exception:
+        level = 6
+    level = max(1, min(9, level))
     return zlib.compress(
         json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-        level=6,
+        level=level,
     )
 
 
@@ -226,3 +238,45 @@ def get_context_flag(context_id: Any, flag_name: str, default: Any = None) -> An
             context_id, flag_name, exc,
         )
         return default
+
+
+def set_auto_tick_runtime(
+    context_id: Any,
+    *,
+    enabled: bool,
+    speed: str | None,
+    updated_at: float,
+) -> None:
+    """Persist lightweight auto-tick runtime settings in Redis."""
+    r = get_redis()
+    if r is None:
+        return
+    try:
+        payload = {
+            "enabled": bool(enabled),
+            "speed": speed,
+            "updated_at": float(updated_at),
+        }
+        r.set(_auto_tick_key(str(context_id)), json.dumps(payload, separators=(",", ":")), ex=_STATE_TTL)
+    except Exception as exc:
+        logger.warning("set_auto_tick_runtime failed for context %s: %s", context_id, exc)
+
+
+def get_auto_tick_runtime(context_id: Any) -> dict[str, Any] | None:
+    """Read lightweight auto-tick runtime settings from Redis."""
+    r = get_redis()
+    if r is None:
+        return None
+    try:
+        raw = r.get(_auto_tick_key(str(context_id)))
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+    except Exception as exc:
+        logger.warning("get_auto_tick_runtime failed for context %s: %s", context_id, exc)
+        return None

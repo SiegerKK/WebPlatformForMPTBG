@@ -7,11 +7,11 @@ pollute the generic platform core.
 """
 import os
 import uuid
-import shutil
 from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth.service import get_current_user
@@ -38,6 +38,86 @@ _EXT_MAP = {
 
 
 # ── Location image upload / delete ────────────────────────────────────────────
+def _normalize_media_url(rel_path: str) -> str:
+    return "/media/" + rel_path.replace(os.sep, "/")
+
+
+def _safe_location_segment(location_id: str) -> str:
+    if not location_id or location_id in {".", ".."} or "/" in location_id or "\\" in location_id:
+        raise HTTPException(status_code=400, detail="Invalid location_id for media path")
+    return location_id
+
+
+def _resolve_media_path(rel_path: str) -> str:
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    candidate_abs = os.path.realpath(os.path.join(media_root_abs, rel_path))
+    if os.path.commonpath([media_root_abs, candidate_abs]) != media_root_abs:
+        raise ValueError("media path escapes MEDIA_ROOT")
+    return candidate_abs
+
+
+def _abs_media_path(rel_path: str) -> str | None:
+    try:
+        return _resolve_media_path(rel_path)
+    except ValueError:
+        return None
+
+
+def _safe_remove_media_file(abs_path: str | None) -> str | None:
+    if not abs_path:
+        return None
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    try:
+        rel_path = os.path.relpath(abs_path, media_root_abs)
+    except ValueError:
+        return None
+    safe_abs = _abs_media_path(rel_path)
+    if safe_abs is None:
+        return None
+    try:
+        os.remove(safe_abs)
+    except FileNotFoundError:
+        return None
+    return safe_abs
+
+
+def _delete_location_images(records: list) -> None:
+    removed_abs_paths: list[str] = []
+    for existing in records:
+        old_abs = _abs_media_path(existing.file_path)
+        removed = _safe_remove_media_file(old_abs)
+        if removed:
+            removed_abs_paths.append(removed)
+    _cleanup_parent_dirs(removed_abs_paths)
+
+
+def _cleanup_parent_dirs(abs_paths: list[str]) -> None:
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    for abs_path in abs_paths:
+        if not abs_path:
+            continue
+        loc_dir = os.path.dirname(abs_path)
+        try:
+            rel_dir = os.path.relpath(loc_dir, media_root_abs)
+        except ValueError:
+            continue
+        safe_dir = _abs_media_path(rel_dir)
+        if safe_dir is None:
+            continue
+        try:
+            os.rmdir(safe_dir)
+        except OSError:
+            pass
+
+
+def _rel_path_from_media_url(url: str | None) -> str | None:
+    if not url or not isinstance(url, str):
+        return None
+    if not url.startswith("/media/"):
+        return None
+    rel = url.removeprefix("/media/").replace("/", os.sep)
+    return rel
+
 
 @router.post("/locations/{context_id}/{location_id}/image")
 async def upload_location_image(
@@ -56,11 +136,19 @@ async def upload_location_image(
     """
     from app.core.contexts.models import GameContext
     from app.games.zone_stalkers.models import LocationImage
+    from app.core.state_cache.service import load_context_state, save_context_state
 
     # Validate context exists
     ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
     if not ctx:
         raise HTTPException(status_code=404, detail="Context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    locations = state.get("locations", {})
+    loc = locations.get(location_id)
+    if not isinstance(loc, dict):
+        raise HTTPException(status_code=404, detail="Location not found in zone state")
+    location_segment = _safe_location_segment(location_id)
 
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_TYPES:
@@ -79,73 +167,142 @@ async def upload_location_image(
         )
 
     ext = _EXT_MAP[content_type]
-    rel_dir = os.path.join("locations", str(context_id))
-    rel_path = os.path.join(rel_dir, f"{location_id}{ext}")
-    abs_dir = os.path.join(MEDIA_ROOT, rel_dir)
-    abs_path = os.path.join(MEDIA_ROOT, rel_path)
+    image_id = uuid.uuid4().hex
+    rel_dir = os.path.join("locations", str(context_id), location_segment)
+    rel_path = os.path.join(rel_dir, f"{image_id}{ext}")
+    abs_dir = _resolve_media_path(rel_dir)
+    abs_path = _resolve_media_path(rel_path)
+    written_abs_path: str | None = None
 
     # Remove any existing image files for this location (may differ in extension)
-    existing = (
+    # Keep .all() here to clean up potential legacy duplicates that existed
+    # before the DB unique constraint was introduced.
+    existing_records = (
         db.query(LocationImage)
         .filter(
             LocationImage.context_id == context_id,
             LocationImage.location_id == location_id,
         )
-        .first()
+        .all()
     )
-    if existing:
-        old_abs = os.path.join(MEDIA_ROOT, existing.file_path)
-        if os.path.exists(old_abs):
-            os.remove(old_abs)
+    _delete_location_images(existing_records)
+    for existing in existing_records:
         db.delete(existing)
+    if existing_records:
+        db.flush()
 
     # Save file to disk
     os.makedirs(abs_dir, exist_ok=True)
     with open(abs_path, "wb") as f:
         f.write(contents)
+    written_abs_path = abs_path
 
     # Persist metadata
     record = LocationImage(
         context_id=context_id,
         location_id=location_id,
-        filename=file.filename or f"{location_id}{ext}",
+        filename=file.filename or f"{image_id}{ext}",
         content_type=content_type,
         file_path=rel_path,
     )
     db.add(record)
-    db.commit()
 
-    url = f"/media/{rel_path}"
-    return {"url": url}
+    url = _normalize_media_url(rel_path)
+    loc["image_url"] = url
+    state["state_revision"] = int(state.get("state_revision", 0)) + 1
+    state["map_revision"] = int(state.get("map_revision", 0)) + 1
+    try:
+        save_context_state(ctx.id, state, ctx, force_persist=True)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        cleanup_abs_paths: list[str] = []
+        removed = _safe_remove_media_file(written_abs_path)
+        if removed:
+            cleanup_abs_paths.append(removed)
+        _cleanup_parent_dirs(cleanup_abs_paths)
+        raise HTTPException(
+            status_code=409,
+            detail="Location image was updated concurrently; retry upload",
+        )
+    except Exception:
+        db.rollback()
+        cleanup_abs_paths = []
+        removed = _safe_remove_media_file(written_abs_path)
+        if removed:
+            cleanup_abs_paths.append(removed)
+        _cleanup_parent_dirs(cleanup_abs_paths)
+        raise
+
+    return {
+        "url": url,
+        "image_url": url,
+        "location_id": location_id,
+        "state_revision": state.get("state_revision"),
+        "map_revision": state.get("map_revision"),
+    }
 
 
-@router.delete("/locations/{context_id}/{location_id}/image", status_code=204)
+@router.delete("/locations/{context_id}/{location_id}/image")
 def delete_location_image(
     context_id: uuid.UUID,
     location_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete the image attached to a location."""
+    """Delete the image attached to a location and clear it from zone state."""
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state, save_context_state
     from app.games.zone_stalkers.models import LocationImage
 
-    existing = (
+    ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    loc = state.get("locations", {}).get(location_id)
+    if not isinstance(loc, dict):
+        raise HTTPException(status_code=404, detail="Location not found in zone state")
+    _safe_location_segment(location_id)
+
+    # Keep .all() here to clean up potential legacy duplicates that existed
+    # before the DB unique constraint was introduced.
+    existing_records = (
         db.query(LocationImage)
         .filter(
             LocationImage.context_id == context_id,
             LocationImage.location_id == location_id,
         )
-        .first()
+        .all()
     )
-    if not existing:
+    has_image_url = bool(loc.get("image_url"))
+    if not existing_records and not has_image_url:
         raise HTTPException(status_code=404, detail="No image found for this location")
 
-    abs_path = os.path.join(MEDIA_ROOT, existing.file_path)
-    if os.path.exists(abs_path):
-        os.remove(abs_path)
+    fallback_abs_paths: list[str] = []
+    _delete_location_images(existing_records)
+    for existing in existing_records:
+        db.delete(existing)
+    if not existing_records:
+        rel = _rel_path_from_media_url(loc.get("image_url"))
+        if rel:
+            old_abs = _abs_media_path(rel)
+            removed = _safe_remove_media_file(old_abs)
+            if removed:
+                fallback_abs_paths.append(removed)
+    _cleanup_parent_dirs(fallback_abs_paths)
 
-    db.delete(existing)
+    loc["image_url"] = None
+    state["state_revision"] = int(state.get("state_revision", 0)) + 1
+    state["map_revision"] = int(state.get("map_revision", 0)) + 1
+    save_context_state(ctx.id, state, ctx, force_persist=True)
     db.commit()
+    return {
+        "status": "deleted",
+        "location_id": location_id,
+        "state_revision": state.get("state_revision"),
+        "map_revision": state.get("map_revision"),
+    }
 
 
 class ZoneEventCreate(BaseModel):

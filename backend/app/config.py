@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     # - 10 = write to DB every 10 ticks (90 % fewer DB writes; up to 9 ticks lost on crash)
     # Ignored when Redis is unavailable — DB is always written in that case.
     STATE_PERSIST_INTERVAL_TICKS: int = 5
+    # Compression level for Redis cached state payload (1..9).
+    # Lower values reduce CPU at the cost of larger payloads.
+    STATE_CACHE_COMPRESSION_LEVEL: int = 6
+    # Debug auto-ticker scheduler controls.
+    AUTO_TICK_MAX_TICKS_PER_BATCH: int = 30
+    AUTO_TICK_MAX_ACCUMULATED_TICKS: int = 60
+    AUTO_TICK_MAX_WS_UPDATES_PER_SECOND: float = 4.0
+    AUTO_TICK_MAX_CATCHUP_BATCHES_PER_LOOP: int = 1
+    AUTO_TICK_CATCHUP_MODE: str = "accurate"
 
     class Config:
         env_file = ".env"
