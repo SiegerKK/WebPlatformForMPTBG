@@ -149,3 +149,39 @@ def test_delete_image_clears_state_and_files(
     ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
     state = load_context_state(ctx.id, ctx)
     assert state["locations"][location_id].get("image_url") is None
+
+
+def test_delete_image_removes_state_only_legacy_file_without_db_row(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state, save_context_state
+    from app.games.zone_stalkers.models import LocationImage
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    legacy_rel = Path("locations") / str(context_id) / location_id / "legacy.jpg"
+    legacy_abs = tmp_path / legacy_rel
+    legacy_abs.parent.mkdir(parents=True, exist_ok=True)
+    legacy_abs.write_bytes(b"legacy")
+
+    ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
+    state = load_context_state(ctx.id, ctx)
+    state["locations"][location_id]["image_url"] = f"/media/{legacy_rel.as_posix()}"
+    save_context_state(ctx.id, state, ctx, force_persist=True)
+    db_session.commit()
+
+    rows = (
+        db_session.query(LocationImage)
+        .filter(LocationImage.context_id == context_id, LocationImage.location_id == location_id)
+        .all()
+    )
+    assert rows == []
+    assert legacy_abs.exists()
+
+    delete = test_client.delete(f"/api/locations/{context_id}/{location_id}/image", headers=auth_headers)
+    assert delete.status_code == 200
+    assert not legacy_abs.exists()

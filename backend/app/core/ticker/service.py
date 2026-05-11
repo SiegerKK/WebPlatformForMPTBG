@@ -60,6 +60,20 @@ _WS_EVENT_PAYLOAD_KEEP_FIELDS: frozenset[str] = frozenset({
     "summary",
 })
 
+_CRITICAL_STOP_REASONS: frozenset[str] = frozenset({
+    "game_over",
+    "emission_warning",
+    "emission_started",
+    "emission_ended",
+    "human_action_completed",
+    "human_combat_started",
+    "human_agent_died",
+    "zone_event_choice_required",
+    "player_decision_required",
+    "requires_resync",
+    "error",
+})
+
 
 def _compact_event_payload(payload: dict) -> dict:
     """Return a compact subset of an event payload (drop heavy nested data)."""
@@ -297,21 +311,24 @@ def tick_match_many(match_id_str: str, db: Session, max_ticks: int) -> dict:
 
 
 def _is_critical_batch_result(result: dict) -> bool:
-    if bool(result.get("new_state", {}).get("game_over")):
-        return True
     if bool(result.get("requires_resync", False)):
+        return True
+    if result.get("stop_reason") in _CRITICAL_STOP_REASONS:
+        return True
+    if bool((result.get("new_state") or {}).get("game_over")):
         return True
     for ev in (result.get("new_events") or []):
         et = ev.get("event_type")
         if et in {
-            "game_over",
             "emission_warning",
             "emission_started",
             "emission_ended",
-            "agent_died",
-            "combat_started",
-            "player_action_completed",
             "zone_event_choice_required",
+            "player_action_completed",
+            "human_action_completed",
+            "human_agent_died",
+            "human_combat_started",
+            "requires_resync",
         }:
             return True
     return False

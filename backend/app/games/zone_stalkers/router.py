@@ -85,6 +85,15 @@ def _cleanup_parent_dirs(abs_paths: list[str]) -> None:
             pass
 
 
+def _rel_path_from_media_url(url: str | None) -> str | None:
+    if not url or not isinstance(url, str):
+        return None
+    if not url.startswith("/media/"):
+        return None
+    rel = url.removeprefix("/media/").replace("/", os.sep)
+    return rel
+
+
 @router.post("/locations/{context_id}/{location_id}/image")
 async def upload_location_image(
     context_id: uuid.UUID,
@@ -223,9 +232,22 @@ def delete_location_image(
     if not existing_records and not has_image_url:
         raise HTTPException(status_code=404, detail="No image found for this location")
 
+    fallback_abs_paths: list[str] = []
     _delete_location_images(existing_records)
     for existing in existing_records:
         db.delete(existing)
+    if not existing_records:
+        rel = _rel_path_from_media_url(loc.get("image_url"))
+        if rel:
+            old_abs = _abs_media_path(rel)
+            if old_abs:
+                try:
+                    os.remove(old_abs)
+                except FileNotFoundError:
+                    pass
+                else:
+                    fallback_abs_paths.append(old_abs)
+    _cleanup_parent_dirs(fallback_abs_paths)
 
     loc["image_url"] = None
     state["state_revision"] = int(state.get("state_revision", 0)) + 1

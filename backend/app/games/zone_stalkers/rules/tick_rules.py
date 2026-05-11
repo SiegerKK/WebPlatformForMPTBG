@@ -1216,7 +1216,66 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     return state, events
 
 
-def tick_zone_map_many(state: Dict[str, Any], max_ticks: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str | None]:
+def _is_human_agent(state: Dict[str, Any], agent_id: str | None) -> bool:
+    if not agent_id:
+        return False
+    agent = (state.get("agents") or {}).get(agent_id)
+    if not isinstance(agent, dict):
+        return False
+    controller = agent.get("controller") or {}
+    if isinstance(controller, dict):
+        if controller.get("kind") == "human":
+            return True
+        if controller.get("participant_id"):
+            return True
+    player_agents = state.get("player_agents") or {}
+    if isinstance(player_agents, dict) and agent_id in {str(v) for v in player_agents.values()}:
+        return True
+    if agent.get("is_player") is True or agent.get("controlled_by") == "player":
+        return True
+    return False
+
+
+def _event_involves_human_or_viewed_agent(
+    state: Dict[str, Any],
+    event: Dict[str, Any],
+    *,
+    viewed_agent_id: str | None = None,
+) -> bool:
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if viewed_agent_id:
+        candidate_fields = ("agent_id", "actor_id", "target_id", "attacker_id", "defender_id")
+        for key in candidate_fields:
+            value = payload.get(key)
+            if value is not None and str(value) == str(viewed_agent_id):
+                return True
+        participants = payload.get("participants") or payload.get("agent_ids") or []
+        if isinstance(participants, list) and str(viewed_agent_id) in {str(x) for x in participants}:
+            return True
+
+    candidate_agent_ids: set[str] = set()
+    for key in ("agent_id", "actor_id", "target_id", "attacker_id", "defender_id"):
+        value = payload.get(key)
+        if value is not None:
+            candidate_agent_ids.add(str(value))
+    for key in ("participants", "agent_ids"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            candidate_agent_ids.update(str(x) for x in values)
+
+    return any(_is_human_agent(state, agent_id) for agent_id in candidate_agent_ids)
+
+
+def tick_zone_map_many(
+    state: Dict[str, Any],
+    max_ticks: int,
+    *,
+    stop_on_decision: bool = False,
+    viewed_agent_id: str | None = None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str | None]:
     """
     Advance world for up to max_ticks in-memory ticks with a single initial copy.
     Returns (new_state, all_events, ticks_advanced, stop_reason).
@@ -1236,28 +1295,49 @@ def tick_zone_map_many(state: Dict[str, Any], max_ticks: int) -> Tuple[Dict[str,
         if new_state.get("game_over"):
             stop_reason = "game_over"
             break
-        stop_reason = _batch_stop_reason(new_state, tick_events)
+        stop_reason = _batch_stop_reason(
+            new_state,
+            tick_events,
+            stop_on_decision=stop_on_decision,
+            viewed_agent_id=viewed_agent_id,
+        )
         if stop_reason:
             break
 
     return new_state, all_events, ticks_advanced, stop_reason
 
 
-def _batch_stop_reason(state: Dict[str, Any], tick_events: List[Dict[str, Any]]) -> str | None:
+def _batch_stop_reason(
+    state: Dict[str, Any],
+    tick_events: List[Dict[str, Any]],
+    *,
+    stop_on_decision: bool = False,
+    viewed_agent_id: str | None = None,
+) -> str | None:
     if state.get("game_over"):
         return "game_over"
-    critical_events = {
-        "emission_warning",
-        "emission_started",
-        "emission_ended",
-        "combat_started",
-        "agent_died",
-        "player_action_completed",
-        "zone_event_choice_required",
-    }
+
     for ev in tick_events or []:
-        if ev.get("event_type") in critical_events:
-            return str(ev.get("event_type"))
+        event_type = ev.get("event_type")
+        if event_type in {"emission_warning", "emission_started", "emission_ended"}:
+            return str(event_type)
+        if event_type in {"requires_resync", "serious_error", "tick_error"}:
+            return "requires_resync"
+        if event_type in {"zone_event_choice_required", "active_event_choice_required"}:
+            return "zone_event_choice_required"
+        if event_type in {"player_action_completed", "human_action_completed"}:
+            return "human_action_completed"
+        if event_type in {"scheduled_action_completed", "agent_scheduled_action_completed"}:
+            if _event_involves_human_or_viewed_agent(state, ev, viewed_agent_id=viewed_agent_id):
+                return "human_action_completed"
+        if event_type == "combat_started":
+            if _event_involves_human_or_viewed_agent(state, ev, viewed_agent_id=viewed_agent_id):
+                return "human_combat_started"
+        if event_type == "agent_died":
+            if _event_involves_human_or_viewed_agent(state, ev, viewed_agent_id=viewed_agent_id):
+                return "human_agent_died"
+        if stop_on_decision and event_type in {"decision_required", "player_decision_required"}:
+            return "player_decision_required"
     return None
 
 

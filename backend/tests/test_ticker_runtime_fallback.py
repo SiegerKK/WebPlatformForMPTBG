@@ -84,3 +84,96 @@ def test_running_flag_cleared_after_tick_match_many_failure(monkeypatch):
 
     ticker_service.tick_debug_auto_matches()
     assert ticker_service._auto_tick_runtime["ctx-1"]["running"] is False
+
+
+def test_max_catchup_batches_per_loop_one_calls_tick_once(monkeypatch):
+    monkeypatch.setattr(ticker_service, "_refresh_debug_context_cache", lambda db: {"ctx-1": "m-1"})
+    monkeypatch.setattr("app.database.SessionLocal", lambda: _DummyDB())
+    monkeypatch.setattr("app.core.state_cache.service.get_auto_tick_runtime", lambda ctx_id: {"enabled": True, "speed": "x600"})
+    monkeypatch.setattr("app.core.state_cache.service.get_context_flag", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.state_cache.service.set_auto_tick_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ticker_service,
+        "_get_auto_tick_limits",
+        lambda: {
+            "max_ticks_per_batch": 30,
+            "max_accumulated_ticks": 60,
+            "max_ws_updates_per_second": 4.0,
+            "max_catchup_batches_per_loop": 1,
+            "catchup_mode": "accurate",
+        },
+    )
+    calls = {"n": 0}
+
+    def _fake_tick(*args, **kwargs):
+        calls["n"] += 1
+        return {"ticks_advanced": 30}
+
+    monkeypatch.setattr(ticker_service, "tick_match_many", _fake_tick)
+    ticker_service._auto_tick_runtime["ctx-1"] = {"last_real_ts": 0.0, "game_seconds_accum": 3600.0, "running": False}
+    result = ticker_service.tick_debug_auto_matches()
+    assert calls["n"] == 1
+    assert result["ticked"] == 30
+
+
+def test_max_catchup_batches_per_loop_two_calls_tick_twice_when_due(monkeypatch):
+    monkeypatch.setattr(ticker_service, "_refresh_debug_context_cache", lambda db: {"ctx-1": "m-1"})
+    monkeypatch.setattr("app.database.SessionLocal", lambda: _DummyDB())
+    monkeypatch.setattr("app.core.state_cache.service.get_auto_tick_runtime", lambda ctx_id: {"enabled": True, "speed": "x600"})
+    monkeypatch.setattr("app.core.state_cache.service.get_context_flag", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.state_cache.service.set_auto_tick_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ticker_service,
+        "_get_auto_tick_limits",
+        lambda: {
+            "max_ticks_per_batch": 30,
+            "max_accumulated_ticks": 120,
+            "max_ws_updates_per_second": 4.0,
+            "max_catchup_batches_per_loop": 2,
+            "catchup_mode": "accurate",
+        },
+    )
+    calls = {"n": 0}
+
+    def _fake_tick(*args, **kwargs):
+        calls["n"] += 1
+        return {"ticks_advanced": 30}
+
+    monkeypatch.setattr(ticker_service, "tick_match_many", _fake_tick)
+    ticker_service._auto_tick_runtime["ctx-1"] = {"last_real_ts": 0.0, "game_seconds_accum": 5400.0, "running": False}
+    result = ticker_service.tick_debug_auto_matches()
+    assert calls["n"] == 2
+    assert result["ticked"] == 60
+
+
+def test_running_flag_cleared_if_second_catchup_batch_errors(monkeypatch):
+    monkeypatch.setattr(ticker_service, "_refresh_debug_context_cache", lambda db: {"ctx-1": "m-1"})
+    monkeypatch.setattr("app.database.SessionLocal", lambda: _DummyDB())
+    monkeypatch.setattr("app.core.state_cache.service.get_auto_tick_runtime", lambda ctx_id: {"enabled": True, "speed": "x600"})
+    monkeypatch.setattr("app.core.state_cache.service.get_context_flag", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.state_cache.service.set_auto_tick_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ticker_service,
+        "_get_auto_tick_limits",
+        lambda: {
+            "max_ticks_per_batch": 30,
+            "max_accumulated_ticks": 120,
+            "max_ws_updates_per_second": 4.0,
+            "max_catchup_batches_per_loop": 2,
+            "catchup_mode": "accurate",
+        },
+    )
+    calls = {"n": 0}
+
+    def _fake_tick(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return {"error": "boom"}
+        return {"ticks_advanced": 30}
+
+    monkeypatch.setattr(ticker_service, "tick_match_many", _fake_tick)
+    ticker_service._auto_tick_runtime["ctx-1"] = {"last_real_ts": 0.0, "game_seconds_accum": 5400.0, "running": False}
+    result = ticker_service.tick_debug_auto_matches()
+    assert calls["n"] == 2
+    assert result["ticked"] == 30
+    assert ticker_service._auto_tick_runtime["ctx-1"]["running"] is False
