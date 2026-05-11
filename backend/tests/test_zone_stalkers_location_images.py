@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.games.zone_stalkers.models import LocationImage  # noqa: F401
+from app.games.zone_stalkers.models import LocationImage
 
 
 def _media_path(media_root: Path, url: str) -> Path:

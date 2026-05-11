@@ -63,25 +63,49 @@ def _abs_media_path(rel_path: str) -> str | None:
         return None
 
 
+def _safe_remove_media_file(abs_path: str | None) -> str | None:
+    if not abs_path:
+        return None
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    try:
+        rel_path = os.path.relpath(abs_path, media_root_abs)
+    except ValueError:
+        return None
+    safe_abs = _abs_media_path(rel_path)
+    if safe_abs is None:
+        return None
+    try:
+        os.remove(safe_abs)
+    except FileNotFoundError:
+        return None
+    return safe_abs
+
+
 def _delete_location_images(records: list) -> None:
     removed_abs_paths: list[str] = []
     for existing in records:
         old_abs = _abs_media_path(existing.file_path)
-        if old_abs is None:
-            continue
-        try:
-            os.remove(old_abs)
-        except FileNotFoundError:
-            pass
-        removed_abs_paths.append(old_abs)
+        removed = _safe_remove_media_file(old_abs)
+        if removed:
+            removed_abs_paths.append(removed)
     _cleanup_parent_dirs(removed_abs_paths)
 
 
 def _cleanup_parent_dirs(abs_paths: list[str]) -> None:
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
     for abs_path in abs_paths:
+        if not abs_path:
+            continue
         loc_dir = os.path.dirname(abs_path)
         try:
-            os.rmdir(loc_dir)
+            rel_dir = os.path.relpath(loc_dir, media_root_abs)
+        except ValueError:
+            continue
+        safe_dir = _abs_media_path(rel_dir)
+        if safe_dir is None:
+            continue
+        try:
+            os.rmdir(safe_dir)
         except OSError:
             pass
 
@@ -193,13 +217,9 @@ async def upload_location_image(
     except IntegrityError:
         db.rollback()
         cleanup_abs_paths: list[str] = []
-        if written_abs_path:
-            try:
-                os.remove(written_abs_path)
-            except FileNotFoundError:
-                pass
-            else:
-                cleanup_abs_paths.append(written_abs_path)
+        removed = _safe_remove_media_file(written_abs_path)
+        if removed:
+            cleanup_abs_paths.append(removed)
         _cleanup_parent_dirs(cleanup_abs_paths)
         raise HTTPException(
             status_code=409,
@@ -208,13 +228,9 @@ async def upload_location_image(
     except Exception:
         db.rollback()
         cleanup_abs_paths = []
-        if written_abs_path:
-            try:
-                os.remove(written_abs_path)
-            except FileNotFoundError:
-                pass
-            else:
-                cleanup_abs_paths.append(written_abs_path)
+        removed = _safe_remove_media_file(written_abs_path)
+        if removed:
+            cleanup_abs_paths.append(removed)
         _cleanup_parent_dirs(cleanup_abs_paths)
         raise
 
@@ -271,13 +287,9 @@ def delete_location_image(
         rel = _rel_path_from_media_url(loc.get("image_url"))
         if rel:
             old_abs = _abs_media_path(rel)
-            if old_abs:
-                try:
-                    os.remove(old_abs)
-                except FileNotFoundError:
-                    pass
-                else:
-                    fallback_abs_paths.append(old_abs)
+            removed = _safe_remove_media_file(old_abs)
+            if removed:
+                fallback_abs_paths.append(removed)
     _cleanup_parent_dirs(fallback_abs_paths)
 
     loc["image_url"] = None
