@@ -1235,7 +1235,9 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         existing = _queue_by_agent.get(agent_id)
         if existing is not None:
             priority = max_priority(priority, existing.get("priority"))
-            queued_turn = min(int(existing.get("queued_turn") or world_turn), world_turn)
+            existing_queued_turn = existing.get("queued_turn")
+            queued_turn = int(existing_queued_turn) if existing_queued_turn is not None else world_turn
+            queued_turn = min(queued_turn, world_turn)
         else:
             queued_turn = world_turn
         _queue_by_agent[agent_id] = {

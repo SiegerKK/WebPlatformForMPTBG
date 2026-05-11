@@ -55,7 +55,8 @@ def ensure_brain_runtime(agent: dict[str, Any], world_turn: int) -> dict[str, An
 
     if not isinstance(br.get("invalidators"), list):
         br["invalidators"] = []
-    br["queued_priority"] = normalize_priority(br.get("queued_priority")) if br.get("queued_priority") else None
+    queued_priority = br.get("queued_priority")
+    br["queued_priority"] = normalize_priority(queued_priority) if queued_priority else None
     return br
 
 
