@@ -26,3 +26,8 @@ def test_tick_zone_map_many_does_not_mutate_input():
 def test_batch_stop_reason_detects_critical_event():
     reason = _batch_stop_reason({}, [{"event_type": "emission_started"}])
     assert reason == "emission_started"
+
+
+def test_batch_stop_reason_detects_game_over_state():
+    reason = _batch_stop_reason({"game_over": True}, [])
+    assert reason == "game_over"
