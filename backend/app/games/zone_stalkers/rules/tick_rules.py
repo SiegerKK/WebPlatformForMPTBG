@@ -544,7 +544,10 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
 
     Returns (new_state, events_emitted).
     """
-    source_state = copy.deepcopy(state) if copy_state else state
+    # Keep PR2 COW invariant: default single-tick path must not do a full deepcopy.
+    # Batch mode performs one upfront copy in tick_zone_map_many and then calls
+    # tick_zone_map(..., copy_state=False) for each inner tick.
+    source_state = state
 
     # ── PR1/PR2: TickProfiler + TickRuntime/ZoneTickRuntime ─────────────────
     try:

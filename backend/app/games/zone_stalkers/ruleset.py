@@ -83,7 +83,7 @@ class ZoneStalkerRuleSet(RuleSet):
         from app.core.events.service import allocate_sequence_numbers
         from app.core.matches.models import Match, MatchStatus
         from app.core.state_cache.service import load_context_state, save_context_state
-        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map_many
+        from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
         from app.games.zone_stalkers.rules.event_rules import start_event, bot_choose_option
 
         match = db.query(Match).filter(Match.id == match_id).first()
