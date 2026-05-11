@@ -253,6 +253,8 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(agent, dict):
             agents_out[agent_id] = agent
             continue
+        _lazy_enabled = isinstance(agent.get("needs_state"), dict)
+        _needs = _project_agent_needs(agent, state.get("world_turn"), _lazy_enabled)
         compact_ctx = _compact_brain_context(agent)
         # Only include keys present in the agent dict (skip None to avoid size bloat)
         _agent_fields = {
@@ -266,9 +268,9 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
             "hp": agent.get("hp"),
             "max_hp": agent.get("max_hp"),
             "radiation": agent.get("radiation"),
-            "hunger": agent.get("hunger"),
-            "thirst": agent.get("thirst"),
-            "sleepiness": agent.get("sleepiness"),
+            "hunger": _needs["hunger"],
+            "thirst": _needs["thirst"],
+            "sleepiness": _needs["sleepiness"],
             "money": agent.get("money"),
             "faction": agent.get("faction"),
             "reputation": agent.get("reputation"),

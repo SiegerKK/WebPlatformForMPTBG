@@ -4,6 +4,8 @@ import math
 from typing import Any
 
 from app.games.zone_stalkers.rules.tick_constants import (
+    CRITICAL_HUNGER_THRESHOLD,
+    CRITICAL_THIRST_THRESHOLD,
     HUNGER_INCREASE_PER_HOUR,
     SLEEPINESS_INCREASE_PER_HOUR,
     THIRST_INCREASE_PER_HOUR,
@@ -58,13 +60,23 @@ def materialize_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float
 
 
 def set_need(agent: dict[str, Any], need_key: str, value: float, world_turn: int) -> None:
+    set_needs(agent, {need_key: value}, world_turn)
+
+
+def set_needs(agent: dict[str, Any], updates: dict[str, float], world_turn: int) -> None:
     ensure_needs_state(agent, world_turn)
     needs_state = agent["needs_state"]
-    node = needs_state.setdefault(need_key, {})
-    node["base"] = _clamp_need(value)
-    node["updated_turn"] = int(world_turn)
-    needs_state["revision"] = int(needs_state.get("revision", 0)) + 1
-    agent[need_key] = node["base"]
+    changed = False
+    for need_key, value in updates.items():
+        if need_key not in _NEED_RATES_PER_TURN:
+            continue
+        node = needs_state.setdefault(need_key, {})
+        node["base"] = _clamp_need(value)
+        node["updated_turn"] = int(world_turn)
+        agent[need_key] = node["base"]
+        changed = True
+    if changed:
+        needs_state["revision"] = int(needs_state.get("revision", 0)) + 1
 
 
 def schedule_need_thresholds(
@@ -84,7 +96,7 @@ def schedule_need_thresholds(
         current = get_need(agent, need_key, world_turn)
         for threshold_name, threshold_value in (
             ("soft", _SOFT_THRESHOLD),
-            ("critical", _CRITICAL_SLEEPINESS_THRESHOLD),
+            ("critical", _critical_threshold_for_need(need_key)),
         ):
             dedupe_key = f"{need_key}:{threshold_name}"
             if threshold_tasks.get(dedupe_key) == revision:
@@ -105,6 +117,14 @@ def schedule_need_thresholds(
                 },
             )
             threshold_tasks[dedupe_key] = revision
+
+
+def _critical_threshold_for_need(need_key: str) -> float:
+    if need_key == "hunger":
+        return float(CRITICAL_HUNGER_THRESHOLD)
+    if need_key == "thirst":
+        return float(CRITICAL_THIRST_THRESHOLD)
+    return float(_CRITICAL_SLEEPINESS_THRESHOLD)
 
 
 def project_needs(agent: dict[str, Any], world_turn: int) -> dict[str, float]:

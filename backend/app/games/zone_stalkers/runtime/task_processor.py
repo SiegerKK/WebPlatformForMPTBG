@@ -10,6 +10,8 @@ from typing import Any
 from app.games.zone_stalkers.runtime.scheduler import pop_due_tasks, schedule_task
 from app.games.zone_stalkers.needs.lazy_needs import (
     get_need,
+    schedule_need_thresholds,
+    set_needs,
     _SOFT_THRESHOLD,
     _CRITICAL_SLEEPINESS_THRESHOLD,
 )
@@ -295,11 +297,17 @@ def _handle_sleep_tick(
         new_hunger = min(100.0, hunger + HUNGER_INCREASE_PER_SLEEP_INTERVAL)
         new_thirst = min(100.0, thirst + THIRST_INCREASE_PER_SLEEP_INTERVAL)
 
-        from app.games.zone_stalkers.needs.lazy_needs import set_need
-        set_need(agent, "sleepiness", new_sleepiness, world_turn)
-        set_need(agent, "hunger", new_hunger, world_turn)
-        set_need(agent, "thirst", new_thirst, world_turn)
+        set_needs(
+            agent,
+            {
+                "sleepiness": new_sleepiness,
+                "hunger": new_hunger,
+                "thirst": new_thirst,
+            },
+            world_turn,
+        )
         _set_agent_field(state, runtime, agent_id, "needs_state", agent.get("needs_state"))
+        schedule_need_thresholds(state, runtime, agent_id, agent, world_turn)
     else:
         sleepiness = float(agent.get("sleepiness", 0))
         hunger = float(agent.get("hunger", 0))

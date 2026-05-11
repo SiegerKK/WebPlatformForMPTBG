@@ -198,6 +198,7 @@ def test_sleep_tick_applies_recovery_without_per_tick_polling():
 
     # Set up lazy needs
     ensure_needs_state(agent, world_turn)
+    old_revision = int(agent["needs_state"]["revision"])
     agent["needs_state"]["sleepiness"]["base"] = 80.0
     agent["sleepiness"] = 80.0
 
@@ -228,6 +229,14 @@ def test_sleep_tick_applies_recovery_without_per_tick_polling():
     from app.games.zone_stalkers.needs.lazy_needs import get_need
     new_sleepiness = get_need(agent, "sleepiness", world_turn)
     assert new_sleepiness < 80.0, f"Expected sleepiness < 80, got {new_sleepiness}"
+    assert int(agent["needs_state"]["revision"]) == old_revision + 1
+    # sleep_tick should re-schedule need threshold tasks for the new revision
+    future_tasks = state.get("scheduled_tasks", {})
+    assert any(
+        task.get("kind") == "need_threshold_crossed" and task.get("agent_id") == agent_id
+        for bucket in future_tasks.values()
+        for task in bucket
+    )
 
 
 def test_sleep_complete_clears_scheduled_action():
@@ -300,3 +309,21 @@ def test_wait_complete_at_ends_turn():
     state_2, _ = tick_zone_map(state_1)
     # Action should be completed/cleared
     assert state_2["agents"][agent_id].get("scheduled_action") is None
+
+
+def test_tick_flow_schedules_need_threshold_tasks_when_lazy_needs_enabled():
+    state = _make_state()
+    state["cpu_lazy_needs_enabled"] = True
+    agent_id, agent = next(iter(state["agents"].items()))
+    world_turn = int(state["world_turn"])
+    assert "needs_state" not in agent
+
+    state_1, _ = tick_zone_map(state)
+    migrated_agent = state_1["agents"][agent_id]
+    assert isinstance(migrated_agent.get("needs_state"), dict)
+    scheduled = state_1.get("scheduled_tasks", {})
+    assert any(
+        task.get("kind") == "need_threshold_crossed" and task.get("agent_id") == agent_id
+        for bucket in scheduled.values()
+        for task in bucket
+    ), f"Expected threshold task scheduling at turn {world_turn}, got keys={list(scheduled.keys())}"

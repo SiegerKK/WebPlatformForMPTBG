@@ -6,10 +6,12 @@ work correctly end-to-end with the tick_zone_map function.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from app.games.zone_stalkers.generators.zone_generator import generate_zone
-from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
-from app.games.zone_stalkers.runtime.scheduler import schedule_task, pop_due_tasks
+from app.games.zone_stalkers.rules.tick_rules import _add_memory, tick_zone_map
 from app.games.zone_stalkers.needs.lazy_needs import ensure_needs_state, get_need
+from tests.decision.v3.e2e_helpers import any_memory, any_objective_decision, run_until
 
 
 def _make_pr3_state(seed=42, num_ai_stalkers=2):
@@ -21,72 +23,233 @@ def _make_pr3_state(seed=42, num_ai_stalkers=2):
     return state
 
 
-def _advance_ticks(state, n):
-    """Advance state by n ticks."""
-    for _ in range(n):
-        state, _ = tick_zone_map(state)
-        if state.get("game_over"):
-            break
-    return state
+def _hunter(*, goal: str, kill_target_id: str | None = None, ammo_count: int = 3) -> dict[str, Any]:
+    inventory = [
+        {"id": "food1", "type": "bread", "value": 0},
+        {"id": "food2", "type": "bread", "value": 0},
+        {"id": "water1", "type": "water", "value": 0},
+        {"id": "water2", "type": "water", "value": 0},
+    ]
+    inventory.extend({"id": f"ammo{i}", "type": "ammo_9mm", "value": 0} for i in range(1, ammo_count + 1))
+    agent = {
+        "archetype": "stalker_agent",
+        "controller": {"kind": "bot"},
+        "name": "hunter",
+        "is_alive": True,
+        "has_left_zone": False,
+        "action_used": False,
+        "location_id": "loc_spawn",
+        "hp": 100,
+        "max_hp": 100,
+        "radiation": 0,
+        "hunger": 5,
+        "thirst": 5,
+        "sleepiness": 5,
+        "money": 3000,
+        "global_goal": goal,
+        "material_threshold": 0,
+        "wealth_goal_target": 1000,
+        "equipment": {
+            "weapon": {"type": "pistol", "value": 300},
+            "armor": {"type": "leather_jacket", "value": 200},
+        },
+        "inventory": inventory,
+        "memory": [],
+        "action_queue": [],
+        "scheduled_action": None,
+    }
+    if kill_target_id:
+        agent["kill_target_id"] = kill_target_id
+    return agent
+
+
+def _target(*, location_id: str, hp: int = 1) -> dict[str, Any]:
+    return {
+        "archetype": "stalker_agent",
+        "controller": {"kind": "script"},
+        "name": "target",
+        "is_alive": True,
+        "has_left_zone": False,
+        "location_id": location_id,
+        "hp": hp,
+        "max_hp": 100,
+        "hunger": 0,
+        "thirst": 0,
+        "sleepiness": 0,
+        "money": 0,
+        "global_goal": "get_rich",
+        "equipment": {},
+        "inventory": [],
+        "memory": [],
+        "action_queue": [],
+        "scheduled_action": None,
+    }
+
+
+def _base_state(locations: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "seed": 7,
+        "world_turn": 1,
+        "world_day": 1,
+        "world_hour": 12,
+        "world_minute": 0,
+        "emission_active": False,
+        "emission_scheduled_turn": None,
+        "emission_ends_turn": None,
+        "agents": {},
+        "traders": {},
+        "locations": locations,
+        "combat_interactions": {},
+        "relations": {},
+        "groups": {},
+        "cpu_copy_on_write_enabled": True,
+        "cpu_copy_on_write_legacy_bridge_enabled": False,
+        "cpu_event_driven_actions_enabled": True,
+        "cpu_lazy_needs_enabled": True,
+    }
+
+
+def _remember_target_location(agent: dict[str, Any], state: dict[str, Any], location_id: str) -> None:
+    _add_memory(
+        agent,
+        state["world_turn"],
+        state,
+        "observation",
+        "📍 Известно местоположение цели",
+        {
+            "action_kind": "target_last_known_location",
+            "target_id": str(agent.get("kill_target_id") or ""),
+            "location_id": location_id,
+        },
+        summary=f"Цель замечена в {location_id}",
+        agent_id="hunter",
+    )
 
 
 def test_get_rich_e2e_with_event_driven_actions_and_lazy_needs():
-    """E2E test: runs with PR3 flags enabled for 120 ticks without errors."""
-    state = generate_zone(seed=42, num_players=0, num_ai_stalkers=2, num_mutants=0, num_traders=1)
-    state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
-    state["cpu_event_driven_actions_enabled"] = True
-    state["cpu_lazy_needs_enabled"] = True
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_anomaly", "travel_time": 2},
+                {"to": "loc_trader", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_anomaly": {
+            "name": "Anomaly",
+            "terrain_type": "wasteland",
+            "anomaly_activity": 10,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_trader", "travel_time": 2},
+            ],
+            "items": [],
+            "artifacts": [{"id": "artifact_1", "type": "soul", "value": 2500}],
+            "agents": [],
+        },
+        "loc_trader": {
+            "name": "Trader",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [
+                {"to": "loc_spawn", "travel_time": 2},
+                {"to": "loc_anomaly", "travel_time": 2},
+                {"to": "loc_exit", "travel_time": 2},
+            ],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_trader", "travel_time": 2}, {"to": "loc_spawn", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_trader",
+        "is_alive": True,
+        "money": 50000,
+    }
+    hunter = _hunter(goal="get_rich")
+    hunter["money"] = 0
+    state["agents"]["hunter"] = hunter
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
 
-    # Override agent goals to get_rich
-    for agent_id, agent in state.get("agents", {}).items():
-        if agent.get("archetype") == "stalker_agent":
-            agent["global_goal"] = "get_rich"
-
-    completed = False
-    for _ in range(120):
-        state, events = tick_zone_map(state)
-        # Check if any agent completed their goal
-        for ev in events:
-            if ev.get("event_type") in ("agent_left_zone", "game_over"):
-                completed = True
-                break
-        if completed or state.get("game_over"):
-            completed = True
-            break
-
-    # Just verify it ran without exception and returned valid state
-    assert isinstance(state, dict)
-    assert "agents" in state
-    assert "world_turn" in state
-    # Should have progressed multiple turns
-    assert state["world_turn"] > 10
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=1200,
+    )
+    hunter = state["agents"]["hunter"]
+    assert hunter.get("global_goal_achieved") is True
+    assert hunter.get("has_left_zone") is True
+    assert any_memory(hunter, "left_zone")
+    assert any_objective_decision(hunter, "LEAVE_ZONE")
+    assert any_memory(hunter, "trade_sell") or any_memory(hunter, "global_goal_completed")
 
 
 def test_kill_target_e2e_with_event_driven_actions_and_lazy_needs():
-    """E2E test: runs kill_stalker goal with PR3 flags enabled."""
-    state = generate_zone(seed=43, num_players=0, num_ai_stalkers=3, num_mutants=0, num_traders=1)
-    state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
-    state["cpu_event_driven_actions_enabled"] = True
-    state["cpu_lazy_needs_enabled"] = True
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_target", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_target": {
+            "name": "Target",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}, {"to": "loc_target", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    hunter = _hunter(goal="kill_stalker", kill_target_id="target")
+    target = _target(location_id="loc_target", hp=1)
+    state["agents"]["hunter"] = hunter
+    state["agents"]["target"] = target
+    state["locations"]["loc_spawn"]["agents"] = ["hunter"]
+    state["locations"]["loc_target"]["agents"] = ["target"]
+    _remember_target_location(hunter, state, "loc_target")
 
-    agent_ids = list(state["agents"].keys())
-    if len(agent_ids) >= 2:
-        # Set first agent as hunter, second as target
-        hunter_id = agent_ids[0]
-        target_id = agent_ids[1]
-        hunter = state["agents"][hunter_id]
-        hunter["global_goal"] = "kill_stalker"
-        hunter["kill_target_id"] = target_id
-
-    for _ in range(60):
-        state, _ = tick_zone_map(state)
-        if state.get("game_over"):
-            break
-
-    assert isinstance(state, dict)
-    assert state["world_turn"] > 10
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        max_ticks=1200,
+    )
+    hunter = state["agents"]["hunter"]
+    target = state["agents"]["target"]
+    assert target.get("is_alive") is False
+    assert hunter.get("global_goal_achieved") is True
+    assert hunter.get("has_left_zone") is True
+    assert any_memory(hunter, "target_death_confirmed")
+    assert any_memory(hunter, "goal_achieved")
+    assert any_memory(hunter, "left_zone")
 
 
 def test_emission_survival_with_event_driven_actions():

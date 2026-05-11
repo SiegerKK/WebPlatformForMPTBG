@@ -61,7 +61,12 @@ from app.games.zone_stalkers.rules.tick_constants import (
     THIRST_INCREASE_PER_SLEEP_INTERVAL,
 )
 from app.games.zone_stalkers.runtime.scheduler import cleanup_old_tasks, pop_due_tasks, schedule_task
-from app.games.zone_stalkers.needs.lazy_needs import ensure_needs_state, get_need
+from app.games.zone_stalkers.needs.lazy_needs import (
+    ensure_needs_state,
+    get_need,
+    schedule_need_thresholds,
+    set_needs,
+)
 
 # 1 game turn = 1 real minute
 MINUTES_PER_TURN = 1
@@ -694,9 +699,11 @@ def tick_zone_map(state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
         if _lazy_needs_enabled(state):
             agent = _runtime_agent(agent_id, agent)
-            if ensure_needs_state(agent, world_turn):
+            _needs_migrated = ensure_needs_state(agent, world_turn)
+            if _needs_migrated:
                 _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
                 agent = _runtime_agent(agent_id, agent)
+            schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
         sched = agent.get("scheduled_action")
         if sched:
             agent = _runtime_agent(agent_id, agent)
@@ -1574,7 +1581,7 @@ def _process_scheduled_action(
         events.extend(result_evs)
 
     elif action_type == "sleep":
-        _resolve_sleep(agent, sched, world_turn, state)
+        _resolve_sleep(agent, sched, world_turn, state, agent_id=agent_id)
         turns_slept = int(
             sched.get(
                 "sleep_turns_slept",
@@ -1828,7 +1835,13 @@ def _process_sleep_tick(
     return events
 
 
-def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int, state: Dict[str, Any]) -> None:
+def _resolve_sleep(
+    agent: Dict[str, Any],
+    sched: Dict[str, Any],
+    world_turn: int,
+    state: Dict[str, Any],
+    agent_id: str | None = None,
+) -> None:
     """Write sleep-completion memory.
 
     Interval effects (sleepiness, hunger, thirst) were already applied during
@@ -1863,7 +1876,14 @@ def _resolve_sleep(agent: Dict[str, Any], sched: Dict[str, Any], world_turn: int
     # 1 full in-game hour.  Very short sleeps (< 1 h) leave residual sleepiness
     # so that gradual per-interval recovery is not bypassed artificially.
     if hours_slept >= 1.0:
-        agent["sleepiness"] = 0
+        if _lazy_needs_enabled(state):
+            ensure_needs_state(agent, world_turn)
+            set_needs(agent, {"sleepiness": 0.0}, world_turn)
+            if agent_id:
+                _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
+                schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
+        else:
+            agent["sleepiness"] = 0
     intervals = int(sched.get("sleep_intervals_applied", 0))
     _add_memory(
         agent,
@@ -3647,6 +3667,16 @@ def _bot_consume(
     item_info = ITEM_TYPES.get(item["type"], {})
     effects = item_info.get("effects", {})
     _apply_item_effects(agent, effects)
+    if _lazy_needs_enabled(state):
+        ensure_needs_state(agent, world_turn)
+        _need_updates: dict[str, float] = {}
+        for _need_key in ("hunger", "thirst", "sleepiness"):
+            if _need_key in effects:
+                _need_updates[_need_key] = float(agent.get(_need_key, 0.0))
+        if _need_updates:
+            set_needs(agent, _need_updates, world_turn)
+            _runtime_set_agent_field(agent_id, "needs_state", agent.get("needs_state"), agent)
+        schedule_need_thresholds(state, _cow_runtime(), agent_id, agent, world_turn)
     _runtime_set_agent_field(agent_id, "inventory", [i for i in agent.get("inventory", []) if i["id"] != item["id"]], agent)
     _runtime_set_action_used(agent, True)
     item_name = item_info.get("name", item.get("name", item["type"]))

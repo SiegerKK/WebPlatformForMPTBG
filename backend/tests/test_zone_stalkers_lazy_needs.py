@@ -5,6 +5,7 @@ from app.games.zone_stalkers.needs.lazy_needs import (
     get_need,
     materialize_needs,
     set_need,
+    set_needs,
 )
 
 
@@ -36,6 +37,22 @@ def test_set_need_resets_base_and_bumps_revision():
     assert get_need(agent, "thirst", world_turn=20) == 12.0
     assert agent["thirst"] == 12.0
     assert agent["needs_state"]["revision"] == old_revision + 1
+
+
+def test_set_needs_batch_bumps_revision_once():
+    agent = {"hunger": 40.0, "thirst": 55.0, "sleepiness": 65.0}
+    ensure_needs_state(agent, world_turn=10)
+    old_revision = agent["needs_state"]["revision"]
+
+    set_needs(
+        agent,
+        {"hunger": 33.0, "thirst": 22.0, "sleepiness": 11.0},
+        world_turn=20,
+    )
+    assert agent["needs_state"]["revision"] == old_revision + 1
+    assert get_need(agent, "hunger", world_turn=20) == 33.0
+    assert get_need(agent, "thirst", world_turn=20) == 22.0
+    assert get_need(agent, "sleepiness", world_turn=20) == 11.0
 
 
 from app.games.zone_stalkers.needs.lazy_needs import project_needs, schedule_need_thresholds
@@ -251,3 +268,83 @@ def test_delta_includes_lazy_needs_for_dirty_agent():
     # The derived needs should be projected (at world_turn=200, elapsed=100 turns from base updated_turn=100)
     # hunger rate = 3/60 per turn, elapsed=100 => hunger = 10 + 100*(3/60) = 10 + 5 = 15
     assert agent_delta["hunger"] > 10.0, f"Expected derived hunger > 10, got {agent_delta['hunger']}"
+
+
+def test_delta_does_not_emit_only_time_based_lazy_growth_without_hot_field_change():
+    """Documented PR3 minimal behavior: derived needs are sent only when agent is already dirty."""
+    from app.games.zone_stalkers.delta import build_zone_delta
+
+    agent_id = "agent_test"
+    old_state = {
+        "agents": {
+            agent_id: {
+                "id": agent_id,
+                "hunger": 10.0,
+                "thirst": 20.0,
+                "sleepiness": 5.0,
+                "hp": 100,
+                "is_alive": True,
+                "needs_state": {
+                    "hunger": {"base": 10.0, "updated_turn": 100},
+                    "thirst": {"base": 20.0, "updated_turn": 100},
+                    "sleepiness": {"base": 5.0, "updated_turn": 100},
+                    "revision": 1,
+                },
+            }
+        },
+        "locations": {},
+        "traders": {},
+        "state_revision": 1,
+        "world_turn": 100,
+    }
+    new_state = {
+        "agents": {
+            agent_id: {
+                "id": agent_id,
+                "hunger": 10.0,
+                "thirst": 20.0,
+                "sleepiness": 5.0,
+                "hp": 100,
+                "is_alive": True,
+                "needs_state": {
+                    "hunger": {"base": 10.0, "updated_turn": 100},
+                    "thirst": {"base": 20.0, "updated_turn": 100},
+                    "sleepiness": {"base": 5.0, "updated_turn": 100},
+                    "revision": 1,
+                },
+            }
+        },
+        "locations": {},
+        "traders": {},
+        "state_revision": 2,
+        "world_turn": 160,
+    }
+    delta = build_zone_delta(old_state=old_state, new_state=new_state, events=[])
+    assert agent_id not in delta["changes"]["agents"]
+
+
+def test_debug_map_lite_projection_uses_lazy_derived_needs():
+    from app.games.zone_stalkers.projections import project_zone_state
+
+    state = {
+        "world_turn": 160,
+        "agents": {
+            "agent_test": {
+                "id": "agent_test",
+                "hunger": 10.0,
+                "thirst": 20.0,
+                "sleepiness": 5.0,
+                "needs_state": {
+                    "hunger": {"base": 10.0, "updated_turn": 100},
+                    "thirst": {"base": 20.0, "updated_turn": 100},
+                    "sleepiness": {"base": 5.0, "updated_turn": 100},
+                    "revision": 1,
+                },
+            }
+        },
+        "traders": {},
+        "locations": {},
+    }
+    projected = project_zone_state(state=state, mode="debug-map-lite")
+    agent = projected["agents"]["agent_test"]
+    assert agent["hunger"] > 10.0

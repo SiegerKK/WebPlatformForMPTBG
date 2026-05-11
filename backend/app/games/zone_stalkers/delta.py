@@ -182,7 +182,11 @@ def build_zone_delta(
             old_agent = {}
         if not isinstance(new_agent, dict):
             continue  # agent removed — skip for MVP
-        # Check if any hot field changed
+        # Check if any hot field changed.
+        # NOTE (PR3 lazy-needs minimal mode):
+        # derived hunger/thirst/sleepiness are overlaid only after an agent is already
+        # selected for delta by a hot-field change. Pure time-based lazy growth alone
+        # does not emit deltas every tick (intentional CPU-friendly trade-off).
         changed = False
         for f in _AGENT_HOT_FIELDS:
             if old_agent.get(f) != new_agent.get(f):
