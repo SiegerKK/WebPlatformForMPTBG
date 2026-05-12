@@ -246,3 +246,29 @@ def test_critical_hunger_does_not_abort_restore_food_buy_consume_chain() -> None
     )
     assert result.decision == "continue"
     assert result.reason == "critical_need_recovery_in_progress"
+
+
+def test_critical_hp_does_not_abort_heal_self_recovery_action() -> None:
+    agent = _base_agent()
+    agent["hp"] = 5
+    agent["brain_v3_context"] = {
+        "objective_key": "HEAL_SELF",
+        "intent_kind": "heal_self",
+    }
+    agent["active_plan_v3"] = {
+        "current_step_index": 1,
+        "steps": [
+            {"kind": "travel_to_location", "payload": {"reason": "buy_medical"}},
+            {"kind": "trade_buy_item", "payload": {"item_category": "medical", "reason": "buy_medical"}},
+            {"kind": "consume_item", "payload": {"item_type": "medkit", "reason": "heal_self"}},
+        ],
+    }
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "travel", "turns_remaining": 2},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "continue"
+    assert result.reason == "critical_need_recovery_in_progress"

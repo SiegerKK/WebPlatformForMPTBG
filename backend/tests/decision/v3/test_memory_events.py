@@ -7,8 +7,8 @@ which is the renamed canonical function.  All removed-path tests were deleted.
 from __future__ import annotations
 
 from app.games.zone_stalkers.memory.store import ensure_memory_v3
-from app.games.zone_stalkers.memory.store import MEMORY_V3_MAX_STALKERS_SEEN_RECORDS
 from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+from app.games.zone_stalkers.memory.memory_events import STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
 from app.games.zone_stalkers.rules.tick_rules import _add_memory
 
 
@@ -391,7 +391,7 @@ def test_repeated_stalkers_seen_keeps_episodic_under_budget() -> None:
         if rec.get("kind") == "stalkers_seen" and rec.get("status", "active") != "archived"
     ]
     semantic = [rec for rec in records if rec.get("kind") == "semantic_stalkers_seen"]
-    assert len(stalkers_seen) <= MEMORY_V3_MAX_STALKERS_SEEN_RECORDS
+    assert len(stalkers_seen) <= STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
     assert len(semantic) >= 1
     assert int(semantic[0]["details"].get("times_seen", 0)) > 1
 

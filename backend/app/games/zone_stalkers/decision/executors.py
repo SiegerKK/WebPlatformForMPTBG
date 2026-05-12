@@ -53,6 +53,7 @@ from .models.plan import (
     STEP_CONSUME_ITEM,
     STEP_EQUIP_ITEM,
     STEP_PICKUP_ITEM,
+    STEP_LOOT_CORPSE,
     STEP_ASK_FOR_INTEL,
     STEP_LOOK_FOR_TRACKS,
     STEP_QUESTION_WITNESSES,
@@ -115,6 +116,7 @@ def execute_plan_step(
         STEP_CONSUME_ITEM:         _exec_consume,
         STEP_EQUIP_ITEM:           _exec_equip,
         STEP_PICKUP_ITEM:          _exec_pickup,
+        STEP_LOOT_CORPSE:          _exec_loot_corpse,
         STEP_HEAL_SELF:            _exec_consume,   # same as consume
         STEP_ASK_FOR_INTEL:        _exec_ask_for_intel,
         STEP_LOOK_FOR_TRACKS:      _exec_look_for_tracks,
@@ -134,7 +136,7 @@ def execute_plan_step(
     # If the step is a one-tick action (not a scheduled multi-tick action),
     # advance the plan index immediately.
     if step.kind in (
-        STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM,
+        STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM, STEP_LOOT_CORPSE,
         STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM, STEP_TRADE_SELL_ITEM,
         STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
         STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
@@ -500,6 +502,150 @@ def _exec_pickup(
     from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
     item_types = step.payload.get("item_types", WEAPON_ITEM_TYPES)
     return _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn) or []
+
+
+def _exec_loot_corpse(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    from app.games.zone_stalkers.balance.items import (
+        AMMO_ITEM_TYPES,
+        FOOD_ITEM_TYPES,
+        DRINK_ITEM_TYPES,
+        HEAL_ITEM_TYPES,
+        WEAPON_ITEM_TYPES,
+        ARMOR_ITEM_TYPES,
+        AMMO_FOR_WEAPON,
+    )
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    _ = ctx
+    location_id = str(agent.get("location_id") or step.payload.get("location_id") or "")
+    corpse_id = str(step.payload.get("corpse_id") or "")
+    take_money = bool(step.payload.get("take_money", True))
+    max_items = int(step.payload.get("max_items") or 0)
+    if not location_id:
+        agent["action_used"] = True
+        return []
+
+    loc = state.get("locations", {}).get(location_id, {})
+    corpses = loc.get("corpses") if isinstance(loc, dict) else None
+    if not isinstance(corpses, list):
+        agent["action_used"] = True
+        return []
+
+    def _is_important(item: dict[str, Any]) -> bool:
+        item_type = str(item.get("type") or "")
+        if item_type in ARTIFACT_TYPES:
+            return True
+        if item_type in FOOD_ITEM_TYPES or item_type in DRINK_ITEM_TYPES or item_type in HEAL_ITEM_TYPES:
+            return True
+        if item_type in WEAPON_ITEM_TYPES and not isinstance((agent.get("equipment") or {}).get("weapon"), dict):
+            return True
+        if item_type in ARMOR_ITEM_TYPES and not isinstance((agent.get("equipment") or {}).get("armor"), dict):
+            return True
+        if item_type in AMMO_ITEM_TYPES:
+            weapon = (agent.get("equipment") or {}).get("weapon") or {}
+            weapon_type = str(weapon.get("type") or "")
+            compatible = AMMO_FOR_WEAPON.get(weapon_type)
+            return bool(compatible and compatible == item_type)
+        return False
+
+    target_corpse: dict[str, Any] | None = None
+    for corpse in corpses:
+        if not isinstance(corpse, dict):
+            continue
+        if not bool(corpse.get("visible", True)):
+            continue
+        if not bool(corpse.get("lootable", True)):
+            continue
+        if corpse_id and str(corpse.get("corpse_id") or "") != corpse_id:
+            continue
+        target_corpse = corpse
+        break
+    if target_corpse is None:
+        agent["action_used"] = True
+        return []
+
+    corpse_inventory = target_corpse.get("inventory")
+    if not isinstance(corpse_inventory, list):
+        corpse_inventory = []
+        target_corpse["inventory"] = corpse_inventory
+    selected_items = [item for item in corpse_inventory if isinstance(item, dict) and _is_important(item)]
+    if max_items > 0:
+        selected_items = selected_items[:max_items]
+
+    selected_ids = {str(item.get("id") or "") for item in selected_items}
+    items_taken = [dict(item) for item in selected_items]
+    if items_taken:
+        agent_inventory = agent.get("inventory")
+        if not isinstance(agent_inventory, list):
+            agent_inventory = []
+            agent["inventory"] = agent_inventory
+        agent_inventory.extend(items_taken)
+    target_corpse["inventory"] = [
+        item for item in corpse_inventory
+        if str(item.get("id") or "") not in selected_ids
+    ]
+
+    money_taken = 0
+    corpse_money = int(target_corpse.get("money") or 0)
+    if take_money and corpse_money > 0:
+        money_taken = corpse_money
+        target_corpse["money"] = 0
+        agent["money"] = int(agent.get("money") or 0) + money_taken
+
+    looted_by = target_corpse.get("looted_by")
+    if not isinstance(looted_by, list):
+        looted_by = []
+        target_corpse["looted_by"] = looted_by
+    if agent_id not in looted_by and (items_taken or money_taken > 0):
+        looted_by.append(agent_id)
+
+    target_corpse["fully_looted"] = (
+        len(target_corpse.get("inventory") or []) == 0 and int(target_corpse.get("money") or 0) <= 0
+    )
+    if target_corpse["fully_looted"]:
+        target_corpse["lootable"] = False
+
+    important_items_taken = [str(item.get("type") or "") for item in items_taken]
+    if items_taken or money_taken > 0:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "action",
+            "💼 Обыскал труп",
+            {
+                "action_kind": "corpse_looted",
+                "corpse_id": str(target_corpse.get("corpse_id") or ""),
+                "dead_agent_id": str(target_corpse.get("agent_id") or ""),
+                "location_id": location_id,
+                "items_taken_count": len(items_taken),
+                "money_taken": money_taken,
+                "important_items_taken": important_items_taken,
+            },
+            summary=f"Обыскал труп и забрал {len(items_taken)} предмет(ов) и {money_taken} денег.",
+        )
+
+    agent["action_used"] = True
+    return [
+        {
+            "event_type": "corpse_looted",
+            "payload": {
+                "agent_id": agent_id,
+                "corpse_id": str(target_corpse.get("corpse_id") or ""),
+                "location_id": location_id,
+                "items_taken_count": len(items_taken),
+                "money_taken": money_taken,
+            },
+        }
+    ]
 
 
 def _exec_ask_for_intel(

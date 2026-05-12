@@ -1848,6 +1848,10 @@ def _update_corpse_visibility(
             if is_visible:
                 updated.append(corpse)
             else:
+                corpse["lootable"] = False
+                corpse["inventory"] = []
+                corpse["money"] = 0
+                corpse["fully_looted"] = True
                 dead_agent = state.get("agents", {}).get(str(corpse.get("agent_id") or ""))
                 if isinstance(dead_agent, dict):
                     dead_agent["corpse_visible"] = False

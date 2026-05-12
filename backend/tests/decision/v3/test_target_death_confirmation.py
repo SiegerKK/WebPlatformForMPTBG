@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 from app.games.zone_stalkers.decision.context_builder import build_agent_context
 from app.games.zone_stalkers.decision.executors import execute_plan_step
 from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_CONFIRM_KILL
@@ -97,23 +99,35 @@ def test_hunter_travels_to_corpse_and_confirms_kill() -> None:
 
 
 def test_personal_combat_kill_confirms_goal_immediately() -> None:
+    from app.games.zone_stalkers.rules.tick_rules import _combat_shoot
+
     hunter, target, state = _build_hunter_and_target_state()
-    hunter["memory_v3"] = {
-        "records": {
-            "m1": {
-                "kind": "target_death_confirmed",
-                "created_turn": 120,
-                "details": {
-                    "action_kind": "target_death_confirmed",
-                    "target_id": "target",
-                    "confirmation_source": "personal_combat_kill",
-                    "directly_observed": True,
-                    "killer_id": "hunter",
-                },
-            }
-        }
+    hunter["location_id"] = "loc_b"
+    hunter["kill_target_id"] = "target"
+    target["location_id"] = "loc_b"
+    target["hp"] = 1
+    state["locations"]["loc_a"]["agents"] = []
+    state["locations"]["loc_b"]["agents"] = ["hunter", "target"]
+    hunter.setdefault("equipment", {})
+    hunter["equipment"]["weapon"] = {"type": "pistol", "damage": 100, "accuracy": 1.0, "value": 100}
+    participant = {"enemies": ["target"], "fled": False}
+    combat = {
+        "id": "combat_test",
+        "participants": {
+            "hunter": participant,
+            "target": {"enemies": ["hunter"], "fled": False},
+        },
     }
+
+    _combat_shoot("hunter", hunter, participant, combat, state, world_turn=120, rng=random.Random(0))
     _check_global_goal_completion("hunter", hunter, state, world_turn=121)
+
+    records = v3_action_records(hunter, "target_death_confirmed")
+    assert records
+    details = records[-1]["details"]
+    assert details.get("confirmation_source") == "personal_combat_kill"
+    assert details.get("directly_observed") is True
+    assert details.get("killer_id") == "hunter"
     assert hunter.get("global_goal_achieved") is True
 
 
@@ -154,3 +168,11 @@ def test_hunter_leaves_zone_only_after_confirming_corpse() -> None:
     )
     _check_global_goal_completion("hunter", hunter, state, world_turn=103)
     assert hunter.get("global_goal_achieved") is True
+
+
+def test_corpse_decay_turn_is_7200_turns_after_death() -> None:
+    hunter, target, state = _build_hunter_and_target_state()
+    _kill_target_by_emission(state, target, world_turn=100)
+    corpses = state["locations"]["loc_b"].get("corpses", [])
+    assert corpses
+    assert corpses[-1]["decay_turn"] == 100 + 7200

@@ -15,6 +15,7 @@ kill_agent.  This guarantees consistent state invariants after death:
 """
 from __future__ import annotations
 
+import copy
 import uuid
 from typing import Any
 
@@ -27,7 +28,7 @@ from app.games.zone_stalkers.decision.active_plan_manager import (
 from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
 from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
 
-CORPSE_DECAY_TURNS = 1440
+CORPSE_DECAY_TURNS = 7200
 
 
 def kill_agent(
@@ -117,6 +118,8 @@ def kill_agent(
     # 6. Death memory record
     _loc_id = location_id or agent.get("location_id")
     _corpse_id = f"corpse_{agent_id}_{world_turn}"
+    _corpse_inventory = copy.deepcopy(agent.get("inventory", [])) if isinstance(agent.get("inventory"), list) else []
+    _corpse_money = int(agent.get("money") or 0)
     agent["corpse_visible"] = True
     agent["death_turn"] = world_turn
     agent["death_cause"] = cause
@@ -159,7 +162,15 @@ def kill_agent(
                 ),
                 "visible": True,
                 "decay_turn": world_turn + CORPSE_DECAY_TURNS,
+                "lootable": True,
+                "inventory": _corpse_inventory,
+                "money": _corpse_money,
+                "looted_by": [],
+                "fully_looted": (not _corpse_inventory and _corpse_money <= 0),
             })
+    agent["inventory"] = []
+    agent["money"] = 0
+    agent["loot_transferred_to_corpse"] = True
     _title = memory_title or "💀 Смерть"
     _summary = memory_summary or f"Агент погиб. Причина: {cause}."
     _effects: dict[str, Any] = {"action_kind": "death", "cause": cause}
