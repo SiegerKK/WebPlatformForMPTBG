@@ -44,7 +44,6 @@ def _make_cow_tick_state(
         num_traders=num_traders,
     )
     state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
     state["world_turn"] = max(2, int(state.get("world_turn", 2)))
     _mem_v3_template = {
         "records": {},
@@ -204,7 +203,6 @@ def test_tick_zone_map_cow_does_not_copy_all_agents():
             "scheduled_action": None,
             "action_used": False,
             "inventory": [],
-            "memory": [],
             "hp": 100,
             "hunger": 0,
             "thirst": 0,
@@ -486,7 +484,6 @@ def test_cow_tick_live_npc_bot_does_not_mutate_input():
         num_traders=0,
     )
     state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
     state["world_turn"] = 2
 
     for agent in state["agents"].values():
@@ -711,7 +708,6 @@ def test_cow_trade_buy_updates_new_state_not_input():
         "is_alive": True,
         "money": 50000,
         "inventory": [],
-        "memory": [],
     }
     state["locations"][loc_a]["agents"].append(trader_id)
 
@@ -743,7 +739,6 @@ def test_cow_trade_sell_updates_new_state_not_input():
         "is_alive": True,
         "money": 50000,
         "inventory": [],
-        "memory": [],
     }
     state["locations"][loc_a]["agents"].append(trader_id)
 

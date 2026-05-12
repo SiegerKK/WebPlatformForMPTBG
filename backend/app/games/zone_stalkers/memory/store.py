@@ -1,7 +1,6 @@
 """memory/store.py — Core MemoryStore v3 API.
 
-Manages ``agent["memory_v3"]`` — a structured, indexed, in-process store on
-top of the existing flat ``agent["memory"]`` list.
+Manages ``agent["memory_v3"]`` — a structured, indexed, in-process store.
 
 No external dependencies (Redis / PostgreSQL) are introduced.
 """

@@ -141,6 +141,10 @@ def _v3_ak(record: dict[str, Any]) -> str | None:
     return record.get("kind") or (record.get("details") or {}).get("action_kind")
 
 
+def _v3_fx(record: dict[str, Any]) -> dict[str, Any]:
+    return record.get("details") or {}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TargetBelief construction
 # ─────────────────────────────────────────────────────────────────────────────

@@ -493,7 +493,7 @@ class TestWriteLocationObservationsIntegration:
         state = self._state("L", agents={"bob": bob})
         main = self._agent("main", "L")
         self._wlo("main", main, "L", state, 100)
-        fx = self._stalker_obs(main)[0]["effects"]
+        fx = self._stalker_obs(main)[0]["details"]
         assert fx.get("times_seen") == 1
         assert fx.get("first_seen_turn") == 100
         assert fx.get("status") == "active"

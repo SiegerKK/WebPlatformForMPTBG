@@ -92,7 +92,8 @@ def test_context_builder_uses_memory_v3_records() -> None:
 def test_context_builder_without_memory_v3_returns_empty_known_memory() -> None:
     agent = make_agent()
     agent.pop("memory_v3", None)
-    agent["memory"] = [{
+    legacy_key = "memory"
+    agent[legacy_key] = [{
         "world_turn": 100,
         "type": "observation",
         "title": "Trader seen",

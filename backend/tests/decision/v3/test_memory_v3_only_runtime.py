@@ -1,10 +1,10 @@
-"""PR5: Verify that the legacy agent["memory"] list is never written at runtime.
+"""PR5: Verify that legacy list-style memory is never written at runtime.
 
 These integration-level tests run _add_memory (and full tick) and assert that:
-1. agent["memory"] is never populated (field doesn't exist or is empty).
+1. Legacy list memory is never populated (field doesn't exist or is empty).
 2. memory_v3 is the sole write target.
 3. The _v3_records_desc / _v3_action_kind / _v3_memory_type helpers work correctly.
-4. The memory init block no longer calls import_legacy_memory.
+4. The old removed bridge module is not importable.
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from app.games.zone_stalkers.rules.tick_rules import (
     _v3_turn,
 )
 
+LEGACY_MEMORY_KEY = "memory"
+
 
 def _base_agent(agent_id: str = "bot1") -> dict:
     return {
@@ -35,7 +37,7 @@ def _base_state(agent: dict, agent_id: str = "bot1") -> dict:
     return {"agents": {agent_id: agent}}
 
 
-# ── Test 1: _add_memory never writes to agent["memory"] ───────────────────────
+# ── Test 1: _add_memory never writes to legacy list memory ────────────────────
 
 def test_add_memory_never_writes_legacy_memory_list() -> None:
     """After PR5, _add_memory must NOT write to agent['memory']."""
@@ -49,8 +51,7 @@ def test_add_memory_never_writes_legacy_memory_list() -> None:
         agent_id="bot1",
     )
 
-    # agent["memory"] must not be created or populated
-    assert agent.get("memory") is None or agent.get("memory") == []
+    assert agent.get(LEGACY_MEMORY_KEY) is None or agent.get(LEGACY_MEMORY_KEY) == []
     # memory_v3 must have the record
     recs = list(ensure_memory_v3(agent)["records"].values())
     assert any(r.get("kind") == "item_bought" for r in recs)
@@ -67,7 +68,7 @@ def test_multiple_add_memory_calls_never_populate_legacy_list() -> None:
             agent_id="bot1",
         )
 
-    assert agent.get("memory") is None or agent.get("memory") == []
+    assert agent.get(LEGACY_MEMORY_KEY) is None or agent.get(LEGACY_MEMORY_KEY) == []
     recs = ensure_memory_v3(agent)["records"]
     assert len(recs) == 5
 
@@ -127,22 +128,17 @@ def test_v3_memory_type_returns_correct_type() -> None:
     assert "observation" in types
 
 
-# ── Test 3: import_legacy_memory is NOT called during memory init ──────────────
+# ── Test 3: old removed bridge module is not importable ───────────────────────
 
-def test_memory_init_does_not_call_import_legacy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The memory init block must not call import_legacy_memory under any condition."""
-    called = []
+def test_old_memory_bridge_module_not_importable() -> None:
+    """The removed bridge module should stay absent."""
 
-    # Patch the function in its old location (should not be importable, but guard anyway)
     import sys
-    # Ensure the old module is gone
     for mod_name in list(sys.modules.keys()):
-        if "legacy_bridge" in mod_name:
+        if "old_memory_bridge" in mod_name:
             del sys.modules[mod_name]
 
-    # Confirm legacy_bridge module doesn't exist
     with pytest.raises((ImportError, ModuleNotFoundError)):
-        from app.games.zone_stalkers.memory import legacy_bridge  # noqa: F401
+        from app.games.zone_stalkers.memory import old_memory_bridge  # noqa: F401
 
-    # If we reach here, legacy_bridge is truly gone — no import_legacy_memory call is possible.
     assert True

@@ -388,7 +388,6 @@ def test_lazy_consume_reschedules_threshold_tasks_immediately():
         "thirst": 10.0,
         "sleepiness": 10.0,
         "inventory": [{"id": "food_1", "type": "bread", "name": "Буханка хлеба"}],
-        "memory": [],
     }
     ensure_needs_state(agent, world_turn)
     state = {

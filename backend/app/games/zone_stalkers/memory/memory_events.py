@@ -2,8 +2,7 @@
 
 This module is the sole canonical path for writing agent memory.  Every call
 to ``_add_memory`` in tick_rules.py ultimately calls
-``write_memory_event_to_v3`` here; the legacy ``agent["memory"]`` list is no
-longer written to.
+``write_memory_event_to_v3`` here.
 """
 from __future__ import annotations
 

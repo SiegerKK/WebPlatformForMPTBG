@@ -18,7 +18,6 @@ from tests.decision.v3.e2e_helpers import any_memory, any_objective_decision, ru
 def _make_pr3_state(seed=42, num_ai_stalkers=2):
     state = generate_zone(seed=seed, num_players=0, num_ai_stalkers=num_ai_stalkers, num_mutants=0, num_traders=1)
     state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
     state["cpu_event_driven_actions_enabled"] = True
     state["cpu_lazy_needs_enabled"] = True
     return state
@@ -55,7 +54,6 @@ def _hunter(*, goal: str, kill_target_id: str | None = None, ammo_count: int = 3
             "armor": {"type": "leather_jacket", "value": 200},
         },
         "inventory": inventory,
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
     }
@@ -81,7 +79,6 @@ def _target(*, location_id: str, hp: int = 1) -> dict[str, Any]:
         "global_goal": "get_rich",
         "equipment": {},
         "inventory": [],
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
     }
@@ -104,7 +101,6 @@ def _base_state(locations: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "relations": {},
         "groups": {},
         "cpu_copy_on_write_enabled": True,
-        "cpu_copy_on_write_legacy_bridge_enabled": False,
         "cpu_event_driven_actions_enabled": True,
         "cpu_lazy_needs_enabled": True,
     }

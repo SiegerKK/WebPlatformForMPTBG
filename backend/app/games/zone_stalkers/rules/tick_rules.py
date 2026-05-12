@@ -87,9 +87,6 @@ _HOUR_IN_TURNS = 60 // MINUTES_PER_TURN       # turns needed to pass 1 in-game h
 EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exploration
 DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
 
-# Legacy agent memory cap (compatibility-only path).
-MAX_AGENT_MEMORY = 100
-
 # ── Memory v3 query helpers ────────────────────────────────────────────────────
 
 def _v3_records_desc(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -737,8 +734,6 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             try:
                 from app.games.zone_stalkers.runtime.zone_tick_runtime import ZoneTickRuntime as _ZoneTickRuntime
                 _tick_runtime = _ZoneTickRuntime(source_state=source_state, profiler=_tick_profiler)
-                if source_state.get("cpu_copy_on_write_legacy_bridge_enabled", False):
-                    _tick_runtime.prepare_for_legacy_mutation()
                 state = _tick_runtime.state
             except Exception:
                 _cow_fallback_to_deepcopy = 1
@@ -2528,7 +2523,7 @@ def _add_memory(
         except Exception:
             pass
 
-    # Write exclusively to memory_v3 (legacy agent["memory"] is no longer used).
+    # Write exclusively to memory_v3.
     write_memory_event_to_v3(
         agent_id=str(resolved_agent_id),
         agent=agent,

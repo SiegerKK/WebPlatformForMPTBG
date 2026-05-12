@@ -2,8 +2,7 @@
 
 Previously these lived in test_legacy_memory_bridge.py, testing
 `bridge_legacy_entry_to_memory_v3`.  They now test `write_memory_event_to_v3`,
-which is the renamed canonical function.  All legacy-only tests
-(import_legacy_memory, legacy_memory_write_enabled flag) have been removed.
+which is the renamed canonical function.  All removed-path tests were deleted.
 """
 from __future__ import annotations
 

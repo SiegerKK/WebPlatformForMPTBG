@@ -89,7 +89,6 @@ def _make_agent(
         "risk_tolerance": 0.5,
         "equipment": equipment,
         "inventory": inventory,
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
         "kill_target_id": "target_bot" if global_goal == "kill_stalker" else None,

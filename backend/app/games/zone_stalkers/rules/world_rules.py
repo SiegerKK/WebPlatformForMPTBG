@@ -385,7 +385,6 @@ def resolve_world_command(
             "location_id": loc_id,
             "inventory": trader_inv,
             "money": rng.randint(3000, 8000),
-            "memory": [],
         }
         state.setdefault("traders", {})[new_trader_id] = trader
         state["locations"][loc_id]["agents"].append(new_trader_id)
