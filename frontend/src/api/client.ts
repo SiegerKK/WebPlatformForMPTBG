@@ -122,7 +122,7 @@ export const usersApi = {
 
 export const locationsApi = {
   /**
-   * Upload an image for a zone-map location.
+   * Upload an image for a zone-map location (legacy: uploads to 'clear' slot).
    * Returns a payload with the public URL and optional revision metadata.
    */
   uploadImage: (contextId: string, locationId: string, file: File) => {
@@ -132,6 +132,9 @@ export const locationsApi = {
       url: string;
       image_url?: string;
       location_id?: string;
+      slot?: string;
+      primary_image_slot?: string;
+      image_slots?: Record<string, string | null>;
       state_revision?: number;
       map_revision?: number;
     }>(
@@ -141,7 +144,30 @@ export const locationsApi = {
     );
   },
 
-  /** Delete the image attached to a location. */
+  /**
+   * Upload an image for a specific slot of a zone-map location.
+   */
+  uploadImageSlot: (contextId: string, locationId: string, file: File, slot: string) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('slot', slot);
+    return apiClient.post<{
+      url: string;
+      image_url?: string;
+      location_id?: string;
+      slot?: string;
+      primary_image_slot?: string;
+      image_slots?: Record<string, string | null>;
+      state_revision?: number;
+      map_revision?: number;
+    }>(
+      `/locations/${contextId}/${locationId}/image`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    );
+  },
+
+  /** Delete the image attached to a location (all slots). */
   deleteImage: (contextId: string, locationId: string) =>
     apiClient.delete<{
       status: 'deleted';
@@ -149,6 +175,19 @@ export const locationsApi = {
       state_revision?: number;
       map_revision?: number;
     }>(`/locations/${contextId}/${locationId}/image`),
+
+  /** Delete the image for a specific slot of a location. */
+  deleteImageSlot: (contextId: string, locationId: string, slot: string) =>
+    apiClient.delete<{
+      status: 'deleted';
+      location_id: string;
+      slot: string;
+      image_url?: string | null;
+      image_slots?: Record<string, string | null>;
+      primary_image_slot?: string | null;
+      state_revision?: number;
+      map_revision?: number;
+    }>(`/locations/${contextId}/${locationId}/image`, { params: { slot } }),
 };
 
 export const zoneMapApi = {

@@ -164,7 +164,6 @@ export interface AgentForProfile {
     type: string;
     title: string;
     summary?: string;
-    source?: string;
     effects?: Record<string, unknown>;
   }>;
   brain_trace?: BrainTrace | null;
@@ -376,66 +375,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
 
   // ── Exports ──────────────────────────────────────────────────────────────
   const handleFullDebugExport = () => {
-    const compactHistory = buildCompactNpcHistoryExport(agent, displayMemory, locationName);
-    const compactStory = compactHistory.story_events ?? [];
-    const storyLimit = 50;
-    const memoryRecords = agent.memory_v3?.records ? Object.values(agent.memory_v3.records) : [];
-    const byLayer = memoryRecords.reduce<Record<string, number>>((acc, rec) => {
-      const layer = String(rec.layer ?? 'unknown');
-      acc[layer] = (acc[layer] ?? 0) + 1;
-      return acc;
-    }, {});
-    const byKind = memoryRecords.reduce<Record<string, number>>((acc, rec) => {
-      const kind = String(rec.kind ?? 'unknown');
-      acc[kind] = (acc[kind] ?? 0) + 1;
-      return acc;
-    }, {});
-    const total = memoryRecords.length;
-    const topKinds = Object.entries(byKind)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8);
-    const turns = memoryRecords
-      .map((rec) => Number((rec as { created_turn?: number }).created_turn ?? 0))
-      .filter((turn) => Number.isFinite(turn));
-    const memoryStats = {
-      records_count: total,
-      records_cap: 500,
-      cap_utilization: total > 0 ? total / 500 : 0,
-      by_layer: byLayer,
-      top_kinds: topKinds,
-      semantic_ratio: total > 0 ? (byLayer.semantic ?? 0) / total : 0,
-      episodic_ratio: total > 0 ? (byLayer.episodic ?? 0) / total : 0,
-      stalkers_seen_ratio: total > 0 ? (byKind.stalkers_seen ?? 0) / total : 0,
-      travel_hop_ratio: total > 0 ? (byKind.travel_hop ?? 0) / total : 0,
-      last_record_turn: turns.length > 0 ? Math.max(...turns) : null,
-      oldest_record_turn: turns.length > 0 ? Math.min(...turns) : null,
-    };
-    const memoryHealth = {
-      is_at_cap: total >= 500,
-      stalkers_seen_dominates: total > 0 ? ((byKind.stalkers_seen ?? 0) / total) > 0.5 : false,
-      semantic_ratio_low: total > 0 ? ((byLayer.semantic ?? 0) / total) < 0.08 : true,
-      top_kind: topKinds[0]?.[0] ?? null,
-    };
-    const exportData = {
-      ...agent,
-      story_events: compactStory.slice(-storyLimit),
-      story_events_count: compactStory.length,
-      story_events_truncated: compactStory.length > storyLimit,
-      memory_v3_stats: memoryStats,
-      memory_health: memoryHealth,
-      sleep_need: {
-        raw_sleepiness: Number(agent.sleepiness ?? 0),
-        interpreted_fatigue: Number(agent.sleepiness ?? 0),
-        scale: 'sleepiness_high_means_tired',
-      },
-      terminal_state: agent.has_left_zone
-        ? {
-            kind: 'left_zone',
-            global_goal_achieved: Boolean(agent.global_goal_achieved),
-            left_zone_turn: null,
-          }
-        : undefined,
-    };
+    const exportData = { ...agent, story_events: fetchedMemory ?? agent.story_events ?? [] };
     downloadJson(`stalker_${agent.name.replace(/\s+/g, '_')}_full_debug.json`, exportData);
   };
 

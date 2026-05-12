@@ -96,7 +96,7 @@ export type CompactNpcHistoryExport = {
     recent_trace_events: BrainTraceEvent[];
   };
 
-  story_events: MemEntry[];
+  story_events: CompactTimelineEntry[];
 
   memory_v3_summary?: {
     records_count?: number;
@@ -431,7 +431,6 @@ const buildStoryEventsFromMemoryV3 = (agent: AgentForProfile): MemEntry[] => {
             : (rec.kind as string),
         location_id: rec.location_id as string | undefined,
       },
-      source: 'memory_v3',
     }));
 
   const traceDerived: MemEntry[] = (agent.brain_trace?.events ?? []).map((event) => ({
@@ -464,7 +463,6 @@ const buildStoryEventsFromMemoryV3 = (agent: AgentForProfile): MemEntry[] => {
       scheduled_action_type:
         typeof event.scheduled_action_type === 'string' ? event.scheduled_action_type : undefined,
     },
-    source: 'brain_trace',
   }));
 
   return [...memoryDerived, ...traceDerived]
@@ -494,13 +492,6 @@ export const buildCompactNpcHistoryExport = (
     .slice(-120)
     .map(toCompactTimelineEntry)
     .filter((entry) => entry.action_kind !== 'active_plan_step_started');
-  const storyEvents = storyEventsSource
-    .slice(-120)
-    .map((entry) => ({
-      ...entry,
-      source: entry.source ?? 'memory_v3',
-      effects: { ...(entry.effects ?? {}) },
-    }));
   const legacyContextUsed = !agent.brain_v3_context && !!agent._v2_context;
   const currentObjective = getCurrentObjectiveFromAgent(agent, latestDecision, storyTimeline, {
     includeLegacyContext: legacyContextUsed,
@@ -621,7 +612,7 @@ export const buildCompactNpcHistoryExport = (
           },
       recent_trace_events: recentTraceEvents,
     },
-    story_events: storyEvents,
+    story_events: storyTimeline,
     memory_v3_summary: buildMemoryV3Summary(agent.memory_v3),
     hunt_search: huntBelief
       ? {

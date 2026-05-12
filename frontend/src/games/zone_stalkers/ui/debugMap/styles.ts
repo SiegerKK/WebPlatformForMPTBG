@@ -4,10 +4,12 @@ import React from 'react';
 
 export const s: Record<string, React.CSSProperties> = {
   page: {
-    display: 'flex',
-    gap: 16,
+    display: 'grid',
+    gridTemplateColumns: 'minmax(520px, 1fr) minmax(420px, 520px)',
+    gap: 12,
     alignItems: 'flex-start',
     minHeight: 500,
+    minWidth: 0,
   },
   canvasWrap: {
     flex: 1,
@@ -109,8 +111,10 @@ export const s: Record<string, React.CSSProperties> = {
     height: 'min(620px, 72vh)',
   },
   detailPanel: {
-    width: 268,
-    flexShrink: 0,
+    minWidth: 420,
+    maxWidth: 560,
+    minHeight: 0,
+    overflowX: 'hidden',
   },
   detail: {
     background: '#0f172a',
@@ -122,17 +126,24 @@ export const s: Record<string, React.CSSProperties> = {
     gap: '0.75rem',
     maxHeight: '72vh',
     overflowY: 'auto',
+    overflowX: 'hidden',
+    minWidth: 0,
+    wordBreak: 'break-word',
+    overflowWrap: 'anywhere',
   },
   detailHeader: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
     gap: 8,
+    minWidth: 0,
   },
   detailName: {
     color: '#f8fafc',
     fontWeight: 700,
     fontSize: '1rem',
+    wordBreak: 'break-word',
+    overflowWrap: 'anywhere',
   },
   detailMeta: {
     color: '#475569',
@@ -166,6 +177,7 @@ export const s: Record<string, React.CSSProperties> = {
     padding: '1rem',
     color: '#475569',
     fontSize: '0.82rem',
+    minWidth: 0,
   },
   emptyDetailTitle: {
     color: '#475569',
@@ -222,6 +234,20 @@ export const s: Record<string, React.CSSProperties> = {
     padding: '1.25rem 1.5rem',
     width: 340,
     maxWidth: '95vw',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 4,
+  },
+  locationModal: {
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: 12,
+    padding: '1.25rem 1.5rem',
+    width: 'min(980px, calc(100vw - 32px))',
+    maxWidth: 'calc(100vw - 32px)',
+    maxHeight: 'calc(100vh - 48px)',
+    overflowY: 'auto',
+    overflowX: 'hidden',
     display: 'flex',
     flexDirection: 'column' as const,
     gap: 4,

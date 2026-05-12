@@ -1,8 +1,15 @@
 /**
  * Modals — LocationModal (edit/create location) and SpawnMutantModal.
  */
-import React, { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { s } from './styles';
+import {
+  LOCATION_IMAGE_SLOTS,
+  LOCATION_IMAGE_SLOT_ICONS,
+  LOCATION_IMAGE_SLOT_LABELS,
+  type LocationImageSlot,
+  type LocationImageSlots,
+} from './types';
 
 // ─── Terrain type options ─────────────────────────────────────────────────────
 
@@ -57,8 +64,6 @@ export interface LocationSaveData {
   dominantAnomalyType: string;
   region: string;
   exitZone: boolean;
-  /** New image file to upload. `null` means "remove existing image". `undefined` means "no change". */
-  imageFile?: File | null;
 }
 
 export function LocationModal({
@@ -69,9 +74,14 @@ export function LocationModal({
   initialDominantAnomalyType = '',
   initialRegion = '',
   initialExitZone = false,
+  initialImageSlots,
+  initialPrimaryImageSlot = null,
   initialImageUrl = null,
   regions,
   locId,
+  onUploadImageSlot,
+  onDeleteImageSlot,
+  onSetPrimaryImageSlot,
   onClose,
   onSave,
 }: {
@@ -82,10 +92,14 @@ export function LocationModal({
   initialDominantAnomalyType?: string;
   initialRegion?: string;
   initialExitZone?: boolean;
-  /** Current image URL (only relevant in edit mode). */
+  initialImageSlots?: LocationImageSlots;
+  initialPrimaryImageSlot?: LocationImageSlot | null;
   initialImageUrl?: string | null;
   regions?: Record<string, { name: string; colorIndex: number }>;
   locId?: string;
+  onUploadImageSlot?: (slot: LocationImageSlot, file: File) => Promise<{ image_slots?: LocationImageSlots; primary_image_slot?: LocationImageSlot | null } | void>;
+  onDeleteImageSlot?: (slot: LocationImageSlot) => Promise<{ image_slots?: LocationImageSlots; primary_image_slot?: LocationImageSlot | null } | void>;
+  onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
   onClose: () => void;
   onSave: (data: LocationSaveData) => Promise<void>;
 }) {
@@ -97,23 +111,109 @@ export function LocationModal({
   const [exitZone, setExitZone] = useState(initialExitZone);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [slotBusy, setSlotBusy] = useState<Partial<Record<LocationImageSlot, boolean>>>({});
+  const canEditImages = mode === 'edit' && !!locId;
+  const buildInitialSlots = useMemo(() => {
+    const slots: LocationImageSlots = {};
+    for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = initialImageSlots?.[slot] ?? null;
+    if (!LOCATION_IMAGE_SLOTS.some((slot) => Boolean(slots[slot])) && initialImageUrl) slots.clear = initialImageUrl;
+    return slots;
+  }, [initialImageSlots, initialImageUrl]);
+  const [imageSlots, setImageSlots] = useState<LocationImageSlots>(buildInitialSlots);
+  const [primaryImageSlot, setPrimaryImageSlot] = useState<LocationImageSlot | null>(
+    initialPrimaryImageSlot ?? (buildInitialSlots.clear ? 'clear' : null),
+  );
+  useEffect(() => {
+    setImageSlots(buildInitialSlots);
+    setPrimaryImageSlot(initialPrimaryImageSlot ?? (buildInitialSlots.clear ? 'clear' : null));
+    setSlotBusy({});
+  }, [buildInitialSlots, initialPrimaryImageSlot, locId]);
+  const primaryImageUrl = primaryImageSlot ? imageSlots[primaryImageSlot] ?? null : null;
 
-  // Image state
-  const [imageFile, setImageFile] = useState<File | null | undefined>(undefined);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(initialImageUrl ?? null);
-
-  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] ?? null;
-    setImageFile(file);
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setPreviewUrl(url);
+  const applyServerImageState = (next?: { image_slots?: LocationImageSlots; primary_image_slot?: LocationImageSlot | null } | void) => {
+    if (!next) return;
+    if (next.image_slots) {
+      setImageSlots((prev) => {
+        const merged: LocationImageSlots = { ...prev };
+        for (const slot of LOCATION_IMAGE_SLOTS) merged[slot] = next.image_slots?.[slot] ?? null;
+        return merged;
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'primary_image_slot')) {
+      setPrimaryImageSlot(next.primary_image_slot ?? null);
     }
   };
 
-  const handleRemoveImage = () => {
-    setImageFile(null);
-    setPreviewUrl(null);
+  const handleUploadSlot = async (slot: LocationImageSlot, file: File) => {
+    if (!canEditImages || !onUploadImageSlot) return;
+    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
+    setErr(null);
+    try {
+      const next = await onUploadImageSlot(slot, file);
+      applyServerImageState(next);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Upload failed');
+    } finally {
+      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
+    }
+  };
+
+  const handleDeleteSlot = async (slot: LocationImageSlot) => {
+    if (!canEditImages || !onDeleteImageSlot || !imageSlots[slot]) return;
+    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
+    setErr(null);
+    try {
+      const next = await onDeleteImageSlot(slot);
+      applyServerImageState(next);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Delete failed');
+    } finally {
+      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
+    }
+  };
+
+  const handleSetPrimarySlot = async (slot: LocationImageSlot) => {
+    if (!canEditImages || !onSetPrimaryImageSlot || !imageSlots[slot] || primaryImageSlot === slot) return;
+    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
+    setErr(null);
+    try {
+      await onSetPrimaryImageSlot(slot);
+      setPrimaryImageSlot(slot);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Set primary failed');
+    } finally {
+      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
+    }
+  };
+
+  const handleDownloadSlot = async (slot: LocationImageSlot) => {
+    const url = imageSlots[slot];
+    if (!url) return;
+    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
+    setErr(null);
+    try {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
+      const blob = await res.blob();
+      const extFromType = blob.type === 'image/png' ? '.png'
+        : blob.type === 'image/webp' ? '.webp'
+          : blob.type === 'image/gif' ? '.gif'
+            : '.jpg';
+      const extFromUrlMatch = url.match(/\.(jpg|jpeg|png|webp|gif)(?:$|\?)/i);
+      const ext = extFromUrlMatch ? `.${extFromUrlMatch[1].toLowerCase() === 'jpeg' ? 'jpg' : extFromUrlMatch[1].toLowerCase()}` : extFromType;
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `${locId ?? 'location'}_${slot}${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Download failed');
+    } finally {
+      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
+    }
   };
 
   const handleSubmit = async () => {
@@ -121,7 +221,7 @@ export function LocationModal({
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region, exitZone, imageFile });
+      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region, exitZone });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -132,7 +232,7 @@ export function LocationModal({
 
   return (
     <div style={s.modalOverlay} onMouseDown={onClose}>
-      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+      <div style={s.locationModal} onMouseDown={(e) => e.stopPropagation()}>
         <h3 style={{ margin: '0 0 12px', color: '#f8fafc', fontSize: '1rem' }}>
           {mode === 'edit' ? '✏ Edit Location' : '➕ New Location'}
         </h3>
@@ -208,36 +308,111 @@ export function LocationModal({
           🚪 Выход из Зоны
         </label>
 
-        {/* ── Image upload (edit mode only) ────────────────────────── */}
-        {mode === 'edit' && (
-          <div style={{ marginTop: 12 }}>
-            <label style={s.modalLabel}>🖼 Изображение локации</label>
-            {previewUrl ? (
-              <div style={{ marginBottom: 8 }}>
-                <img
-                  src={previewUrl}
-                  alt="preview"
-                  style={{ width: '100%', maxHeight: 160, objectFit: 'cover', borderRadius: 6, border: '1px solid #1e3a5f' }}
-                />
-                <button
-                  type="button"
-                  onClick={handleRemoveImage}
-                  style={{ marginTop: 4, background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '0.72rem', padding: 0 }}
-                >
-                  ✕ Удалить изображение
-                </button>
+        {/* ── Image slots editor ───────────────────────────────────── */}
+        <div style={{ marginTop: 12 }}>
+          <label style={s.modalLabel}>🖼 Изображения локации</label>
+          {mode === 'create' && (
+            <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: 8 }}>
+              Сначала создайте локацию, затем добавьте изображения в режиме редактирования.
+            </div>
+          )}
+          {mode === 'edit' && (
+            <>
+              <div style={{
+                width: '100%',
+                borderRadius: 8,
+                border: '1px solid #1e3a5f',
+                background: '#020617',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: primaryImageUrl ? '#f8fafc' : '#334155',
+                fontSize: '0.75rem',
+                marginBottom: 8,
+                overflow: 'hidden',
+              }}>
+                {primaryImageUrl ? (
+                  <img src={primaryImageUrl} alt={name || 'location'} style={{ width: '100%', height: 'auto', objectFit: 'contain', display: 'block' }} />
+                ) : (
+                  'Нет изображения'
+                )}
               </div>
-            ) : (
-              <div style={{ color: '#475569', fontSize: '0.72rem', marginBottom: 6 }}>Изображение не задано</div>
-            )}
-            <input
-              type="file"
-              accept="image/jpeg,image/png,image/webp,image/gif"
-              onChange={handleImageChange}
-              style={{ display: 'block', fontSize: '0.72rem', color: '#94a3b8', marginBottom: 4 }}
-            />
-          </div>
-        )}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(5, minmax(120px, 1fr))' }}>
+                  {LOCATION_IMAGE_SLOTS.map((slot) => {
+                    const url = imageSlots[slot] ?? null;
+                    const isPrimary = primaryImageSlot === slot;
+                    const busy = Boolean(slotBusy[slot]);
+                    return (
+                      <div key={slot} style={{ border: '1px solid #1e293b', borderRadius: 6, padding: 8, background: '#0b1220' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginBottom: 6, color: '#cbd5e1', fontSize: '0.7rem' }}>
+                          <span>{LOCATION_IMAGE_SLOT_ICONS[slot]} {LOCATION_IMAGE_SLOT_LABELS[slot]}</span>
+                          <span style={{ color: isPrimary ? '#60a5fa' : '#475569' }}>{isPrimary ? '★ primary' : ''}</span>
+                        </div>
+                        <div style={{
+                          width: '100%',
+                          height: 80,
+                          borderRadius: 6,
+                          border: '1px solid #1e3a5f',
+                          background: '#020617',
+                          marginBottom: 6,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                          color: '#334155',
+                          fontSize: '0.68rem',
+                        }}>
+                          {url ? <img src={url} alt={`${slot}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : 'пусто'}
+                        </div>
+                        <div style={{ display: 'grid', gap: 4 }}>
+                          <label style={{ ...s.spawnBtn, cursor: canEditImages && !busy ? 'pointer' : 'default', opacity: canEditImages && !busy ? 1 : 0.6 }}>
+                            📤 Загрузить
+                            <input
+                              type="file"
+                              accept="image/jpeg,image/png,image/webp,image/gif"
+                              style={{ display: 'none' }}
+                              disabled={!canEditImages || busy}
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) void handleUploadSlot(slot, file);
+                                e.currentTarget.value = '';
+                              }}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            style={s.spawnBtn}
+                            disabled={!url || busy}
+                            onClick={() => void handleDownloadSlot(slot)}
+                          >
+                            ⬇ Скачать картинку
+                          </button>
+                          <button
+                            type="button"
+                            style={{ ...s.spawnBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
+                            disabled={!canEditImages || !url || busy}
+                            onClick={() => void handleDeleteSlot(slot)}
+                          >
+                            🗑 Удалить
+                          </button>
+                          <button
+                            type="button"
+                            style={{ ...s.spawnBtn, color: '#93c5fd', borderColor: '#1d4ed8' }}
+                            disabled={!canEditImages || !url || isPrimary || busy}
+                            onClick={() => void handleSetPrimarySlot(slot)}
+                          >
+                            ★ Сделать приоритетной
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
 
         {err && <div style={{ color: '#ef4444', fontSize: '0.72rem', marginTop: 6 }}>{err}</div>}
 

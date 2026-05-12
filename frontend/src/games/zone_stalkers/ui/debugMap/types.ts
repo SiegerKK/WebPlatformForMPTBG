@@ -9,6 +9,56 @@ export interface LocationConn {
   closed?: boolean;
 }
 
+// ─── Image slots ─────────────────────────────────────────────────────────────
+
+export type LocationImageSlot = "clear" | "fog" | "rain" | "night_clear" | "night_rain";
+
+export type LocationImageSlots = Partial<Record<LocationImageSlot, string | null>>;
+
+export const LOCATION_IMAGE_SLOTS: LocationImageSlot[] = [
+  "clear",
+  "fog",
+  "rain",
+  "night_clear",
+  "night_rain",
+];
+
+export const LOCATION_IMAGE_SLOT_LABELS: Record<LocationImageSlot, string> = {
+  clear: "Ясно",
+  fog: "Туман",
+  rain: "Дождь",
+  night_clear: "Ночь ясно",
+  night_rain: "Ночь дождь",
+};
+
+export const LOCATION_IMAGE_SLOT_ICONS: Record<LocationImageSlot, string> = {
+  clear: "☀️",
+  fog: "🌫️",
+  rain: "🌧️",
+  night_clear: "🌙",
+  night_rain: "🌧️🌙",
+};
+
+/**
+ * Returns the URL of the primary image for a location, with fallback logic.
+ * This is the canonical function to use everywhere instead of `loc.image_url`.
+ */
+export function getPrimaryLocationImageUrl(loc: ZoneLocation): string | null {
+  const slot = loc.primary_image_slot;
+  if (slot && loc.image_slots?.[slot]) return loc.image_slots[slot] ?? null;
+  // Legacy fallback: if image_url is set and no slots are populated, use it
+  if (loc.image_url && !loc.image_slots) return loc.image_url;
+  if (loc.image_url && Object.keys(loc.image_slots ?? {}).length === 0) return loc.image_url;
+  // Scan all slots in order for any available image
+  for (const key of LOCATION_IMAGE_SLOTS) {
+    const url = loc.image_slots?.[key];
+    if (url) return url;
+  }
+  // Final fallback to raw image_url
+  if (loc.image_url) return loc.image_url;
+  return null;
+}
+
 export interface ZoneLocation {
   id: string;
   name: string;
@@ -21,8 +71,12 @@ export interface ZoneLocation {
   items: Array<{ id: string; type: string; name: string }>;
   agents: string[];
   exit_zone?: boolean;
-  /** URL of an attached image, served from /media/... */
+  /** Legacy single-image URL — kept for backward compat. Use getPrimaryLocationImageUrl(). */
   image_url?: string | null;
+  /** Per-weather-condition image slots. */
+  image_slots?: LocationImageSlots;
+  /** Which slot is the current primary image. */
+  primary_image_slot?: LocationImageSlot | null;
 }
 
 export interface StalkerAgent {
