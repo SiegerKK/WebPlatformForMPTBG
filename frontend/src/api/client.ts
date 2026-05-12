@@ -182,6 +182,9 @@ export const locationsApi = {
       status: 'deleted';
       location_id: string;
       slot: string;
+      image_url?: string | null;
+      image_slots?: Record<string, string | null>;
+      primary_image_slot?: string | null;
       state_revision?: number;
       map_revision?: number;
     }>(`/locations/${contextId}/${locationId}/image`, { params: { slot } }),

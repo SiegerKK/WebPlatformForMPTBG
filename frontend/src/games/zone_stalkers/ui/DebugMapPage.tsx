@@ -13,13 +13,14 @@
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
-import type { DebugMapPageProps, LocationConn, ZoneLocation, LocationImageSlot } from './debugMap/types';
+import type { DebugMapPageProps, LocationConn, ZoneLocation, LocationImageSlot, LocationImageSlots } from './debugMap/types';
 import {
   CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
   TERRAIN_TYPE_COLOR, TERRAIN_TYPE_LABELS,
   REGION_LABELS, REGION_BG_COLOR, REGION_BORDER_COLOR, REGION_COLOR_PALETTE,
 } from './debugMap/constants';
+import { LOCATION_IMAGE_SLOTS, getPrimaryLocationImageUrl } from './debugMap/types';
 import { s } from './debugMap/styles';
 import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from './debugMap/DetailPanels';
 import { LocationModal } from './debugMap/Modals';
@@ -41,6 +42,22 @@ function formatTurns(turns: number): string {
   if (hours > 0) parts.push(`${hours} ч`);
   if (mins > 0 || parts.length === 0) parts.push(`${mins} мин`);
   return parts.join(' ');
+}
+
+function detectImageExtension(url: string, contentType?: string): string {
+  const fromUrl = url.match(/\.(jpg|jpeg|png|webp|gif)(?:$|\?)/i)?.[1]?.toLowerCase();
+  if (fromUrl) return `.${fromUrl === 'jpeg' ? 'jpg' : fromUrl}`;
+  if (contentType === 'image/png') return '.png';
+  if (contentType === 'image/webp') return '.webp';
+  if (contentType === 'image/gif') return '.gif';
+  return '.jpg';
+}
+
+function normalizeImageSlots(loc: ZoneLocation): LocationImageSlots {
+  const slots: LocationImageSlots = {};
+  for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = loc.image_slots?.[slot] ?? null;
+  if (!LOCATION_IMAGE_SLOTS.some((slot) => Boolean(slots[slot])) && loc.image_url) slots.clear = loc.image_url;
+  return slots;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -88,6 +105,8 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // ── Location edit / create modals ─────────────────────────────────────────
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [creatingLoc, setCreatingLoc] = useState(false);
+  const [localImageSlotsByLoc, setLocalImageSlotsByLoc] = useState<Record<string, LocationImageSlots>>({});
+  const [localPrimaryImageSlotByLoc, setLocalPrimaryImageSlotByLoc] = useState<Record<string, LocationImageSlot | null>>({});
 
   // ── Viewport persistence (pan + zoom saved per-match in localStorage) ────────
   const _vpKey = `zs_viewport_${matchId}`;
@@ -699,52 +718,70 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // ── Export full map ───────────────────────────────────────────────────────
   const handleExport = useCallback(async () => {
     const zip = new JSZip();
-    const imagesFolder = zip.folder('images')!;
+    const locationsForExport: Record<string, Record<string, unknown>> = {};
+    for (const [id, loc] of Object.entries(zoneState.locations)) {
+      const exportedSlots: LocationImageSlots = {};
+      for (const slot of LOCATION_IMAGE_SLOTS) exportedSlots[slot] = null;
+      const normalizedSlots = normalizeImageSlots(loc);
+      let primarySlot = loc.primary_image_slot ?? null;
+      let exportedPrimaryPath: string | null = null;
 
-    // Build location entries, fetching images where present
-    const locEntries = await Promise.all(
-      Object.entries(zoneState.locations).map(async ([id, loc]) => {
-        let imageFile: string | null = null;
-        if (loc.image_url) {
-          try {
-            const resp = await fetch(loc.image_url);
-            if (resp.ok) {
-              const blob = await resp.blob();
-              // Last segment of the URL path, e.g. "loc_forest.jpg"
-              const filename = loc.image_url.split('/').pop() ?? `${id}.jpg`;
-              imagesFolder.file(filename, blob);
-              imageFile = `images/${filename}`;
-            }
-          } catch {
-            // skip — image not critical for export
-          }
+      for (const slot of LOCATION_IMAGE_SLOTS) {
+        const imageUrl = normalizedSlots[slot];
+        if (!imageUrl) continue;
+        try {
+          const resp = await fetch(imageUrl, { credentials: 'include' });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const blob = await resp.blob();
+          const ext = detectImageExtension(imageUrl, blob.type);
+          const zipPath = `images/${id}/${slot}${ext}`;
+          zip.file(zipPath, blob);
+          exportedSlots[slot] = zipPath;
+          if (primarySlot === slot) exportedPrimaryPath = zipPath;
+        } catch (error) {
+          console.warn(`Failed to export image ${id}/${slot}`, error);
+          exportedSlots[slot] = null;
         }
-        return [
-          id,
-          {
-            name: loc.name,
-            terrain_type: loc.terrain_type,
-            anomaly_activity: loc.anomaly_activity,
-            dominant_anomaly_type: loc.dominant_anomaly_type ?? null,
-            region: loc.region ?? null,
-            connections: (localConnsRef.current[id] ?? loc.connections ?? []).map((c) => ({
-              to: c.to,
-              travel_time: c.travel_time,
-              type: c.type ?? 'normal',
-              closed: c.closed ?? false,
-            })),
-            artifacts: loc.artifacts ?? [],
-            ...(imageFile !== null && { image_file: imageFile }),
-          },
-        ] as [string, Record<string, unknown>];
-      }),
-    );
+      }
+
+      if (!primarySlot || !exportedSlots[primarySlot]) {
+        primarySlot = LOCATION_IMAGE_SLOTS.find((slot) => Boolean(exportedSlots[slot])) ?? null;
+      }
+      if (primarySlot && exportedSlots[primarySlot]) {
+        exportedPrimaryPath = exportedSlots[primarySlot] ?? null;
+      }
+
+      locationsForExport[id] = {
+        id,
+        name: loc.name,
+        terrain_type: loc.terrain_type,
+        anomaly_activity: loc.anomaly_activity,
+        dominant_anomaly_type: loc.dominant_anomaly_type ?? null,
+        region: loc.region ?? null,
+        exit_zone: loc.exit_zone ?? false,
+        connections: (localConnsRef.current[id] ?? loc.connections ?? []).map((c) => ({
+          to: c.to,
+          travel_time: c.travel_time,
+          type: c.type ?? 'normal',
+          closed: c.closed ?? false,
+        })),
+        artifacts: loc.artifacts ?? [],
+        image_slots: exportedSlots,
+        primary_image_slot: primarySlot,
+        image_url: exportedPrimaryPath,
+      };
+    }
 
     const exportData = {
-      version: 4,
+      schema_version: 2,
+      exported_at: new Date().toISOString(),
+      locations: locationsForExport,
+      debug_layout: {
+        positions: effectivePosRef.current,
+        regions: localRegionsRef.current,
+      },
       positions: effectivePosRef.current,
       regions: localRegionsRef.current,
-      locations: Object.fromEntries(locEntries),
       world_turn: zoneState.world_turn,
       world_day: zoneState.world_day,
       world_hour: zoneState.world_hour,
@@ -810,6 +847,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           }
 
           const locsData = parsed.locations as Record<string, Record<string, unknown>>;
+          const parsedDebugLayout = (parsed.debug_layout && typeof parsed.debug_layout === 'object' && !Array.isArray(parsed.debug_layout))
+            ? parsed.debug_layout as Record<string, unknown>
+            : {};
           const locCount = Object.keys(locsData).length;
           const confirmed = window.confirm(
             `⚠️ Полный импорт карты из ZIP!\n\n` +
@@ -821,42 +861,36 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           );
           if (!confirmed) { e.target.value = ''; return; }
 
-          // Upload images for locations that have image_file in the ZIP
-          const imageUrlMap: Record<string, string> = {};
-          const failedImageLocs: string[] = [];
-          if (contextId) {
-            await Promise.all(
-              Object.entries(locsData).map(async ([locId, locData]) => {
-                const imageFilePath = locData['image_file'] as string | undefined;
-                if (!imageFilePath) return;
-                const zipEntry = zip.file(imageFilePath);
-                if (!zipEntry) return;
-                try {
-                  const imgBuf = await zipEntry.async('arraybuffer');
-                  const ext = imageFilePath.split('.').pop()?.toLowerCase() ?? '';
-                  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
-                  const mime = mimeMap[ext] ?? 'application/octet-stream';
-                  const imgFile = new File([imgBuf], imageFilePath.split('/').pop() ?? `${locId}.jpg`, { type: mime });
-                  const resp = await locationsApi.uploadImage(contextId, locId, imgFile);
-                  imageUrlMap[locId] = resp.data.image_url ?? resp.data.url;
-                } catch {
-                  failedImageLocs.push(locId);
-                }
-              }),
-            );
-          }
-
-          // Inject uploaded image_url back into location data
+          const schemaVersion = Number(parsed.schema_version ?? 1);
           const finalLocs: Record<string, Record<string, unknown>> = {};
           for (const [locId, locData] of Object.entries(locsData)) {
-            const url = imageUrlMap[locId];
-            finalLocs[locId] = url ? { ...locData, image_url: url } : { ...locData };
+            const incomingSlots = (locData.image_slots && typeof locData.image_slots === 'object' && !Array.isArray(locData.image_slots))
+              ? locData.image_slots as Record<string, string | null>
+              : {};
+            const normalizedSlots: Record<string, string | null> = Object.fromEntries(
+              LOCATION_IMAGE_SLOTS.map((slot) => [slot, null]),
+            );
+            if (schemaVersion >= 2) {
+              for (const slot of LOCATION_IMAGE_SLOTS) {
+                normalizedSlots[slot] = incomingSlots[slot] ?? null;
+              }
+            } else {
+              const legacyPath = typeof locData.image_url === 'string' ? locData.image_url : null;
+              if (legacyPath) normalizedSlots.clear = legacyPath;
+            }
+
+            finalLocs[locId] = {
+              ...locData,
+              image_slots: normalizedSlots,
+              primary_image_slot: (locData.primary_image_slot as string | undefined) ?? (normalizedSlots.clear ? 'clear' : null),
+              image_url: null,
+            };
           }
 
           await sendCommand('debug_import_full_map', {
             locations: finalLocs,
-            positions: parsed.positions ?? {},
-            regions: parsed.regions ?? {},
+            positions: parsed.positions ?? parsedDebugLayout.positions ?? {},
+            regions: parsed.regions ?? parsedDebugLayout.regions ?? {},
             world_turn: parsed.world_turn,
             world_day: parsed.world_day,
             world_hour: parsed.world_hour,
@@ -866,15 +900,69 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             emission_ends_turn: parsed.emission_ends_turn,
           });
 
-          const newPositions = (parsed.positions ?? {}) as Record<string, { x: number; y: number }>;
+          const failedImageLocs: string[] = [];
+          if (contextId) {
+            for (const [locId, locData] of Object.entries(locsData)) {
+              const slotPaths: Record<string, string | null> = {};
+              if (schemaVersion >= 2 && locData.image_slots && typeof locData.image_slots === 'object' && !Array.isArray(locData.image_slots)) {
+                for (const slot of LOCATION_IMAGE_SLOTS) {
+                  const p = (locData.image_slots as Record<string, string | null>)[slot];
+                  slotPaths[slot] = typeof p === 'string' ? p : null;
+                }
+              } else {
+                const legacy = typeof locData.image_url === 'string'
+                  ? locData.image_url
+                  : (typeof locData.image_file === 'string' ? locData.image_file : null);
+                slotPaths.clear = legacy;
+              }
+
+              for (const slot of LOCATION_IMAGE_SLOTS) {
+                const imageFilePath = slotPaths[slot];
+                if (!imageFilePath) continue;
+                const zipEntry = zip.file(imageFilePath);
+                if (!zipEntry) continue;
+                try {
+                  const imgBuf = await zipEntry.async('arraybuffer');
+                  const ext = imageFilePath.split('.').pop()?.toLowerCase() ?? '';
+                  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+                  const mime = mimeMap[ext] ?? 'application/octet-stream';
+                  const imgFile = new File([imgBuf], `${locId}_${slot}.${ext || 'jpg'}`, { type: mime });
+                  const upload = await locationsApi.uploadImageSlot(contextId, locId, imgFile, slot as LocationImageSlot);
+                  setLocalImageSlotsByLoc((prev) => ({
+                    ...prev,
+                    [locId]: upload.data.image_slots as LocationImageSlots,
+                  }));
+                  setLocalPrimaryImageSlotByLoc((prev) => ({
+                    ...prev,
+                    [locId]: (upload.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null,
+                  }));
+                } catch {
+                  failedImageLocs.push(`${locId}/${slot}`);
+                }
+              }
+
+              const requestedPrimary = locData.primary_image_slot as LocationImageSlot | undefined;
+              if (requestedPrimary && LOCATION_IMAGE_SLOTS.includes(requestedPrimary)) {
+                try {
+                  await sendCommand('debug_set_location_primary_image', { loc_id: locId, slot: requestedPrimary });
+                  setLocalPrimaryImageSlotByLoc((prev) => ({ ...prev, [locId]: requestedPrimary }));
+                } catch {
+                  failedImageLocs.push(`${locId}/primary`);
+                }
+              }
+            }
+          }
+
+          const newPositions = (parsed.positions ?? parsedDebugLayout.positions ?? {}) as Record<string, { x: number; y: number }>;
           const newConns = {} as Record<string, LocationConn[]>;
           for (const [id, locData] of Object.entries(finalLocs)) {
             if (Array.isArray(locData.connections)) {
               newConns[id] = locData.connections as LocationConn[];
             }
           }
-          const newRegions = (typeof parsed.regions === 'object' && !Array.isArray(parsed.regions) && parsed.regions !== null)
-            ? parsed.regions as Record<string, { name: string; colorIndex: number }>
+          const rawRegions = parsed.regions ?? parsedDebugLayout.regions;
+          const newRegions = (typeof rawRegions === 'object' && !Array.isArray(rawRegions) && rawRegions !== null)
+            ? rawRegions as Record<string, { name: string; colorIndex: number }>
             : {};
           setDragOverrides(newPositions);
           setLocalConns(newConns);
@@ -1064,24 +1152,67 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   );
 
 
-  const handleSaveEdit = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean; imageFile?: File | null }) => {
-      if (!editingLocId) return;
+  const handleUploadLocationImageSlot = useCallback(
+    async (locId: string, slot: LocationImageSlot, file: File) => {
+      if (!contextId) return undefined;
+      const resp = await locationsApi.uploadImageSlot(contextId, locId, file, slot);
+      const imageSlots = (resp.data.image_slots ?? {}) as LocationImageSlots;
+      const primary = (resp.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null;
+      setLocalImageSlotsByLoc((prev) => ({
+        ...prev,
+        [locId]: {
+          ...normalizeImageSlots(zoneState.locations[locId]),
+          ...imageSlots,
+        },
+      }));
+      setLocalPrimaryImageSlotByLoc((prev) => ({
+        ...prev,
+        [locId]: primary,
+      }));
+      return { image_slots: imageSlots, primary_image_slot: primary };
+    },
+    [contextId, zoneState.locations],
+  );
 
-      // Handle image upload / removal before updating the game state
-      let imageUrl: string | null | undefined;
-      if (data.imageFile instanceof File && contextId) {
-        // Upload new image
-        const response = await locationsApi.uploadImage(contextId, editingLocId, data.imageFile);
-        imageUrl = response.data.image_url ?? response.data.url;
-      } else if (data.imageFile === null) {
-        // Explicit removal
-        if (contextId) {
-          try { await locationsApi.deleteImage(contextId, editingLocId); } catch { /* ignore 404 */ }
-        }
-        imageUrl = null;
+  const handleDeleteLocationImageSlot = useCallback(
+    async (locId: string, slot: LocationImageSlot) => {
+      if (!contextId) return undefined;
+      const resp = await locationsApi.deleteImageSlot(contextId, locId, slot);
+      const imageSlots = (resp.data.image_slots ?? {}) as LocationImageSlots;
+      const primary = (resp.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null;
+      setLocalImageSlotsByLoc((prev) => ({
+        ...prev,
+        [locId]: {
+          ...normalizeImageSlots(zoneState.locations[locId]),
+          ...imageSlots,
+        },
+      }));
+      setLocalPrimaryImageSlotByLoc((prev) => ({
+        ...prev,
+        [locId]: primary,
+      }));
+      return { image_slots: imageSlots, primary_image_slot: primary };
+    },
+    [contextId, zoneState.locations],
+  );
+
+  const handleSetLocationPrimaryImageSlot = useCallback(
+    async (locId: string, slot: LocationImageSlot) => {
+      const prev = zoneState.locations[locId]?.primary_image_slot ?? null;
+      setLocalPrimaryImageSlotByLoc((curr) => ({ ...curr, [locId]: slot }));
+      try {
+        await sendCommand('debug_set_location_primary_image', { loc_id: locId, slot });
+      } catch (error) {
+        setLocalPrimaryImageSlotByLoc((curr) => ({ ...curr, [locId]: prev }));
+        throw error;
       }
-      // imageFile === undefined means "no change" → imageUrl stays undefined → not sent
+    },
+    [sendCommand, zoneState.locations],
+  );
+
+  const handleSaveEdit = useCallback(
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
+      if (!editingLocId) return;
 
       await sendCommand('debug_update_location', {
         loc_id: editingLocId,
@@ -1091,10 +1222,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
         exit_zone: data.exitZone,
-        ...(imageUrl !== undefined && { image_url: imageUrl }),
       });
     },
-    [editingLocId, sendCommand, contextId],
+    [editingLocId, sendCommand],
   );
 
   const handleSaveCreate = useCallback(
@@ -1143,7 +1273,53 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   }, [sendCommand, zoneState.locations]);
 
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
+  const detailLocEffective = useMemo(() => {
+    if (!detailLoc) return null;
+    const localSlots = localImageSlotsByLoc[detailLoc.id];
+    const localPrimary = Object.prototype.hasOwnProperty.call(localPrimaryImageSlotByLoc, detailLoc.id)
+      ? localPrimaryImageSlotByLoc[detailLoc.id]
+      : undefined;
+    const merged: ZoneLocation = {
+      ...detailLoc,
+      image_slots: localSlots ?? detailLoc.image_slots,
+      primary_image_slot: localPrimary !== undefined ? localPrimary : detailLoc.primary_image_slot,
+    };
+    merged.image_url = getPrimaryLocationImageUrl(merged);
+    return merged;
+  }, [detailLoc, localImageSlotsByLoc, localPrimaryImageSlotByLoc]);
   const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
+
+  useEffect(() => {
+    setLocalImageSlotsByLoc((prev) => {
+      const next = { ...prev };
+      for (const [locId, slots] of Object.entries(prev)) {
+        const server = zoneState.locations[locId];
+        if (!server) {
+          delete next[locId];
+          continue;
+        }
+        let matches = true;
+        for (const slot of LOCATION_IMAGE_SLOTS) {
+          if ((slots[slot] ?? null) !== (server.image_slots?.[slot] ?? null)) {
+            matches = false;
+            break;
+          }
+        }
+        if (matches) delete next[locId];
+      }
+      return next;
+    });
+    setLocalPrimaryImageSlotByLoc((prev) => {
+      const next = { ...prev };
+      for (const [locId, slot] of Object.entries(prev)) {
+        const server = zoneState.locations[locId];
+        if (!server || (server.primary_image_slot ?? null) === (slot ?? null)) {
+          delete next[locId];
+        }
+      }
+      return next;
+    });
+  }, [zoneState.locations]);
 
   // ── Region CRUD ───────────────────────────────────────────────────────────
   const handleSaveRegion = useCallback((regionId: string, name: string, colorIndex: number) => {
@@ -1916,11 +2092,11 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
 
       {/* ── Detail panel ──────────────────────────────────── */}
       <div style={s.detailPanel}>
-        {detailLoc ? (
+        {detailLocEffective ? (
           <LocationDetailPanel
-            loc={detailLoc}
+            loc={detailLocEffective}
             conns={detailConns}
-            regionName={detailLoc.region ? (localRegions[detailLoc.region]?.name ?? REGION_LABELS[detailLoc.region] ?? detailLoc.region) : undefined}
+            regionName={detailLocEffective.region ? (localRegions[detailLocEffective.region]?.name ?? REGION_LABELS[detailLocEffective.region] ?? detailLocEffective.region) : undefined}
             zoneState={zoneState}
             onClose={() => setSelectedLocId(null)}
             onEdit={() => setEditingLocId(selectedLocId!)}
@@ -1945,27 +2121,8 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             onAgentClick={(agentId) => setProfileAgentId(agentId)}
             onTraderClick={(traderId) => setProfileTraderId(traderId)}
             onDeleteLoc={() => handleDeleteLoc(selectedLocId!)}
-            onUploadLocationImageSlot={contextId ? async (slot: LocationImageSlot, file: File) => {
-              const resp = await locationsApi.uploadImageSlot(contextId, selectedLocId!, file, slot);
-              const url = resp.data.image_url ?? resp.data.url;
-              await sendCommand('debug_update_location', {
-                loc_id: selectedLocId!,
-                image_slots: { [slot]: url },
-                primary_image_slot: resp.data.primary_image_slot ?? slot,
-              });
-            } : undefined}
-            onDeleteLocationImageSlot={contextId ? async (slot: LocationImageSlot) => {
-              await locationsApi.deleteImageSlot(contextId, selectedLocId!, slot);
-              await sendCommand('debug_update_location', {
-                loc_id: selectedLocId!,
-                image_slots: { [slot]: null },
-              });
-            } : undefined}
             onSetPrimaryImageSlot={async (slot: LocationImageSlot) => {
-              await sendCommand('debug_set_location_primary_image', {
-                loc_id: selectedLocId!,
-                slot,
-              });
+              await handleSetLocationPrimaryImageSlot(selectedLocId!, slot);
             }}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
@@ -1995,8 +2152,17 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           initialRegion={zoneState.locations[editingLocId].region ?? ''}
           initialExitZone={zoneState.locations[editingLocId].exit_zone ?? false}
           initialImageUrl={zoneState.locations[editingLocId].image_url ?? null}
+          initialImageSlots={localImageSlotsByLoc[editingLocId] ?? zoneState.locations[editingLocId].image_slots}
+          initialPrimaryImageSlot={
+            Object.prototype.hasOwnProperty.call(localPrimaryImageSlotByLoc, editingLocId)
+              ? localPrimaryImageSlotByLoc[editingLocId]
+              : zoneState.locations[editingLocId].primary_image_slot
+          }
           regions={localRegions}
           locId={editingLocId}
+          onUploadImageSlot={contextId ? async (slot, file) => handleUploadLocationImageSlot(editingLocId, slot, file) : undefined}
+          onDeleteImageSlot={contextId ? async (slot) => handleDeleteLocationImageSlot(editingLocId, slot) : undefined}
+          onSetPrimaryImageSlot={async (slot) => handleSetLocationPrimaryImageSlot(editingLocId, slot)}
           onClose={() => setEditingLocId(null)}
           onSave={handleSaveEdit}
         />
