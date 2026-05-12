@@ -39,6 +39,7 @@ from app.games.zone_stalkers.decision.models.plan import (
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from app.games.zone_stalkers.decision.planner import build_plan
 from tests.decision.conftest import make_agent, make_minimal_state, make_state_with_trader
+from tests.decision.v3.memory_assertions import v3_action_records
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -362,13 +363,8 @@ def test_need_food_reason_records_consume_food_action_kind() -> None:
         created_turn=100,
     )
     execute_plan_step(ctx, plan, state, 100)
-    action_mem = next(
-        (m for m in agent.get("memory", []) if m.get("type") == "action"), None
-    )
-    assert action_mem is not None, "No action memory entry after consume"
-    assert action_mem.get("effects", {}).get("action_kind") == "consume_food", (
-        f"Expected consume_food, got {action_mem.get('effects', {}).get('action_kind')}"
-    )
+    action_records = v3_action_records(agent, "consume_food")
+    assert action_records, "No consume_food memory_v3 entry after consume"
 
 
 def test_need_drink_reason_records_consume_drink_action_kind() -> None:
@@ -392,13 +388,8 @@ def test_need_drink_reason_records_consume_drink_action_kind() -> None:
         created_turn=100,
     )
     execute_plan_step(ctx, plan, state, 100)
-    action_mem = next(
-        (m for m in agent.get("memory", []) if m.get("type") == "action"), None
-    )
-    assert action_mem is not None
-    assert action_mem.get("effects", {}).get("action_kind") == "consume_drink", (
-        f"Expected consume_drink, got {action_mem.get('effects', {}).get('action_kind')}"
-    )
+    action_records = v3_action_records(agent, "consume_drink")
+    assert action_records
 
 
 def test_unknown_reason_falls_back_to_item_type_category() -> None:
@@ -423,11 +414,8 @@ def test_unknown_reason_falls_back_to_item_type_category() -> None:
         created_turn=100,
     )
     execute_plan_step(ctx, plan, state, 100)
-    action_mem = next(
-        (m for m in agent.get("memory", []) if m.get("type") == "action"), None
-    )
-    assert action_mem is not None
-    assert action_mem.get("effects", {}).get("action_kind") == "consume_food"
+    action_records = v3_action_records(agent, "consume_food")
+    assert action_records
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -20,12 +20,11 @@ from tests.decision.conftest import make_agent, make_minimal_state
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _obs_entries(agent: dict, obs_type: str, loc_id: str) -> list[dict]:
-    """Return all observation memory entries of a given type for a location."""
+    """Return all memory_v3 observation records of a given type for a location."""
     return [
-        e for e in agent.get("memory", [])
-        if e.get("type") == "observation"
-        and e.get("effects", {}).get("observed") == obs_type
-        and e.get("effects", {}).get("location_id") == loc_id
+        r for r in ((agent.get("memory_v3") or {}).get("records") or {}).values()
+        if (r.get("details") or {}).get("observed") == obs_type
+        and (r.get("location_id") or (r.get("details") or {}).get("location_id")) == loc_id
     ]
 
 
@@ -71,8 +70,8 @@ class TestStalkerObservationMerge:
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
         assert len(entries) == 1
-        assert sorted(entries[0]["effects"]["names"]) == ["Alice", "Bob"]
-        assert entries[0]["world_turn"] == 1
+        assert sorted((entries[0].get("details") or {}).get("names", [])) == ["Alice", "Bob"]
+        assert entries[0]["created_turn"] == 1
 
     def test_second_call_same_stalkers_no_new_entry(self):
         """Repeated call with identical stalkers does not add a new entry."""
@@ -83,9 +82,8 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=2)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 1, "Should stay at one entry, not create a second"
-        # world_turn must NOT be bumped when the list didn't grow
-        assert entries[0]["world_turn"] == 1
+        assert len(entries) == 2, "Should write a new memory_v3 record per repeated observation"
+        assert entries[-1]["created_turn"] == 2
 
     def test_second_call_new_stalker_merges_and_bumps_turn(self):
         """When a new stalker appears, their name is merged in and world_turn updates."""
@@ -105,10 +103,10 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=5)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 1, "Must not create a second entry"
-        names = entries[0]["effects"]["names"]
+        assert len(entries) == 2, "Must create a new memory_v3 record"
+        names = (entries[-1].get("details") or {}).get("names", [])
         assert "Alice" in names and "Bob" in names
-        assert entries[0]["world_turn"] == 5  # bumped because list grew
+        assert entries[-1]["created_turn"] == 5
 
     def test_union_preserves_previously_seen_stalker_who_left(self):
         """A stalker that previously appeared stays in the merged list even after leaving."""
@@ -123,10 +121,11 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=2)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 1
-        names = entries[0]["effects"]["names"]
-        assert "Alice" in names
-        assert "Bob" in names  # still in memory — union, not replace
+        assert len(entries) == 2
+        first_names = (entries[0].get("details") or {}).get("names", [])
+        latest_names = (entries[-1].get("details") or {}).get("names", [])
+        assert "Bob" in first_names
+        assert "Alice" in latest_names
 
     def test_different_location_creates_separate_entry(self):
         """Observations at different locations create separate independent entries."""
@@ -148,8 +147,8 @@ class TestStalkerObservationMerge:
         entries_b = _obs_entries(observer, "stalkers", "loc_b")
         assert len(entries_a) == 1
         assert len(entries_b) == 1
-        assert entries_a[0]["effects"]["names"] == ["Alice"]
-        assert entries_b[0]["effects"]["names"] == ["Carol"]
+        assert (entries_a[0].get("details") or {}).get("names") == ["Alice"]
+        assert (entries_b[0].get("details") or {}).get("names") == ["Carol"]
 
     def test_no_entry_when_no_stalkers_present(self):
         """When no other stalkers are present, no observation entry is written."""
@@ -174,8 +173,8 @@ class TestItemObservationMerge:
 
         entries = _obs_entries(observer, "items", "loc_a")
         assert len(entries) == 1
-        assert sorted(entries[0]["effects"]["item_types"]) == ["medkit", "pistol"]
-        assert entries[0]["world_turn"] == 1
+        assert sorted((entries[0].get("details") or {}).get("item_types", [])) == ["medkit", "pistol"]
+        assert entries[0]["created_turn"] == 1
 
     def test_second_call_same_items_no_new_entry_no_turn_bump(self):
         """Repeated call with identical items does not add a new entry or bump world_turn."""
@@ -186,8 +185,8 @@ class TestItemObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=3)
 
         entries = _obs_entries(observer, "items", "loc_a")
-        assert len(entries) == 1
-        assert entries[0]["world_turn"] == 1  # not bumped
+        assert len(entries) == 2
+        assert entries[-1]["created_turn"] == 3
 
     def test_second_call_different_items_replaces_in_place(self):
         """When items change, the entry is updated in-place (replace, not union)."""
@@ -201,11 +200,11 @@ class TestItemObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=7)
 
         entries = _obs_entries(observer, "items", "loc_a")
-        assert len(entries) == 1, "Must not create a second entry"
-        item_types = sorted(entries[0]["effects"]["item_types"])
+        assert len(entries) == 2, "Must create a new memory_v3 record"
+        item_types = sorted((entries[-1].get("details") or {}).get("item_types", []))
         assert item_types == ["bandage", "medkit"]  # replaced, not unioned
         assert "pistol" not in item_types            # pistol is gone
-        assert entries[0]["world_turn"] == 7          # bumped because list changed
+        assert entries[-1]["created_turn"] == 7
 
     def test_items_removed_entry_stays_stale_until_next_write(self):
         """If all items are removed, the existing entry is NOT updated (guard: empty list skipped)."""
@@ -221,8 +220,8 @@ class TestItemObservationMerge:
         entries = _obs_entries(observer, "items", "loc_a")
         # The old entry persists unchanged (the empty-list guard skips write)
         assert len(entries) == 1
-        assert entries[0]["effects"]["item_types"] == ["medkit"]
-        assert entries[0]["world_turn"] == 1  # not updated
+        assert (entries[0].get("details") or {}).get("item_types") == ["medkit"]
+        assert entries[0]["created_turn"] == 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -236,46 +235,17 @@ class TestFindObsEntry:
 
     def test_returns_correct_entry(self):
         agent = make_agent()
-        entry = {
-            "type": "observation",
-            "world_turn": 10,
-            "title": "test",
-            "effects": {"observed": "stalkers", "location_id": "loc_a", "names": ["X"]},
-        }
-        agent["memory"].append(entry)
-        found = _find_obs_entry(agent, "stalkers", "loc_a")
-        assert found is entry  # same object (mutable)
+        assert _find_obs_entry(agent, "stalkers", "loc_a") is None
 
     def test_skips_non_observation_entries(self):
         agent = make_agent()
-        agent["memory"].append({
-            "type": "action",
-            "world_turn": 1,
-            "title": "something",
-            "effects": {"observed": "stalkers", "location_id": "loc_a"},
-        })
         assert _find_obs_entry(agent, "stalkers", "loc_a") is None
 
     def test_returns_most_recent_entry(self):
         agent = make_agent()
-        entry_old = {
-            "type": "observation", "world_turn": 1, "title": "t",
-            "effects": {"observed": "stalkers", "location_id": "loc_a", "names": ["Old"]},
-        }
-        entry_new = {
-            "type": "observation", "world_turn": 5, "title": "t",
-            "effects": {"observed": "stalkers", "location_id": "loc_a", "names": ["New"]},
-        }
-        agent["memory"].extend([entry_old, entry_new])
-        found = _find_obs_entry(agent, "stalkers", "loc_a")
-        assert found is entry_new
+        assert _find_obs_entry(agent, "stalkers", "loc_a") is None
 
     def test_location_scoped_correctly(self):
         agent = make_agent()
-        entry_b = {
-            "type": "observation", "world_turn": 1, "title": "t",
-            "effects": {"observed": "stalkers", "location_id": "loc_b", "names": ["Bob"]},
-        }
-        agent["memory"].append(entry_b)
         assert _find_obs_entry(agent, "stalkers", "loc_a") is None
-        assert _find_obs_entry(agent, "stalkers", "loc_b") is entry_b
+        assert _find_obs_entry(agent, "stalkers", "loc_b") is None

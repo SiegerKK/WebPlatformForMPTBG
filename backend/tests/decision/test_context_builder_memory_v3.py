@@ -6,7 +6,7 @@ from app.games.zone_stalkers.memory.store import add_memory_record
 from tests.decision.conftest import make_agent, make_minimal_state
 
 
-def test_context_builder_prefers_memory_v3_with_legacy_fallback() -> None:
+def test_context_builder_uses_memory_v3_records() -> None:
     agent = make_agent()
     state = make_minimal_state(agent=agent)
     state["agents"]["target_1"] = make_agent(agent_id="target_1", location_id="loc_b")
@@ -89,8 +89,9 @@ def test_context_builder_prefers_memory_v3_with_legacy_fallback() -> None:
     assert any(trader["agent_id"] == "trader_1" for trader in ctx.known_traders)
 
 
-def test_context_builder_legacy_fallback_when_memory_v3_missing() -> None:
+def test_context_builder_without_memory_v3_returns_empty_known_memory() -> None:
     agent = make_agent()
+    agent.pop("memory_v3", None)
     agent["memory"] = [{
         "world_turn": 100,
         "type": "observation",
@@ -113,4 +114,7 @@ def test_context_builder_legacy_fallback_when_memory_v3_missing() -> None:
 
     ctx = build_agent_context("bot1", agent, state)
 
-    assert any(trader["agent_id"] == "trader_1" for trader in ctx.known_traders)
+    assert ctx.known_entities == []
+    assert ctx.known_locations == []
+    assert ctx.known_hazards == []
+    assert ctx.known_traders == []

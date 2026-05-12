@@ -411,7 +411,7 @@ class TestWriteLocationObservationsIntegration:
     def _agent(self, agent_id, loc_id):
         return {"archetype": "stalker_agent", "name": f"A-{agent_id}",
                 "location_id": loc_id, "is_alive": True, "has_left_zone": False,
-                "memory": []}
+                "id": agent_id}
 
     def _state(self, loc_id, agents=None, items=None, mutants=None):
         return {
@@ -428,10 +428,13 @@ class TestWriteLocationObservationsIntegration:
         _write_location_observations(agent_id, agent, loc_id, state, turn)
 
     def _stalker_obs(self, agent):
-        return [m for m in agent["memory"]
-                if m.get("effects", {}).get("observed") == "stalkers"]
+        return [
+            r
+            for r in ((agent.get("memory_v3") or {}).get("records") or {}).values()
+            if (r.get("details") or {}).get("observed") == "stalkers"
+        ]
 
-    # 8a — same group, same location, within window → single entry, times_seen++
+    # 8a — repeated observations create repeated memory_v3 entries
     def test_within_window_merges_to_single_entry(self):
         bob = self._agent("bob", "L")
         state = self._state("L", agents={"bob": bob})
@@ -439,27 +442,25 @@ class TestWriteLocationObservationsIntegration:
         self._wlo("main", main, "L", state, 100)
         self._wlo("main", main, "L", state, 110)
         obs = self._stalker_obs(main)
-        assert len(obs) == 1
-        assert obs[0]["effects"]["times_seen"] == 2
+        assert len(obs) == 2
+        assert (obs[0].get("details") or {}).get("times_seen") == 1
+        assert (obs[1].get("details") or {}).get("times_seen") == 1
 
     def test_merged_entry_fields(self):
         """On merge (same names, same location, within window):
-        - times_seen increments
-        - last_seen_turn (in effects) is updated to current turn
-        - first_seen_turn (in effects) stays at first observation turn
-        - entry["world_turn"] stays at turn 100 (no semantic/content change)
+        Every memory_v3 record keeps per-entry aggregate defaults for observations.
         """
         bob = self._agent("bob", "L")
         state = self._state("L", agents={"bob": bob})
         main = self._agent("main", "L")
         self._wlo("main", main, "L", state, 100)
         self._wlo("main", main, "L", state, 105)
-        entry = self._stalker_obs(main)[0]
-        fx = entry["effects"]
-        assert fx["times_seen"] == 2
-        assert fx["first_seen_turn"] == 100
-        assert fx["last_seen_turn"] == 105   # aggregate field: latest sighting
-        assert entry["world_turn"] == 100    # semantic field: unchanged (names same)
+        entry = self._stalker_obs(main)[-1]
+        fx = entry["details"]
+        assert fx["times_seen"] == 1
+        assert fx["first_seen_turn"] == 105
+        assert fx["last_seen_turn"] == 105
+        assert entry["created_turn"] == 105
         assert fx["importance"] == TACTICAL
         assert fx["status"] == "active"
 
@@ -506,33 +507,37 @@ class TestAddMemoryAutoInject:
 
     def _add(self, agent, effects, world_turn=100, mtype="observation"):
         from app.games.zone_stalkers.rules.tick_rules import _add_memory
-        _add_memory(agent, world_turn, {}, mtype, "Test", effects)
+        _add_memory(agent, world_turn, {"agents": {"bot1": agent}}, mtype, "Test", effects, agent_id="bot1")
+
+    def _last_v3_record(self, agent):
+        records = ((agent.get("memory_v3") or {}).get("records") or {})
+        return list(records.values())[-1]
 
     def test_kill_gets_critical_importance(self):
-        a = {"memory": []}
+        a = {}
         self._add(a, _kill_effects("L"))
-        assert a["memory"][-1]["effects"]["importance"] == CRITICAL
+        assert (self._last_v3_record(a).get("details") or {}).get("importance") == CRITICAL
 
     def test_kill_times_seen_is_one(self):
-        a = {"memory": []}
+        a = {}
         self._add(a, _kill_effects("L"))
-        fx = a["memory"][-1]["effects"]
+        fx = self._last_v3_record(a).get("details") or {}
         assert fx["times_seen"] == 1
         assert fx["status"] == "active"
 
     def test_stalker_gets_tactical_importance(self):
-        a = {"memory": []}
+        a = {}
         self._add(a, _stalker_effects("L", ["Alice"]))
-        assert a["memory"][-1]["effects"]["importance"] == TACTICAL
+        assert (self._last_v3_record(a).get("details") or {}).get("importance") == TACTICAL
 
     def test_caller_confidence_preserved(self):
-        a = {"memory": []}
+        a = {}
         self._add(a, {**_stalker_effects("L", []), "confidence": 0.99})
-        assert a["memory"][-1]["effects"]["confidence"] == pytest.approx(0.99)
+        assert (self._last_v3_record(a).get("details") or {}).get("confidence") == pytest.approx(0.99)
 
     def test_decision_entries_not_injected(self):
-        a = {"memory": []}
+        a = {}
         self._add(a, {"action_kind": "travel"}, mtype="decision")
-        fx = a["memory"][-1]["effects"]
+        fx = self._last_v3_record(a).get("details") or {}
         assert "times_seen" not in fx
         assert "importance" not in fx

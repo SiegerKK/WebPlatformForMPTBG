@@ -2137,7 +2137,7 @@ class TestUnifiedStalkerModel:
         "experience", "skill_combat", "skill_stalker", "skill_trade",
         "skill_medicine", "skill_social",
         "global_goal", "current_goal", "risk_tolerance", "material_threshold",
-        "scheduled_action", "action_queue", "memory",
+        "scheduled_action", "action_queue",
     ]
 
     def test_player_agent_has_all_required_fields(self):

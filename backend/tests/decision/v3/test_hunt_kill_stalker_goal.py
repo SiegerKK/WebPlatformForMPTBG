@@ -48,6 +48,7 @@ from app.games.zone_stalkers.decision.target_beliefs import build_target_belief
 from app.games.zone_stalkers.memory.models import LAYER_SOCIAL, MemoryRecord
 from app.games.zone_stalkers.memory.store import add_memory_record, ensure_memory_v3
 from tests.decision.conftest import make_agent, make_minimal_state
+from tests.decision.v3.memory_assertions import v3_records
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -130,6 +131,14 @@ def _remember_target_location(agent: dict, state: dict, *, target_id: str, locat
         summary=f"Цель замечена в {location_id}",
         agent_id="bot1",
     )
+
+
+def _v3r(agent: dict[str, Any]) -> list[dict[str, Any]]:
+    return v3_records(agent)
+
+
+def _v3_ak(record: dict[str, Any]) -> str | None:
+    return record.get("kind") or (record.get("details") or {}).get("action_kind")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
