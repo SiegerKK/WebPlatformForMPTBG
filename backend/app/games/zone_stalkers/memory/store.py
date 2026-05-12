@@ -194,7 +194,7 @@ def _eviction_sort_key(record_id: str, raw: dict[str, Any], *, protected_penalty
 
 
 def _rebuild_indexes_from_records(mem_v3: dict[str, Any]) -> None:
-    records: dict[str, Any] = mem_v3.get("records", {})
+    records: dict[str, dict[str, Any]] = mem_v3.get("records", {})
     indexes = {
         "by_layer": {},
         "by_kind": {},
