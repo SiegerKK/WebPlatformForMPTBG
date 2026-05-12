@@ -206,6 +206,31 @@ def test_game_projection_locations_include_required_fields():
     assert loc["terrain_type"] == "military_buildings"
 
 
+def test_game_projection_location_image_migration_does_not_mutate_source_state():
+    state = _sample_state()
+    state["locations"] = {
+        "C1": {
+            "id": "C1",
+            "name": "Loc",
+            "terrain_type": "plain",
+            "anomaly_activity": 0,
+            "dominant_anomaly_type": None,
+            "connections": [],
+            "agents": [],
+            "artifacts": [],
+            "items": [],
+            "image_url": "/media/legacy.jpg",
+        }
+    }
+    projected = project_zone_state(state=state, mode="game")
+    loc = projected["locations"]["C1"]
+    assert (loc.get("image_slots") or {}).get("clear") == "/media/legacy.jpg"
+    assert loc.get("primary_image_slot") == "clear"
+    # Source state must remain untouched by projection.
+    assert "image_slots" not in state["locations"]["C1"]
+    assert "primary_image_slot" not in state["locations"]["C1"]
+
+
 
 # ── debug-map-lite projection tests ──────────────────────────────────────────
 

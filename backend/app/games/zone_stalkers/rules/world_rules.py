@@ -269,7 +269,13 @@ def resolve_world_command(
         if "exit_zone" in payload:
             loc["exit_zone"] = bool(payload["exit_zone"])
         if "image_url" in payload:
-            loc["image_url"] = payload["image_url"] or None
+            url = payload["image_url"] or None
+            loc["image_url"] = url
+            slots = loc.setdefault("image_slots", {})
+            slots["clear"] = url
+            if url and not loc.get("primary_image_slot"):
+                loc["primary_image_slot"] = "clear"
+            _sync_location_primary_image_url(loc)
         if "image_slots" in payload:
             incoming = payload.get("image_slots") or {}
             current = loc.setdefault("image_slots", {})

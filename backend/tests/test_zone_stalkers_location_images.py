@@ -231,6 +231,12 @@ def test_upload_integrity_error_cleans_file_and_returns_409(
     def _integrity_error(*args, **kwargs):  # noqa: ARG001
         raise IntegrityError("INSERT", {}, Exception("unique violation"))
 
+    invalidated: list[str] = []
+
+    def _invalidate(_context_id):  # noqa: ANN001
+        invalidated.append(str(_context_id))
+
+    monkeypatch.setattr("app.core.state_cache.service.invalidate_context_state", _invalidate)
     monkeypatch.setattr("sqlalchemy.orm.session.Session.commit", _integrity_error)
 
     response = test_client.post(
@@ -240,6 +246,7 @@ def test_upload_integrity_error_cleans_file_and_returns_409(
     )
     assert response.status_code == 409
     assert response.json()["detail"] == "Location image was updated concurrently; retry upload"
+    assert invalidated == [str(context_id)]
 
     loc_dir = tmp_path / "locations" / str(context_id) / location_id
     assert (not loc_dir.exists()) or (not any(loc_dir.iterdir()))
@@ -380,6 +387,76 @@ def test_debug_update_location_with_image_slots():
     assert loc["image_slots"]["fog"] == "/media/fog.jpg"
     assert loc["primary_image_slot"] == "fog"
     assert loc["image_url"] == "/media/fog.jpg"
+
+
+def test_debug_update_location_image_url_migrates_to_clear_slot():
+    """Legacy image_url update should sync into clear slot and keep state consistent."""
+    from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+
+    state = {
+        "locations": {
+            "loc_A": {
+                "id": "loc_A",
+                "name": "Test",
+                "terrain_type": "plain",
+                "anomaly_activity": 0,
+                "dominant_anomaly_type": None,
+                "connections": [],
+                "artifacts": [],
+                "items": [],
+                "agents": [],
+                "image_slots": {},
+                "primary_image_slot": None,
+                "image_url": None,
+            }
+        }
+    }
+    new_state, _ = resolve_world_command(
+        "debug_update_location",
+        {"loc_id": "loc_A", "image_url": "/media/new.jpg"},
+        state,
+        player_id="debug",
+    )
+    loc = new_state["locations"]["loc_A"]
+    assert loc["image_url"] == "/media/new.jpg"
+    assert (loc.get("image_slots") or {}).get("clear") == "/media/new.jpg"
+    assert loc.get("primary_image_slot") == "clear"
+
+
+def test_delete_commit_failure_invalidates_context_state_cache(
+    test_client, auth_headers, monkeypatch, tmp_path, zone_context
+):
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    upload = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("img.jpg", b"img-data", "image/jpeg")},
+    )
+    assert upload.status_code == 200, upload.text
+
+    invalidated: list[str] = []
+
+    def _invalidate(_context_id):  # noqa: ANN001
+        invalidated.append(str(_context_id))
+
+    def _boom_commit(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr("app.core.state_cache.service.invalidate_context_state", _invalidate)
+    monkeypatch.setattr("sqlalchemy.orm.session.Session.commit", _boom_commit)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        test_client.delete(
+            f"/api/locations/{context_id}/{location_id}/image",
+            headers=auth_headers,
+        )
+
+    assert invalidated == [str(context_id)]
 
 
 def test_delete_primary_slot_falls_back_to_next_available(

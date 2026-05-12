@@ -153,7 +153,11 @@ async def upload_location_image(
     """
     from app.core.contexts.models import GameContext
     from app.games.zone_stalkers.models import LocationImage
-    from app.core.state_cache.service import load_context_state, save_context_state
+    from app.core.state_cache.service import (
+        invalidate_context_state,
+        load_context_state,
+        save_context_state,
+    )
 
     # Validate slot
     _safe_slot_segment(slot)
@@ -250,6 +254,7 @@ async def upload_location_image(
         db.commit()
     except IntegrityError:
         db.rollback()
+        invalidate_context_state(ctx.id)
         cleanup_abs_paths: list[str] = []
         removed = _safe_remove_media_file(written_abs_path)
         if removed:
@@ -261,6 +266,7 @@ async def upload_location_image(
         )
     except Exception:
         db.rollback()
+        invalidate_context_state(ctx.id)
         cleanup_abs_paths = []
         removed = _safe_remove_media_file(written_abs_path)
         if removed:
@@ -324,7 +330,11 @@ def delete_location_image(
     back to next available slot automatically.
     """
     from app.core.contexts.models import GameContext
-    from app.core.state_cache.service import load_context_state, save_context_state
+    from app.core.state_cache.service import (
+        invalidate_context_state,
+        load_context_state,
+        save_context_state,
+    )
     from app.games.zone_stalkers.models import LocationImage
 
     ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
@@ -420,6 +430,7 @@ def delete_location_image(
         db.commit()
     except Exception:
         db.rollback()
+        invalidate_context_state(ctx.id)
         raise
 
     # Only after successful commit+state-save: delete files from disk

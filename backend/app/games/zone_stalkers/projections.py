@@ -211,24 +211,28 @@ def _project_locations_game(locations: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(loc, dict):
             result[loc_id] = loc
             continue
+        # Keep projection read-only: migrate a local copy, never mutate source state.
+        loc_for_projection = dict(loc)
+        if isinstance(loc_for_projection.get("image_slots"), dict):
+            loc_for_projection["image_slots"] = dict(loc_for_projection["image_slots"])
         # P1-4: ensure image_slots is initialised on-the-fly (no separate migration job needed)
-        migrate_location_images(loc)
+        migrate_location_images(loc_for_projection)
         result[loc_id] = {
-            "id": loc.get("id"),
-            "name": loc.get("name"),
-            "terrain_type": loc.get("terrain_type"),
-            "anomaly_activity": loc.get("anomaly_activity"),
-            "dominant_anomaly_type": loc.get("dominant_anomaly_type"),
-            "connections": loc.get("connections"),
-            "agents": loc.get("agents"),
-            "exit_zone": loc.get("exit_zone"),
-            "artifacts": loc.get("artifacts"),
-            "items": loc.get("items"),
-            "region": loc.get("region"),
-            "image_url": loc.get("image_url"),
-            "image_slots": loc.get("image_slots"),
-            "primary_image_slot": loc.get("primary_image_slot"),
-            "debug_layout": loc.get("debug_layout"),
+            "id": loc_for_projection.get("id"),
+            "name": loc_for_projection.get("name"),
+            "terrain_type": loc_for_projection.get("terrain_type"),
+            "anomaly_activity": loc_for_projection.get("anomaly_activity"),
+            "dominant_anomaly_type": loc_for_projection.get("dominant_anomaly_type"),
+            "connections": loc_for_projection.get("connections"),
+            "agents": loc_for_projection.get("agents"),
+            "exit_zone": loc_for_projection.get("exit_zone"),
+            "artifacts": loc_for_projection.get("artifacts"),
+            "items": loc_for_projection.get("items"),
+            "region": loc_for_projection.get("region"),
+            "image_url": loc_for_projection.get("image_url"),
+            "image_slots": loc_for_projection.get("image_slots"),
+            "primary_image_slot": loc_for_projection.get("primary_image_slot"),
+            "debug_layout": loc_for_projection.get("debug_layout"),
         }
     return result
 
