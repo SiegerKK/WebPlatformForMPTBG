@@ -8,4 +8,11 @@ For current documentation, see:
 
 - [`docs/zone_stalkers/brain_v3/`](../zone_stalkers/brain_v3/README.md) — NPC Brain v3 mechanics
 - [`docs/zone_stalkers/optimization/`](../zone_stalkers/optimization/README.md) — Optimization architecture
-- [`docs/zone_stalkers/future/`](../zone_stalkers/future/) — Planned future features
+
+## Archived files
+
+| File | Description |
+|---|---|
+| `zone_stalkers_tick_process_optimization_plan.md` | Stale top-level tick-process optimization planning document (superseded by CPU optimization applied doc) |
+| `location_image_upload_bugfix_copilot_instructions.md` | Copilot task instruction for location image upload bugfix (one-time task doc, no longer active) |
+| `combat_encounter_system_pr_implementation.md` | Combat encounter system PR implementation doc (future feature, not yet implemented) |
