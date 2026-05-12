@@ -4,6 +4,8 @@ import copy
 import json
 from typing import Any, Literal
 
+from app.games.zone_stalkers.location_images import migrate_location_images
+
 ProjectionMode = Literal["zone-lite", "game", "debug-map", "debug-map-lite", "full"]
 
 INVENTORY_PREVIEW_LIMIT = 20
@@ -209,6 +211,8 @@ def _project_locations_game(locations: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(loc, dict):
             result[loc_id] = loc
             continue
+        # P1-4: ensure image_slots is initialised on-the-fly (no separate migration job needed)
+        migrate_location_images(loc)
         result[loc_id] = {
             "id": loc.get("id"),
             "name": loc.get("name"),
@@ -222,6 +226,8 @@ def _project_locations_game(locations: dict[str, Any]) -> dict[str, Any]:
             "items": loc.get("items"),
             "region": loc.get("region"),
             "image_url": loc.get("image_url"),
+            "image_slots": loc.get("image_slots"),
+            "primary_image_slot": loc.get("primary_image_slot"),
             "debug_layout": loc.get("debug_layout"),
         }
     return result

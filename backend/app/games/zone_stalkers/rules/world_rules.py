@@ -57,54 +57,17 @@ _VALID_GLOBAL_GOALS = frozenset([
     "kill_stalker",
 ])
 
-_VALID_LOCATION_IMAGE_SLOTS = frozenset([
-    "clear",
-    "fog",
-    "rain",
-    "night_clear",
-    "night_rain",
-])
-
-_ORDERED_IMAGE_SLOTS = ["clear", "fog", "rain", "night_clear", "night_rain"]
-
-
-def _sync_location_primary_image_url(loc: dict) -> None:
-    """Sync loc['image_url'] to reflect the primary slot or best available image."""
-    slots = loc.get("image_slots") or {}
-    primary = loc.get("primary_image_slot")
-
-    if primary and slots.get(primary):
-        loc["image_url"] = slots[primary]
-        return
-
-    # If no slots populated but we have a raw image_url, keep it (legacy)
-    if loc.get("image_url") and not any(v for v in slots.values() if v):
-        return
-
-    # Auto-select first available slot
-    for key in _ORDERED_IMAGE_SLOTS:
-        if slots.get(key):
-            loc["primary_image_slot"] = key
-            loc["image_url"] = slots[key]
-            return
-
-    loc["image_url"] = None
-
-
-def migrate_location_images(loc: dict) -> None:
-    """Migrate a location that only has image_url into the image_slots model."""
-    if "image_slots" not in loc:
-        loc["image_slots"] = {}
-
-    slots = loc["image_slots"]
-    existing_url = loc.get("image_url")
-
-    # If image_url is set but no slots are populated, migrate it to 'clear'
-    if existing_url and not any(v for v in slots.values() if v):
-        slots["clear"] = existing_url
-        loc.setdefault("primary_image_slot", "clear")
-
-    _sync_location_primary_image_url(loc)
+# Image slot constants and helpers — single source of truth in location_images.py
+from app.games.zone_stalkers.location_images import (
+    VALID_LOCATION_IMAGE_SLOTS as _VALID_LOCATION_IMAGE_SLOTS,
+    ORDERED_LOCATION_IMAGE_SLOTS as _ORDERED_IMAGE_SLOTS_TUPLE,
+    sync_location_primary_image_url as _sync_location_primary_image_url,
+    migrate_location_images,
+)
+# Legacy alias used inside this module
+_ORDERED_IMAGE_SLOTS = list(_ORDERED_IMAGE_SLOTS_TUPLE)
+# Keep VALID_LOCATION_IMAGE_SLOTS as the canonical name internally
+_VALID_LOCATION_IMAGE_SLOTS = _VALID_LOCATION_IMAGE_SLOTS
 
 
 def validate_world_command(
@@ -288,6 +251,11 @@ def resolve_world_command(
     if command_type == "debug_update_location":
         loc_id = payload["loc_id"]
         loc = state["locations"][loc_id]
+        # Ensure image_slots exists before applying any image changes (P1-4)
+        migrate_location_images(loc)
+        _map_bump_fields = {"name", "terrain_type", "region", "exit_zone",
+                            "image_url", "image_slots", "primary_image_slot"}
+        _needs_map_bump = bool(_map_bump_fields & set(payload.keys()))
         loc["name"] = str(payload.get("name", loc["name"])).strip()
         if "terrain_type" in payload:
             loc["terrain_type"] = payload["terrain_type"]
@@ -315,6 +283,8 @@ def resolve_world_command(
             if slot is None or slot in _VALID_LOCATION_IMAGE_SLOTS:
                 loc["primary_image_slot"] = slot
                 _sync_location_primary_image_url(loc)
+        if _needs_map_bump:
+            state["map_revision"] = int(state.get("map_revision", 0)) + 1
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 
@@ -352,6 +322,7 @@ def resolve_world_command(
                 "x": float(pos["x"]),
                 "y": float(pos["y"]),
             }
+        state["map_revision"] = int(state.get("map_revision", 0)) + 1
         events.append({"event_type": "debug_location_created", "payload": {"loc_id": new_id}})
         return state, events
 
@@ -368,6 +339,7 @@ def resolve_world_command(
         del state["locations"][loc_id_to_del]
         # Remove persisted canvas position if present
         state.get("debug_layout", {}).get("positions", {}).pop(loc_id_to_del, None)
+        state["map_revision"] = int(state.get("map_revision", 0)) + 1
         events.append({"event_type": "debug_location_deleted", "payload": {"loc_id": loc_id_to_del}})
         return state, events
     if command_type == "debug_spawn_stalker":
@@ -730,6 +702,7 @@ def resolve_world_command(
         loc.setdefault("image_slots", {})
         loc["primary_image_slot"] = slot
         _sync_location_primary_image_url(loc)
+        state["map_revision"] = int(state.get("map_revision", 0)) + 1
         events.append({
             "event_type": "debug_location_primary_image_set",
             "payload": {"loc_id": loc_id, "slot": slot},

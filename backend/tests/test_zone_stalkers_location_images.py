@@ -36,7 +36,7 @@ def zone_context(test_client, auth_headers, db_session):
     state = load_context_state(ctx.id, ctx)
     location_id = next(iter(state.get("locations", {}).keys()))
 
-    return {"context_id": context_id, "location_id": location_id}
+    return {"context_id": context_id, "location_id": location_id, "match_id": match_id}
 
 
 def test_upload_same_location_returns_unique_url_and_updates_state(
@@ -412,16 +412,29 @@ def test_delete_primary_slot_falls_back_to_next_available(
     assert res_rain.status_code == 200, res_rain.text
 
     # Set primary to rain
-    test_client.post(
+    match_id = zone_context["match_id"]
+    cmd_resp = test_client.post(
         "/api/commands",
         json={
-            "match_id": None,  # will be resolved from context
-            "context_id": context_id,
+            "match_id": str(match_id),
+            "context_id": str(context_id),
             "command_type": "debug_set_location_primary_image",
             "payload": {"loc_id": location_id, "slot": "rain"},
         },
         headers=auth_headers,
     )
+    assert cmd_resp.status_code == 200, cmd_resp.text
+
+    # Verify set-primary actually worked before deleting
+    from app.core.contexts.models import GameContext as _GCCheck
+    _ctx_check = db_session.query(_GCCheck).filter(_GCCheck.id == context_id).first()
+    db_session.expire_all()
+    from app.core.state_cache.service import load_context_state as _lcs
+    _state_check = _lcs(_ctx_check.id, _ctx_check)
+    assert (_state_check["locations"][location_id].get("primary_image_slot") == "rain"), (
+        "Expected primary_image_slot=rain after debug_set_location_primary_image"
+    )
+
     # Now delete rain slot
     delete_resp = test_client.delete(
         f"/api/locations/{context_id}/{location_id}/image",
@@ -432,6 +445,7 @@ def test_delete_primary_slot_falls_back_to_next_available(
     assert delete_resp.json()["slot"] == "rain"
 
     # Reload state — primary should have fallen back to clear
+    db_session.expire_all()  # ensure we get fresh data, not stale identity-map cache
     from app.core.contexts.models import GameContext as GC
     ctx = db_session.query(GC).filter(GC.id == context_id).first()
     state = load_context_state(ctx.id, ctx)
