@@ -59,6 +59,7 @@ from .models.plan import (
     STEP_TRADE_BUY_ITEM,
     STEP_TRADE_SELL_ITEM,
     STEP_CONSUME_ITEM,
+    STEP_LOOT_CORPSE,
     STEP_ASK_FOR_INTEL,
     STEP_LOOK_FOR_TRACKS,
     STEP_QUESTION_WITNESSES,
@@ -297,6 +298,21 @@ def _plan_heal_or_flee(
         return Plan(
             intent_kind=intent.kind, steps=[step], interruptible=False,
             confidence=1.0, created_turn=world_turn,
+        )
+
+    loot_step = _build_local_corpse_loot_step(
+        agent=agent,
+        state=state,
+        preferred_categories={"medical"},
+        take_money=True,
+    )
+    if loot_step is not None:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[loot_step],
+            interruptible=False,
+            confidence=0.95,
+            created_turn=world_turn,
         )
 
     # No heal item in inventory — evaluate buy affordability.
@@ -872,6 +888,90 @@ def _find_immediate_need(
         if trigger_context is not None and need.trigger_context != trigger_context:
             continue
         return need
+    return None
+
+
+def _build_local_corpse_loot_step(
+    *,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    preferred_categories: set[str],
+    take_money: bool = True,
+) -> PlanStep | None:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    from app.games.zone_stalkers.balance.items import (
+        AMMO_ITEM_TYPES,
+        AMMO_FOR_WEAPON,
+        ARMOR_ITEM_TYPES,
+        DRINK_ITEM_TYPES,
+        FOOD_ITEM_TYPES,
+        HEAL_ITEM_TYPES,
+        WEAPON_ITEM_TYPES,
+    )
+
+    location_id = str(agent.get("location_id") or "")
+    if not location_id:
+        return None
+    corpses = (state.get("locations", {}).get(location_id, {}) or {}).get("corpses")
+    if not isinstance(corpses, list):
+        return None
+
+    preferred = {str(category).strip().lower() for category in preferred_categories}
+    weapon = (agent.get("equipment") or {}).get("weapon") or {}
+    weapon_type = str(weapon.get("type") or "")
+    compatible_ammo = AMMO_FOR_WEAPON.get(weapon_type)
+
+    for corpse in corpses:
+        if not isinstance(corpse, dict):
+            continue
+        if not bool(corpse.get("visible", True)) or not bool(corpse.get("lootable", True)):
+            continue
+        inventory = corpse.get("inventory")
+        if not isinstance(inventory, list):
+            inventory = []
+        corpse_money = int(corpse.get("money") or 0)
+        has_useful = False
+        for item in inventory:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if "artifact" in preferred and item_type in ARTIFACT_TYPES:
+                has_useful = True
+                break
+            if "food" in preferred and item_type in FOOD_ITEM_TYPES:
+                has_useful = True
+                break
+            if "drink" in preferred and item_type in DRINK_ITEM_TYPES:
+                has_useful = True
+                break
+            if "medical" in preferred and item_type in HEAL_ITEM_TYPES:
+                has_useful = True
+                break
+            if "weapon" in preferred and item_type in WEAPON_ITEM_TYPES:
+                has_useful = True
+                break
+            if "armor" in preferred and item_type in ARMOR_ITEM_TYPES:
+                has_useful = True
+                break
+            if "ammo" in preferred and item_type in AMMO_ITEM_TYPES:
+                if compatible_ammo is None or compatible_ammo == item_type:
+                    has_useful = True
+                    break
+            if "any" in preferred:
+                has_useful = True
+                break
+        if not has_useful and not (take_money and corpse_money > 0):
+            continue
+        return PlanStep(
+            kind=STEP_LOOT_CORPSE,
+            payload={
+                "corpse_id": str(corpse.get("corpse_id") or ""),
+                "location_id": location_id,
+                "take_money": take_money,
+            },
+            interruptible=False,
+            expected_duration_ticks=1,
+        )
     return None
 
 

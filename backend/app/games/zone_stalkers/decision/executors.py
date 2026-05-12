@@ -528,6 +528,7 @@ def _exec_loot_corpse(
     location_id = str(agent.get("location_id") or step.payload.get("location_id") or "")
     corpse_id = str(step.payload.get("corpse_id") or "")
     take_money = bool(step.payload.get("take_money", True))
+    take_all = bool(step.payload.get("take_all", False))
     max_items = int(step.payload.get("max_items") or 0)
     if not location_id:
         agent["action_used"] = True
@@ -576,11 +577,16 @@ def _exec_loot_corpse(
     if not isinstance(corpse_inventory, list):
         corpse_inventory = []
         target_corpse["inventory"] = corpse_inventory
-    selected_items = [item for item in corpse_inventory if isinstance(item, dict) and _is_important(item)]
+    selected_pairs = [
+        (idx, item)
+        for idx, item in enumerate(corpse_inventory)
+        if isinstance(item, dict) and (take_all or _is_important(item))
+    ]
     if max_items > 0:
-        selected_items = selected_items[:max_items]
+        selected_pairs = selected_pairs[:max_items]
 
-    selected_ids = {str(item.get("id") or "") for item in selected_items}
+    selected_indices = {idx for idx, _ in selected_pairs}
+    selected_items = [item for _, item in selected_pairs]
     items_taken = [dict(item) for item in selected_items]
     if items_taken:
         agent_inventory = agent.get("inventory")
@@ -589,8 +595,8 @@ def _exec_loot_corpse(
             agent["inventory"] = agent_inventory
         agent_inventory.extend(items_taken)
     target_corpse["inventory"] = [
-        item for item in corpse_inventory
-        if str(item.get("id") or "") not in selected_ids
+        item for idx, item in enumerate(corpse_inventory)
+        if idx not in selected_indices
     ]
 
     money_taken = 0
@@ -1151,7 +1157,7 @@ def _exec_confirm_kill(
                 corpse = raw_corpse
                 break
 
-        direct_confirmation = bool(corpse) or str(target.get("location_id") or "") == current_loc
+        direct_confirmation = bool(corpse)
         if direct_confirmation:
             _add_memory(
                 agent,
