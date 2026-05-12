@@ -1,7 +1,7 @@
 /**
  * Modals — LocationModal (edit/create location) and SpawnMutantModal.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { s } from './styles';
 import {
   LOCATION_IMAGE_SLOTS,
