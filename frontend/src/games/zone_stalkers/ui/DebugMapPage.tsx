@@ -53,6 +53,10 @@ function detectImageExtension(url: string, contentType?: string): string {
   return '.jpg';
 }
 
+function normalizeLocationConnections(loc?: Partial<ZoneLocation> | null): LocationConn[] {
+  return Array.isArray(loc?.connections) ? (loc.connections as LocationConn[]) : [];
+}
+
 function normalizeImageSlots(loc: ZoneLocation): LocationImageSlots {
   const slots: LocationImageSlots = {};
   for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = loc.image_slots?.[slot] ?? null;
@@ -195,7 +199,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // Seeded from zoneState which already contains any previously-persisted edits.
   const [localConns, setLocalConns] = useState<Record<string, LocationConn[]>>(() =>
     Object.fromEntries(
-      Object.entries(zoneState.locations).map(([id, loc]) => [id, [...loc.connections]]),
+      Object.entries(zoneState.locations).map(([id, loc]) => [id, normalizeLocationConnections(loc)]),
     ),
   );
 
@@ -251,7 +255,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     setLocalConns((prev) => {
       const newConns: Record<string, LocationConn[]> = {};
       for (const [id, loc] of Object.entries(zoneState.locations)) {
-        if (!(id in prev)) newConns[id] = [...(loc as ZoneLocation).connections];
+        if (!(id in prev)) newConns[id] = normalizeLocationConnections(loc as ZoneLocation);
       }
       return Object.keys(newConns).length ? { ...prev, ...newConns } : prev;
     });
