@@ -300,20 +300,16 @@ def test_tick_scheduled_action_completion_advances_active_plan_step() -> None:
     assert new_plan["steps"][0]["status"] == "completed"
     assert new_bot["scheduled_action"]["type"] == "explore_anomaly_location"
     assert new_bot["scheduled_action"]["active_plan_step_index"] == 1
-    completed_entries = [
+    # Fix 2: active_plan_step_completed is trace_only and not stored in memory_v3.
+    # The functional assertions (step index, scheduled action) remain valid.
+    completed_entries_v3 = [
         m
         for m in _v3r(new_bot)
         if _v3_ak(m) == "active_plan_step_completed"
     ]
-    assert completed_entries
-    latest_completed = completed_entries[0]  # newest first
-    assert "шаг 1/2 travel_to_location" in (_v3_fx(latest_completed).get("summary") or latest_completed.get("summary") or "")
-    effects = _v3_fx(latest_completed)
-    assert effects.get("completed_step_index") == 0
-    assert effects.get("completed_step_number") == 1
-    assert effects.get("completed_step_kind") == "travel_to_location"
-    assert effects.get("next_step_index") == 1
-    assert effects.get("next_step_kind") == "explore_location"
+    assert completed_entries_v3 == [], (
+        "active_plan_step_completed must not be stored in memory_v3 (trace_only policy)"
+    )
 
 
 def test_active_plan_completed_summary_has_no_off_by_one() -> None:
@@ -342,15 +338,15 @@ def test_active_plan_completed_summary_has_no_off_by_one() -> None:
 
     new_state, _ = tick_zone_map(state)
     new_bot = new_state["agents"]["bot1"]
+    # Fix 2: active_plan_completed is trace_only and not stored in memory_v3.
     completed_entries = [
         m
         for m in _v3r(new_bot)
         if _v3_ak(m) == "active_plan_completed"
     ]
-    assert completed_entries
-    summary = _v3_fx(completed_entries[0]).get("summary") or completed_entries[0].get("summary") or ""
-    assert "1/1 steps completed" in summary
-    assert "шаг 2/1" not in summary
+    assert completed_entries == [], (
+        "active_plan_completed must not be stored in memory_v3 (trace_only policy)"
+    )
 
 
 def test_tick_active_plan_continue_skips_new_objective_decision() -> None:

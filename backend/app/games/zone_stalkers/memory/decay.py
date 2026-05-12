@@ -36,6 +36,10 @@ def decay_memory(agent: dict[str, Any], world_turn: int) -> None:
 
     Safe to call every tick — it skips work when cadence not met.
     """
+    if not agent.get("is_alive", True):
+        # Dead agents: skip consolidation — no new semantic records after death.
+        return
+
     mem_v3 = ensure_memory_v3(agent)
     stats = mem_v3["stats"]
     last_decay = stats.get("last_decay_turn")

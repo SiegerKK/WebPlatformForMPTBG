@@ -19,7 +19,29 @@ from .models import (
 )
 from .store import ensure_memory_v3, add_memory_record
 
-_SKIP_ACTION_KINDS: frozenset[str] = frozenset({"sleep_interval_applied"})
+# Events classified as trace-only: never written to memory_v3.
+# These belong in brain_trace / debug timeline only.
+MEMORY_EVENT_POLICY: dict[str, str] = {
+    "active_plan_created": "trace_only",
+    "active_plan_step_started": "trace_only",
+    "active_plan_step_completed": "trace_only",
+    "active_plan_completed": "trace_only",
+    "sleep_interval_applied": "trace_only",
+
+    # Still written to memory — semantically meaningful outcomes.
+    "active_plan_step_failed": "memory",
+    "active_plan_repair_requested": "memory_dedup",
+    "active_plan_repaired": "memory_dedup",
+    "active_plan_aborted": "memory",
+    "plan_monitor_abort": "memory",
+    "objective_decision": "memory_dedup",
+    "global_goal_completed": "memory",
+    "target_death_confirmed": "memory",
+}
+
+_SKIP_ACTION_KINDS: frozenset[str] = frozenset(
+    k for k, v in MEMORY_EVENT_POLICY.items() if v == "trace_only"
+)
 
 _TYPE_TO_LAYER: dict[str, str] = {
     "observation": LAYER_EPISODIC,
@@ -71,6 +93,13 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     # Exploration
     "explore_confirmed_empty": (LAYER_SPATIAL, "location_empty", ("exploration", "spatial")),
     "travel_hop": (LAYER_EPISODIC, "travel_hop", ("travel",)),
+    "anomaly_search_exhausted": (LAYER_GOAL, "anomaly_search_exhausted", ("support", "money", "cooldown")),
+    "support_objective_progress": (LAYER_GOAL, "support_objective_progress", ("support", "progress")),
+    "support_objective_failed": (LAYER_GOAL, "support_objective_failed", ("support", "failure")),
+    "support_source_exhausted": (LAYER_GOAL, "support_source_exhausted", ("support", "cooldown")),
+    "no_witnesses": (LAYER_SOCIAL, "no_witnesses", ("target", "intel", "social", "negative_observation")),
+    "witness_source_exhausted": (LAYER_SOCIAL, "witness_source_exhausted", ("target", "intel", "social", "cooldown")),
+    "no_tracks_found": (LAYER_SPATIAL, "no_tracks_found", ("target", "tracking", "negative_observation")),
 
     # PR3 hunt prerequisites (taxonomy only; no hunt logic here)
     "target_seen": (LAYER_SOCIAL, "target_seen", ("target", "tracking", "social")),
@@ -97,6 +126,79 @@ _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
 }
 
 
+# Low-value repeated observation kinds eligible for deduplication within a window.
+# NOTE: stalkers_seen/items_seen are intentionally excluded — they have their own
+# merge logic in memory_merge.py and tests rely on that path creating new records.
+_DEDUP_KINDS: frozenset[str] = frozenset({
+    "travel_hop",
+    "trader_visited",
+    "no_tracks_found",
+    "no_witnesses",
+    "witness_source_exhausted",
+})
+# Never deduplicate these — each occurrence is individually important.
+_NO_DEDUP_KINDS: frozenset[str] = frozenset({
+    "death",
+    "combat_kill",
+    "combat_killed",
+    "target_death_confirmed",
+    "global_goal_completed",
+})
+MEMORY_EVENT_DEDUP_WINDOW_TURNS = 30
+
+
+def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | None:
+    details = raw.details if isinstance(raw, MemoryRecord) else raw.get("details", {})
+    if not isinstance(details, dict):
+        details = {}
+    kind = str(raw.kind if isinstance(raw, MemoryRecord) else raw.get("kind") or "")
+    location_id = str(
+        (raw.location_id if isinstance(raw, MemoryRecord) else raw.get("location_id"))
+        or details.get("location_id")
+        or ""
+    )
+    if kind == "travel_hop":
+        return (
+            kind,
+            str(details.get("from_location_id") or details.get("from_loc") or ""),
+            str(details.get("to_location_id") or details.get("to_loc") or location_id),
+        )
+    if kind in {"trader_visited", "witness_source_exhausted", "no_witnesses", "no_tracks_found"}:
+        return (
+            kind,
+            location_id,
+            str(details.get("target_id") or ""),
+            str(details.get("trader_id") or ""),
+        )
+    return None
+
+
+def _find_recent_dedup_record(
+    agent: dict[str, Any],
+    signature: tuple[Any, ...],
+    world_turn: int,
+) -> dict[str, Any] | None:
+    """Return the most recent existing record that matches the dedup signature, or None."""
+    mem_v3 = agent.get("memory_v3")
+    if not isinstance(mem_v3, dict):
+        return None
+    records: dict[str, Any] = mem_v3.get("records", {})
+    cutoff = world_turn - MEMORY_EVENT_DEDUP_WINDOW_TURNS
+
+    best: dict[str, Any] | None = None
+    best_turn = -1
+    for raw in records.values():
+        if _dedup_signature(raw) != signature:
+            continue
+        rec_turn = int(raw.get("created_turn", 0))
+        if rec_turn < cutoff:
+            continue
+        if rec_turn > best_turn:
+            best_turn = rec_turn
+            best = raw
+    return best
+
+
 def write_memory_event_to_v3(
     *,
     agent_id: str,
@@ -107,7 +209,14 @@ def write_memory_event_to_v3(
     """Convert a single memory event entry into a MemoryRecord and store it in memory_v3."""
     effects: dict[str, Any] = legacy_entry.get("effects", {})
     action_kind = str(effects.get("action_kind", ""))
+
+    # Policy check — skip trace-only events entirely.
     if action_kind in _SKIP_ACTION_KINDS:
+        return
+
+    # Also skip by observed kind if action_kind absent.
+    obs_type = str(effects.get("observed", ""))
+    if not action_kind and obs_type in _SKIP_ACTION_KINDS:
         return
 
     record = _map_event_to_record(
@@ -116,8 +225,22 @@ def write_memory_event_to_v3(
         entry=legacy_entry,
         world_turn=world_turn,
     )
-    if record is not None:
-        add_memory_record(agent, record)
+    if record is None:
+        return
+
+    # Dedup low-value repeated observations within the window.
+    if record.kind in _DEDUP_KINDS and record.kind not in _NO_DEDUP_KINDS:
+        signature = _dedup_signature(record)
+        existing = _find_recent_dedup_record(agent, signature, world_turn) if signature is not None else None
+        if existing is not None:
+            # Update in-place instead of appending a new record.
+            details = existing.setdefault("details", {})
+            details["times_seen"] = int(details.get("times_seen", 1)) + 1
+            details["last_seen_turn"] = world_turn
+            existing["confidence"] = min(1.0, float(existing.get("confidence", 0.7)) + 0.02)
+            return
+
+    add_memory_record(agent, record)
 
 
 def _map_event_to_record(

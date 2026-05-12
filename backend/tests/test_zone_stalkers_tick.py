@@ -6210,6 +6210,10 @@ class TestCombatInteraction:
         assert any(
             e.get("payload", {}).get("cause") == "combat" for e in events
         )
+        died_events = [e for e in events if e.get("event_type") == "agent_died" and e.get("payload", {}).get("cause") == "combat"]
+        assert died_events, "combat kill must emit agent_died event"
+        assert died_events[0]["payload"].get("killer_id") == "agent_hunter"
+        assert died_events[0]["payload"].get("combat_id") == "combat_B_90"
 
     def test_combat_kill_writes_hunt_target_killed_when_goal_target(self):
         """_combat_shoot writes hunt_target_killed when kill_target_id matches the slain agent."""

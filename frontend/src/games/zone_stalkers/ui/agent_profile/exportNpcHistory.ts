@@ -19,12 +19,12 @@ import type {
 
 export type { BrainTrace, BrainTraceEvent, BrainTraceObjectiveInfo, BrainTraceMemoryUsed, BrainTraceNeed };
 
-export type MemEntry = NonNullable<AgentForProfile['memory']>[number];
+export type MemEntry = NonNullable<AgentForProfile['story_events']>[number];
 
 // ─── CompactNpcHistoryExport ─────────────────────────────────────────────────
 
 export type CompactNpcHistoryExport = {
-  export_schema: 'npc_history_v1';
+  export_schema: 'npc_history_v2';
   exported_at: string;
 
   agent: {
@@ -96,7 +96,7 @@ export type CompactNpcHistoryExport = {
     recent_trace_events: BrainTraceEvent[];
   };
 
-  story_timeline: CompactTimelineEntry[];
+  story_events: CompactTimelineEntry[];
 
   memory_v3_summary?: {
     records_count?: number;
@@ -410,15 +410,85 @@ export const buildMemoryV3Summary = (memoryV3: AgentForProfile['memory_v3']) => 
   };
 };
 
+const buildStoryEventsFromMemoryV3 = (agent: AgentForProfile): MemEntry[] => {
+  const records = agent.memory_v3?.records ? (Object.values(agent.memory_v3.records) as Array<Record<string, unknown>>) : [];
+  const memoryDerived: MemEntry[] = records
+    .slice()
+    .sort((a, b) => Number(a.created_turn ?? 0) - Number(b.created_turn ?? 0))
+    .map((rec) => ({
+      world_turn: Number(rec.created_turn ?? 0),
+      type:
+        typeof (rec.details as Record<string, unknown> | undefined)?.memory_type === 'string'
+          ? ((rec.details as Record<string, unknown>).memory_type as string)
+          : 'observation',
+      title: (rec.summary as string | undefined) || (rec.kind as string),
+      summary: rec.summary as string | undefined,
+      effects: {
+        ...((rec.details as Record<string, unknown> | undefined) ?? {}),
+        action_kind:
+          typeof (rec.details as Record<string, unknown> | undefined)?.action_kind === 'string'
+            ? ((rec.details as Record<string, unknown>).action_kind as string)
+            : (rec.kind as string),
+        location_id: rec.location_id as string | undefined,
+      },
+    }));
+
+  const traceDerived: MemEntry[] = (agent.brain_trace?.events ?? []).map((event) => ({
+    world_turn: Number(event.turn ?? 0),
+    world_day: event.world_time?.world_day,
+    world_hour: event.world_time?.world_hour,
+    world_minute: event.world_time?.world_minute,
+    type: event.mode === 'decision' ? 'decision' : 'system',
+    title:
+      event.mode === 'decision'
+        ? '🧠 Brain decision'
+        : event.mode === 'active_plan_monitor'
+        ? '🛰️ Plan monitor'
+        : '📌 Trace event',
+    summary: event.summary,
+    effects: {
+      action_kind: typeof event.decision === 'string' ? event.decision : event.mode,
+      objective_key:
+        typeof event.active_objective?.key === 'string'
+          ? event.active_objective.key
+          : typeof (event as Record<string, unknown>).objective_key === 'string'
+          ? ((event as Record<string, unknown>).objective_key as string)
+          : undefined,
+      adapter_intent_kind:
+        typeof event.adapter_intent?.kind === 'string'
+          ? event.adapter_intent.kind
+          : typeof event.intent_kind === 'string'
+          ? event.intent_kind
+          : undefined,
+      scheduled_action_type:
+        typeof event.scheduled_action_type === 'string' ? event.scheduled_action_type : undefined,
+    },
+  }));
+
+  return [...memoryDerived, ...traceDerived]
+    .sort((a, b) => Number(a.world_turn ?? 0) - Number(b.world_turn ?? 0))
+    .slice(-120);
+};
+
+export const buildStoryEvents = (
+  agent: AgentForProfile,
+  displayMemory: MemEntry[],
+): MemEntry[] => {
+  if (displayMemory.length > 0) return displayMemory;
+  if ((agent.story_events ?? []).length > 0) return agent.story_events ?? [];
+  return buildStoryEventsFromMemoryV3(agent);
+};
+
 export const buildCompactNpcHistoryExport = (
   agent: AgentForProfile,
   displayMemory: MemEntry[],
   locationName: string,
 ): CompactNpcHistoryExport => {
+  const storyEventsSource = buildStoryEvents(agent, displayMemory);
   const latestEvent = getLatestTraceEvent(agent.brain_trace);
   const latestDecision = getLatestDecisionEvent(agent.brain_trace);
   const recentTraceEvents = (agent.brain_trace?.events ?? []).slice(-10);
-  const storyTimeline = displayMemory
+  const storyTimeline = storyEventsSource
     .slice(-120)
     .map(toCompactTimelineEntry)
     .filter((entry) => entry.action_kind !== 'active_plan_step_started');
@@ -452,7 +522,7 @@ export const buildCompactNpcHistoryExport = (
   };
   const huntBelief = agent.brain_v3_context?.hunt_target_belief;
   const targetName = huntBelief?.target_id
-    ? (displayMemory
+    ? (storyEventsSource
         .slice()
         .reverse()
         .find((mem) => {
@@ -470,7 +540,7 @@ export const buildCompactNpcHistoryExport = (
     : undefined;
 
   return {
-    export_schema: 'npc_history_v1',
+    export_schema: 'npc_history_v2',
     exported_at: new Date().toISOString(),
     agent: {
       id: agent.id,
@@ -542,7 +612,7 @@ export const buildCompactNpcHistoryExport = (
           },
       recent_trace_events: recentTraceEvents,
     },
-    story_timeline: storyTimeline,
+    story_events: storyTimeline,
     memory_v3_summary: buildMemoryV3Summary(agent.memory_v3),
     hunt_search: huntBelief
       ? {

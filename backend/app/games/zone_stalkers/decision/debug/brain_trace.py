@@ -112,6 +112,7 @@ def append_brain_trace_event(
     alternatives: list[dict[str, Any]] | None = None,
     adapter_intent: dict[str, Any] | None = None,
     active_plan_runtime: dict[str, Any] | None = None,
+    extra_context: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     # --- Gating: skip full trace only when agent_id is explicitly provided ---
@@ -169,6 +170,8 @@ def append_brain_trace_event(
         event["adapter_intent"] = adapter_intent
     if active_plan_runtime is not None:
         event["active_plan_runtime"] = active_plan_runtime
+    if extra_context:
+        event.update(extra_context)
 
     if not isinstance(trace, dict):
         thought = summary
@@ -219,6 +222,7 @@ def write_plan_monitor_trace(
     scheduled_action_type: str | None,
     dominant_pressure_key: str | None = None,
     dominant_pressure_value: float | None = None,
+    extra_context: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> None:
     _agent_id = str(agent.get("id") or "")
@@ -238,6 +242,7 @@ def write_plan_monitor_trace(
         reason=reason,
         scheduled_action_type=scheduled_action_type,
         dominant_pressure=dominant_pressure,
+        extra_context=extra_context,
         state=state,
     )
 

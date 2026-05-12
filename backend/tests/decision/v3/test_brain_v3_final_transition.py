@@ -134,6 +134,12 @@ def test_legacy_scheduled_action_is_wrapped_into_active_plan() -> None:
 
 
 def test_active_plan_memory_events_bridge_to_memory_v3() -> None:
+    """Updated for Fix 2: active_plan lifecycle noise no longer stored in memory_v3.
+
+    The plan DOES execute (active_plan_v3 and scheduled_action are set), but
+    trace-only lifecycle events (active_plan_created, active_plan_step_started)
+    are filtered out by the MEMORY_EVENT_POLICY before reaching the store.
+    """
     state = _make_state()
     bot = _bot()
     state["agents"]["bot1"] = bot
@@ -141,10 +147,20 @@ def test_active_plan_memory_events_bridge_to_memory_v3() -> None:
 
     new_state, _ = tick_zone_map(state)
 
-    records = list((new_state["agents"]["bot1"].get("memory_v3", {}) or {}).get("records", {}).values())
+    new_bot = new_state["agents"]["bot1"]
+    records = list((new_bot.get("memory_v3", {}) or {}).get("records", {}).values())
     kinds = {record.get("kind") for record in records}
-    assert "active_plan_created" in kinds
-    assert "active_plan_step_started" in kinds
+
+    # Lifecycle noise must NOT be stored (Fix 2)
+    assert "active_plan_created" not in kinds, (
+        "active_plan_created must be filtered by MEMORY_EVENT_POLICY (trace_only)"
+    )
+    assert "active_plan_step_started" not in kinds, (
+        "active_plan_step_started must be filtered by MEMORY_EVENT_POLICY (trace_only)"
+    )
+
+    # The plan execution itself still happened
+    assert new_bot.get("active_plan_v3") is not None or new_bot.get("scheduled_action") is not None
 
 
 def test_v3_bot_action_queue_stays_empty_when_active_plan_exists() -> None:

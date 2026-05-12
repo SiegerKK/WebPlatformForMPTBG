@@ -115,6 +115,18 @@ def objective_to_intent(
         forced_resupply_category = _prepare_for_hunt_forced_category(objective)
     if forced_resupply_category is not None:
         metadata["forced_resupply_category"] = forced_resupply_category
+    objective_metadata = objective.metadata if isinstance(objective.metadata, dict) else {}
+    for key in (
+        "support_objective_for",
+        "combat_ready",
+        "not_attacking_reasons",
+        "target_visible_now",
+        "target_co_located",
+        "target_strength",
+        "recommended_support_objective",
+    ):
+        if key in objective_metadata:
+            metadata[key] = objective_metadata.get(key)
     return Intent(
         kind=intent_kind,
         score=float(score.final_score),

@@ -864,17 +864,21 @@ def resolve_world_command(
                     },
                 })
                 if agent["hp"] <= 0:
-                    agent["is_alive"] = False
-                    from app.games.zone_stalkers.rules.tick_rules import _add_memory
                     _move_loc_name = new_loc_data.get("name", target_loc_id)
-                    _add_memory(
-                        agent, state.get("world_turn", 1), state, "observation",
-                        "💀 Смерть",
-                        f"Погиб от аномалии при перемещении в «{_move_loc_name}». Тип аномалии: {anomaly_type}.",
-                        {"action_kind": "death", "cause": "anomaly",
-                         "location_id": target_loc_id, "anomaly_type": anomaly_type},
+                    from app.games.zone_stalkers.rules.agent_lifecycle import kill_agent as _kill_agent
+                    _kill_agent(
+                        agent_id=agent_id,
+                        agent=agent,
+                        state=state,
+                        world_turn=state.get("world_turn", 1),
+                        cause="anomaly",
+                        location_id=target_loc_id,
+                        memory_title="💀 Смерть",
+                        memory_summary=f"Погиб от аномалии при перемещении в «{_move_loc_name}».",
+                        memory_effects={"action_kind": "death", "cause": "anomaly",
+                                        "location_id": target_loc_id, "anomaly_type": anomaly_type},
+                        events=events,
                     )
-                    events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
 
     elif command_type == "travel":
         target_loc_id = payload["target_location_id"]
