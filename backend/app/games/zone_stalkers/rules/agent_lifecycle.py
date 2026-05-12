@@ -41,8 +41,23 @@ def kill_agent(
     memory_effects: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
     emit_event: bool = True,
+    use_runtime: bool = True,
 ) -> None:
     """Canonical kill helper — apply all death-state invariants atomically."""
+    runtime = None
+    if use_runtime:
+        try:
+            from app.games.zone_stalkers.rules import tick_rules as _tick_rules  # noqa: PLC0415
+
+            runtime = getattr(_tick_rules, "_current_tick_runtime", None)
+        except Exception:
+            runtime = None
+        if runtime is not None and hasattr(runtime, "agent"):
+            try:
+                agent = runtime.agent(agent_id)
+            except Exception:
+                runtime = None
+
     # 1. Core state mutations
     agent["is_alive"] = False
     agent["hp"] = 0
@@ -134,3 +149,9 @@ def kill_agent(
                 "world_turn": world_turn,
             },
         })
+
+    if runtime is not None and hasattr(runtime, "mark_agent_dirty"):
+        try:
+            runtime.mark_agent_dirty(agent_id)
+        except Exception:
+            pass

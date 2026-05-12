@@ -150,7 +150,7 @@ def evaluate_scheduled_action_interrupts(
         interrupt_triggered = "critical_thirst"
     elif _projected(float(agent.get("hunger", 0)), int(state.get("world_minute", 0)), HUNGER_INCREASE_PER_HOUR) >= CRITICAL_HUNGER_THRESHOLD:
         interrupt_triggered = "critical_hunger"
-    elif bool(agent.get("global_goal_achieved")):
+    elif bool(agent.get("global_goal_achieved")) and objective_key not in {"LEAVE_ZONE", "CONFIRM_KILL"}:
         interrupt_triggered = "global_goal_completed"
     elif _has_active_support_exhaustion(
         agent=agent,

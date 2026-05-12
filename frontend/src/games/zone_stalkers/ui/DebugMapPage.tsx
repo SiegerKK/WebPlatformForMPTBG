@@ -2026,7 +2026,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           action_used: false,
           scheduled_action: null,
           controller: { kind: 'npc' },
-          memory: [],
+          story_events: [],
         };
         return (
           <AgentProfileModal

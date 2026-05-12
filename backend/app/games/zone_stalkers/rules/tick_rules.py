@@ -1790,20 +1790,35 @@ def _mark_agent_dead(
     events: List[Dict[str, Any]],
 ) -> None:
     """Compatibility wrapper around the canonical death helper."""
-    agent = _runtime_agent(agent_id, agent)
+    runtime_agent = _runtime_agent(agent_id, agent)
+    temp_agent = copy.deepcopy(runtime_agent)
     kill_agent(
         agent_id=agent_id,
-        agent=agent,
+        agent=temp_agent,
         state=state,
         world_turn=world_turn,
         cause=cause,
-        location_id=str(memory_effects.get("location_id") or agent.get("location_id") or ""),
+        location_id=str(memory_effects.get("location_id") or runtime_agent.get("location_id") or ""),
         memory_title=memory_title,
         memory_summary=memory_summary,
         memory_effects=memory_effects,
         events=events,
+        use_runtime=False,
     )
-    _runtime_set_agent_field(agent_id, "action_used", False, agent)
+    for key in (
+        "is_alive",
+        "hp",
+        "scheduled_action",
+        "action_queue",
+        "current_goal",
+        "active_plan_v3",
+        "brain_runtime",
+        "brain_v3_context",
+        "brain_trace",
+        "memory_v3",
+    ):
+        _runtime_set_agent_field(agent_id, key, temp_agent.get(key), runtime_agent)
+    _runtime_set_agent_field(agent_id, "action_used", False, runtime_agent)
 
 
 def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:

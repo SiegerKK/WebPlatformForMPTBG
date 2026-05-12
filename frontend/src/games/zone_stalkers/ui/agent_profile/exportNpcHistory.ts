@@ -411,19 +411,25 @@ export const buildMemoryV3Summary = (memoryV3: AgentForProfile['memory_v3']) => 
 };
 
 const buildStoryEventsFromMemoryV3 = (agent: AgentForProfile): MemEntry[] => {
-  const records = agent.memory_v3?.records ? Object.values(agent.memory_v3.records) : [];
+  const records = agent.memory_v3?.records ? (Object.values(agent.memory_v3.records) as Array<Record<string, unknown>>) : [];
   const memoryDerived: MemEntry[] = records
     .slice()
     .sort((a, b) => Number(a.created_turn ?? 0) - Number(b.created_turn ?? 0))
     .map((rec) => ({
       world_turn: Number(rec.created_turn ?? 0),
-      type: typeof rec.details?.memory_type === 'string' ? rec.details.memory_type : 'observation',
-      title: rec.summary || rec.kind,
-      summary: rec.summary,
+      type:
+        typeof (rec.details as Record<string, unknown> | undefined)?.memory_type === 'string'
+          ? ((rec.details as Record<string, unknown>).memory_type as string)
+          : 'observation',
+      title: (rec.summary as string | undefined) || (rec.kind as string),
+      summary: rec.summary as string | undefined,
       effects: {
-        ...(rec.details ?? {}),
-        action_kind: typeof rec.details?.action_kind === 'string' ? rec.details.action_kind : rec.kind,
-        location_id: rec.location_id,
+        ...((rec.details as Record<string, unknown> | undefined) ?? {}),
+        action_kind:
+          typeof (rec.details as Record<string, unknown> | undefined)?.action_kind === 'string'
+            ? ((rec.details as Record<string, unknown>).action_kind as string)
+            : (rec.kind as string),
+        location_id: rec.location_id as string | undefined,
       },
     }));
 
@@ -445,8 +451,8 @@ const buildStoryEventsFromMemoryV3 = (agent: AgentForProfile): MemEntry[] => {
       objective_key:
         typeof event.active_objective?.key === 'string'
           ? event.active_objective.key
-          : typeof event.objective_key === 'string'
-          ? event.objective_key
+          : typeof (event as Record<string, unknown>).objective_key === 'string'
+          ? ((event as Record<string, unknown>).objective_key as string)
           : undefined,
       adapter_intent_kind:
         typeof event.adapter_intent?.kind === 'string'
