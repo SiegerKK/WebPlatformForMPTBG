@@ -195,7 +195,6 @@ def generate_zone(
             "location_id": spawn_loc,
             "inventory": trader_inventory,
             "money": rng.randint(3000, 8000),
-            "memory": [],   # list of {world_turn, world_day, world_hour, type, title, summary, effects}
         }
         locations[spawn_loc]["agents"].append(trader_id)
 
@@ -222,7 +221,6 @@ def generate_zone(
         "emission_active": False,
         "emission_scheduled_turn": rng.randint(1440, 2880),
         "emission_ends_turn": 0,
-        "legacy_memory_write_enabled": False,
     }
 
 
@@ -326,8 +324,15 @@ def _make_stalker_agent(
         # ─── Action state ───
         "scheduled_action": None,   # {"type", "turns_remaining", "turns_total", "target_id", "started_turn"}
         "action_queue": [],         # list of scheduled_action dicts to execute after current one
-        # ─── Memory ───
-        "memory": [],               # list of {world_turn, world_day, type, title, summary, effects}
+        # ─── Memory v3 ───
+        "memory_v3": {
+            "records": {},
+            "indexes": {
+                "by_layer": {}, "by_kind": {}, "by_location": {},
+                "by_entity": {}, "by_item_type": {}, "by_tag": {},
+            },
+            "stats": {"records_count": 0, "last_decay_turn": None, "last_consolidation_turn": None},
+        },
     }
 
 

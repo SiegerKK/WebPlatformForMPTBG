@@ -336,10 +336,6 @@ def assess_active_plan_v3(
         # confirmed_empty for that location.
         location_id = _step_location_id(step)
         if location_id is not None:
-            for mem in agent.get("memory", []):
-                mem_loc = mem.get("location_id") or mem.get("effects", {}).get("location_id")
-                if mem_loc == location_id and mem.get("confirmed_empty", False):
-                    return ("repair", "target_location_empty")
             if _memory_v3_has_target_moved(agent, location_id):
                 return ("repair", "target_moved")
             if _memory_v3_has_confirmed_empty(agent, location_id):

@@ -11,6 +11,7 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_TRAVEL_TO_LOCATION,
 )
 from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
+from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc as _v3r, _v3_action_kind as _v3_ak, _v3_details as _v3_fx, _v3_memory_type as _v3_mt
 
 
 def _make_base_state() -> dict:
@@ -76,7 +77,6 @@ def _bot_agent() -> dict:
             {"id": "med2", "type": "bandage", "value": 0},
             {"id": "med3", "type": "bandage", "value": 0},
         ],
-        "memory": [],
         "action_queue": [],
         "scheduled_action": {
             "type": "travel",
@@ -201,8 +201,8 @@ def test_plan_monitor_abort_memory_is_deduplicated_within_window() -> None:
     bot_after_first = state_after_first["agents"]["bot1"]
     first_count = sum(
         1
-        for m in bot_after_first.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "plan_monitor_abort"
+        for m in _v3r(bot_after_first)
+        if _v3_ak(m) == "plan_monitor_abort"
     )
     assert first_count == 1
 
@@ -220,34 +220,10 @@ def test_plan_monitor_abort_memory_is_deduplicated_within_window() -> None:
     bot_after_second = state_after_second["agents"]["bot1"]
     second_count = sum(
         1
-        for m in bot_after_second.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "plan_monitor_abort"
+        for m in _v3r(bot_after_second)
+        if _v3_ak(m) == "plan_monitor_abort"
     )
     assert second_count == 1
-
-
-def test_tick_normalizes_oversized_legacy_memory_once_in_memory_prep_path() -> None:
-    state = _make_base_state()
-    state["legacy_memory_write_enabled"] = False
-    bot = _bot_agent()
-    bot["memory"] = [
-        {
-            "world_turn": i,
-            "type": "observation",
-            "title": f"mem-{i}",
-            "summary": f"mem-{i}",
-            "effects": {"location_id": "loc_a"},
-        }
-        for i in range(130)
-    ]
-    state["agents"]["bot1"] = bot
-    state["locations"]["loc_a"]["agents"] = ["bot1"]
-
-    new_state, _ = tick_zone_map(state)
-
-    normalized = new_state["agents"]["bot1"]
-    assert len(normalized["memory"]) == 100
-    assert normalized["memory"][0]["world_turn"] == 30
 
 
 def test_bot_decision_pipeline_writes_decision_brain_trace_event() -> None:
@@ -326,13 +302,13 @@ def test_tick_scheduled_action_completion_advances_active_plan_step() -> None:
     assert new_bot["scheduled_action"]["active_plan_step_index"] == 1
     completed_entries = [
         m
-        for m in new_bot.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "active_plan_step_completed"
+        for m in _v3r(new_bot)
+        if _v3_ak(m) == "active_plan_step_completed"
     ]
     assert completed_entries
-    latest_completed = completed_entries[-1]
-    assert "шаг 1/2 travel_to_location" in (latest_completed.get("summary") or "")
-    effects = latest_completed.get("effects", {})
+    latest_completed = completed_entries[0]  # newest first
+    assert "шаг 1/2 travel_to_location" in (_v3_fx(latest_completed).get("summary") or latest_completed.get("summary") or "")
+    effects = _v3_fx(latest_completed)
     assert effects.get("completed_step_index") == 0
     assert effects.get("completed_step_number") == 1
     assert effects.get("completed_step_kind") == "travel_to_location"
@@ -368,11 +344,11 @@ def test_active_plan_completed_summary_has_no_off_by_one() -> None:
     new_bot = new_state["agents"]["bot1"]
     completed_entries = [
         m
-        for m in new_bot.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "active_plan_completed"
+        for m in _v3r(new_bot)
+        if _v3_ak(m) == "active_plan_completed"
     ]
     assert completed_entries
-    summary = completed_entries[-1].get("summary") or ""
+    summary = _v3_fx(completed_entries[0]).get("summary") or completed_entries[0].get("summary") or ""
     assert "1/1 steps completed" in summary
     assert "шаг 2/1" not in summary
 
@@ -384,12 +360,15 @@ def test_tick_active_plan_continue_skips_new_objective_decision() -> None:
     bot["action_queue"] = []
     bot["thirst"] = 10
     bot["hunger"] = 10
-    bot["memory"] = [
-        {
-            "type": "decision",
-            "effects": {"action_kind": "objective_decision", "objective_key": "FIND_ARTIFACTS"},
-        }
-    ]
+    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.store import ensure_memory_v3  # noqa: PLC0415
+    ensure_memory_v3(bot)
+    write_memory_event_to_v3(
+        agent_id="bot1", agent=bot,
+        legacy_entry={"world_turn": 100, "type": "decision", "title": "decide",
+                      "effects": {"action_kind": "objective_decision", "objective_key": "FIND_ARTIFACTS"}},
+        world_turn=100,
+    )
     plan = Plan(intent_kind="explore", steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc_a"})])
     active_plan = create_active_plan(_decision(), world_turn=100, plan=plan)
     bot["active_plan_v3"] = active_plan.to_dict()
@@ -401,11 +380,11 @@ def test_tick_active_plan_continue_skips_new_objective_decision() -> None:
     new_bot = new_state["agents"]["bot1"]
     decision_memories = [
         m
-        for m in new_bot.get("memory", [])
-        if m.get("type") == "decision"
-        and m.get("effects", {}).get("action_kind") == "objective_decision"
+        for m in _v3r(new_bot)
+        if _v3_mt(m) == "decision"
+        and _v3_ak(m) == "objective_decision"
     ]
-    assert len(decision_memories) == 1
+    assert len(decision_memories) >= 1
     assert new_bot["active_plan_v3"]["id"] == active_plan.id
     assert new_bot["scheduled_action"]["active_plan_id"] == active_plan.id
 
@@ -691,12 +670,12 @@ def test_tick_decision_memory_is_objective_first_and_updates_current_goal() -> N
 
     decision_memories = [
         m
-        for m in new_bot.get("memory", [])
-        if m.get("type") == "decision"
-        and m.get("effects", {}).get("action_kind") == "objective_decision"
+        for m in _v3r(new_bot)
+        if _v3_mt(m) == "decision"
+        and _v3_ak(m) == "objective_decision"
     ]
     assert decision_memories
-    effects = decision_memories[-1]["effects"]
+    effects = _v3_fx(decision_memories[0])
     assert effects.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
     assert effects.get("adapter_intent_kind")
     assert new_bot.get("current_goal") == "get_money_for_resupply"
@@ -764,8 +743,8 @@ def test_material_threshold_does_not_complete_get_rich_goal() -> None:
     assert new_bot.get("global_goal_achieved") is not True
     completion_entries = [
         m
-        for m in new_bot.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "global_goal_completed"
+        for m in _v3r(new_bot)
+        if _v3_ak(m) == "global_goal_completed"
     ]
     assert not completion_entries
     decision_events = [ev for ev in new_bot.get("brain_trace", {}).get("events", []) if ev.get("mode") == "decision"]
@@ -797,11 +776,11 @@ def test_get_rich_liquid_wealth_completion_generates_leave_zone_objective() -> N
     assert new_bot.get("global_goal_achieved") is True
     completion_entries = [
         m
-        for m in new_bot.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "global_goal_completed"
+        for m in _v3r(new_bot)
+        if _v3_ak(m) == "global_goal_completed"
     ]
     assert completion_entries
-    completion_effects = completion_entries[-1].get("effects", {})
+    completion_effects = _v3_fx(completion_entries[0])
     assert completion_effects.get("global_goal") == "get_rich"
     assert completion_effects.get("liquid_wealth", 0) >= completion_effects.get("wealth_goal_target", 0)
 

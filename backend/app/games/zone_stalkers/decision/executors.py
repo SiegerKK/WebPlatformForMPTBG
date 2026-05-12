@@ -19,6 +19,30 @@ from __future__ import annotations
 from typing import Any
 
 from .models.agent_context import AgentContext
+
+
+# ── Standalone v3 memory helpers (no tick_rules dependency) ──────────────────
+def _v3r_ex(agent: "dict[str, Any]") -> "list[dict[str, Any]]":
+    """Return memory_v3 records sorted newest-first."""
+    mv3 = agent.get("memory_v3")
+    records = mv3.get("records", {}) if isinstance(mv3, dict) else {}
+    return sorted(records.values(), key=lambda r: int(r.get("created_turn") or 0), reverse=True)
+
+
+def _v3ak_ex(rec: "dict[str, Any]") -> str:
+    """Return original action_kind (details.action_kind first, then rec.kind)."""
+    d = rec.get("details") or {}
+    return str(d.get("action_kind") or rec.get("kind") or "")
+
+
+def _v3fx_ex(rec: "dict[str, Any]") -> "dict[str, Any]":
+    """Return details dict safely."""
+    return dict(rec.get("details") or {})
+
+
+def _v3mt_ex(rec: "dict[str, Any]") -> str:
+    """Return memory_type from details."""
+    return str((rec.get("details") or {}).get("memory_type") or "")
 from .models.plan import (
     Plan, PlanStep,
     STEP_TRAVEL_TO_LOCATION,
@@ -167,10 +191,10 @@ def _exec_travel(
     elif reason == "get_rich_travel_to_anomaly":
         # Write a decision record only when the target anomaly location changes.
         _prev_anomaly_target = next(
-            (m.get("effects", {}).get("target_location_id")
-             for m in reversed(agent.get("memory", []))
-             if m.get("type") == "decision"
-             and m.get("effects", {}).get("action_kind") == "anomaly_search_target_chosen"),
+            (_v3fx_ex(r).get("target_location_id")
+             for r in _v3r_ex(agent)
+             if _v3mt_ex(r) == "decision"
+             and _v3ak_ex(r) == "anomaly_search_target_chosen"),
             None,
         )
         if _prev_anomaly_target != target_id:
@@ -591,17 +615,13 @@ def _count_target_not_found_failures(
     location_id: str,
 ) -> int:
     count = 0
-    for memory in agent.get("memory", []):
-        if not isinstance(memory, dict):
+    for rec in _v3r_ex(agent):
+        if _v3ak_ex(rec) != "target_not_found":
             continue
-        effects = memory.get("effects")
-        if not isinstance(effects, dict):
+        fx = _v3fx_ex(rec)
+        if str(fx.get("target_id") or "") != target_id:
             continue
-        if effects.get("action_kind") != "target_not_found":
-            continue
-        if str(effects.get("target_id") or "") != target_id:
-            continue
-        if str(effects.get("location_id") or "") != location_id:
+        if str(fx.get("location_id") or rec.get("location_id") or "") != location_id:
             continue
         count += 1
     return count
@@ -623,32 +643,6 @@ def _resolve_track_destination_from_known_leads(
         target_loc = str(target.get("location_id") or "")
         if target_loc and target_loc != current_loc:
             return target_loc
-
-    for mem in reversed(agent.get("memory", [])):
-        if not isinstance(mem, dict):
-            continue
-        effects = mem.get("effects")
-        if not isinstance(effects, dict):
-            continue
-        action_kind = str(effects.get("action_kind") or "")
-        loc: str | None = None
-        if action_kind in {"target_moved", "target_route_observed"}:
-            if str(effects.get("target_id") or "") != target_id:
-                continue
-            loc = str(effects.get("to_location_id") or effects.get("location_id") or "")
-        elif action_kind in {"intel_from_stalker", "intel_from_trader", "target_intel"}:
-            if str(effects.get("target_agent_id") or effects.get("target_id") or "") != target_id:
-                continue
-            observed = str(effects.get("observed") or "")
-            if action_kind != "target_intel" and observed != "agent_location":
-                continue
-            loc = str(effects.get("location_id") or "")
-        elif action_kind == "target_last_known_location":
-            if str(effects.get("target_id") or "") != target_id:
-                continue
-            loc = str(effects.get("location_id") or "")
-        if loc and loc != current_loc:
-            return loc
 
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
@@ -1055,15 +1049,11 @@ def _exec_wait(
         # just update its world_turn instead of adding a new entry every tick.
         # This prevents the shelter/v2_decision pair from writing duplicate
         # entries on every emission tick.
-        _shelter_entry = next(
-            (m for m in reversed(agent.get("memory", []))
-             if m.get("type") == "decision"
-             and m.get("effects", {}).get("action_kind") == "wait_in_shelter"),
-            None,
+        _has_shelter_entry = any(
+            _v3ak_ex(r) == "wait_in_shelter"
+            for r in _v3r_ex(agent)
         )
-        if _shelter_entry is not None:
-            _shelter_entry["world_turn"] = world_turn
-        else:
+        if not _has_shelter_entry:
             _add_memory(agent, world_turn, state, "decision",
                 "🏠 Укрываюсь от выброса",
                 {"action_kind": "wait_in_shelter"},
@@ -1140,9 +1130,9 @@ def _write_once_decision(
     """
     from app.games.zone_stalkers.rules.tick_rules import _add_memory
     action_kind = effects.get("action_kind")
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("type") == "decision":
-            if mem.get("effects", {}).get("action_kind") == action_kind:
+    for rec in _v3r_ex(agent):
+        if _v3mt_ex(rec) == "decision":
+            if _v3ak_ex(rec) == action_kind:
                 return  # already written this kind
             if not check_all:
                 break  # last decision is different — safe to write
@@ -1160,10 +1150,10 @@ def _write_once_by_dest(
 ) -> None:
     """Write a seek_item decision memory (anti-spam by destination + category)."""
     from app.games.zone_stalkers.rules.tick_rules import _add_memory
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "decision":
+    for rec in _v3r_ex(agent):
+        if _v3mt_ex(rec) != "decision":
             continue
-        fx = mem.get("effects", {})
+        fx = _v3fx_ex(rec)
         if (fx.get("action_kind") == action_kind
                 and fx.get("destination") == destination
                 and fx.get("item_category") == item_category):

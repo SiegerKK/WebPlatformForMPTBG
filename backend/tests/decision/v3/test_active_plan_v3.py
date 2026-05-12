@@ -46,6 +46,38 @@ from app.games.zone_stalkers.decision.models.objective import (
     ObjectiveDecision,
     ObjectiveScore,
 )
+from app.games.zone_stalkers.memory.store import ensure_memory_v3
+from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+
+
+def _setup_confirmed_empty(agent: dict, location_id: str, world_turn: int = 7) -> None:
+    """Write a confirmed_empty (location_empty) record to memory_v3."""
+    ensure_memory_v3(agent)
+    entry = {
+        "world_turn": world_turn,
+        "type": "observation",
+        "title": f"empty {location_id}",
+        "effects": {"action_kind": "explore_confirmed_empty", "location_id": location_id},
+    }
+    write_memory_event_to_v3(
+        agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=world_turn
+    )
+
+
+def _setup_emission_imminent(agent: dict, world_turn: int = 10) -> None:
+    """Write an emission_imminent observation to memory_v3."""
+    ensure_memory_v3(agent)
+    entry = {
+        "world_turn": world_turn,
+        "type": "observation",
+        "title": "emission",
+        "effects": {"action_kind": "emission_imminent"},
+    }
+    write_memory_event_to_v3(
+        agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=world_turn
+    )
+
+
 from app.games.zone_stalkers.decision.models.plan import (
     Plan,
     PlanStep,
@@ -115,7 +147,6 @@ def _base_agent() -> dict[str, Any]:
         "hp": 100,
         "hunger": 0,
         "thirst": 0,
-        "memory": [],
         "inventory": [],
     }
 
@@ -420,14 +451,7 @@ class TestAssessActivePlanV3:
 
     def test_repair_target_location_empty(self) -> None:
         agent = _base_agent()
-        agent["memory"] = [
-            {
-                "type": "observation",
-                "location_id": "loc-0",
-                "confirmed_empty": True,
-                "world_turn": 5,
-            }
-        ]
+        _setup_confirmed_empty(agent, "loc-0", world_turn=5)
         ap = create_active_plan(_decision(), world_turn=1, plan=_plan(STEP_EXPLORE_LOCATION))
         # loc-0 is set in _plan helper
         save_active_plan(agent, ap)
@@ -437,14 +461,7 @@ class TestAssessActivePlanV3:
 
     def test_active_plan_repair_uses_target_id_alias_for_location(self) -> None:
         agent = _base_agent()
-        agent["memory"] = [
-            {
-                "type": "observation",
-                "location_id": "loc-alias",
-                "confirmed_empty": True,
-                "world_turn": 5,
-            }
-        ]
+        _setup_confirmed_empty(agent, "loc-alias", world_turn=5)
         plan = Plan(
             intent_kind="explore",
             steps=[PlanStep(kind=STEP_EXPLORE_LOCATION, payload={"target_id": "loc-alias"})],
@@ -670,13 +687,7 @@ class TestEmissionInterruption:
     def test_emission_memory_triggers_repair(self) -> None:
         """Emission detected via memory (not state flag)."""
         agent = _base_agent()
-        agent["memory"] = [
-            {
-                "type": "observation",
-                "effects": {"action_kind": "emission_imminent"},
-                "world_turn": 10,
-            }
-        ]
+        _setup_emission_imminent(agent, world_turn=10)
         ap = create_active_plan(
             _decision("FIND_ARTIFACTS"),
             world_turn=1,
@@ -826,14 +837,7 @@ class TestConfirmedEmptyMemoryIntegration:
 
     def test_confirmed_empty_triggers_repair(self) -> None:
         agent = _base_agent()
-        agent["memory"] = [
-            {
-                "type": "observation",
-                "location_id": "loc-0",
-                "confirmed_empty": True,
-                "world_turn": 7,
-            }
-        ]
+        _setup_confirmed_empty(agent, "loc-0", world_turn=7)
         ap = create_active_plan(_decision(), world_turn=1, plan=_plan(STEP_EXPLORE_LOCATION))
         save_active_plan(agent, ap)
         op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=8)
@@ -842,14 +846,7 @@ class TestConfirmedEmptyMemoryIntegration:
 
     def test_confirmed_empty_for_different_location_does_not_trigger(self) -> None:
         agent = _base_agent()
-        agent["memory"] = [
-            {
-                "type": "observation",
-                "location_id": "other-loc",
-                "confirmed_empty": True,
-                "world_turn": 7,
-            }
-        ]
+        _setup_confirmed_empty(agent, "other-loc", world_turn=7)
         ap = create_active_plan(_decision(), world_turn=1, plan=_plan(STEP_EXPLORE_LOCATION))
         save_active_plan(agent, ap)
         op, _ = assess_active_plan_v3(agent, _base_state(), world_turn=8)
@@ -858,14 +855,7 @@ class TestConfirmedEmptyMemoryIntegration:
     def test_stale_memory_invalidation_repair(self) -> None:
         """Memory shows location was empty on turn 3; plan is being executed on turn 10."""
         agent = _base_agent()
-        agent["memory"] = [
-            {
-                "type": "observation",
-                "location_id": "loc-0",
-                "confirmed_empty": True,
-                "world_turn": 3,  # old memory, but still present
-            }
-        ]
+        _setup_confirmed_empty(agent, "loc-0", world_turn=3)
         ap = create_active_plan(_decision(), world_turn=1, plan=_plan(STEP_EXPLORE_LOCATION))
         save_active_plan(agent, ap)
         op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=10)

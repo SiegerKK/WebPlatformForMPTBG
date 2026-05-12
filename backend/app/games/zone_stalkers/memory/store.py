@@ -235,12 +235,8 @@ def trim_memory_v3_to_cap(
 
 
 def normalize_agent_memory_state(agent: dict[str, Any]) -> dict[str, int]:
-    """Normalize legacy and memory_v3 structures for oversized/old states."""
+    """Normalize memory_v3 structure for oversized/old states."""
     legacy_trimmed = 0
-    legacy = agent.get("memory")
-    if isinstance(legacy, list) and len(legacy) > 100:
-        legacy_trimmed = len(legacy) - 100
-        agent["memory"] = legacy[-100:]
 
     mem_v3 = ensure_memory_v3(agent)
     memory_v3_evicted = trim_memory_v3_to_cap(agent)

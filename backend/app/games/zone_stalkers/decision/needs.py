@@ -470,13 +470,12 @@ def _is_emission_warned(agent: dict[str, Any], current_turn: int) -> bool:
     """
     last_ended_turn = 0
     last_imminent_turn = 0
-    memory = agent.get("memory", [])
-    # Scan in reverse (most recent first) and stop once both are found
-    for mem in reversed(memory):
-        if mem.get("type") != "observation":
+    from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_action_kind, _v3_memory_type, _v3_turn  # noqa: PLC0415
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        kind = mem.get("effects", {}).get("action_kind")
-        turn = mem.get("world_turn", 0)
+        kind = _v3_action_kind(rec)
+        turn = _v3_turn(rec)
         if kind == "emission_ended" and last_ended_turn == 0:
             last_ended_turn = turn
         elif kind == "emission_imminent" and last_imminent_turn == 0:

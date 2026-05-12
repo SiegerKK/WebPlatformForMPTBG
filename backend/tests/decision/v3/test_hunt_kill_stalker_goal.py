@@ -564,7 +564,7 @@ class TestHuntExecutors:
             STEP_SEARCH_TARGET, {"target_id": "target_1", "target_location_id": "loc_a"},
             agent, state,
         )
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_seen" in memory_kinds
         assert "target_last_known_location" in memory_kinds
 
@@ -575,7 +575,7 @@ class TestHuntExecutors:
             STEP_SEARCH_TARGET, {"target_id": "target_1", "target_location_id": "loc_a"},
             agent, state,
         )
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_not_found" in memory_kinds
 
     def test_start_combat_creates_combat_interaction(self) -> None:
@@ -611,7 +611,7 @@ class TestHuntExecutors:
             STEP_START_COMBAT, {"target_id": "target_1"},
             agent, state,
         )
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_moved" in memory_kinds
 
     def test_engage_target_does_not_confirm_before_combat_resolves(self) -> None:
@@ -635,7 +635,7 @@ class TestHuntExecutors:
         _ = execute_plan_step(ctx, plan, state, state["world_turn"])
 
         assert plan.current_step_index == 1
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_death_confirmed" not in memory_kinds
 
     def test_engage_target_confirms_after_combat_target_dead(self) -> None:
@@ -666,7 +666,7 @@ class TestHuntExecutors:
         state["world_turn"] += 1
         ctx = build_agent_context("bot1", agent, state)
         _ = execute_plan_step(ctx, plan, state, state["world_turn"])
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_death_confirmed" in memory_kinds
 
     def test_confirm_kill_dead_target_writes_death_confirmed(self) -> None:
@@ -676,7 +676,7 @@ class TestHuntExecutors:
             STEP_CONFIRM_KILL, {"target_id": "target_1"},
             agent, state,
         )
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_death_confirmed" in memory_kinds
 
     def test_confirm_kill_alive_target_writes_hunt_failed(self) -> None:
@@ -686,7 +686,7 @@ class TestHuntExecutors:
             STEP_CONFIRM_KILL, {"target_id": "target_1"},
             agent, state,
         )
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "hunt_failed" in memory_kinds
 
     def test_search_target_found_writes_combat_strength_memory(self) -> None:
@@ -696,13 +696,13 @@ class TestHuntExecutors:
             STEP_SEARCH_TARGET, {"target_id": "target_1", "target_location_id": "loc_a"},
             agent, state,
         )
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "target_combat_strength_observed" in memory_kinds
         strength_entry = next(
-            m for m in agent["memory"]
-            if m["effects"].get("action_kind") == "target_combat_strength_observed"
+            r for r in _v3r(agent)
+            if _v3_ak(r) == "target_combat_strength_observed"
         )
-        assert strength_entry["effects"]["combat_strength"] == pytest.approx(0.6, abs=0.01)
+        assert _v3_fx(strength_entry)["combat_strength"] == pytest.approx(0.6, abs=0.01)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -760,7 +760,7 @@ class TestKillStalkerGoalCompletion:
             summary="Цель устранена и подтверждена.",
         )
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
-        memory_kinds = [m["effects"].get("action_kind") for m in agent["memory"]]
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "goal_achieved" in memory_kinds
 
     def test_objective_generation_confirms_kill_after_goal_achieved(self) -> None:

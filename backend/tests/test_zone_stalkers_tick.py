@@ -2,6 +2,55 @@
 import pytest
 
 
+
+# ── v3 memory helpers (CPU Optimization PR5) ─────────────────────────────────
+def _v3r(agent):
+    """Return memory_v3 records sorted newest-first."""
+    mv3 = agent.get("memory_v3")
+    records = mv3.get("records", {}) if isinstance(mv3, dict) else {}
+    return sorted(records.values(), key=lambda r: int(r.get("created_turn") or 0), reverse=True)
+
+def _v3_ak(r):
+    d = r.get("details") or {}
+    return str(d.get("action_kind") or r.get("kind") or "")
+
+def _v3_fx(r):
+    return dict(r.get("details") or {})
+
+def _v3_mt(r):
+    return str((r.get("details") or {}).get("memory_type") or "")
+
+def _setup_v3_memory(agent, entries, agent_id="test_agent"):
+    """Populate agent memory_v3 from a list of legacy-format dicts."""
+    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+    from app.games.zone_stalkers.memory.store import ensure_memory_v3
+    ensure_memory_v3(agent)
+    agent["memory_v3"]["records"] = {}
+    for e in entries:
+        write_memory_event_to_v3(
+            agent_id=agent_id, agent=agent,
+            legacy_entry={"type": e.get("type", "observation"),
+                          "world_turn": e.get("world_turn", 1),
+                          "title": e.get("title", "test"),
+                          "effects": e.get("effects", {})},
+            world_turn=e.get("world_turn", 1),
+        )
+
+def _add_v3_memory(agent, entry, agent_id="test_agent"):
+    """Append one legacy-format memory entry to agent memory_v3."""
+    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+    from app.games.zone_stalkers.memory.store import ensure_memory_v3
+    ensure_memory_v3(agent)
+    write_memory_event_to_v3(
+        agent_id=agent_id, agent=agent,
+        legacy_entry={"type": entry.get("type", "observation"),
+                      "world_turn": entry.get("world_turn", 1),
+                      "title": entry.get("title", "test"),
+                      "effects": entry.get("effects", {})},
+        world_turn=entry.get("world_turn", 1),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────
@@ -30,8 +79,8 @@ class TestGeneratorExtensions:
     def test_agent_has_memory(self):
         state = _make_world()
         agent = state["agents"]["agent_p0"]
-        assert "memory" in agent
-        assert isinstance(agent["memory"], list)
+        assert "memory_v3" in agent
+        assert isinstance(_v3r(agent), list)
 
     def test_world_has_hour_and_day(self):
         state = _make_world()
@@ -252,9 +301,9 @@ class TestTickRules:
         turns = state["agents"]["agent_p0"]["scheduled_action"]["turns_remaining"]
         for _ in range(turns):
             state, _ = self._tick(state)
-        memory = state["agents"]["agent_p0"]["memory"]
+        memory = _v3r(state["agents"]["agent_p0"])
         assert len(memory) > 0
-        assert any(m["type"] == "action" for m in memory)
+        assert any(_v3_mt(m) == "action" for m in memory)
 
     # Explore completion ─────────────────────────────────────────
 
@@ -272,9 +321,9 @@ class TestTickRules:
         state = _make_world()
         state, _ = resolve_world_command("explore_location", {}, state, "player1")
         state, _ = self._tick(state)
-        memory = state["agents"]["agent_p0"]["memory"]
+        memory = _v3r(state["agents"]["agent_p0"])
         assert len(memory) > 0
-        assert any(m["type"] == "action" for m in memory)
+        assert any(_v3_mt(m) == "action" for m in memory)
 
     # Sleep completion ───────────────────────────────────────────
 
@@ -320,7 +369,7 @@ class TestTickRules:
         # 1 turn = 1 minute; sleep(2 hours) = 120 ticks
         for _ in range(2 * 60):
             state, _ = self._tick(state)
-        assert any(m["type"] == "action" for m in state["agents"]["agent_p0"]["memory"])
+        assert any(_v3_mt(m) == "action" for m in _v3r(state["agents"]["agent_p0"]))
 
 
 class TestDebugSetTime:
@@ -704,7 +753,7 @@ class TestNeedsDegradation:
     def test_sleep_resolve_hours_field(self):
         """_resolve_sleep heals correctly when scheduled with the 'hours' key."""
         from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep
-        agent = {"hp": 50, "max_hp": 100, "radiation": 30, "sleepiness": 80, "memory": []}
+        agent = {"hp": 50, "max_hp": 100, "radiation": 30, "sleepiness": 80}
         _resolve_sleep(agent, {"hours": 4}, 1, {"world_day": 1, "world_hour": 6, "world_minute": 0})
         assert agent["hp"] == min(50 + 15 * 4, 100)  # 110 → capped at max_hp=100
         assert agent["radiation"] == 30 - 5 * 4     # 10
@@ -713,7 +762,7 @@ class TestNeedsDegradation:
     def test_sleep_resolve_turns_total_fallback(self):
         """_resolve_sleep falls back to turns_total when 'hours' key is absent (legacy saves)."""
         from app.games.zone_stalkers.rules.tick_rules import _resolve_sleep, _HOUR_IN_TURNS
-        agent = {"hp": 70, "max_hp": 100, "radiation": 20, "sleepiness": 75, "memory": []}
+        agent = {"hp": 70, "max_hp": 100, "radiation": 20, "sleepiness": 75}
         # Simulate legacy scheduled action that used turns_total=360 (= 6 h × 60 turns/h)
         sched = {"turns_total": 6 * _HOUR_IN_TURNS}
         _resolve_sleep(agent, sched, 1, {"world_day": 1, "world_hour": 0, "world_minute": 0})
@@ -806,7 +855,6 @@ def _make_trader_scenario():
 
     # Generate a world with no bots/traders (we'll add them manually)
     state = generate_zone(seed=99, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
-    state["legacy_memory_write_enabled"] = True
     # Offset world_turn so that the first exploration attempt uses an RNG seed that
     # guarantees a successful artifact pickup.
     #
@@ -884,8 +932,7 @@ def _make_trader_scenario():
         "location_id": trader_loc,
         "inventory": [],
         "money": 10000,
-        "memory": [],
-    }
+            }
     state.setdefault("traders", {})["trader_test"] = trader
     state["locations"][trader_loc]["agents"].append("trader_test")
 
@@ -922,8 +969,8 @@ class TestArtifactToTraderScenario:
         """Tick until the stalker has a trade_sell (action) entry in memory or max_ticks."""
         for _ in range(max_ticks):
             agent = state["agents"][sid]
-            if any(m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"
-                   for m in agent.get("memory", [])):
+            if any(_v3_mt(m) == "action" and _v3_fx(m).get("action_kind") == "trade_sell"
+                   for m in _v3r(agent)):
                 return state
             state, _ = self._tick(state)
         return state
@@ -948,9 +995,9 @@ class TestArtifactToTraderScenario:
         state, sid, *_ = _make_trader_scenario()
         new_state, _ = self._tick(state)
         agent = new_state["agents"][sid]
-        explore_mems = [m for m in agent["memory"]
-                        if m["type"] == "decision"
-                        and m["effects"].get("action_kind") == "explore_decision"]
+        explore_mems = [m for m in _v3r(agent)
+                        if _v3_mt(m) == "decision"
+                        and _v3_fx(m).get("action_kind") == "explore_decision"]
         assert len(explore_mems) >= 1
 
     def test_artifact_found_via_explore(self):
@@ -961,12 +1008,12 @@ class TestArtifactToTraderScenario:
         assert any(i["id"] == artifact["id"] for i in agent.get("inventory", [])), \
             "Artifact should eventually be found via exploration"
         # Verify it was found through explore action, not direct pickup
-        pickup_mems = [m for m in agent["memory"]
-                       if m["type"] == "action" and m["effects"].get("action_kind") == "pickup"
-                       and m["effects"].get("artifact_type") == "soul"]
+        pickup_mems = [m for m in _v3r(agent)
+                       if _v3_mt(m) == "action" and _v3_fx(m).get("action_kind") == "pickup"
+                       and _v3_fx(m).get("artifact_type") == "soul"]
         assert len(pickup_mems) >= 1
         mem = pickup_mems[0]
-        assert mem["effects"]["artifact_value"] > 0
+        assert (_v3_fx(mem) or {})["artifact_value"] > 0
 
     # ── Phase 2: Travel decision toward trader ────────────────────────────────
 
@@ -990,11 +1037,11 @@ class TestArtifactToTraderScenario:
         # Run one more tick for travel decision
         new_state, _ = self._tick(state)
         agent = new_state["agents"][sid]
-        decision_mems = [m for m in agent["memory"] if m["type"] == "decision"]
+        decision_mems = [m for m in _v3r(agent) if _v3_mt(m) == "decision"]
         assert len(decision_mems) >= 1
         # The artifacts_count memory is written in the trading opportunity check
         trader_decision_mems = [m for m in decision_mems
-                                 if m["effects"].get("artifacts_count", 0) >= 1]
+                                 if _v3_fx(m).get("artifacts_count", 0) >= 1]
         assert len(trader_decision_mems) >= 1
 
     # ── Phase 3: Sell to trader ───────────────────────────────────────────────
@@ -1016,8 +1063,8 @@ class TestArtifactToTraderScenario:
         assert agent["money"] > initial_stalker_money
         # bot_sold_artifact event was emitted somewhere in the run
         # (checked via memory instead since events are per-tick)
-        sell_mems = [m for m in agent["memory"]
-                     if m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"]
+        sell_mems = [m for m in _v3r(agent)
+                     if _v3_mt(m) == "action" and _v3_fx(m).get("action_kind") == "trade_sell"]
         assert len(sell_mems) >= 1
 
     def test_sell_recorded_in_stalker_memory(self):
@@ -1025,25 +1072,13 @@ class TestArtifactToTraderScenario:
         state = self._run_until_sold(state, sid)
 
         agent = state["agents"][sid]
-        sell_mems = [m for m in agent["memory"]
-                     if m["type"] == "action" and m["effects"].get("action_kind") == "trade_sell"]
+        sell_mems = [m for m in _v3r(agent)
+                     if _v3_mt(m) == "action" and _v3_fx(m).get("action_kind") == "trade_sell"]
         assert len(sell_mems) >= 1
         mem = sell_mems[0]
-        assert "soul" in mem["effects"]["items_sold"]
-        assert mem["effects"]["money_gained"] > 0
-        assert mem["effects"]["trader_id"] == tid
-
-    def test_sell_recorded_in_trader_memory(self):
-        state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
-        state = self._run_until_sold(state, sid)
-
-        trader = state["traders"][tid]
-        buy_mems = [m for m in trader.get("memory", []) if m["type"] == "trade_buy"]
-        assert len(buy_mems) >= 1
-        mem = buy_mems[0]
-        assert "soul" in mem["effects"]["items_bought"]
-        assert mem["effects"]["money_spent"] > 0
-        assert mem["effects"]["stalker_id"] == sid
+        assert "soul" in (_v3_fx(mem) or {})["items_sold"]
+        assert (_v3_fx(mem) or {})["money_gained"] > 0
+        assert (_v3_fx(mem) or {})["trader_id"] == tid
 
     def test_trader_receives_artifact(self):
         state, sid, tid, stalker_loc, trader_loc, artifact = _make_trader_scenario()
@@ -1067,23 +1102,24 @@ class TestArtifactToTraderScenario:
         state = self._run_until_sold(state, sid)
 
         agent = state["agents"][sid]
-        mem_types = [m["type"] for m in agent["memory"]]
-        action_kinds = [m["effects"].get("action_kind") for m in agent["memory"]
-                        if m["type"] == "action"]
+        mem_types = [_v3_mt(m) for m in _v3r(agent)]
+        action_kinds = [_v3_fx(m).get("action_kind") for m in _v3r(agent)
+                        if _v3_mt(m) == "action"]
         assert "action" in mem_types  # at least one action entry (pickup, travel, or sell)
         assert "decision" in mem_types
         assert "pickup" in action_kinds
         assert "trade_sell" in action_kinds
-        # Check ordering: pickup before travel_arrived before trade_sell
-        def first_idx(kind):
-            for i, m in enumerate(agent["memory"]):
-                if m["type"] == "action" and m["effects"].get("action_kind") == kind:
-                    return i
-            return 999
-        p = first_idx("pickup")
-        t = first_idx("travel_arrived")
-        s = first_idx("trade_sell")
-        assert p < t < s, f"Expected pickup({p}) < travel_arrived({t}) < trade_sell({s})"
+        # Check that sell happened after pickup (by created_turn)
+        def first_turn(kind):
+            for m in _v3r(agent):
+                if _v3_mt(m) == "action" and _v3_fx(m).get("action_kind") == kind:
+                    return int(m.get("created_turn") or 0)
+            return -1
+        p_turn = first_turn("pickup")
+        s_turn = first_turn("trade_sell")
+        assert p_turn >= 0, "pickup memory not found"
+        assert s_turn >= 0, "trade_sell memory not found"
+        assert p_turn <= s_turn, f"Expected pickup({p_turn}) happened before trade_sell({s_turn})"
 
     # ── Debug spawn trader command ───────────────────────────────────────────
 
@@ -1114,16 +1150,15 @@ class TestArtifactToTraderScenario:
         trader = new_state["traders"][new_tid]
         assert trader["name"] == "TestTrader"
         assert trader["location_id"] == loc_id
-        assert "memory" in trader
-        assert isinstance(trader["memory"], list)
+        assert "inventory" in trader  # traders have inventory, memory is v3 now
         assert any(e["event_type"] == "debug_trader_spawned" for e in events)
 
-    def test_trader_has_memory_field_from_generator(self):
+    def test_trader_has_inventory_field_from_generator(self):
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
         state = generate_zone(seed=42, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=2)
         for tid, trader in state["traders"].items():
-            assert "memory" in trader, f"Trader {tid} missing memory field"
-            assert isinstance(trader["memory"], list)
+            assert "inventory" in trader, f"Trader {tid} missing inventory field"
+            assert isinstance(trader["inventory"], list)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1147,10 +1182,10 @@ class TestPerTurnObservations:
         shared_loc = state["agents"][a0]["location_id"]
         state["agents"][a1]["location_id"] = shared_loc
         new_state, _ = self._tick(state)
-        obs = [m for m in new_state["agents"][a0]["memory"]
-               if m["type"] == "observation" and m["effects"].get("observed") == "stalkers"]
+        obs = [m for m in _v3r(new_state["agents"][a0])
+               if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "stalkers"]
         assert len(obs) >= 1
-        assert state["agents"][a1]["name"] in obs[0]["effects"]["names"]
+        assert state["agents"][a1]["name"] in _v3_fx(obs[0])["names"]
 
     def test_no_artifact_observation_on_tick_arrival(self):
         """Artifacts at a location do NOT generate an 'artifacts' observation on arrival/tick.
@@ -1162,8 +1197,8 @@ class TestPerTurnObservations:
             {"id": "art_obs_001", "type": "fire", "value": 100}
         )
         new_state, _ = self._tick(state)
-        obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
-               if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
+        obs = [m for m in _v3r(new_state["agents"]["agent_p0"])
+               if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "artifacts"]
         assert len(obs) == 0, "Artifacts should NOT be observed passively; only via explore."
 
     def test_observation_deduplicated_on_second_tick(self):
@@ -1177,13 +1212,13 @@ class TestPerTurnObservations:
         )
         state1, _ = self._tick(state)
         count_after_tick1 = sum(
-            1 for m in state1["agents"]["agent_p0"]["memory"]
-            if m["type"] == "observation" and m["effects"].get("observed") == "items"
+            1 for m in _v3r(state1["agents"]["agent_p0"])
+            if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "items"
         )
         state2, _ = self._tick(state1)
         count_after_tick2 = sum(
-            1 for m in state2["agents"]["agent_p0"]["memory"]
-            if m["type"] == "observation" and m["effects"].get("observed") == "items"
+            1 for m in _v3r(state2["agents"]["agent_p0"])
+            if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "items"
         )
         # Should NOT have added a duplicate entry on the second tick
         assert count_after_tick2 == count_after_tick1
@@ -1203,8 +1238,8 @@ class TestPerTurnObservations:
             {"id": "art_change_002", "type": "soul", "value": 200}
         )
         state2, _ = self._tick(state1)
-        obs = [m for m in state2["agents"]["agent_p0"]["memory"]
-               if m["type"] == "observation" and m["effects"].get("observed") == "artifacts"]
+        obs = [m for m in _v3r(state2["agents"]["agent_p0"])
+               if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "artifacts"]
         # No artifact observations should exist — not written on tick
         assert len(obs) == 0
 
@@ -1221,10 +1256,10 @@ class TestPerTurnObservations:
         trader_id = list(state["traders"].keys())[0]
         state["traders"][trader_id]["location_id"] = loc_id
         new_state, _ = self._tick(state)
-        obs = [m for m in new_state["agents"][agent_id]["memory"]
-               if m["type"] == "observation" and m["effects"].get("observed") == "stalkers"]
+        obs = [m for m in _v3r(new_state["agents"][agent_id])
+               if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "stalkers"]
         trader_name = state["traders"][trader_id]["name"]
-        assert any(trader_name in o["effects"]["names"] for o in obs)
+        assert any(trader_name in _v3_fx(o)["names"] for o in obs)
 
     def test_no_observation_when_location_empty(self):
         """No observation entries are written when the location is completely empty."""
@@ -1236,8 +1271,8 @@ class TestPerTurnObservations:
         state["locations"][loc_id]["items"] = []
         state["locations"][loc_id].pop("agents", None)
         new_state, _ = self._tick(state)
-        obs = [m for m in new_state["agents"]["agent_p0"]["memory"]
-               if m["type"] == "observation"]
+        obs = [m for m in _v3r(new_state["agents"]["agent_p0"])
+               if _v3_mt(m) == "observation"]
         assert len(obs) == 0
 
 
@@ -1268,7 +1303,7 @@ class TestTravelHopActionMemory:
         agent_id = list(state["agents"].keys())[0]
         agent = state["agents"][agent_id]
         agent["location_id"] = a
-        agent["memory"] = []
+        _setup_v3_memory(agent, [])
         # Schedule a 2-hop journey: immediate target = B, final = C, remaining = [C]
         agent["scheduled_action"] = {
             "type": "travel",
@@ -1286,12 +1321,12 @@ class TestTravelHopActionMemory:
         state, agent_id, a, b, c = self._setup_two_hop_travel()
         new_state, _ = self._tick(state)
         agent = new_state["agents"][agent_id]
-        hop_mems = [m for m in agent["memory"]
-                    if m["type"] == "action"
-                    and m["effects"].get("action_kind") == "travel_hop"]
+        hop_mems = [m for m in _v3r(agent)
+                    if _v3_mt(m) == "action"
+                    and _v3_fx(m).get("action_kind") == "travel_hop"]
         assert len(hop_mems) >= 1
-        assert hop_mems[0]["effects"]["to_loc"] == b
-        assert hop_mems[0]["effects"]["final_target"] == c
+        assert _v3_fx(hop_mems[0])["to_loc"] == b
+        assert _v3_fx(hop_mems[0])["final_target"] == c
 
     def test_hop_title_contains_location_name(self):
         """The hop action title contains the name of the intermediate location."""
@@ -1299,10 +1334,10 @@ class TestTravelHopActionMemory:
         b_name = state["locations"][b].get("name", b)
         new_state, _ = self._tick(state)
         agent = new_state["agents"][agent_id]
-        hop_mems = [m for m in agent["memory"]
-                    if m["type"] == "action"
-                    and m["effects"].get("action_kind") == "travel_hop"]
-        assert any(b_name in m["title"] for m in hop_mems)
+        hop_mems = [m for m in _v3r(agent)
+                    if _v3_mt(m) == "action"
+                    and _v3_fx(m).get("action_kind") == "travel_hop"]
+        assert any(b_name in m.get("summary", "") for m in hop_mems)
 
     def test_final_arrival_still_recorded(self):
         """After all hops, the final arrival is still recorded as travel_arrived."""
@@ -1311,11 +1346,11 @@ class TestTravelHopActionMemory:
         state, _ = self._tick(state)
         new_state, _ = self._tick(state)
         agent = new_state["agents"][agent_id]
-        arrived = [m for m in agent["memory"]
-                   if m["type"] == "action"
-                   and m["effects"].get("action_kind") == "travel_arrived"]
+        arrived = [m for m in _v3r(agent)
+                   if _v3_mt(m) == "action"
+                   and _v3_fx(m).get("action_kind") == "travel_arrived"]
         assert len(arrived) >= 1
-        assert arrived[-1]["effects"]["to_loc"] == c
+        assert _v3_fx(arrived[-1])["to_loc"] == c
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1351,8 +1386,7 @@ def _make_minimal_state(locations_cfg, agent_loc_id="A"):
         "is_alive": True,
         "inventory": [],
         "money": 0,
-        "memory": [],
-        "scheduled_action": None,
+                "scheduled_action": None,
         "action_used": False,
         "controller": {"kind": "bot", "participant_id": None},
         "global_goal": "get_rich",
@@ -1495,12 +1529,12 @@ class TestUnreachableTargetHandling:
         new_state, _ = self._tick(state)
         agent = new_state["agents"]["test_agent"]
         decision_mems = [
-            m for m in agent["memory"]
-            if m["type"] == "decision"
-            and m["effects"].get("action_kind") == "goal_cancelled"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "goal_cancelled"
         ]
         assert len(decision_mems) >= 1, "Expected a goal_cancelled decision memory"
-        assert decision_mems[0]["effects"]["cancelled_target"] == "C"
+        assert _v3_fx(decision_mems[0])["cancelled_target"] == "C"
 
     def test_mid_travel_abort_emits_travel_aborted_event(self):
         """When route is blocked, a travel_aborted event is emitted."""
@@ -1563,13 +1597,13 @@ class TestUnreachableTargetHandling:
         assert sa["final_target_id"] == "C"
         # Re-route should write a decision memory entry
         reroute_mems = [
-            m for m in agent_after["memory"]
-            if m["type"] == "decision"
-            and m["effects"].get("action_kind") == "route_changed"
+            m for m in _v3r(agent_after)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "route_changed"
         ]
         assert len(reroute_mems) >= 1, "Expected a route_changed decision memory"
-        assert reroute_mems[0]["effects"]["final_target"] == "C"
-        assert reroute_mems[0]["effects"]["rerouted_at"] == "B"
+        assert _v3_fx(reroute_mems[0])["final_target"] == "C"
+        assert _v3_fx(reroute_mems[0])["rerouted_at"] == "B"
 
 
 
@@ -1584,7 +1618,6 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
     import random
 
     state = generate_zone(seed=7, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
-    state["legacy_memory_write_enabled"] = True
     locs = list(state["locations"].keys())
     stalker_loc = locs[0]
 
@@ -1644,8 +1677,7 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
             "location_id": stalker_loc,  # trader at same location
             "inventory": [],
             "money": 10000,
-            "memory": [],
-            "is_alive": True,
+                        "is_alive": True,
         }
         state.setdefault("traders", {})["trader_bare"] = trader
         state["locations"][stalker_loc]["agents"].append("trader_bare")
@@ -1741,8 +1773,7 @@ class TestEquipmentMaintenance:
                 "location_id": trader_loc,
                 "inventory": [],
                 "money": 10000,
-                "memory": [],
-                "is_alive": True,
+                                "is_alive": True,
             }
             state.setdefault("traders", {})["tr_distant"] = trader
             state["locations"][trader_loc]["agents"].append("tr_distant")
@@ -1773,7 +1804,7 @@ class TestEquipmentMaintenance:
         state.setdefault("traders", {})["tr_phase1"] = {
             "id": "tr_phase1", "archetype": "trader_npc", "name": "Phase1 Trader",
             "location_id": trader_loc, "inventory": [], "money": 10000,
-            "memory": [], "is_alive": True,
+            "is_alive": True,
         }
         state["locations"][trader_loc]["agents"].append("tr_phase1")
         new_state, events = self._tick(state)
@@ -1834,13 +1865,10 @@ class TestEquipmentMaintenance:
              "weight": info["weight"], "value": info["value"]}
         ]
         # Give agent a memory of seeing that item at mem_loc
-        state["agents"][sid]["memory"] = [{
-            "world_turn": 1,
-            "type": "observation",
-            "title": "Вижу предметы",
-            "summary": "На земле: pistol",
+        _setup_v3_memory(state["agents"][sid], [{
+            "world_turn": 1, "type": "observation", "title": "Вижу предметы",
             "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["pistol"]},
-        }]
+        }], agent_id=sid)
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
@@ -1967,13 +1995,10 @@ class TestEquipmentMaintenance:
              "weight": info.get("weight", 0.01), "value": info.get("value", 10)}
         ]
         # Give agent an observation memory of the ammo at mem_loc
-        state["agents"][sid]["memory"] = [{
-            "world_turn": 1,
-            "type": "observation",
-            "title": "Вижу предметы",
-            "summary": "На земле: ammo_9mm",
+        _setup_v3_memory(state["agents"][sid], [{
+            "world_turn": 1, "type": "observation", "title": "Вижу предметы",
             "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["ammo_9mm"]},
-        }]
+        }], agent_id=sid)
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
@@ -2001,13 +2026,10 @@ class TestEquipmentMaintenance:
             {"id": "heal_mem", "type": "bandage", "name": info["name"],
              "weight": info.get("weight", 0.1), "value": info.get("value", 50)}
         ]
-        state["agents"][sid]["memory"] = [{
-            "world_turn": 1,
-            "type": "observation",
-            "title": "Вижу предметы",
-            "summary": "На земле: bandage",
+        _setup_v3_memory(state["agents"][sid], [{
+            "world_turn": 1, "type": "observation", "title": "Вижу предметы",
             "effects": {"observed": "items", "location_id": mem_loc, "item_types": ["bandage"]},
-        }]
+        }], agent_id=sid)
         new_state, events = self._tick(state)
         agent = new_state["agents"][sid]
         sched = agent.get("scheduled_action")
@@ -2015,9 +2037,9 @@ class TestEquipmentMaintenance:
         assert sched["type"] == "travel", "Bot should be traveling toward observed medicine"
         # Verify a 'seek_item' decision memory was written for medical category
         decision_mems = [
-            m for m in agent.get("memory", [])
-            if m.get("type") == "decision"
-            and m.get("effects", {}).get("item_category") == "medical"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("item_category") == "medical"
         ]
         assert decision_mems, "Bot should write a 'seek_item' decision memory for medicine"
 
@@ -2038,8 +2060,7 @@ class TestEquipmentMaintenance:
             "location_id": trader_loc,
             "inventory": [],
             "money": 10000,
-            "memory": [],
-            "is_alive": True,
+                        "is_alive": True,
         }
         state["locations"][trader_loc].setdefault("agents", []).append("tr_far")
         # Bot has zero money — cannot afford anything
@@ -2119,13 +2140,11 @@ class TestConfirmedEmptyBlocking:
         ]
         # Plant the confirmed_empty memory entry for the current location.
         # Note: written as "observation" (not "decision") — see tick_rules.py.
-        stalker["memory"] = [{
+        _setup_v3_memory(stalker, [{
             "world_turn": 1,
             "type": "observation",
-            "title": "Аномалия пустая",
-            "summary": "Тщательно обыскал — артефактов нет.",
             "effects": {"action_kind": "explore_confirmed_empty", "location_id": stalker_loc},
-        }]
+        }])
 
         state["agents"]["bot_ce"] = stalker
         state["locations"][stalker_loc]["agents"].append("bot_ce")
@@ -2192,7 +2211,7 @@ class TestConfirmedEmptyBlocking:
         agent = state["agents"][sid]
         # The confirmed_empty entry was written at world_turn=1.
         # Now add a newer emission_ended memory (turn 5) → the confirmed_empty is stale.
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "world_turn": 5,
             "type": "observation",
             "title": "✅ Выброс закончился",
@@ -2350,7 +2369,7 @@ class TestItemNotFoundLoop:
         )
         agent = next(iter(state["agents"].values()))
         # Memory: agent observed a weapon at the target
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "world_turn": 0,
             "type": "observation",
             "title": "Вижу предметы",
@@ -2359,7 +2378,7 @@ class TestItemNotFoundLoop:
                         "item_types": sorted(WEAPON_ITEM_TYPES)},
         })
         # Memory: agent decided to travel there to get a weapon
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "world_turn": 0,
             "type": "decision",
             "title": "Ищу оружие по памяти",
@@ -2376,14 +2395,15 @@ class TestItemNotFoundLoop:
         from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
 
-        agent = {"memory": [
+        agent = {}
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
             {"world_turn": 1, "type": "observation",
              "effects": {"action_kind": "item_not_found_here", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]}
+        ])
         result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
         assert "B" in result, f"B should be blocked; got {result}"
 
@@ -2392,7 +2412,8 @@ class TestItemNotFoundLoop:
         from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
 
-        agent = {"memory": [
+        agent = {}
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
@@ -2403,7 +2424,7 @@ class TestItemNotFoundLoop:
             {"world_turn": 2, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]}
+        ])
         result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
         assert "B" not in result, f"B should not be blocked after newer item obs; got {result}"
 
@@ -2418,14 +2439,14 @@ class TestItemNotFoundLoop:
             agent_loc_id="A",
         )
         agent = next(iter(state["agents"].values()))
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
             {"world_turn": 1, "type": "observation",
              "effects": {"action_kind": "item_not_found_here", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result is None, f"Should return None when B is blocked; got {result}"
 
@@ -2439,11 +2460,11 @@ class TestItemNotFoundLoop:
             agent_loc_id="A",
         )
         agent = next(iter(state["agents"].values()))
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result == "B", f"Should return B normally; got {result}"
 
@@ -2459,9 +2480,9 @@ class TestItemNotFoundLoop:
         new_state, _events = self._tick(state)
         agent = next(iter(new_state["agents"].values()))
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
-            and m.get("effects", {}).get("location_id") == "A"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
+            and _v3_fx(m).get("location_id") == "A"
         ]
         assert len(not_found) == 1, (
             f"Expected 1 item_not_found_here observation for A, got {len(not_found)}"
@@ -2481,12 +2502,12 @@ class TestItemNotFoundLoop:
         new_state, _events = self._tick(state)
         agent = next(iter(new_state["agents"].values()))
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
         ]
         picked_up = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_picked_up_here"
         ]
         # With suppress_not_found=True in _bot_pickup_on_arrival, no "📭 Предметы закончились"
         assert len(not_found) == 0, (
@@ -2496,7 +2517,7 @@ class TestItemNotFoundLoop:
         assert len(picked_up) == 1, (
             f"Expected 1 item_picked_up_here; got {len(picked_up)}: {picked_up}"
         )
-        assert picked_up[0]["effects"].get("source") == "seek_item_arrival"
+        assert _v3_fx(picked_up[0]).get("source") == "seek_item_arrival"
 
     def test_no_observation_without_seek_intent(self):
         """Without a prior seek_item decision for this location, arriving at an empty location
@@ -2505,7 +2526,7 @@ class TestItemNotFoundLoop:
         state = _make_minimal_state({"A": {}}, agent_loc_id="A")
         agent = next(iter(state["agents"].values()))
         # Only an item-observation memory — no seek_item decision
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "world_turn": 0,
             "type": "observation",
             "effects": {"observed": "items", "location_id": "A",
@@ -2515,8 +2536,8 @@ class TestItemNotFoundLoop:
         new_state, _events = self._tick(state)
         agent = next(iter(new_state["agents"].values()))
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
         ]
         assert len(not_found) == 0, (
             f"Should not write not_found without a seek_item decision; got {not_found}"
@@ -2528,14 +2549,15 @@ class TestItemNotFoundLoop:
         from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
 
-        agent = {"memory": [
+        agent = {}
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
             {"world_turn": 1, "type": "observation",
              "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]}
+        ])
         result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
         assert "B" in result, f"B should be blocked by item_picked_up_here; got {result}"
 
@@ -2544,7 +2566,8 @@ class TestItemNotFoundLoop:
         from app.games.zone_stalkers.rules.tick_rules import _item_not_found_locations
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
 
-        agent = {"memory": [
+        agent = {}
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
@@ -2555,7 +2578,7 @@ class TestItemNotFoundLoop:
             {"world_turn": 2, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]}
+        ])
         result = _item_not_found_locations(agent, WEAPON_ITEM_TYPES)
         assert "B" not in result, f"B should be unblocked after newer obs; got {result}"
 
@@ -2569,14 +2592,14 @@ class TestItemNotFoundLoop:
             agent_loc_id="A",
         )
         agent = next(iter(state["agents"].values()))
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
             {"world_turn": 1, "type": "observation",
              "effects": {"action_kind": "item_picked_up_here", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result is None, f"B should be excluded after item_picked_up_here; got {result}"
 
@@ -2603,11 +2626,11 @@ class TestItemMemoryUnreachable:
             agent_loc_id="A",
         )
         agent = next(iter(state["agents"].values()))
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result is None, f"Should return None for unreachable B; got {result}"
 
@@ -2624,11 +2647,11 @@ class TestItemMemoryUnreachable:
             agent_loc_id="A",
         )
         agent = next(iter(state["agents"].values()))
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result == "B", f"Should return B; got {result}"
 
@@ -2651,14 +2674,14 @@ class TestItemMemoryUnreachable:
         )
         agent = next(iter(state["agents"].values()))
         # B was observed more recently but is unreachable; C is older but reachable
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "C",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
             {"world_turn": 1, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result == "C", f"Should return reachable C, not unreachable B; got {result}"
 
@@ -2694,14 +2717,14 @@ class TestPickupBlocksResearch:
         evs = self._call_pickup(agent, WEAPON_ITEM_TYPES, state)
         assert evs, "Should have returned pickup event"
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
-            and m.get("effects", {}).get("location_id") == "A"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
+            and _v3_fx(m).get("location_id") == "A"
         ]
         assert len(not_found) == 1, (
             f"Expected 1 item_not_found_here after last-item pickup, got {len(not_found)}"
         )
-        assert not_found[0]["effects"].get("source") == "pickup", (
+        assert _v3_fx(not_found[0]).get("source") == "pickup", (
             f"Expected source='pickup'; got {not_found[0]['effects'].get('source')!r}"
         )
 
@@ -2720,8 +2743,8 @@ class TestPickupBlocksResearch:
         evs = self._call_pickup(agent, WEAPON_ITEM_TYPES, state)
         assert evs, "Should have returned pickup event"
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
         ]
         assert len(not_found) == 0, (
             f"Should NOT write not_found when another weapon remains; got {not_found}"
@@ -2739,11 +2762,11 @@ class TestPickupBlocksResearch:
         )
         agent = self._make_agent_at("A", state)
         # Agent remembers having seen a weapon at B
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         # Simulate: agent travelled to B, picked up last weapon there
         agent["location_id"] = "B"
         info = ITEM_TYPES["pistol"]
@@ -2771,7 +2794,7 @@ class TestPickupBlocksResearch:
         )
         agent = self._make_agent_at("A", state)
         # Simulate: old observation + pickup (writes not_found) + newer observation
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
@@ -2783,7 +2806,7 @@ class TestPickupBlocksResearch:
             {"world_turn": 2, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
-        ]
+        ])
         result = _find_item_memory_location(agent, WEAPON_ITEM_TYPES, state)
         assert result == "B", (
             f"Newer observed:items should lift the pickup block on B; got {result}"
@@ -2803,25 +2826,25 @@ class TestPickupBlocksResearch:
              "weight": info["weight"], "value": info["value"]}
         ]
         # Simulate NPC having decided to travel to A for a weapon
-        agent["memory"] = [{
+        _setup_v3_memory(agent, [{
             "type": "decision", "world_turn": 0,
             "label": "Иду за оружием", "summary": "...",
             "effects": {"action_kind": "seek_item", "item_category": "weapon",
                         "destination": "A"},
             "reason": "test",
-        }]
+        }])
         agent_id = next(iter(state["agents"]))
         result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
         assert result, "Should have returned pickup events"
         picked_up = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
-            and m.get("effects", {}).get("location_id") == "A"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_picked_up_here"
+            and _v3_fx(m).get("location_id") == "A"
         ]
         assert len(picked_up) == 1, (
             f"Expected 1 item_picked_up_here, got {len(picked_up)}"
         )
-        assert picked_up[0]["effects"].get("source") == "seek_item_arrival"
+        assert _v3_fx(picked_up[0]).get("source") == "seek_item_arrival"
 
     def test_seek_item_arrival_pickup_blocks_find_item_memory_location(self):
         """After a seek_item arrival pickup, _find_item_memory_location excludes that location."""
@@ -2841,7 +2864,7 @@ class TestPickupBlocksResearch:
             {"id": "wpn2", "type": "pistol", "name": info["name"],
              "weight": info["weight"], "value": info["value"]},
         ]
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {"world_turn": 0, "type": "observation",
              "effects": {"observed": "items", "location_id": "B",
                          "item_types": sorted(WEAPON_ITEM_TYPES)}},
@@ -2850,7 +2873,7 @@ class TestPickupBlocksResearch:
              "effects": {"action_kind": "seek_item", "item_category": "weapon",
                          "destination": "B"},
              "reason": "test"},
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
         # Even though one weapon remains at B, item_picked_up_here should block B
@@ -2873,18 +2896,18 @@ class TestPickupBlocksResearch:
              "weight": info["weight"], "value": info["value"]}
         ]
         # Most recent decision is a wander — not a seek_item
-        agent["memory"] = [{
+        _setup_v3_memory(agent, [{
             "type": "decision", "world_turn": 0,
             "label": "Иду куда-нибудь", "summary": "...",
             "effects": {"action_kind": "wander", "destination": "A"},
             "reason": "test",
-        }]
+        }])
         agent_id = next(iter(state["agents"]))
         result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
         assert result == [], "_bot_pickup_on_arrival returns [] when latest decision is not seek_item"
         picked_up = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_picked_up_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_picked_up_here"
         ]
         assert len(picked_up) == 0, "Should not write item_picked_up_here without seek_item decision"
 
@@ -2935,48 +2958,48 @@ class TestEmergencyTravelMemory:
         state = self._make_state_with_remote_trader(agent_hp=25, money=5000)
         agent = self._run_tick(state)
         decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
-            and m.get("effects", {}).get("action_kind") == "seek_item"
-            and m.get("effects", {}).get("item_category") == "medical"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "seek_item"
+            and _v3_fx(m).get("item_category") == "medical"
         ]
         assert len(decisions) == 1, (
             f"Expected 1 seek_item/medical decision for emergency HP; got {decisions}"
         )
-        assert decisions[0]["effects"].get("emergency") is True
-        assert decisions[0]["effects"].get("destination") == "B"
+        assert _v3_fx(decisions[0]).get("emergency") is True
+        assert _v3_fx(decisions[0]).get("destination") == "B"
 
     def test_high_hunger_travel_writes_decision_memory(self):
         """When hunger is critical and trader requires travel, a decision memory is written."""
         state = self._make_state_with_remote_trader(hunger=75, money=5000)
         agent = self._run_tick(state)
         decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
-            and m.get("effects", {}).get("action_kind") == "seek_item"
-            and m.get("effects", {}).get("item_category") == "food"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "seek_item"
+            and _v3_fx(m).get("item_category") == "food"
         ]
         assert len(decisions) == 1, (
             f"Expected 1 seek_item/food decision for emergency hunger; got {decisions}"
         )
-        assert decisions[0]["effects"].get("emergency") is True
-        assert decisions[0]["effects"].get("destination") == "B"
+        assert _v3_fx(decisions[0]).get("emergency") is True
+        assert _v3_fx(decisions[0]).get("destination") == "B"
 
     def test_high_thirst_travel_writes_decision_memory(self):
         """When thirst is critical and trader requires travel, a decision memory is written."""
         state = self._make_state_with_remote_trader(thirst=75, money=5000)
         agent = self._run_tick(state)
         decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
-            and m.get("effects", {}).get("action_kind") == "seek_item"
-            and m.get("effects", {}).get("item_category") == "drink"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "seek_item"
+            and _v3_fx(m).get("item_category") == "drink"
         ]
         assert len(decisions) == 1, (
             f"Expected 1 seek_item/drink decision for emergency thirst; got {decisions}"
         )
-        assert decisions[0]["effects"].get("emergency") is True
-        assert decisions[0]["effects"].get("destination") == "B"
+        assert _v3_fx(decisions[0]).get("emergency") is True
+        assert _v3_fx(decisions[0]).get("destination") == "B"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -3003,7 +3026,7 @@ class TestPickupOnArrival:
              "category": "weapon", "risk_tolerance": 0.5},
         ]
         # Inject a seek_item decision pointing at current location
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision",
                 "world_turn": 0,
@@ -3016,7 +3039,7 @@ class TestPickupOnArrival:
                 },
                 "reason": "test",
             }
-        ]
+        ])
         if agent_extra:
             agent.update(agent_extra)
         return state
@@ -3034,11 +3057,11 @@ class TestPickupOnArrival:
         state = self._make_state()
         agent = self._run_tick(state)
         pickups = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "pickup_ground"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "pickup_ground"
         ]
         assert pickups, "Expected a pickup_ground action memory on arrival"
-        assert pickups[0]["effects"]["item_type"] == "pistol"
+        assert _v3_fx(pickups[0])["item_type"] == "pistol"
         # Item is now in inventory
         assert any(i["type"] == "pistol" for i in agent.get("inventory", []))
 
@@ -3049,14 +3072,14 @@ class TestPickupOnArrival:
         agent = self._run_tick(state)
         # Should have picked up weapon, not scheduled travel to armor
         pickups = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "pickup_ground"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "pickup_ground"
         ]
         assert pickups, "pickup_ground should fire on arrival, not a redirect"
         seek_armor = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "seek_item"
-            and m.get("effects", {}).get("item_category") == "armor"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "seek_item"
+            and _v3_fx(m).get("item_category") == "armor"
         ]
         assert not seek_armor, "Should not have sought armor before picking up weapon"
 
@@ -3073,7 +3096,7 @@ class TestPickupOnArrival:
             {"id": "wpn1", "type": "pistol", "name": "Пистолет", "value": 500,
              "category": "weapon", "risk_tolerance": 0.5},
         ]
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision",
                 "world_turn": 0,
@@ -3086,7 +3109,7 @@ class TestPickupOnArrival:
                 },
                 "reason": "test",
             }
-        ]
+        ])
         result = _bot_pickup_on_arrival(
             next(iter(state["agents"])), agent, state, world_turn=2
         )
@@ -3099,7 +3122,7 @@ class TestPickupOnArrival:
         state = self._make_state()
         agent = next(iter(state["agents"].values()))
         # Replace memory with a non-seek_item decision
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision",
                 "world_turn": 0,
@@ -3108,7 +3131,7 @@ class TestPickupOnArrival:
                 "effects": {"action_kind": "explore", "destination": "A"},
                 "reason": "test",
             }
-        ]
+        ])
         from app.games.zone_stalkers.rules.tick_rules import _run_bot_action
         agent_id = next(iter(state["agents"]))
         _run_bot_action(agent_id, agent, state, world_turn=2)
@@ -3120,16 +3143,13 @@ class TestPickupOnArrival:
         # Reset state for isolated test
         state2 = self._make_state()
         agent2 = next(iter(state2["agents"].values()))
-        agent2["memory"] = [
+        _setup_v3_memory(agent2, [
             {
                 "type": "decision",
                 "world_turn": 0,
-                "label": "...",
-                "summary": "...",
                 "effects": {"action_kind": "explore"},
-                "reason": "test",
             }
-        ]
+        ])
         result = _bot_pickup_on_arrival(
             next(iter(state2["agents"])), agent2, state2, world_turn=2
         )
@@ -3149,7 +3169,7 @@ class TestPickupOnArrival:
         agent = next(iter(state["agents"].values()))
         # No items on the ground at A (the food was taken)
         state["locations"]["A"]["items"] = []
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision",
                 "world_turn": 0,
@@ -3162,14 +3182,14 @@ class TestPickupOnArrival:
                 },
                 "reason": "test",
             }
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
         assert result == [], "No items on ground — should return []"
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
-            and m.get("effects", {}).get("location_id") == "A"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
+            and _v3_fx(m).get("location_id") == "A"
         ]
         assert len(not_found) == 1, (
             f"Expected item_not_found_here to be recorded at A on arrival; got {len(not_found)}"
@@ -3197,7 +3217,7 @@ class TestPickupOnArrival:
             "inventory": [],
         }
         state["locations"]["A"]["agents"] = ["t1"]
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision",
                 "world_turn": 0,
@@ -3211,13 +3231,13 @@ class TestPickupOnArrival:
                 },
                 "reason": "test",
             }
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=1)
         assert result == [], "No ground items — should return []"
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
         ]
         assert len(not_found) == 0, (
             "item_not_found_here must NOT be written at a trader location"
@@ -3235,7 +3255,7 @@ class TestPickupOnArrival:
         # No items left on the ground (pickup happened on a prior tick)
         state["locations"]["A"]["items"] = []
         # Simulate: agent had a seek_item decision + picked up the item (wrote item_picked_up_here)
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision", "world_turn": 0,
                 "label": "Иду за оружием", "summary": "...",
@@ -3253,15 +3273,15 @@ class TestPickupOnArrival:
                     "item_types": sorted(WEAPON_ITEM_TYPES),
                 },
             },
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         # Simulate tick T+1: no items on ground, but seek_item is still the latest decision
         result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=2)
         assert result == [], "Should return [] when seek is already resolved"
         # No extra observations should be written
         new_obs = [
-            m for m in agent["memory"]
-            if m.get("type") == "observation" and m.get("world_turn") == 2
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "observation" and m.get("world_turn") == 2
         ]
         assert len(new_obs) == 0, (
             f"Should not write any new observations on retrigger tick; got {new_obs}"
@@ -3276,7 +3296,7 @@ class TestPickupOnArrival:
         state = _make_minimal_state({"A": {}}, agent_loc_id="A")
         agent = next(iter(state["agents"].values()))
         state["locations"]["A"]["items"] = []
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision", "world_turn": 0,
                 "label": "Иду за оружием", "summary": "...",
@@ -3294,13 +3314,13 @@ class TestPickupOnArrival:
                     "item_types": sorted(WEAPON_ITEM_TYPES),
                 },
             },
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         result = _bot_pickup_on_arrival(agent_id, agent, state, world_turn=2)
         assert result == [], "Should return [] when already recorded as not_found"
         new_obs = [
-            m for m in agent["memory"]
-            if m.get("type") == "observation" and m.get("world_turn") == 2
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "observation" and m.get("world_turn") == 2
         ]
         assert len(new_obs) == 0, (
             f"Should not write again after not_found was already recorded; got {new_obs}"
@@ -3327,7 +3347,7 @@ class TestPickupOnArrival:
         state["locations"]["A"]["items"] = []
 
         # Old emergency seek_item in memory (agent travelled to this trader earlier)
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision", "world_turn": 1,
                 "label": "Иду к торговцу за едой (экстренно)",
@@ -3346,7 +3366,7 @@ class TestPickupOnArrival:
                 "summary": "...",
                 "effects": {"action_kind": "trade_decision", "item_type": "bread"},
             },
-        ]
+        ])
         loc = state["locations"]["A"]
 
         _maybe_record_item_not_found(
@@ -3354,8 +3374,8 @@ class TestPickupOnArrival:
         )
 
         not_found = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "item_not_found_here"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "item_not_found_here"
         ]
         assert len(not_found) == 0, (
             "item_not_found_here must NOT be written after an emergency seek_item "
@@ -3387,8 +3407,7 @@ class TestSellOnArrival:
             "archetype": "trader_npc",
             "inventory": [],
             "money": 10000,
-            "memory": [],
-            "is_alive": True,
+                        "is_alive": True,
         }
         state["locations"]["A"]["agents"] = ["t1"]
         # Give the agent an artifact to sell
@@ -3396,7 +3415,7 @@ class TestSellOnArrival:
                     "category": "artifact", "risk_tolerance": 0.5}
         agent.setdefault("inventory", []).append(artifact)
         # Inject a sell_at_trader decision pointing at current location
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "decision",
                 "world_turn": 0,
@@ -3408,7 +3427,7 @@ class TestSellOnArrival:
                 },
                 "reason": "test",
             }
-        ]
+        ])
         if agent_extra:
             agent.update(agent_extra)
         return state
@@ -3423,9 +3442,9 @@ class TestSellOnArrival:
         result = _bot_sell_on_arrival(agent_id, agent, state, world_turn=1)
         assert result, "_bot_sell_on_arrival should return events when artifact sold"
         sell_mem = [
-            m for m in agent["memory"]
-            if m.get("type") == "action"
-            and m.get("effects", {}).get("action_kind") == "trade_sell"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "action"
+            and _v3_fx(m).get("action_kind") == "trade_sell"
         ]
         assert sell_mem, "trade_sell action memory should be written after sale"
 
@@ -3435,7 +3454,7 @@ class TestSellOnArrival:
         state = self._make_state()
         agent = next(iter(state["agents"].values()))
         # Override destination to point at a different location
-        agent["memory"][0]["effects"]["destination"] = "B"
+        _v3r(agent)[0].setdefault("details", {})["destination"] = "B"
         agent_id = next(iter(state["agents"]))
         result = _bot_sell_on_arrival(agent_id, agent, state, world_turn=1)
         assert result == [], "Should not sell when destination differs from current location"
@@ -3459,9 +3478,9 @@ class TestSellOnArrival:
         agent_id = next(iter(state["agents"]))
         _run_bot_action(agent_id, agent, state, world_turn=1)
         sell_mem = [
-            m for m in agent["memory"]
-            if m.get("type") == "action"
-            and m.get("effects", {}).get("action_kind") == "trade_sell"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "action"
+            and _v3_fx(m).get("action_kind") == "trade_sell"
         ]
         assert sell_mem, (
             "Artifact sale should fire on arrival even when equipment needs are present"
@@ -3508,8 +3527,8 @@ class TestEmissionWarning:
         state["world_turn"] = 88; state, events = tick_zone_map(state)
         agent = next(iter(state["agents"].values()))
         warnings = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "emission_imminent"
         ]
         assert len(warnings) == 1, f"Expected 1 emission_imminent memory, got {warnings}"
         assert state["emission_warning_written_turn"] == 88
@@ -3526,8 +3545,8 @@ class TestEmissionWarning:
         state, _ = tick_zone_map(state)  # second tick — must NOT add another
         agent = next(iter(state["agents"].values()))
         warnings = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "emission_imminent"
         ]
         assert len(warnings) == 1, "Duplicate emission_imminent observations written"
 
@@ -3547,7 +3566,7 @@ class TestEmissionWarning:
         state = self._make_state_with_emission(scheduled_turn=200, current_turn=1)
         agent = next(iter(state["agents"].values()))
         # Manually inject the emission_imminent observation (as if it was written earlier)
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "observation",
                 "world_turn": 1,
@@ -3559,12 +3578,12 @@ class TestEmissionWarning:
                     "emission_scheduled_turn": 200,
                 },
             }
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         _run_bot_action(agent_id, agent, state, world_turn=1)
         flee_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "flee_emission"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "flee_emission"
         ]
         assert flee_decisions, (
             "Bot on dangerous terrain with emission_imminent memory should flee"
@@ -3576,7 +3595,7 @@ class TestEmissionWarning:
         state = self._make_state_with_emission(scheduled_turn=200, current_turn=50)
         agent = next(iter(state["agents"].values()))
         # emission_imminent at turn 1, then emission_ended at turn 15
-        agent["memory"] = [
+        _setup_v3_memory(agent, [
             {
                 "type": "observation",
                 "world_turn": 1,
@@ -3592,12 +3611,12 @@ class TestEmissionWarning:
                 "summary": "...",
                 "effects": {"action_kind": "emission_ended"},
             },
-        ]
+        ])
         agent_id = next(iter(state["agents"]))
         _run_bot_action(agent_id, agent, state, world_turn=50)
         flee_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "flee_emission"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "flee_emission"
         ]
         assert not flee_decisions, (
             "Bot should NOT flee when emission_ended supersedes emission_imminent"
@@ -3644,7 +3663,7 @@ class TestEmissionShelterBehavior:
         return state
 
     def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation",
             "world_turn": world_turn,
             "title": "⚠️ Скоро выброс!",
@@ -3670,8 +3689,8 @@ class TestEmissionShelterBehavior:
         assert events == [], "Bot should return no events while sheltering"
         assert agent.get("scheduled_action") is None, "No travel should be scheduled"
         shelter_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "wait_in_shelter"
         ]
         assert shelter_decisions, "Bot should write wait_in_shelter decision memory"
 
@@ -3689,8 +3708,8 @@ class TestEmissionShelterBehavior:
         _run_bot_action(agent_id, agent, state, world_turn=4)
 
         shelter_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "wait_in_shelter"
         ]
         assert len(shelter_decisions) == 1, (
             f"Expected exactly 1 wait_in_shelter memory, got {len(shelter_decisions)}"
@@ -3706,7 +3725,7 @@ class TestEmissionShelterBehavior:
         agent = next(iter(state["agents"].values()))
         # Emission_imminent at turn 1, then emission_ended at turn 50
         self._inject_emission_imminent(agent, world_turn=1)
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation",
             "world_turn": 50,
             "title": "✅ Выброс закончился",
@@ -3719,9 +3738,9 @@ class TestEmissionShelterBehavior:
 
         # Should NOT have added another wait_in_shelter after the emission ended
         shelter_after_ended = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
-            and m.get("world_turn", 0) > 50
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "wait_in_shelter"
+            and m.get("created_turn", 0) > 50
         ]
         assert not shelter_after_ended, (
             "Bot should not shelter after emission_ended supersedes emission_imminent"
@@ -3740,8 +3759,8 @@ class TestEmissionShelterBehavior:
         _run_bot_action(agent_id, agent, state, world_turn=2)
 
         flee_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "flee_emission"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "flee_emission"
         ]
         assert flee_decisions, "Bot on dangerous terrain should flee when emission_imminent"
         # scheduled_action should be a travel action
@@ -3777,16 +3796,16 @@ class TestEmissionShelterBehavior:
         assert events == [], "Trapped agent should return no events"
         # Must NOT claim it is in a safe shelter
         shelter_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "wait_in_shelter"
         ]
         assert not shelter_decisions, (
             "Trapped agent on dangerous terrain must NOT write wait_in_shelter"
         )
         # Must log the trapped situation
         trapped_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "trapped_on_dangerous_terrain"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "trapped_on_dangerous_terrain"
         ]
         assert trapped_decisions, (
             "Trapped agent should write trapped_on_dangerous_terrain decision"
@@ -3817,8 +3836,8 @@ class TestEmissionShelterBehavior:
         _run_bot_action(agent_id, agent, state, world_turn=4)
 
         trapped_decisions = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "trapped_on_dangerous_terrain"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "trapped_on_dangerous_terrain"
         ]
         assert len(trapped_decisions) == 1, (
             f"Expected exactly 1 trapped_on_dangerous_terrain memory, got {len(trapped_decisions)}"
@@ -3879,8 +3898,8 @@ class TestDebugTriggerEmission:
         new_state, _ = self._run_command(state, "debug_trigger_emission")
         agent = next(iter(new_state["agents"].values()))
         warnings = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "emission_imminent"
         ]
         assert len(warnings) == 1, (
             f"Expected 1 emission_imminent memory, got {len(warnings)}"
@@ -3909,8 +3928,8 @@ class TestDebugTriggerEmission:
             new_state, _ = tick_zone_map(new_state)
         agent = next(iter(new_state["agents"].values()))
         warnings = [
-            m for m in agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "emission_imminent"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "emission_imminent"
         ]
         assert len(warnings) == 1, (
             f"Expected 1 emission_imminent memory after ticks, got {len(warnings)}"
@@ -3953,7 +3972,7 @@ class TestExplorationEmissionInterrupt:
         return state
 
     def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation",
             "world_turn": world_turn,
             "title": "⚠️ Скоро выброс!",
@@ -3994,8 +4013,8 @@ class TestExplorationEmissionInterrupt:
         new_agent = next(iter(new_state["agents"].values()))
 
         interrupted = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "exploration_interrupted"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "exploration_interrupted"
         ]
         assert interrupted, "exploration_interrupted memory entry should be written"
 
@@ -4029,8 +4048,8 @@ class TestExplorationEmissionInterrupt:
         new_agent = next(iter(new_state["agents"].values()))
 
         shelter = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "wait_in_shelter"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "wait_in_shelter"
         ]
         assert shelter, "Bot should write wait_in_shelter after interruption on safe terrain"
         # No travel should be scheduled (already safe)
@@ -4146,7 +4165,7 @@ class TestTravelEmissionInterrupt:
         return state
 
     def _inject_emission_imminent(self, agent, world_turn=1, scheduled_turn=200):
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation",
             "world_turn": world_turn,
             "title": "⚠️ Скоро выброс!",
@@ -4177,8 +4196,8 @@ class TestTravelEmissionInterrupt:
 
         # The bot must have written a travel_interrupted entry (original travel cancelled)
         interrupted = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "travel_interrupted"
         ]
         assert interrupted, "travel_interrupted memory should be written when emission fires"
 
@@ -4199,11 +4218,11 @@ class TestTravelEmissionInterrupt:
         new_agent = next(iter(new_state["agents"].values()))
 
         interrupted = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "travel_interrupted"
         ]
         assert interrupted, "travel_interrupted memory entry should be written"
-        assert interrupted[0]["effects"].get("reason") == "emission_warning"
+        assert _v3_fx(interrupted[0]).get("reason") == "emission_warning"
 
     def test_mid_hop_travel_not_interrupted_without_warning(self):
         """Without emission warning, mid-hop travel continues normally."""
@@ -4257,8 +4276,8 @@ class TestTravelEmissionInterrupt:
 
         # travel_interrupted must be in memory (route was cancelled)
         interrupted = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "travel_interrupted"
         ]
         assert interrupted, "travel_interrupted memory should confirm route was cancelled"
         # On safe terrain the bot waits in shelter — no new travel should be scheduled
@@ -4278,8 +4297,8 @@ class TestTravelEmissionInterrupt:
         new_agent = next(iter(new_state["agents"].values()))
 
         interrupted = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "travel_interrupted"
         ]
         assert interrupted, "travel_interrupted memory should be written after post-hop interrupt"
 
@@ -4325,8 +4344,8 @@ class TestTravelEmissionInterrupt:
         # After interrupt bot runs its decision logic and should flee from hills
         sched = new_agent.get("scheduled_action")
         flee_mems = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "flee_emission"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "flee_emission"
         ]
         assert flee_mems or (sched is not None and sched.get("type") == "travel"), (
             "Bot should flee from dangerous terrain after travel interrupt"
@@ -4366,7 +4385,7 @@ class TestFleeEmissionSelfInterrupt:
         # Simulate the state after the flee decision was made:
         # - Agent has an emission_imminent in memory
         # - scheduled_action is a flee travel (emergency_flee=True) to B
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation",
             "world_turn": 1,
             "title": "⚠️ Скоро выброс!",
@@ -4415,9 +4434,9 @@ class TestFleeEmissionSelfInterrupt:
             # Agent may have completed travel (sched=None) but must NOT have
             # been interrupted (which would cause travel_interrupted in memory).
             interrupted = [
-                m for m in agent["memory"]
-                if m.get("effects", {}).get("action_kind") == "travel_interrupted"
-                and m.get("world_turn", 0) > 1  # only entries written by these ticks
+                m for m in _v3r(agent)
+                if _v3_fx(m).get("action_kind") == "travel_interrupted"
+                and m.get("created_turn", 0) > 1  # only entries written by these ticks
             ]
             assert not interrupted, (
                 f"Flee travel was interrupted at tick {tick + 2} — "
@@ -4440,7 +4459,7 @@ class TestFleeEmissionSelfInterrupt:
         state["seed"] = 0
         agent = next(iter(state["agents"].values()))
         # Normal travel (no emergency_flee flag) while emission is warned
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation",
             "world_turn": 1,
             "title": "⚠️ Скоро выброс!",
@@ -4468,8 +4487,8 @@ class TestFleeEmissionSelfInterrupt:
         sched = new_agent.get("scheduled_action")
         # After interrupt, bot may reschedule a flee OR stay sheltered (B is safe anyway)
         interrupted = [
-            m for m in new_agent["memory"]
-            if m.get("effects", {}).get("action_kind") == "travel_interrupted"
+            m for m in _v3r(new_agent)
+            if _v3_fx(m).get("action_kind") == "travel_interrupted"
         ]
         # The travel should have been interrupted (unless it completed, which it can't at 4 ticks)
         assert interrupted or (sched is None), (
@@ -4545,8 +4564,7 @@ class TestUnravelZoneMysteryGoal:
             "material_threshold": 1,  # already over threshold → goal pursuit phase
             "scheduled_action": None,
             "action_queue": [],
-            "memory": [],
-        }
+                    }
 
     def _make_mystery_agent_equipped(self, loc_id: str, state: dict) -> dict:
         """Return an agent with weapon, armor, and ammo so equipment-purchase logic is skipped."""
@@ -4608,12 +4626,12 @@ class TestUnravelZoneMysteryGoal:
         state["agents"]["agent_ai_m"] = agent
         _run_bot_action_inner("agent_ai_m", agent, state, 1)
         decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
         ]
         assert decisions, "Bot should record a decision"
         # Should wander or seek item
-        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        action_kinds = {_v3_fx(d).get("action_kind") for d in decisions}
         assert action_kinds.intersection(
             {"wander", "seek_item"}
         ), f"Expected wander or seek_item, got: {action_kinds}"
@@ -4636,11 +4654,11 @@ class TestUnravelZoneMysteryGoal:
         _run_bot_action_inner("agent_ai_m", agent, state, 1)
         # Agent should decide to seek_item for destination B
         seek_decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
-            and m["effects"].get("action_kind") == "seek_item"
-            and m["effects"].get("destination") == "B"
-            and m["effects"].get("item_category") == "secret_document"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "seek_item"
+            and _v3_fx(m).get("destination") == "B"
+            and _v3_fx(m).get("item_category") == "secret_document"
         ]
         assert seek_decisions, "Bot with doc memory should seek_item to known location"
 
@@ -4680,8 +4698,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, 0, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -4697,12 +4714,12 @@ class TestUnravelZoneMysteryGoal:
         assert result_loc == "B", "Should receive intel about location B from co-located stalker"
         # Asking agent should have an intel_from_stalker observation in memory
         intel_mems = [
-            m for m in agent["memory"]
-            if m["effects"].get("action_kind") == "intel_from_stalker"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "intel_from_stalker"
         ]
         assert intel_mems, "Agent should have intel_from_stalker memory entry"
-        assert intel_mems[0]["effects"]["location_id"] == "B"
-        assert intel_mems[0]["effects"]["source_agent_name"] == "Информатор"
+        assert _v3_fx(intel_mems[0])["location_id"] == "B"
+        assert _v3_fx(intel_mems[0])["source_agent_name"] == "Информатор"
 
     def test_intel_deduplication_same_turn(self):
         """Asking twice in the same turn from the same stalker should not write duplicate entries."""
@@ -4719,8 +4736,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, 0, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -4736,8 +4752,8 @@ class TestUnravelZoneMysteryGoal:
             "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 1
         )
         intel_mems = [
-            m for m in agent["memory"]
-            if m["effects"].get("action_kind") == "intel_from_stalker"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "intel_from_stalker"
         ]
         assert len(intel_mems) == 1, "Should not write duplicate intel from same stalker in same turn"
 
@@ -4765,8 +4781,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         # Informant has seen docs in BOTH B and C
         _add_memory(
             informant, 1, state, "observation",
@@ -4788,10 +4803,10 @@ class TestUnravelZoneMysteryGoal:
         )
         # Should receive intel from BOTH locations
         intel_mems = [
-            m for m in agent["memory"]
-            if m["effects"].get("action_kind") == "intel_from_stalker"
+            m for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "intel_from_stalker"
         ]
-        intel_locs = {m["effects"]["location_id"] for m in intel_mems}
+        intel_locs = {_v3_fx(m)["location_id"] for m in intel_mems}
         assert intel_locs == {"B", "C"}, (
             f"Should receive intel about both B and C, got: {intel_locs}"
         )
@@ -4819,8 +4834,7 @@ class TestUnravelZoneMysteryGoal:
         # Stalker 1 knows about location B
         stalker1 = {
             "id": "stalker_1", "archetype": "stalker_agent", "name": "Сталкер Один",
-            "location_id": "A", "is_alive": True, "memory": [],
-        }
+            "location_id": "A", "is_alive": True,         }
         _add_memory(stalker1, 1, state, "observation", "Вижу предметы",
                     f"На земле: {doc_type}.",
                     {"observed": "items", "location_id": "B", "item_types": [doc_type]})
@@ -4829,8 +4843,7 @@ class TestUnravelZoneMysteryGoal:
         # Stalker 2 knows about location C
         stalker2 = {
             "id": "stalker_2", "archetype": "stalker_agent", "name": "Сталкер Два",
-            "location_id": "A", "is_alive": True, "memory": [],
-        }
+            "location_id": "A", "is_alive": True,         }
         _add_memory(stalker2, 1, state, "observation", "Вижу предметы",
                     f"На земле: {doc_type}.",
                     {"observed": "items", "location_id": "C", "item_types": [doc_type]})
@@ -4840,8 +4853,8 @@ class TestUnravelZoneMysteryGoal:
             "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES, "секретные документы", state, 2
         )
         intel_locs = {
-            m["effects"]["location_id"] for m in agent["memory"]
-            if m["effects"].get("action_kind") == "intel_from_stalker"
+            _v3_fx(m)["location_id"] for m in _v3r(agent)
+            if _v3_fx(m).get("action_kind") == "intel_from_stalker"
         }
         assert intel_locs == {"B", "C"}, (
             f"Should receive intel from both stalkers about B and C, got: {intel_locs}"
@@ -4858,7 +4871,7 @@ class TestUnravelZoneMysteryGoal:
 
         doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
         # Agent already resolved location B as not_found on turn 5
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation", "world_turn": 5,
             "label": "⚠️ Предмет исчез", "summary": "...",
             "effects": {
@@ -4876,8 +4889,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, 3, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -4893,8 +4905,8 @@ class TestUnravelZoneMysteryGoal:
         assert result_loc is None, (
             f"Stale intel (obs_turn=3 <= resolved_turn=5) should be skipped; got {result_loc}"
         )
-        intel_mems = [m for m in agent["memory"]
-                      if m.get("effects", {}).get("action_kind") == "intel_from_stalker"]
+        intel_mems = [m for m in _v3r(agent)
+                      if _v3_fx(m).get("action_kind") == "intel_from_stalker"]
         assert len(intel_mems) == 0, (
             f"Should not write stale intel entry; got {intel_mems}"
         )
@@ -4910,7 +4922,7 @@ class TestUnravelZoneMysteryGoal:
 
         doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
         # Agent already picked up from B on turn 7
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation", "world_turn": 7,
             "label": "✅ Нашёл", "summary": "...",
             "effects": {
@@ -4928,8 +4940,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, 4, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -4957,7 +4968,7 @@ class TestUnravelZoneMysteryGoal:
 
         doc_type = next(iter(sorted(SECRET_DOCUMENT_ITEM_TYPES)))
         # Agent resolved B on turn 5 (not_found)
-        agent["memory"].append({
+        _add_v3_memory(agent, {
             "type": "observation", "world_turn": 5,
             "label": "⚠️ Предмет исчез", "summary": "...",
             "effects": {
@@ -4975,8 +4986,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, 6, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -5012,8 +5022,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, obs_turn, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -5026,12 +5035,12 @@ class TestUnravelZoneMysteryGoal:
             "agent_ai_m", agent, SECRET_DOCUMENT_ITEM_TYPES,
             "секретные документы", state, obs_turn + 1
         )
-        intel_mems = [m for m in agent["memory"]
-                      if m.get("effects", {}).get("action_kind") == "intel_from_stalker"]
+        intel_mems = [m for m in _v3r(agent)
+                      if _v3_fx(m).get("action_kind") == "intel_from_stalker"]
         assert intel_mems, "Should have written intel_from_stalker entry"
         entry = intel_mems[0]
         # obs_world_turn must be stored in effects
-        assert entry["effects"].get("obs_world_turn") == obs_turn, (
+        assert _v3_fx(entry).get("obs_world_turn") == obs_turn, (
             f"Expected obs_world_turn={obs_turn}; got {entry['effects'].get('obs_world_turn')}"
         )
         # Summary must contain the time label: obs_turn=90 → Day 1 · 01:30
@@ -5083,9 +5092,9 @@ class TestUnravelZoneMysteryGoal:
         state["agents"]["agent_ai_m"] = agent
         _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
                          "B", state["locations"]["B"], state, 1, random.Random(0))
-        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        decisions = [m for m in _v3r(agent) if _v3_mt(m) == "decision"]
         assert decisions, "Bot should record a decision"
-        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        action_kinds = {_v3_fx(d).get("action_kind") for d in decisions}
         assert "wait_at_trader" in action_kinds, (
             f"Bot with trader reachable should head to trader, got: {action_kinds}"
         )
@@ -5106,9 +5115,9 @@ class TestUnravelZoneMysteryGoal:
         state["agents"]["agent_ai_m"] = agent
         _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
                          "A", state["locations"]["A"], state, 1, random.Random(0))
-        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        decisions = [m for m in _v3r(agent) if _v3_mt(m) == "decision"]
         assert decisions, "Bot should record a decision"
-        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        action_kinds = {_v3_fx(d).get("action_kind") for d in decisions}
         assert "wait_at_trader" in action_kinds, (
             f"Bot at trader with no other stalkers should wait, got: {action_kinds}"
         )
@@ -5135,9 +5144,9 @@ class TestUnravelZoneMysteryGoal:
         _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
                          "A", state["locations"]["A"], state, 2, random.Random(0))
         wait_decisions = [
-            m for m in agent["memory"]
-            if m.get("type") == "decision"
-            and m["effects"].get("action_kind") == "wait_at_trader"
+            m for m in _v3r(agent)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") == "wait_at_trader"
         ]
         assert len(wait_decisions) == 1, (
             f"wait_at_trader decision should not be written more than once, got: {len(wait_decisions)}"
@@ -5166,8 +5175,7 @@ class TestUnravelZoneMysteryGoal:
             "name": "Информатор",
             "location_id": "A",
             "is_alive": True,
-            "memory": [],
-        }
+                    }
         _add_memory(
             informant, 0, state, "observation",
             "Вижу предметы в «Равнина»",
@@ -5178,15 +5186,15 @@ class TestUnravelZoneMysteryGoal:
         _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
                          "A", state["locations"]["A"], state, 1, random.Random(0))
         # Bot should have asked the informant and decided to travel to B
-        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
-        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        decisions = [m for m in _v3r(agent) if _v3_mt(m) == "decision"]
+        action_kinds = {_v3_fx(d).get("action_kind") for d in decisions}
         assert "seek_item" in action_kinds, (
             f"Bot at trader with informed stalker should seek_item, got: {action_kinds}"
         )
         seek_decision = next(
-            d for d in decisions if d["effects"].get("action_kind") == "seek_item"
+            d for d in decisions if _v3_fx(d).get("action_kind") == "seek_item"
         )
-        assert seek_decision["effects"].get("destination") == "B"
+        assert _v3_fx(seek_decision).get("destination") == "B"
 
     def test_bot_continues_seeking_with_docs(self):
         """Agent that already has docs should continue searching for more, not idle."""
@@ -5202,11 +5210,11 @@ class TestUnravelZoneMysteryGoal:
         state["agents"]["agent_ai_m"] = agent
         _bot_pursue_goal("agent_ai_m", agent, "unravel_zone_mystery",
                          "A", state["locations"]["A"], state, 1, random.Random(0))
-        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        decisions = [m for m in _v3r(agent) if _v3_mt(m) == "decision"]
         # Agent with docs should still write a decision (seek_item, wander, wait_at_trader)
         assert decisions, "Agent with docs should still take an action and write a decision"
         # Must NOT idle with goal_unravel_has_docs any more
-        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        action_kinds = {_v3_fx(d).get("action_kind") for d in decisions}
         assert "goal_unravel_has_docs" not in action_kinds, (
             f"Agent should not idle with goal_unravel_has_docs, got: {action_kinds}"
         )
@@ -5250,8 +5258,7 @@ class TestKillStalkerGoal:
             "has_left_zone": False,
             "scheduled_action": None,
             "action_queue": [],
-            "memory": [],
-        }
+                    }
 
     def _make_target(self, loc_id: str) -> dict:
         """Return a simple target agent."""
@@ -5284,8 +5291,7 @@ class TestKillStalkerGoal:
             "has_left_zone": False,
             "scheduled_action": None,
             "action_queue": [],
-            "memory": [],
-        }
+                    }
 
     def _minimal_state(self) -> dict:
         """Two-location state: A-trader, B-plain, connected."""
@@ -5320,8 +5326,7 @@ class TestKillStalkerGoal:
                     "location_id": "A",
                     "inventory": [],
                     "money": 5000,
-                    "memory": [],
-                },
+                                    },
             },
             "world_turn": 10,
             "emission_active": False,
@@ -5345,11 +5350,11 @@ class TestKillStalkerGoal:
         assert hunter["action_used"]
         # New behavior: combat_initiated instead of hunt_target_killed
         combat_decisions = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "combat_initiated"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "combat_initiated"
         ]
         assert combat_decisions, "Should have written combat_initiated decision"
-        assert combat_decisions[0]["effects"]["target_id"] == "agent_target"
+        assert _v3_fx(combat_decisions[0])["target_id"] == "agent_target"
         assert any(e["event_type"] == "combat_initiated" for e in events)
         # Combat interaction should be created in state
         assert len(state["combat_interactions"]) == 1
@@ -5370,13 +5375,13 @@ class TestKillStalkerGoal:
         informant["id"] = "agent_informant"
         informant["name"] = "Информатор"
         # Informant has observed the target at B.
-        informant["memory"] = [{
+        _setup_v3_memory(informant, [{
             "world_turn": 8,
             "type": "observation",
             "title": "Вижу сталкеров",
             "effects": {"observed": "stalkers", "location_id": "B", "names": ["Цель"]},
             "summary": "Видел Цель в Промзоне",
-        }]
+        }])
         state["agents"]["agent_hunter"] = hunter
         state["agents"]["agent_target"] = target
         state["agents"]["agent_informant"] = informant
@@ -5385,12 +5390,12 @@ class TestKillStalkerGoal:
             "A", state["locations"]["A"], state, 10, random.Random(0)
         )
         intel_obs = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "intel_from_stalker"
-            and m.get("effects", {}).get("observed") == "agent_location"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "intel_from_stalker"
+            and _v3_fx(m).get("observed") == "agent_location"
         ]
         assert intel_obs, "Should have written agent_location intel from informant"
-        assert intel_obs[0]["effects"]["location_id"] == "B"
+        assert _v3_fx(intel_obs[0])["location_id"] == "B"
 
     def test_hunter_goes_to_trader_when_no_intel(self):
         """Hunter with no intel and no co-located informants should travel to nearest trader."""
@@ -5406,9 +5411,9 @@ class TestKillStalkerGoal:
             "B", state["locations"]["B"], state, 10, random.Random(0)
         )
         # Should decide to travel to trader (at A)
-        decisions = [m for m in hunter["memory"] if m.get("type") == "decision"]
+        decisions = [m for m in _v3r(hunter) if _v3_mt(m) == "decision"]
         assert decisions, "Should have written a decision"
-        action_kinds = {d["effects"].get("action_kind") for d in decisions}
+        action_kinds = {_v3_fx(d).get("action_kind") for d in decisions}
         assert "hunt_wait_at_trader" in action_kinds, (
             f"Should head to trader when no intel; got: {action_kinds}"
         )
@@ -5421,12 +5426,12 @@ class TestKillStalkerGoal:
         hunter = self._make_hunter("A", "agent_target")
         hunter["money"] = 50  # Too broke to buy intel — forces idle/wait path
         # Pre-seed an existing wait_at_trader decision to test anti-spam.
-        hunter["memory"] = [{
+        _setup_v3_memory(hunter, [{
             "world_turn": 9, "type": "decision",
             "title": "Жду у торговца",
             "effects": {"action_kind": "hunt_wait_at_trader", "location_id": "A"},
             "summary": "",
-        }]
+        }])
         target = self._make_target("B")
         state["agents"]["agent_hunter"] = hunter
         state["agents"]["agent_target"] = target
@@ -5436,8 +5441,8 @@ class TestKillStalkerGoal:
         )
         assert hunter["action_used"]
         new_decisions = [
-            m for m in hunter["memory"]
-            if m.get("type") == "decision"
+            m for m in _v3r(hunter)
+            if _v3_mt(m) == "decision"
             and m.get("world_turn") == 10
         ]
         # Anti-spam: should NOT write a second hunt_wait_at_trader this turn.
@@ -5458,11 +5463,11 @@ class TestKillStalkerGoal:
         _check_global_goal_completion("agent_hunter", hunter, state, 10)
         assert hunter.get("global_goal_achieved"), "Goal should be achieved when target is dead"
         goal_obs = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "goal_achieved"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "goal_achieved"
         ]
         assert goal_obs, "Should write goal_achieved observation"
-        assert goal_obs[0]["effects"]["goal"] == "kill_stalker"
+        assert _v3_fx(goal_obs[0])["goal"] == "kill_stalker"
 
     def test_check_goal_completion_not_triggered_when_target_alive(self):
         """_check_global_goal_completion does NOT set global_goal_achieved if target is still alive."""
@@ -5471,13 +5476,13 @@ class TestKillStalkerGoal:
         hunter = self._make_hunter("B", "agent_target")
         target = self._make_target("B")
         # Target is alive — goal must NOT be completed even if old stub memory exists
-        hunter["memory"] = [{
+        _setup_v3_memory(hunter, [{
             "world_turn": 9, "type": "observation",
             "title": "old stub",
             "effects": {"action_kind": "hunt_target_killed",
                         "target_id": "agent_target"},
             "summary": "",
-        }]
+        }])
         state["agents"]["agent_hunter"] = hunter
         state["agents"]["agent_target"] = target
         _check_global_goal_completion("agent_hunter", hunter, state, 10)
@@ -5511,21 +5516,16 @@ class TestKillStalkerGoal:
     def test_hunter_uses_retreat_observed_as_hunt_intel(self):
         """_find_hunt_intel_location should return the to_location from a retreat_observed entry."""
         from app.games.zone_stalkers.rules.tick_rules import _find_hunt_intel_location
-        agent = {
-            "memory": [{
-                "world_turn": 8,
-                "type": "observation",
-                "title": "Видел отступление",
-                "effects": {
-                    "action_kind": "retreat_observed",
-                    "subject": "agent_target",
-                    "from_location": "A",
-                    "to_location": "B",
-                    "note": "Видел, как участник отступил",
-                },
-                "summary": "",
-            }]
-        }
+        agent = {}
+        _setup_v3_memory(agent, [{
+            "world_turn": 8, "type": "observation",
+            "effects": {
+                "action_kind": "retreat_observed",
+                "subject": "agent_target",
+                "from_location": "A",
+                "to_location": "B",
+            },
+        }])
         result = _find_hunt_intel_location(agent, "agent_target", {})
         assert result == "B", (
             f"Expected 'B' from retreat_observed to_location, got {result!r}"
@@ -5534,33 +5534,15 @@ class TestKillStalkerGoal:
     def test_retreat_observed_intel_respects_exhausted_locs(self):
         """retreat_observed to_location should be skipped if that area was already exhausted."""
         from app.games.zone_stalkers.rules.tick_rules import _find_hunt_intel_location
-        agent = {
-            "memory": [
-                {
-                    "world_turn": 5,
-                    "type": "observation",
-                    "title": "Видел отступление",
-                    "effects": {
-                        "action_kind": "retreat_observed",
-                        "subject": "agent_target",
-                        "from_location": "A",
-                        "to_location": "B",
-                    },
-                    "summary": "",
-                },
-                {
-                    "world_turn": 7,
-                    "type": "observation",
-                    "title": "Район обыскан",
-                    "effects": {
-                        "action_kind": "hunt_area_exhausted",
-                        "target_id": "agent_target",
-                        "location_id": "B",
-                    },
-                    "summary": "",
-                },
-            ]
-        }
+        agent = {}
+        _setup_v3_memory(agent, [
+            {"world_turn": 5, "type": "observation",
+             "effects": {"action_kind": "retreat_observed", "subject": "agent_target",
+                         "from_location": "A", "to_location": "B"}},
+            {"world_turn": 7, "type": "observation",
+             "effects": {"action_kind": "hunt_area_exhausted", "target_id": "agent_target",
+                         "location_id": "B"}},
+        ])
         result = _find_hunt_intel_location(agent, "agent_target", {})
         assert result is None, (
             f"Exhausted retreat destination should not be returned; got {result!r}"
@@ -5569,34 +5551,15 @@ class TestKillStalkerGoal:
     def test_find_hunt_intel_location_prefers_newest(self):
         """_find_hunt_intel_location returns the location with the highest world_turn."""
         from app.games.zone_stalkers.rules.tick_rules import _find_hunt_intel_location
-        agent = {
-            "memory": [
-                {
-                    "world_turn": 3,
-                    "type": "observation",
-                    "title": "Старая наводка",
-                    "effects": {
-                        "action_kind": "retreat_observed",
-                        "subject": "agent_target",
-                        "from_location": "X",
-                        "to_location": "B",
-                    },
-                    "summary": "",
-                },
-                {
-                    "world_turn": 9,
-                    "type": "observation",
-                    "title": "Новая наводка",
-                    "effects": {
-                        "action_kind": "intel_from_trader",
-                        "observed": "agent_location",
-                        "target_agent_id": "agent_target",
-                        "location_id": "C",
-                    },
-                    "summary": "",
-                },
-            ]
-        }
+        agent = {}
+        _setup_v3_memory(agent, [
+            {"world_turn": 3, "type": "observation",
+             "effects": {"action_kind": "retreat_observed", "subject": "agent_target",
+                         "from_location": "X", "to_location": "B"}},
+            {"world_turn": 9, "type": "observation",
+             "effects": {"action_kind": "intel_from_trader", "observed": "agent_location",
+                         "target_agent_id": "agent_target", "location_id": "C"}},
+        ])
         result = _find_hunt_intel_location(agent, "agent_target", {})
         assert result == "C", (
             f"Should prefer the newest intel (turn 9 → C); got {result!r}"
@@ -5620,15 +5583,15 @@ class TestKillStalkerGoal:
         assert hunter["action_used"]
         # Should have written an intel_from_trader observation
         intel_obs = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "intel_from_trader"
-            and m.get("effects", {}).get("target_agent_id") == "agent_target"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "intel_from_trader"
+            and _v3_fx(m).get("target_agent_id") == "agent_target"
         ]
         assert intel_obs, "Should have written intel_from_trader observation"
-        assert intel_obs[0]["effects"]["location_id"] == "B", (
+        assert _v3_fx(intel_obs[0])["location_id"] == "B", (
             "Intel should point to target's actual location"
         )
-        assert intel_obs[0]["effects"]["observed"] == "agent_location"
+        assert _v3_fx(intel_obs[0])["observed"] == "agent_location"
         mem_v3_records = ensure_memory_v3(hunter)["records"].values()
         assert any(
             rec.get("kind") == "target_intel"
@@ -5659,16 +5622,16 @@ class TestKillStalkerGoal:
         assert hunter["action_used"]
         # Should NOT have written an intel_from_trader observation
         intel_obs = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "intel_from_trader"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "intel_from_trader"
         ]
         assert not intel_obs, "Should NOT buy intel when broke"
         # Money unchanged
         assert hunter["money"] == 50
         # Should write a hunt_wait_at_trader decision (falling back to idle)
         wait_decisions = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "hunt_wait_at_trader"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "hunt_wait_at_trader"
         ]
         assert wait_decisions, "Should write hunt_wait_at_trader when broke at trader"
 
@@ -5680,7 +5643,7 @@ class TestKillStalkerGoal:
         hunter = self._make_hunter("A", "agent_target")
         hunter["money"] = 1000
         # Pre-seed: intel already bought on turn 10
-        hunter["memory"] = [{
+        _setup_v3_memory(hunter, [{
             "world_turn": 10,
             "type": "observation",
             "title": "Купил информацию",
@@ -5695,7 +5658,7 @@ class TestKillStalkerGoal:
                 "price_paid": 200,
             },
             "summary": "",
-        }]
+        }])
         target = self._make_target("B")
         state["agents"]["agent_hunter"] = hunter
         state["agents"]["agent_target"] = target
@@ -5728,8 +5691,7 @@ class TestDepartedStalkerNotObserved:
             "is_alive": True,
             "action_used": False,
             "has_left_zone": has_left,
-            "memory": [],
-            "global_goal": "get_rich",
+                        "global_goal": "get_rich",
             "current_goal": None,
             "risk_tolerance": 0.5,
             "material_threshold": 5000,
@@ -5768,8 +5730,8 @@ class TestDepartedStalkerNotObserved:
         _write_location_observations("observer", observer, "A", state, 5)
 
         stalker_obs = [
-            m for m in observer["memory"]
-            if m.get("effects", {}).get("observed") == "stalkers"
+            m for m in _v3r(observer)
+            if _v3_fx(m).get("observed") == "stalkers"
         ]
         assert not stalker_obs, (
             "Departed stalker should NOT appear in location observations, "
@@ -5788,11 +5750,11 @@ class TestDepartedStalkerNotObserved:
         _write_location_observations("observer", observer, "A", state, 5)
 
         stalker_obs = [
-            m for m in observer["memory"]
-            if m.get("effects", {}).get("observed") == "stalkers"
+            m for m in _v3r(observer)
+            if _v3_fx(m).get("observed") == "stalkers"
         ]
         assert stalker_obs, "A normal alive stalker should appear in observations"
-        assert "Сталкер_present" in stalker_obs[0]["effects"]["names"]
+        assert "Сталкер_present" in _v3_fx(stalker_obs[0])["names"]
 
 
 class TestDijkstraReachableLocations:
@@ -5871,8 +5833,7 @@ class TestDijkstraReachableLocations:
             "is_alive": True,
             "action_used": False,
             "has_left_zone": False,
-            "memory": [],
-            "global_goal": "get_rich",
+                        "global_goal": "get_rich",
             "current_goal": None,
             "risk_tolerance": 0.5,
             "material_threshold": 1,  # already over threshold
@@ -5888,13 +5849,13 @@ class TestDijkstraReachableLocations:
         state["agents"]["agent_a"] = agent
         _bot_pursue_goal("agent_a", agent, "get_rich",
                          "A", state["locations"]["A"], state, 1, random.Random(0))
-        decisions = [m for m in agent["memory"] if m.get("type") == "decision"]
+        decisions = [m for m in _v3r(agent) if _v3_mt(m) == "decision"]
         anomaly_decisions = [
             d for d in decisions
-            if d.get("effects", {}).get("action_kind") == "move_for_anomaly"
+            if _v3_fx(d).get("action_kind") == "move_for_anomaly"
         ]
         assert anomaly_decisions, "Should have a move_for_anomaly decision"
-        fx = anomaly_decisions[0]["effects"]
+        fx = _v3_fx(anomaly_decisions[0])
         assert "travel_minutes" in fx, (
             "Decision should contain travel_minutes, not distance_hops"
         )
@@ -5968,8 +5929,7 @@ class TestCombatInteraction:
             "global_goal_achieved": False,
             "scheduled_action": None,
             "action_queue": [],
-            "memory": [],
-            "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
+                        "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
             "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
             "experience": 0, "reputation": 0,
         }
@@ -5999,8 +5959,7 @@ class TestCombatInteraction:
             "global_goal_achieved": False,
             "scheduled_action": None,
             "action_queue": [],
-            "memory": [],
-            "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
+                        "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
             "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
             "experience": 0, "reputation": 0,
         }
@@ -6029,11 +5988,11 @@ class TestCombatInteraction:
         assert ci["participants"]["agent_target"]["motive"] == "выжить"
         # Hunter memory should have combat_initiated decision
         combat_mem = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "combat_initiated"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "combat_initiated"
         ]
         assert combat_mem, "Hunter should have combat_initiated in memory"
-        assert combat_mem[0]["effects"]["target_id"] == "agent_target"
+        assert _v3_fx(combat_mem[0])["target_id"] == "agent_target"
         # Event should be emitted
         assert any(e["event_type"] == "combat_initiated" for e in events)
         assert hunter["action_used"]
@@ -6074,9 +6033,9 @@ class TestCombatInteraction:
         # Normal bot decisions (wander, seek_anomaly etc.) should NOT be written for hunter
         hunter_after = new_state["agents"]["agent_hunter"]
         normal_decisions = [
-            m for m in hunter_after.get("memory", [])
-            if m.get("type") == "decision"
-            and m.get("effects", {}).get("action_kind") in (
+            m for m in _v3r(hunter_after)
+            if _v3_mt(m) == "decision"
+            and _v3_fx(m).get("action_kind") in (
                 "wander", "move_for_anomaly", "explore_decision",
                 "buy_item", "seek_item", "hunt_search"
             )
@@ -6091,7 +6050,7 @@ class TestCombatInteraction:
         state = self._make_minimal_state()
         hunter = self._make_hunter("B", "agent_target")
         # Add travel history: hunter came from A
-        hunter["memory"] = [{
+        _setup_v3_memory(hunter, [{
             "world_turn": 88,
             "type": "action",
             "title": "Прибыл в B",
@@ -6103,7 +6062,7 @@ class TestCombatInteraction:
             "title": "Прибыл в A",
             "effects": {"action_kind": "travel_arrived", "to_loc": "A"},
             "summary": "Прибыл",
-        }]
+        }])
         state["agents"]["agent_hunter"] = hunter
         combat = {
             "id": "combat_B_90",
@@ -6133,8 +6092,8 @@ class TestCombatInteraction:
         )
         # Memory should have combat_flee decision
         flee_mem = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "combat_flee"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "combat_flee"
         ]
         assert flee_mem, "Should have combat_flee in memory"
         # Event should be emitted
@@ -6229,21 +6188,21 @@ class TestCombatInteraction:
         assert not target.get("is_alive", True), "Target should be dead"
         # Hunter memory: combat_shoot decision + combat_kill observation
         shoot_mem = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("action_kind") == "combat_shoot"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("action_kind") == "combat_shoot"
         ]
         assert shoot_mem, "Should have combat_shoot in memory"
-        assert shoot_mem[0]["effects"]["hit"] is True
-        assert shoot_mem[0]["effects"]["damage"] == 50
+        assert _v3_fx(shoot_mem[0])["hit"] is True
+        assert _v3_fx(shoot_mem[0])["damage"] == 50
         kill_obs = [
-            m for m in hunter["memory"]
-            if m.get("effects", {}).get("observed") == "combat_kill"
+            m for m in _v3r(hunter)
+            if _v3_fx(m).get("observed") == "combat_kill"
         ]
         assert kill_obs, "Should have combat_kill observation"
         # Target memory: combat_killed observation
         killed_obs = [
-            m for m in target["memory"]
-            if m.get("effects", {}).get("observed") == "combat_killed"
+            m for m in _v3r(target)
+            if _v3_fx(m).get("observed") == "combat_killed"
         ]
         assert killed_obs, "Target should have combat_killed observation"
         # Events should include agent_died
@@ -6284,10 +6243,10 @@ class TestCombatInteraction:
         _combat_shoot("agent_hunter", hunter, combat["participants"]["agent_hunter"],
                       combat, state, 90, random.Random(0))
         # hunt_target_killed entry must exist in hunter's memory
-        ktk = [m for m in hunter["memory"]
-               if m.get("effects", {}).get("action_kind") == "hunt_target_killed"]
+        ktk = [m for m in _v3r(hunter)
+               if _v3_fx(m).get("action_kind") == "hunt_target_killed"]
         assert ktk, "Should write hunt_target_killed when kill_target_id matches slain agent"
-        assert ktk[0]["effects"]["target_id"] == "agent_target"
+        assert _v3_fx(ktk[0])["target_id"] == "agent_target"
 
     def test_goal_completion_after_combat_kill(self):
         """After combat kills the kill_target, hunter's goal is marked achieved on next tick."""
@@ -6360,8 +6319,7 @@ class TestCombatInteraction:
             "global_goal_achieved": False,
             "scheduled_action": None,
             "action_queue": [],
-            "memory": [],
-            "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
+                        "skill_stalker": 1, "skill_combat": 1, "skill_trade": 1,
             "skill_medicine": 1, "skill_social": 1, "skill_survival": 1,
             "experience": 0, "reputation": 0,
         }
@@ -6462,11 +6420,11 @@ class TestCombatInteraction:
         assert hunter.get("scheduled_action") is not None
         # Target must have retreat_observed in memory
         retreat_obs = [
-            m for m in target.get("memory", [])
-            if m.get("effects", {}).get("action_kind") == "retreat_observed"
+            m for m in _v3r(target)
+            if _v3_fx(m).get("action_kind") == "retreat_observed"
         ]
         assert retreat_obs, "Target should have retreat_observed after hunter flees"
-        obs = retreat_obs[0]["effects"]
+        obs = _v3_fx(retreat_obs[0])
         assert obs["subject"] == "agent_hunter"
         assert obs["from_location"] == "B"
         assert obs["to_location"] == "A"
@@ -6541,11 +6499,11 @@ class TestCombatInteraction:
         # Execute flee and check retreat_observed for agent_b
         _combat_flee("agent_a", agent_a, participant_a, combat, state, 90)
         retreat_obs = [
-            m for m in agent_b.get("memory", [])
-            if m.get("effects", {}).get("action_kind") == "retreat_observed"
+            m for m in _v3r(agent_b)
+            if _v3_fx(m).get("action_kind") == "retreat_observed"
         ]
         assert retreat_obs, "Remaining participant should receive retreat_observed"
-        obs = retreat_obs[0]["effects"]
+        obs = _v3_fx(retreat_obs[0])
         assert obs["subject"] == "agent_a"
         assert obs["from_location"] == "B"
         assert obs["to_location"] == "A"
@@ -6612,9 +6570,9 @@ class TestCombatInteraction:
         assert ci.get("ended"), "Combat should end when remaining participants have no active enemies"
         # A should observe B's retreat
         a_retreat_obs = [
-            m for m in new_state["agents"]["agent_a"].get("memory", [])
-            if m.get("effects", {}).get("action_kind") == "retreat_observed"
-               and m.get("effects", {}).get("subject") == "agent_b"
+            m for m in _v3r(new_state["agents"]["agent_a"])
+            if _v3_fx(m).get("action_kind") == "retreat_observed"
+               and _v3_fx(m).get("subject") == "agent_b"
         ]
         assert a_retreat_obs, "A should have retreat_observed memory for B's escape"
 

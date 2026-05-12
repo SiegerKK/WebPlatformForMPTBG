@@ -72,7 +72,6 @@ def _sleeping_bot(bot_id: str, location_id: str, hunger: int = 20, thirst: int =
             {"id": "med2", "type": "bandage", "value": 0},
             {"id": "med3", "type": "bandage", "value": 0},
         ],
-        "memory": [],
         "action_queue": [],
         "scheduled_action": {
             "type": "sleep",
@@ -87,18 +86,26 @@ def _sleeping_bot(bot_id: str, location_id: str, hunger: int = 20, thirst: int =
 
 
 def _add_emission_imminent_memory(bot: dict, world_turn: int, turns_until: int = 10) -> None:
-    """Add an emission_imminent observation to the bot's memory."""
-    bot["memory"].append({
-        "world_turn": world_turn,
-        "type": "observation",
-        "title": "⚠️ Скоро выброс!",
-        "effects": {
-            "action_kind": "emission_imminent",
-            "turns_until": turns_until,
-            "emission_scheduled_turn": world_turn + turns_until,
+    """Add an emission_imminent observation to the bot's memory_v3."""
+    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.store import ensure_memory_v3  # noqa: PLC0415
+    ensure_memory_v3(bot)
+    write_memory_event_to_v3(
+        agent_id=bot.get("id", "bot"),
+        agent=bot,
+        legacy_entry={
+            "world_turn": world_turn,
+            "type": "observation",
+            "title": "⚠️ Скоро выброс!",
+            "effects": {
+                "action_kind": "emission_imminent",
+                "turns_until": turns_until,
+                "emission_scheduled_turn": world_turn + turns_until,
+            },
+            "summary": f"Скоро выброс через {turns_until} ходов",
         },
-        "summary": f"Скоро выброс через {turns_until} ходов",
-    })
+        world_turn=world_turn,
+    )
 
 
 def _base_state(world_turn: int = 100) -> dict:

@@ -178,10 +178,6 @@ def _memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
-def _memory_v3_is_usable(agent: dict[str, Any]) -> bool:
-    return bool(_memory_v3_records(agent))
-
-
 def _record_memory_turn(record: dict[str, Any]) -> int:
     return int(record.get("created_turn", 0) or 0)
 
@@ -247,42 +243,17 @@ def _entities_from_memory(
     This is acceptable at Phase 1 but could be optimised in Phase 5+ with a
     memory index keyed by observed agent_id.
     """
-    if _memory_v3_is_usable(agent):
-        seen_ids: set[str] = set()
-        result: list[dict[str, Any]] = []
-        for record in _memory_v3_records(agent):
-            if not _record_is_active(record):
-                continue
-            last_known_location = None
-            for location_id in _record_location_ids(record):
-                if location_id:
-                    last_known_location = location_id
-                    break
-            for other_id in _record_entity_ids(record):
-                if (
-                    other_id
-                    and other_id != own_id
-                    and other_id not in seen_ids
-                    and other_id in agents
-                ):
-                    seen_ids.add(other_id)
-                    other = agents[other_id]
-                    result.append({
-                        "agent_id": other_id,
-                        "name": other.get("name", other_id),
-                        "archetype": other.get("archetype"),
-                        "is_alive": other.get("is_alive", True),
-                        "last_known_location": last_known_location,
-                        "memory_turn": _record_memory_turn(record),
-                    })
-        return result
-
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
-    for mem in agent.get("memory", []):
-        effects = mem.get("effects", {})
-        for key in ("target_agent_id", "subject", "agent_id"):
-            other_id = effects.get(key)
+    for record in _memory_v3_records(agent):
+        if not _record_is_active(record):
+            continue
+        last_known_location = None
+        for location_id in _record_location_ids(record):
+            if location_id:
+                last_known_location = location_id
+                break
+        for other_id in _record_entity_ids(record):
             if (
                 other_id
                 and other_id != own_id
@@ -296,8 +267,8 @@ def _entities_from_memory(
                     "name": other.get("name", other_id),
                     "archetype": other.get("archetype"),
                     "is_alive": other.get("is_alive", True),
-                    "last_known_location": effects.get("location_id") or effects.get("to_location"),
-                    "memory_turn": mem.get("world_turn", 0),
+                    "last_known_location": last_known_location,
+                    "memory_turn": _record_memory_turn(record),
                 })
     return result
 
@@ -318,46 +289,19 @@ def _locations_from_memory(
     """
     if traders is None:
         traders = {}
-    if _memory_v3_is_usable(agent):
-        seen_ids: set[str] = set()
-        result: list[dict[str, Any]] = []
-        for record in _memory_v3_records(agent):
-            if not _record_is_active(record):
-                continue
-            for loc_id in _record_location_ids(record):
-                if loc_id and loc_id not in seen_ids and loc_id in locations:
-                    seen_ids.add(loc_id)
-                    loc = locations[loc_id]
-                    has_trader = any(
-                        trader.get("location_id") == loc_id
-                        for trader in traders.values()
-                        if isinstance(trader, dict)
-                    )
-                    result.append({
-                        "location_id": loc_id,
-                        "name": loc.get("name", loc_id),
-                        "terrain_type": loc.get("terrain_type"),
-                        "anomaly_activity": loc.get("anomaly_activity", 0),
-                        "has_trader": has_trader,
-                        "memory_turn": _record_memory_turn(record),
-                    })
-        return result
-
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
-    for mem in agent.get("memory", []):
-        effects = mem.get("effects", {})
-        for key in ("location_id", "destination", "from_location", "to_location"):
-            loc_id = effects.get(key)
+    for record in _memory_v3_records(agent):
+        if not _record_is_active(record):
+            continue
+        for loc_id in _record_location_ids(record):
             if loc_id and loc_id not in seen_ids and loc_id in locations:
                 seen_ids.add(loc_id)
                 loc = locations[loc_id]
-                # P4 fix: check traders dict — location["agents"] is a list of IDs (strings),
-                # so we cannot call .get() on those strings. Instead check state["traders"].
-                loc_agent_ids: list[str] = loc.get("agents", [])
                 has_trader = any(
-                    tid in traders
-                    for tid in loc_agent_ids
+                    trader.get("location_id") == loc_id
+                    for trader in traders.values()
+                    if isinstance(trader, dict)
                 )
                 result.append({
                     "location_id": loc_id,
@@ -365,43 +309,24 @@ def _locations_from_memory(
                     "terrain_type": loc.get("terrain_type"),
                     "anomaly_activity": loc.get("anomaly_activity", 0),
                     "has_trader": has_trader,
-                    "memory_turn": mem.get("world_turn", 0),
+                    "memory_turn": _record_memory_turn(record),
                 })
     return result
 
 
 def _hazards_from_memory(agent: dict[str, Any]) -> list[dict[str, Any]]:
     """Return hazard observations recorded in the NPC's memory."""
-    if _memory_v3_is_usable(agent):
-        hazards: list[dict[str, Any]] = []
-        for record in _memory_v3_records(agent):
-            if not _record_is_active(record):
-                continue
-            if str(record.get("kind", "")) not in _HAZARD_KINDS:
-                continue
-            hazards.append({
-                "kind": record.get("kind"),
-                "world_turn": _record_memory_turn(record),
-                "effects": _record_details(record),
-            })
-        return hazards
-
     hazards: list[dict[str, Any]] = []
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "observation":
+    for record in _memory_v3_records(agent):
+        if not _record_is_active(record):
             continue
-        kind = mem.get("effects", {}).get("action_kind", "")
-        if kind in (
-            "emission_imminent",
-            "emission_started",
-            "emission_ended",
-            "anomaly_detected",
-        ):
-            hazards.append({
-                "kind": kind,
-                "world_turn": mem.get("world_turn", 0),
-                "effects": mem.get("effects", {}),
-            })
+        if str(record.get("kind", "")) not in _HAZARD_KINDS:
+            continue
+        hazards.append({
+            "kind": record.get("kind"),
+            "world_turn": _record_memory_turn(record),
+            "effects": _record_details(record),
+        })
     return hazards
 
 
@@ -422,43 +347,24 @@ def _traders_from_visible_and_memory(
             seen.add(aid)
             result.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
 
-    if _memory_v3_is_usable(agent):
-        for record in _memory_v3_records(agent):
-            if not _record_is_active(record):
-                continue
-            trader_id = _record_trader_id(record, traders_dict)
-            if trader_id and trader_id not in seen:
-                seen.add(trader_id)
-                details = _record_details(record)
-                result.append({
-                    "agent_id": trader_id,
-                    "name": details.get("trader_name")
-                    or traders_dict.get(trader_id, {}).get("name")
-                    or trader_id,
-                    "location_id": record.get("location_id")
-                    or details.get("location_id")
-                    or traders_dict.get(trader_id, {}).get("location_id"),
-                    "source": "memory_v3",
-                    "memory_turn": _record_memory_turn(record),
-                })
-        return result
-
-    # Traders remembered from memory
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "observation":
+    for record in _memory_v3_records(agent):
+        if not _record_is_active(record):
             continue
-        effects = mem.get("effects", {})
-        if effects.get("action_kind") == "trader_visit":
-            trader_id = effects.get("trader_id")
-            if trader_id and trader_id not in seen:
-                seen.add(trader_id)
-                result.append({
-                    "agent_id": trader_id,
-                    "name": effects.get("trader_name", trader_id),
-                    "location_id": effects.get("location_id"),
-                    "source": "memory",
-                    "memory_turn": mem.get("world_turn", 0),
-                })
+        trader_id = _record_trader_id(record, traders_dict)
+        if trader_id and trader_id not in seen:
+            seen.add(trader_id)
+            details = _record_details(record)
+            result.append({
+                "agent_id": trader_id,
+                "name": details.get("trader_name")
+                or traders_dict.get(trader_id, {}).get("name")
+                or trader_id,
+                "location_id": record.get("location_id")
+                or details.get("location_id")
+                or traders_dict.get(trader_id, {}).get("location_id"),
+                "source": "memory_v3",
+                "memory_turn": _record_memory_turn(record),
+            })
     return result
 
 
