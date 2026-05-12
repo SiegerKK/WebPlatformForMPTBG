@@ -103,7 +103,7 @@ def build_agent_context(
 
     # ── Known traders (co-located or from memory) ─────────────────────────────
     known_traders: list[dict[str, Any]] = _traders_from_visible_and_memory(
-        visible_entities, agent, locations
+        visible_entities, agent, locations, traders
     )
 
     # ── Known targets ─────────────────────────────────────────────────────────
@@ -141,6 +141,97 @@ def build_agent_context(
 
 # ── Private helpers ────────────────────────────────────────────────────────────
 
+_MEMORY_V3_DETAIL_ENTITY_KEYS: tuple[str, ...] = (
+    "target_agent_id",
+    "subject",
+    "agent_id",
+    "other_agent_id",
+    "target_id",
+)
+_MEMORY_V3_DETAIL_LOCATION_KEYS: tuple[str, ...] = (
+    "location_id",
+    "destination",
+    "from_location",
+    "to_location",
+)
+_HAZARD_KINDS: frozenset[str] = frozenset({
+    "emission_warning",
+    "emission_started",
+    "emission_ended",
+    "anomaly_detected",
+})
+
+
+def _memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
+    memory_v3 = agent.get("memory_v3")
+    if not isinstance(memory_v3, dict):
+        return []
+    records = memory_v3.get("records")
+    if not isinstance(records, dict) or not records:
+        return []
+    return sorted(
+        (record for record in records.values() if isinstance(record, dict)),
+        key=lambda record: (
+            int(record.get("created_turn", 0) or 0),
+            str(record.get("id", "")),
+        ),
+    )
+
+
+def _memory_v3_is_usable(agent: dict[str, Any]) -> bool:
+    return bool(_memory_v3_records(agent))
+
+
+def _record_memory_turn(record: dict[str, Any]) -> int:
+    return int(record.get("created_turn", 0) or 0)
+
+
+def _record_details(record: dict[str, Any]) -> dict[str, Any]:
+    details = record.get("details")
+    return details if isinstance(details, dict) else {}
+
+
+def _record_entity_ids(record: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for entity_id in record.get("entity_ids", []) or []:
+        if entity_id:
+            ids.append(str(entity_id))
+    details = _record_details(record)
+    for key in _MEMORY_V3_DETAIL_ENTITY_KEYS:
+        value = details.get(key)
+        if value:
+            ids.append(str(value))
+    return list(dict.fromkeys(ids))
+
+
+def _record_location_ids(record: dict[str, Any]) -> list[str]:
+    locations: list[str] = []
+    location_id = record.get("location_id")
+    if location_id:
+        locations.append(str(location_id))
+    details = _record_details(record)
+    for key in _MEMORY_V3_DETAIL_LOCATION_KEYS:
+        value = details.get(key)
+        if value:
+            locations.append(str(value))
+    return list(dict.fromkeys(locations))
+
+
+def _record_trader_id(record: dict[str, Any], traders: dict[str, Any]) -> str | None:
+    details = _record_details(record)
+    trader_id = details.get("trader_id")
+    if trader_id:
+        return str(trader_id)
+    tags = {str(tag) for tag in record.get("tags", []) or []}
+    if "trader" not in tags and record.get("kind") != "trader_visited":
+        return None
+    for entity_id in _record_entity_ids(record):
+        if entity_id in traders:
+            return entity_id
+        if entity_id.startswith("trader_"):
+            return entity_id
+    return None
+
 def _entities_from_memory(
     agent: dict[str, Any],
     agents: dict[str, Any],
@@ -152,6 +243,34 @@ def _entities_from_memory(
     This is acceptable at Phase 1 but could be optimised in Phase 5+ with a
     memory index keyed by observed agent_id.
     """
+    if _memory_v3_is_usable(agent):
+        seen_ids: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for record in _memory_v3_records(agent):
+            last_known_location = None
+            for location_id in _record_location_ids(record):
+                if location_id:
+                    last_known_location = location_id
+                    break
+            for other_id in _record_entity_ids(record):
+                if (
+                    other_id
+                    and other_id != own_id
+                    and other_id not in seen_ids
+                    and other_id in agents
+                ):
+                    seen_ids.add(other_id)
+                    other = agents[other_id]
+                    result.append({
+                        "agent_id": other_id,
+                        "name": other.get("name", other_id),
+                        "archetype": other.get("archetype"),
+                        "is_alive": other.get("is_alive", True),
+                        "last_known_location": last_known_location,
+                        "memory_turn": _record_memory_turn(record),
+                    })
+        return result
+
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
     for mem in agent.get("memory", []):
@@ -193,6 +312,29 @@ def _locations_from_memory(
     """
     if traders is None:
         traders = {}
+    if _memory_v3_is_usable(agent):
+        seen_ids: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for record in _memory_v3_records(agent):
+            for loc_id in _record_location_ids(record):
+                if loc_id and loc_id not in seen_ids and loc_id in locations:
+                    seen_ids.add(loc_id)
+                    loc = locations[loc_id]
+                    has_trader = any(
+                        trader.get("location_id") == loc_id
+                        for trader in traders.values()
+                        if isinstance(trader, dict)
+                    )
+                    result.append({
+                        "location_id": loc_id,
+                        "name": loc.get("name", loc_id),
+                        "terrain_type": loc.get("terrain_type"),
+                        "anomaly_activity": loc.get("anomaly_activity", 0),
+                        "has_trader": has_trader,
+                        "memory_turn": _record_memory_turn(record),
+                    })
+        return result
+
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
     for mem in agent.get("memory", []):
@@ -222,6 +364,18 @@ def _locations_from_memory(
 
 def _hazards_from_memory(agent: dict[str, Any]) -> list[dict[str, Any]]:
     """Return hazard observations recorded in the NPC's memory."""
+    if _memory_v3_is_usable(agent):
+        hazards: list[dict[str, Any]] = []
+        for record in _memory_v3_records(agent):
+            if str(record.get("kind", "")) not in _HAZARD_KINDS:
+                continue
+            hazards.append({
+                "kind": record.get("kind"),
+                "world_turn": _record_memory_turn(record),
+                "effects": _record_details(record),
+            })
+        return hazards
+
     hazards: list[dict[str, Any]] = []
     for mem in agent.get("memory", []):
         if mem.get("type") != "observation":
@@ -245,6 +399,7 @@ def _traders_from_visible_and_memory(
     visible: list[dict[str, Any]],
     agent: dict[str, Any],
     locations: dict[str, Any],
+    traders_by_id: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Collect known trader info from co-located agents and memory."""
     traders: list[dict[str, Any]] = []
@@ -256,6 +411,25 @@ def _traders_from_visible_and_memory(
             aid = entity["agent_id"]
             seen.add(aid)
             traders.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
+
+    if _memory_v3_is_usable(agent):
+        for record in _memory_v3_records(agent):
+            trader_id = _record_trader_id(record, traders_by_id)
+            if trader_id and trader_id not in seen:
+                seen.add(trader_id)
+                details = _record_details(record)
+                traders.append({
+                    "agent_id": trader_id,
+                    "name": details.get("trader_name")
+                    or traders_by_id.get(trader_id, {}).get("name")
+                    or trader_id,
+                    "location_id": record.get("location_id")
+                    or details.get("location_id")
+                    or traders_by_id.get(trader_id, {}).get("location_id"),
+                    "source": "memory_v3",
+                    "memory_turn": _record_memory_turn(record),
+                })
+        return traders
 
     # Traders remembered from memory
     for mem in agent.get("memory", []):

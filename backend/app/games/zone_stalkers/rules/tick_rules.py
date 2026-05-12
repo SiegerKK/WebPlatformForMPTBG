@@ -769,7 +769,11 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     # Decay runs every MEMORY_DECAY_INTERVAL_TURNS to reduce CPU; legacy import
     # still happens on every turn when memory_v3 is empty.
     MEMORY_DECAY_INTERVAL_TURNS = 30
-    from app.games.zone_stalkers.memory.store import ensure_memory_v3 as _ensure_mem_v3  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.store import (  # noqa: PLC0415
+        MEMORY_V3_MAX_RECORDS as _MEMORY_V3_MAX_RECORDS,
+        ensure_memory_v3 as _ensure_mem_v3,
+        normalize_agent_memory_state as _normalize_agent_memory_state,
+    )
     from app.games.zone_stalkers.memory.legacy_bridge import import_legacy_memory as _import_legacy  # noqa: PLC0415
     from app.games.zone_stalkers.memory.decay import decay_memory as _decay_mem  # noqa: PLC0415
     _profiler_ctx_memory = _tick_profiler.section("memory_v3_ensure_ms") if _tick_profiler else __import__("contextlib").nullcontext()
@@ -787,13 +791,24 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                 and _MEM_IDX_KEYS.issubset(_mem_v3["indexes"])
             )
             _records_populated = bool(_mem_complete and _mem_v3.get("records"))
+            _legacy_mem = _pr3_agent.get("memory")
+            _legacy_oversized = isinstance(_legacy_mem, list) and len(_legacy_mem) > MAX_AGENT_MEMORY
+            _records_oversized = (
+                isinstance(_mem_v3, dict)
+                and isinstance(_mem_v3.get("records"), dict)
+                and len(_mem_v3.get("records", {})) > _MEMORY_V3_MAX_RECORDS
+            )
+            _needs_normalization = _legacy_oversized or not _mem_complete or _records_oversized
             _needs_memory_cow = (
                 not _mem_complete
                 or not _records_populated
                 or _is_decay_turn
+                or _needs_normalization
             )
             if _needs_memory_cow:
                 _pr3_agent = _runtime_agent(_pr3_agent_id, _pr3_agent)
+            if _needs_normalization:
+                _normalize_agent_memory_state(_pr3_agent)
             _ensure_mem_v3(_pr3_agent)
             if not _pr3_agent.get("memory_v3", {}).get("records"):
                 _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)

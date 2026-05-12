@@ -45,7 +45,7 @@ def test_score_record_raw_matches_record_based_semantics() -> None:
     assert score > 0.85
 
 
-def test_retrieve_memory_deserializes_only_selected_records(monkeypatch) -> None:
+def test_retrieve_memory_limits_deserialization_to_top_k_records(monkeypatch) -> None:
     agent: dict = {}
     for i in range(500):
         _add(agent, f"m{i}", tags=("item",), created_turn=i)
@@ -76,6 +76,7 @@ def test_retrieve_memory_applies_candidate_limit() -> None:
         agent,
         MemoryQuery(purpose="items", tags=("item",), max_results=10, max_candidates=50),
         world_turn=600,
+        record_metrics=True,
     )
     metrics = agent["memory_v3"]["stats"]["retrieval_metrics"]
     assert metrics["memory_retrieval_candidates_max"] <= 50

@@ -33,6 +33,9 @@ class TestZoneGenerator:
     def test_context_type_field(self):
         assert self._gen()["context_type"] == "zone_map"
 
+    def test_generated_states_disable_legacy_memory_writes_by_default(self):
+        assert self._gen()["legacy_memory_write_enabled"] is False
+
     def test_traders_present(self):
         assert len(self._gen()["traders"]) >= 1
 

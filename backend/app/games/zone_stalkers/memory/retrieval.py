@@ -38,6 +38,7 @@ def retrieve_memory(
     world_turn: int,
     *,
     track_access: bool = False,
+    record_metrics: bool = False,
 ) -> list[MemoryRecord]:
     """Return top-N MemoryRecords matching *query*, scored and sorted.
 
@@ -49,7 +50,7 @@ def retrieve_memory(
     if not records_raw:
         return []
 
-    started = time.perf_counter()
+    started = time.perf_counter() if record_metrics else 0.0
     cap = min(query.max_results, MEMORY_V3_RETRIEVAL_MAX_RESULTS)
     indexes = mem_v3.get("indexes", {})
 
@@ -137,14 +138,15 @@ def retrieve_memory(
         for _, _, rid in selected
         if rid in records_raw
     ]
-    _update_retrieval_metrics(
-        mem_v3,
-        elapsed_ms=(time.perf_counter() - started) * 1000.0,
-        candidate_count=candidate_count,
-        scored_count=len(scored),
-        selected_count=len(result),
-        from_dict_count=len(result),
-    )
+    if record_metrics:
+        _update_retrieval_metrics(
+            mem_v3,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            candidate_count=candidate_count,
+            scored_count=len(scored),
+            selected_count=len(result),
+            from_dict_count=len(result),
+        )
     return result
 
 

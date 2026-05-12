@@ -226,6 +226,30 @@ def test_plan_monitor_abort_memory_is_deduplicated_within_window() -> None:
     assert second_count == 1
 
 
+def test_tick_normalizes_oversized_legacy_memory_once_in_memory_prep_path() -> None:
+    state = _make_base_state()
+    state["legacy_memory_write_enabled"] = False
+    bot = _bot_agent()
+    bot["memory"] = [
+        {
+            "world_turn": i,
+            "type": "observation",
+            "title": f"mem-{i}",
+            "summary": f"mem-{i}",
+            "effects": {"location_id": "loc_a"},
+        }
+        for i in range(130)
+    ]
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    normalized = new_state["agents"]["bot1"]
+    assert len(normalized["memory"]) == 100
+    assert normalized["memory"][0]["world_turn"] == 30
+
+
 def test_bot_decision_pipeline_writes_decision_brain_trace_event() -> None:
     state = _make_base_state()
     bot = _bot_agent()
