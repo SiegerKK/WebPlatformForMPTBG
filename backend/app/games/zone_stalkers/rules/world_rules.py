@@ -118,11 +118,14 @@ def validate_world_command(
     if command_type == "debug_spawn_item_on_location":
         return _validate_debug_spawn_item_on_location(payload, state)
 
+    if command_type == "debug_import_full_map":
+        return _validate_debug_import_full_map(payload)
+
     if command_type in ("debug_delete_all_npcs", "debug_delete_all_mutants",
                         "debug_delete_all_artifacts", "debug_delete_all_traders",
                         "debug_delete_all_items",
                         "debug_set_time", "debug_advance_turns",
-                        "debug_trigger_emission", "debug_import_full_map"):
+                        "debug_trigger_emission"):
         return RuleCheckResult(valid=True)
 
     if command_type == "debug_set_agent_money":
@@ -814,6 +817,14 @@ def resolve_world_command(
         new_locations: Dict[str, Any] = {}
         for loc_id, loc_data in new_locs_data.items():
             old = old_locations.get(loc_id, {})
+            raw_slots = loc_data.get("image_slots") if isinstance(loc_data.get("image_slots"), dict) else {}
+            image_slots = {slot: None for slot in _ORDERED_IMAGE_SLOTS}
+            for slot, value in raw_slots.items():
+                if slot in _VALID_LOCATION_IMAGE_SLOTS:
+                    image_slots[slot] = value or None
+            primary_slot = loc_data.get("primary_image_slot")
+            if primary_slot is not None and primary_slot not in _VALID_LOCATION_IMAGE_SLOTS:
+                primary_slot = None
             new_locations[loc_id] = {
                 "id": loc_id,
                 "name": str(loc_data.get("name", loc_id)).strip(),
@@ -834,14 +845,24 @@ def resolve_world_command(
                 "artifacts": list(loc_data.get("artifacts", [])),
                 "agents": list(old.get("agents", [])),
                 "items": list(old.get("items", [])),
-                "image_url": loc_data.get("image_url") or old.get("image_url") or None,
+                "image_slots": image_slots,
+                "primary_image_slot": primary_slot if primary_slot in _VALID_LOCATION_IMAGE_SLOTS else None,
+                "image_url": loc_data.get("image_url") if "image_url" in loc_data else None,
             }
+            migrate_location_images(new_locations[loc_id])
+            _sync_location_primary_image_url(new_locations[loc_id])
         state["locations"] = new_locations
 
         # Canvas layout
         debug_layout = state.setdefault("debug_layout", {})
-        debug_layout["positions"] = new_positions
-        debug_layout["regions"] = new_regions
+        if isinstance(new_positions, dict):
+            debug_layout["positions"] = new_positions
+        else:
+            debug_layout.setdefault("positions", {})
+        if isinstance(new_regions, dict):
+            debug_layout["regions"] = new_regions
+        else:
+            debug_layout.setdefault("regions", {})
 
         # World time
         if "world_turn" in payload:
@@ -860,6 +881,8 @@ def resolve_world_command(
             state["emission_scheduled_turn"] = int(payload["emission_scheduled_turn"])
         if "emission_ends_turn" in payload and payload["emission_ends_turn"] is not None:
             state["emission_ends_turn"] = int(payload["emission_ends_turn"])
+
+        state["map_revision"] = int(state.get("map_revision", 0)) + 1
 
         events.append({
             "event_type": "debug_full_map_imported",
@@ -1369,6 +1392,26 @@ def _validate_take_control(
         return RuleCheckResult(valid=False, error="Agent is already controlled by a player")
     if not agent.get("is_alive", True):
         return RuleCheckResult(valid=False, error="Cannot take control of a dead agent")
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_import_full_map(payload: Dict[str, Any]) -> RuleCheckResult:
+    locations = payload.get("locations")
+    if locations is None or not isinstance(locations, dict):
+        return RuleCheckResult(valid=False, error="locations must be a dict")
+    for loc_id, loc_data in locations.items():
+        if not isinstance(loc_data, dict):
+            return RuleCheckResult(valid=False, error=f"Location payload for {loc_id} must be an object")
+        image_slots = loc_data.get("image_slots")
+        if image_slots is not None and not isinstance(image_slots, dict):
+            return RuleCheckResult(valid=False, error=f"image_slots for {loc_id} must be a dict")
+        if isinstance(image_slots, dict):
+            for slot in image_slots.keys():
+                if slot not in _VALID_LOCATION_IMAGE_SLOTS:
+                    return RuleCheckResult(valid=False, error=f"Invalid image slot '{slot}' in {loc_id}")
+        primary = loc_data.get("primary_image_slot")
+        if primary is not None and primary not in _VALID_LOCATION_IMAGE_SLOTS:
+            return RuleCheckResult(valid=False, error=f"Invalid primary_image_slot '{primary}' in {loc_id}")
     return RuleCheckResult(valid=True)
 
 

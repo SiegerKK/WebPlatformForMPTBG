@@ -423,6 +423,133 @@ def test_debug_update_location_image_url_migrates_to_clear_slot():
     assert loc.get("primary_image_slot") == "clear"
 
 
+def test_debug_import_full_map_accepts_image_slots():
+    from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+
+    state = {
+        "locations": {
+            "loc_A": {
+                "id": "loc_A",
+                "name": "Old",
+                "terrain_type": "plain",
+                "anomaly_activity": 0,
+                "dominant_anomaly_type": None,
+                "region": None,
+                "connections": [],
+                "artifacts": [],
+                "agents": [],
+                "items": [],
+                "image_slots": {"clear": None, "fog": None, "rain": None, "night_clear": None, "night_rain": None},
+                "primary_image_slot": None,
+                "image_url": None,
+            }
+        },
+        "debug_layout": {"positions": {}, "regions": {}},
+        "map_revision": 1,
+    }
+    new_state, _ = resolve_world_command(
+        "debug_import_full_map",
+        {
+            "locations": {
+                "loc_A": {
+                    "name": "Imported",
+                    "terrain_type": "plain",
+                    "anomaly_activity": 0,
+                    "dominant_anomaly_type": None,
+                    "region": None,
+                    "connections": [],
+                    "artifacts": [],
+                    "image_slots": {"clear": "/media/a_clear.jpg", "rain": "/media/a_rain.jpg"},
+                    "primary_image_slot": "rain",
+                    "image_url": "/media/a_rain.jpg",
+                }
+            },
+            "positions": {"loc_A": {"x": 1, "y": 2}},
+            "regions": {},
+        },
+        state,
+        player_id="debug",
+    )
+    loc = new_state["locations"]["loc_A"]
+    assert loc["image_slots"]["clear"] == "/media/a_clear.jpg"
+    assert loc["image_slots"]["rain"] == "/media/a_rain.jpg"
+    assert loc["primary_image_slot"] == "rain"
+    assert loc["image_url"] == "/media/a_rain.jpg"
+
+
+def test_debug_import_full_map_migrates_legacy_image_url_to_clear():
+    from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+
+    state = {"locations": {}, "debug_layout": {"positions": {}, "regions": {}}}
+    new_state, _ = resolve_world_command(
+        "debug_import_full_map",
+        {
+            "locations": {
+                "loc_A": {
+                    "name": "Imported",
+                    "connections": [],
+                    "artifacts": [],
+                    "image_url": "/media/legacy.jpg",
+                }
+            },
+        },
+        state,
+        player_id="debug",
+    )
+    loc = new_state["locations"]["loc_A"]
+    assert loc["image_slots"]["clear"] == "/media/legacy.jpg"
+    assert loc["primary_image_slot"] == "clear"
+    assert loc["image_url"] == "/media/legacy.jpg"
+
+
+def test_debug_import_full_map_rejects_invalid_primary_slot():
+    from app.games.zone_stalkers.rules.world_rules import validate_world_command
+
+    result = validate_world_command(
+        "debug_import_full_map",
+        {
+            "locations": {
+                "loc_A": {
+                    "name": "Imported",
+                    "connections": [],
+                    "artifacts": [],
+                    "image_slots": {"clear": "/media/a.jpg"},
+                    "primary_image_slot": "invalid_slot",
+                }
+            }
+        },
+        {"locations": {}},
+        player_id="debug",
+    )
+    assert result.valid is False
+
+
+def test_debug_import_full_map_syncs_image_url_to_primary_slot():
+    from app.games.zone_stalkers.rules.world_rules import resolve_world_command
+
+    state = {"locations": {}, "debug_layout": {"positions": {}, "regions": {}}}
+    new_state, _ = resolve_world_command(
+        "debug_import_full_map",
+        {
+            "locations": {
+                "loc_A": {
+                    "name": "Imported",
+                    "connections": [],
+                    "artifacts": [],
+                    "image_slots": {"clear": "/media/a_clear.jpg", "fog": "/media/a_fog.jpg"},
+                    "primary_image_slot": "fog",
+                    "image_url": None,
+                }
+            },
+        },
+        state,
+        player_id="debug",
+    )
+    loc = new_state["locations"]["loc_A"]
+    assert loc["primary_image_slot"] == "fog"
+    assert loc["image_url"] == "/media/a_fog.jpg"
+
+
 def test_delete_commit_failure_invalidates_context_state_cache(
     test_client, auth_headers, monkeypatch, tmp_path, zone_context
 ):

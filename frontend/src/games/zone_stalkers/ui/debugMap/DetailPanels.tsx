@@ -2,7 +2,7 @@
  * DetailPanels — the right-hand side panels shown when a location or region
  * is selected, plus the empty hint when nothing is selected.
  */
-import { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { AgentCreateModal } from '../AgentProfileModal';
 import type { ZoneLocation, ZoneMapState, LocationConn, LocationImageSlot } from './types';
 import {
@@ -15,6 +15,96 @@ import { TERRAIN_TYPE_LABELS, REGION_COLOR_PALETTE } from './constants';
 import { s } from './styles';
 import { Badge, Section, DetailRow, EmptyRow } from './UIKit';
 import { SpawnMutantModal, SpawnArtifactModal, SpawnItemModal } from './Modals';
+
+const LocationPrimaryImagePreview = React.memo(function LocationPrimaryImagePreview({
+  url,
+  name,
+}: {
+  url: string | null;
+  name: string;
+}) {
+  if (!url) {
+    return (
+      <div style={{
+        width: '100%',
+        minHeight: 80,
+        borderRadius: 8,
+        border: '1px dashed #1e3a5f',
+        background: '#020617',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#334155',
+        fontSize: '0.75rem',
+      }}>
+        Нет изображения
+      </div>
+    );
+  }
+  return (
+    <img
+      key={url}
+      src={url}
+      alt={name}
+      style={{
+        width: '100%',
+        maxHeight: 360,
+        minHeight: 220,
+        borderRadius: 8,
+        objectFit: 'cover',
+        border: '1px solid #1e3a5f',
+        background: '#020617',
+        display: 'block',
+      }}
+    />
+  );
+});
+
+const LocationPrimaryImageSelector = React.memo(function LocationPrimaryImageSelector({
+  imageSlots,
+  primaryImageSlot,
+  hasLegacyImageUrl,
+  onSetPrimaryImageSlot,
+}: {
+  imageSlots?: Partial<Record<LocationImageSlot, string | null>>;
+  primaryImageSlot?: LocationImageSlot | null;
+  hasLegacyImageUrl: boolean;
+  onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
+}) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+      {LOCATION_IMAGE_SLOTS.map((slot) => {
+        const hasImage = Boolean(imageSlots?.[slot]);
+        const isPrimary = primaryImageSlot === slot || (!primaryImageSlot && slot === 'clear' && hasLegacyImageUrl);
+        return (
+          <button
+            key={slot}
+            onClick={() => {
+              if (hasImage && onSetPrimaryImageSlot) void onSetPrimaryImageSlot(slot);
+            }}
+            disabled={!hasImage || !onSetPrimaryImageSlot}
+            title={hasImage ? 'Сделать приоритетной' : 'Нет изображения в этом слоте'}
+            style={{
+              padding: '2px 7px',
+              fontSize: '0.68rem',
+              cursor: hasImage && onSetPrimaryImageSlot ? 'pointer' : 'default',
+              background: isPrimary ? '#1d4ed8' : (hasImage ? '#1e293b' : '#0f172a'),
+              color: isPrimary ? '#bfdbfe' : (hasImage ? '#94a3b8' : '#334155'),
+              borderTop: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+              borderRight: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+              borderBottom: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+              borderLeft: `3px solid ${isPrimary ? '#60a5fa' : (hasImage ? '#334155' : '#1e293b')}`,
+              borderRadius: 4,
+              transition: 'background 0.15s',
+            }}
+          >
+            {LOCATION_IMAGE_SLOT_ICONS[slot]} {isPrimary ? '★ ' : ''}{LOCATION_IMAGE_SLOT_LABELS[slot]}
+          </button>
+        );
+      })}
+    </div>
+  );
+});
 
 // ─── LocationDetailPanel ──────────────────────────────────────────────────────
 
@@ -36,8 +126,6 @@ export function LocationDetailPanel({
   onAgentClick,
   onTraderClick,
   onDeleteLoc,
-  onUploadLocationImageSlot,
-  onDeleteLocationImageSlot,
   onSetPrimaryImageSlot,
 }: {
   loc: ZoneLocation;
@@ -65,17 +153,10 @@ export function LocationDetailPanel({
   onTraderClick?: (traderId: string) => void;
   /** Called when the user wants to delete this location entirely. */
   onDeleteLoc?: () => void;
-  /** Upload an image for a specific slot. */
-  onUploadLocationImageSlot?: (slot: LocationImageSlot, file: File) => Promise<void>;
-  /** Delete the image for a specific slot. */
-  onDeleteLocationImageSlot?: (slot: LocationImageSlot) => Promise<void>;
   /** Set the primary image slot. */
   onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | 'item' | null>(null);
-  const [selectedSlot, setSelectedSlot] = useState<LocationImageSlot>('clear');
-  const [imgUploading, setImgUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Safe collection lookups ──────────────────────────────────────────────
   const agentsById = zoneState.agents ?? {};
@@ -146,18 +227,6 @@ export function LocationDetailPanel({
 
   const primaryImageUrl = getPrimaryLocationImageUrl(loc);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !onUploadLocationImageSlot) return;
-    setImgUploading(true);
-    try {
-      await onUploadLocationImageSlot(selectedSlot, file);
-    } finally {
-      setImgUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
   return (
     <div style={s.detail}>
       {/* Header */}
@@ -190,130 +259,13 @@ export function LocationDetailPanel({
 
       {/* Image Slots */}
       <Section label="🖼 Изображения локации">
-        {/* Primary image preview */}
-        {primaryImageUrl ? (
-          <img
-            key={primaryImageUrl}
-            src={primaryImageUrl}
-            alt={loc.name}
-            style={{
-              width: '100%',
-              maxHeight: 360,
-              minHeight: 220,
-              borderRadius: 8,
-              objectFit: 'cover',
-              border: '1px solid #1e3a5f',
-              background: '#020617',
-              display: 'block',
-            }}
-          />
-        ) : (
-          <div style={{
-            width: '100%',
-            minHeight: 80,
-            borderRadius: 8,
-            border: '1px dashed #1e3a5f',
-            background: '#020617',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#334155',
-            fontSize: '0.75rem',
-          }}>
-            Нет изображения
-          </div>
-        )}
-
-        {/* Slot selector buttons (show primary / has-image indicators) */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
-          {LOCATION_IMAGE_SLOTS.map((slot) => {
-            const hasImage = Boolean(loc.image_slots?.[slot]);
-            const isPrimary = loc.primary_image_slot === slot || (!loc.primary_image_slot && slot === 'clear' && Boolean(loc.image_url) && !loc.image_slots);
-            return (
-              <button
-                key={slot}
-                onClick={() => {
-                  if (hasImage && onSetPrimaryImageSlot) onSetPrimaryImageSlot(slot);
-                }}
-                disabled={!hasImage || !onSetPrimaryImageSlot}
-                title={hasImage ? 'Сделать приоритетной' : 'Сначала загрузите изображение'}
-                style={{
-                  padding: '2px 7px',
-                  fontSize: '0.68rem',
-                  cursor: hasImage && onSetPrimaryImageSlot ? 'pointer' : 'default',
-                  background: isPrimary ? '#1d4ed8' : (hasImage ? '#1e293b' : '#0f172a'),
-                  color: isPrimary ? '#bfdbfe' : (hasImage ? '#94a3b8' : '#334155'),
-                  borderTop: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
-                  borderRight: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
-                  borderBottom: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
-                  borderLeft: `3px solid ${isPrimary ? '#60a5fa' : (hasImage ? '#334155' : '#1e293b')}`,
-                  borderRadius: 4,
-                  transition: 'background 0.15s',
-                }}
-              >
-                {LOCATION_IMAGE_SLOT_ICONS[slot]} {isPrimary ? '★ ' : ''}{LOCATION_IMAGE_SLOT_LABELS[slot]}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Upload / delete controls */}
-        {(onUploadLocationImageSlot || onDeleteLocationImageSlot) && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 6 }}>
-            <select
-              value={selectedSlot}
-              onChange={(e) => setSelectedSlot(e.target.value as LocationImageSlot)}
-              style={{
-                background: '#0f172a',
-                color: '#94a3b8',
-                border: '1px solid #334155',
-                borderRadius: 4,
-                fontSize: '0.72rem',
-                padding: '2px 4px',
-                cursor: 'pointer',
-              }}
-            >
-              {LOCATION_IMAGE_SLOTS.map((slot) => (
-                <option key={slot} value={slot}>
-                  {LOCATION_IMAGE_SLOT_ICONS[slot]} {LOCATION_IMAGE_SLOT_LABELS[slot]}
-                </option>
-              ))}
-            </select>
-
-            {onUploadLocationImageSlot && (
-              <label
-                style={{
-                  ...s.spawnBtn,
-                  color: '#86efac',
-                  cursor: imgUploading ? 'wait' : 'pointer',
-                  opacity: imgUploading ? 0.6 : 1,
-                  display: 'inline-block',
-                }}
-                title={`Загрузить изображение для слота «${LOCATION_IMAGE_SLOT_LABELS[selectedSlot]}»`}
-              >
-                {imgUploading ? '⏳' : '📤'} Загрузить
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp,image/gif"
-                  style={{ display: 'none' }}
-                  onChange={handleFileChange}
-                  disabled={imgUploading}
-                />
-              </label>
-            )}
-
-            {onDeleteLocationImageSlot && loc.image_slots?.[selectedSlot] && (
-              <button
-                style={{ ...s.spawnBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
-                onClick={() => onDeleteLocationImageSlot(selectedSlot)}
-                title={`Удалить изображение слота «${LOCATION_IMAGE_SLOT_LABELS[selectedSlot]}»`}
-              >
-                🗑 Удалить
-              </button>
-            )}
-          </div>
-        )}
+        <LocationPrimaryImagePreview url={primaryImageUrl} name={loc.name} />
+        <LocationPrimaryImageSelector
+          imageSlots={loc.image_slots}
+          primaryImageSlot={loc.primary_image_slot}
+          hasLegacyImageUrl={Boolean(loc.image_url) && !loc.image_slots}
+          onSetPrimaryImageSlot={onSetPrimaryImageSlot}
+        />
       </Section>
 
       {/* Characteristics */}
