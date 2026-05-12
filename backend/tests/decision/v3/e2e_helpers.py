@@ -19,8 +19,23 @@ def run_until(
     raise AssertionError("condition not reached")
 
 
+def _memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
+    records = ((agent.get("memory_v3") or {}).get("records") or {})
+    if not isinstance(records, dict):
+        return []
+    return [record for record in records.values() if isinstance(record, dict)]
+
+
+def _matches_action_kind(record: dict[str, Any], action_kind: str) -> bool:
+    details = record.get("details", {})
+    return (
+        str(record.get("kind", "")) == action_kind
+        or details.get("action_kind") == action_kind
+    )
+
+
 def any_memory(agent: dict[str, Any], action_kind: str) -> bool:
-    return any(
+    return any(_matches_action_kind(record, action_kind) for record in _memory_v3_records(agent)) or any(
         mem.get("effects", {}).get("action_kind") == action_kind
         for mem in agent.get("memory", [])
         if isinstance(mem, dict)
@@ -28,14 +43,27 @@ def any_memory(agent: dict[str, Any], action_kind: str) -> bool:
 
 
 def memories(agent: dict[str, Any], action_kind: str) -> list[dict[str, Any]]:
-    return [
+    v3_records = [
+        record
+        for record in _memory_v3_records(agent)
+        if _matches_action_kind(record, action_kind)
+    ]
+    legacy_records = [
         mem
         for mem in agent.get("memory", [])
         if isinstance(mem, dict) and mem.get("effects", {}).get("action_kind") == action_kind
     ]
+    return v3_records + legacy_records
 
 
 def any_objective_decision(agent: dict[str, Any], objective_key: str) -> bool:
+    v3_found = any(
+        _matches_action_kind(record, "objective_decision")
+        and (record.get("details", {}) or {}).get("objective_key") == objective_key
+        for record in _memory_v3_records(agent)
+    )
+    if v3_found:
+        return True
     return any(
         mem.get("effects", {}).get("action_kind") == "objective_decision"
         and mem.get("effects", {}).get("objective_key") == objective_key
@@ -45,17 +73,35 @@ def any_objective_decision(agent: dict[str, Any], objective_key: str) -> bool:
 
 
 def first_objective_turn(agent: dict[str, Any], objective_key: str) -> int | None:
+    turns: list[int] = []
+    for record in _memory_v3_records(agent):
+        details = record.get("details", {}) or {}
+        if _matches_action_kind(record, "objective_decision") and details.get("objective_key") == objective_key:
+            turn = record.get("created_turn")
+            if isinstance(turn, int):
+                turns.append(turn)
     for mem in agent.get("memory", []):
         if not isinstance(mem, dict):
             continue
         effects = mem.get("effects", {})
         if effects.get("action_kind") == "objective_decision" and effects.get("objective_key") == objective_key:
             turn = mem.get("world_turn")
-            return int(turn) if isinstance(turn, int) else None
-    return None
+            if isinstance(turn, int):
+                turns.append(turn)
+    return min(turns) if turns else None
 
 
 def first_memory_turn(agent: dict[str, Any], action_kind: str, **effect_filters: Any) -> int | None:
+    turns: list[int] = []
+    for record in _memory_v3_records(agent):
+        details = record.get("details", {}) or {}
+        if not _matches_action_kind(record, action_kind):
+            continue
+        if any(details.get(key) != value for key, value in effect_filters.items()):
+            continue
+        turn = record.get("created_turn")
+        if isinstance(turn, int):
+            turns.append(turn)
     for mem in agent.get("memory", []):
         if not isinstance(mem, dict):
             continue
@@ -65,8 +111,9 @@ def first_memory_turn(agent: dict[str, Any], action_kind: str, **effect_filters:
         if any(effects.get(key) != value for key, value in effect_filters.items()):
             continue
         turn = mem.get("world_turn")
-        return int(turn) if isinstance(turn, int) else None
-    return None
+        if isinstance(turn, int):
+            turns.append(turn)
+    return min(turns) if turns else None
 
 
 def any_active_plan_event(agent: dict[str, Any], event_kind: str) -> bool:

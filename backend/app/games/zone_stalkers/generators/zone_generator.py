@@ -222,6 +222,7 @@ def generate_zone(
         "emission_active": False,
         "emission_scheduled_turn": rng.randint(1440, 2880),
         "emission_ends_turn": 0,
+        "legacy_memory_write_enabled": False,
     }
 
 

@@ -305,7 +305,7 @@ def test_add_memory_bridges_new_legacy_entry_to_memory_v3() -> None:
     )
 
     mem_v3 = ensure_memory_v3(agent)
-    assert agent["memory"], "legacy memory must be appended"
+    assert agent["memory"] == []
     recs = list(mem_v3["records"].values())
     assert recs, "bridge must write to memory_v3"
     assert any(r.get("kind") == "item_bought" for r in recs)
@@ -326,5 +326,27 @@ def test_add_memory_does_not_bridge_sleep_interval_applied() -> None:
         agent_id="bot1",
     )
 
-    assert len(agent["memory"]) == 1
+    assert agent["memory"] == []
     assert ensure_memory_v3(agent)["records"] == {}
+
+
+def test_legacy_memory_write_can_be_enabled_for_compatibility() -> None:
+    agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
+    state = {"agents": {"bot1": agent}, "legacy_memory_write_enabled": True}
+
+    _add_memory(
+        agent,
+        100,
+        state,
+        "action",
+        "buy",
+        {"action_kind": "trade_buy", "item_type": "bread", "trader_id": "trader_1", "location_id": "loc_a"},
+        summary="купил хлеб",
+        agent_id="bot1",
+    )
+
+    assert len(agent["memory"]) == 1
+    legacy = agent["memory"][0]
+    assert legacy.get("summary") == "купил хлеб"
+    assert legacy.get("effects", {}).get("action_kind") == "trade_buy"
+    assert "item_type" not in legacy.get("effects", {})

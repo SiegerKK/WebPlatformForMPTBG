@@ -9,6 +9,8 @@ from app.games.zone_stalkers.memory.store import (
     mark_memory_stale,
     get_memory_record,
     MEMORY_V3_MAX_RECORDS,
+    trim_memory_v3_to_cap,
+    normalize_agent_memory_state,
 )
 
 
@@ -164,4 +166,39 @@ def test_cap_evicts_non_protected_records() -> None:
             confidence=0.1,
         )
         add_memory_record(agent, rec)
+    assert len(agent["memory_v3"]["records"]) == MEMORY_V3_MAX_RECORDS
+
+
+def test_trim_memory_v3_enforces_hard_cap_even_with_protected_records() -> None:
+    agent: dict = {}
+    for i in range(MEMORY_V3_MAX_RECORDS + 25):
+        rec = _make_record(
+            record_id=f"p_{i:06d}",
+            layer=LAYER_THREAT,
+            importance=1.0,
+            confidence=1.0,
+        )
+        add_memory_record(agent, rec)
+    assert len(agent["memory_v3"]["records"]) == MEMORY_V3_MAX_RECORDS
+
+
+def test_trim_memory_v3_rebuilds_indexes() -> None:
+    agent: dict = {}
+    rec = _make_record("mem_001", location_id="loc_a", tags=("item",))
+    add_memory_record(agent, rec)
+    agent["memory_v3"]["indexes"] = {"broken": {}}
+    counters = normalize_agent_memory_state(agent)
+    assert counters["indexes_rebuilt"] == 1
+    idx = agent["memory_v3"]["indexes"]
+    assert "by_location" in idx and "mem_001" in idx["by_location"].get("loc_a", [])
+
+
+def test_trim_memory_v3_to_cap_returns_evicted_count() -> None:
+    agent: dict = {}
+    for i in range(MEMORY_V3_MAX_RECORDS + 3):
+        add_memory_record(agent, _make_record(record_id=f"m_{i:06d}"))
+    # add_memory_record already trimmed; force overflow manually then normalize.
+    agent["memory_v3"]["records"]["manual_overflow"] = _make_record("manual_overflow").to_dict()
+    evicted = trim_memory_v3_to_cap(agent)
+    assert evicted == 1
     assert len(agent["memory_v3"]["records"]) == MEMORY_V3_MAX_RECORDS

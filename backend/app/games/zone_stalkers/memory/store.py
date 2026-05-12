@@ -12,10 +12,11 @@ from typing import Any
 
 from .models import MemoryRecord, MemoryQuery, VALID_LAYERS
 
-# ── Caps (section 13) ─────────────────────────────────────────────────────────
-MEMORY_V3_MAX_RECORDS = 5000
+# ── Caps (section 13 / PR5) ───────────────────────────────────────────────────
+MEMORY_V3_MAX_RECORDS = 500
 MEMORY_V3_IMPORT_LEGACY_LIMIT = 200
 MEMORY_V3_RETRIEVAL_MAX_RESULTS = 50
+MEMORY_V3_RETRIEVAL_MAX_CANDIDATES = 200
 
 # Layers whose records must not be deleted during cap-trimming.
 _PROTECTED_LAYERS = frozenset({"threat", "goal", "semantic"})
@@ -87,8 +88,7 @@ def add_memory_record(agent: dict[str, Any], record: MemoryRecord) -> None:
     mem_v3["stats"]["records_count"] = len(records)
 
     # Enforce cap.
-    if len(records) > MEMORY_V3_MAX_RECORDS:
-        _evict_over_cap(mem_v3)
+    trim_memory_v3_to_cap(agent)
 
 
 def mark_memory_stale(agent: dict[str, Any], memory_id: str, reason: str = "") -> None:
@@ -158,30 +158,108 @@ def _deindex_record(mem_v3: dict[str, Any], record: MemoryRecord) -> None:
         _remove(idx["by_tag"], tag, record.id)
 
 
-def _evict_over_cap(mem_v3: dict[str, Any]) -> None:
-    """Evict lowest-scoring non-protected records until within cap."""
-    records = mem_v3["records"]
-    if len(records) <= MEMORY_V3_MAX_RECORDS:
-        return
+def _status_evict_rank(status: Any) -> int:
+    s = str(status or "active")
+    if s == "archived":
+        return 0
+    if s in {"stale", "contradicted"}:
+        return 1
+    return 2
 
-    # Score each record for eviction (lower = evict first).
-    def evict_score(d: dict[str, Any]) -> float:
-        return (
-            float(d.get("importance", 0.5))
-            + float(d.get("confidence", 1.0))
-            + float(d.get("emotional_weight", 0.0))
-        )
 
-    candidates = [
-        rid for rid, d in records.items()
-        if d.get("layer") not in _PROTECTED_LAYERS
-        and d.get("status") != "archived"
-    ]
-    candidates.sort(key=lambda rid: evict_score(records[rid]))
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-    to_evict = len(records) - MEMORY_V3_MAX_RECORDS
-    for rid in candidates[:to_evict]:
-        record = MemoryRecord.from_dict(records.pop(rid))
-        _deindex_record(mem_v3, record)
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _eviction_sort_key(record_id: str, raw: dict[str, Any], *, protected_penalty: int) -> tuple:
+    protected = 1 if str(raw.get("layer") or "") in _PROTECTED_LAYERS else 0
+    return (
+        protected * protected_penalty,
+        _status_evict_rank(raw.get("status")),
+        _coerce_float(raw.get("importance"), 0.5),
+        _coerce_float(raw.get("confidence"), 1.0),
+        _coerce_int(raw.get("created_turn"), 0),
+        record_id,
+    )
+
+
+def _rebuild_indexes_from_records(mem_v3: dict[str, Any]) -> None:
+    records: dict[str, Any] = mem_v3.get("records", {})
+    indexes = {
+        "by_layer": {},
+        "by_kind": {},
+        "by_location": {},
+        "by_entity": {},
+        "by_item_type": {},
+        "by_tag": {},
+    }
+    mem_v3["indexes"] = indexes
+    for rid in sorted(records.keys()):
+        _index_record(mem_v3, MemoryRecord.from_dict(records[rid]))
+
+
+def trim_memory_v3_to_cap(
+    agent: dict[str, Any],
+    *,
+    max_records: int = MEMORY_V3_MAX_RECORDS,
+) -> int:
+    """Evict records until hard cap is respected and indexes are rebuilt."""
+    mem_v3 = ensure_memory_v3(agent)
+    records: dict[str, Any] = mem_v3.get("records", {})
+    over = len(records) - max_records
+    if over <= 0:
+        mem_v3["stats"]["records_count"] = len(records)
+        return 0
+
+    ranked = sorted(
+        records.keys(),
+        key=lambda rid: _eviction_sort_key(rid, records[rid], protected_penalty=10_000_000),
+    )
+    evicted_ids = ranked[:over]
+    for rid in evicted_ids:
+        records.pop(rid, None)
+
+    _rebuild_indexes_from_records(mem_v3)
     mem_v3["stats"]["records_count"] = len(records)
+    return len(evicted_ids)
+
+
+def normalize_agent_memory_state(agent: dict[str, Any]) -> dict[str, int]:
+    """Normalize legacy and memory_v3 structures for oversized/old states."""
+    legacy_trimmed = 0
+    legacy = agent.get("memory")
+    if isinstance(legacy, list) and len(legacy) > 100:
+        legacy_trimmed = len(legacy) - 100
+        agent["memory"] = legacy[-100:]
+
+    mem_v3 = ensure_memory_v3(agent)
+    memory_v3_evicted = trim_memory_v3_to_cap(agent)
+
+    indexes_rebuilt = 0
+    records = mem_v3.get("records")
+    indexes = mem_v3.get("indexes")
+    if not isinstance(records, dict) or not isinstance(indexes, dict):
+        mem_v3["records"] = records if isinstance(records, dict) else {}
+        _rebuild_indexes_from_records(mem_v3)
+        indexes_rebuilt = 1
+    else:
+        required_keys = {"by_layer", "by_kind", "by_location", "by_entity", "by_item_type", "by_tag"}
+        if not required_keys.issubset(set(indexes.keys())):
+            _rebuild_indexes_from_records(mem_v3)
+            indexes_rebuilt = 1
+    mem_v3["stats"]["records_count"] = len(mem_v3.get("records", {}))
+    return {
+        "legacy_trimmed": legacy_trimmed,
+        "memory_v3_evicted": memory_v3_evicted,
+        "indexes_rebuilt": indexes_rebuilt,
+    }

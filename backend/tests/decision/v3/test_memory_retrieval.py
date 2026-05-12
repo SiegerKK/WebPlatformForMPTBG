@@ -134,4 +134,16 @@ def test_retrieve_memory_updates_last_accessed_turn() -> None:
     agent: dict = {}
     _add(agent, "m1", tags=("trader",), last_accessed_turn=None)
     _ = retrieve_memory(agent, MemoryQuery(purpose="p", tags=("trader",)), world_turn=123)
+    assert agent["memory_v3"]["records"]["m1"]["last_accessed_turn"] is None
+
+
+def test_retrieve_memory_updates_last_accessed_turn_when_track_access_enabled() -> None:
+    agent: dict = {}
+    _add(agent, "m1", tags=("trader",), last_accessed_turn=None)
+    _ = retrieve_memory(
+        agent,
+        MemoryQuery(purpose="p", tags=("trader",)),
+        world_turn=123,
+        track_access=True,
+    )
     assert agent["memory_v3"]["records"]["m1"]["last_accessed_turn"] == 123

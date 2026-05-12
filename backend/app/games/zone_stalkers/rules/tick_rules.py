@@ -87,8 +87,8 @@ _HOUR_IN_TURNS = 60 // MINUTES_PER_TURN       # turns needed to pass 1 in-game h
 EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exploration
 DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
 
-# Agent memory cap — oldest entries are dropped when this limit is exceeded.
-MAX_AGENT_MEMORY = 2000
+# Legacy agent memory cap (compatibility-only path).
+MAX_AGENT_MEMORY = 100
 PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
 MAX_DECISION_QUEUE_SIZE = 512
 
@@ -2473,17 +2473,60 @@ def _add_memory(
     if not resolved_agent_id:
         resolved_agent_id = "unknown"
 
-    # Use COW-safe mutable list when a runtime is active so that appending
-    # to the memory list does not mutate the original (input) agent dict.
+    from app.games.zone_stalkers.memory.legacy_bridge import (  # noqa: PLC0415
+        bridge_legacy_entry_to_memory_v3,
+    )
+
+    # Ensure memory_v3 is COW-copied before in-place mutations inside the bridge.
     _cow = _cow_runtime()
     if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
         try:
-            mem = _cow.mutable_agent_list(resolved_agent_id, "memory")
+            _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")
+            agent = _cow.agent(resolved_agent_id)
         except Exception:
+            pass
+
+    # Canonical path: always write memory_v3.
+    bridge_legacy_entry_to_memory_v3(
+        agent_id=str(resolved_agent_id),
+        agent=agent,
+        legacy_entry=memory_entry,
+        world_turn=world_turn,
+    )
+
+    # Optional compact legacy write for compatibility.
+    legacy_memory_write_enabled = bool(state.get("legacy_memory_write_enabled", False))
+    if legacy_memory_write_enabled:
+        compact_effects_keys = (
+            "action_kind",
+            "objective_key",
+            "location_id",
+            "agent_id",
+            "target_id",
+        )
+        compact_effects = {
+            key: effects[key]
+            for key in compact_effects_keys
+            if key in effects
+        }
+        compact_entry: Dict[str, Any] = {
+            "world_turn": world_turn,
+            "type": memory_type,
+            "summary": summary or title,
+            "effects": compact_effects,
+        }
+        # Use COW-safe mutable list when a runtime is active so appending does
+        # not mutate the original (input) agent dict.
+        if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
+            try:
+                mem = _cow.mutable_agent_list(resolved_agent_id, "memory")
+            except Exception:
+                mem = agent.setdefault("memory", [])
+        else:
             mem = agent.setdefault("memory", [])
-    else:
-        mem = agent.setdefault("memory", [])
-    mem.append(memory_entry)
+        mem.append(compact_entry)
+        if len(mem) > MAX_AGENT_MEMORY:
+            _runtime_set_agent_field(resolved_agent_id, "memory", mem[-MAX_AGENT_MEMORY:], agent)
 
     _action_kind = str(effects.get("action_kind") or "")
     _observed_kind = str(effects.get("observed") or "")
@@ -2547,28 +2590,6 @@ def _add_memory(
             world_turn=world_turn,
         )
 
-    # Keep only the last MAX_AGENT_MEMORY memory entries
-    if len(mem) > MAX_AGENT_MEMORY:
-        _runtime_set_agent_field(resolved_agent_id, "memory", mem[-MAX_AGENT_MEMORY:], agent)
-
-    # PR 3: bridge this entry into memory_v3 using stable agent id.
-    from app.games.zone_stalkers.memory.legacy_bridge import bridge_legacy_entry_to_memory_v3  # noqa: PLC0415
-
-    # Ensure memory_v3 is COW-copied before in-place mutations inside the bridge.
-    if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
-        try:
-            _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")  # triggers COW copy
-            agent = _cow.agent(resolved_agent_id)  # full agent dict with copied memory_v3
-        except Exception:
-            pass
-
-    bridge_legacy_entry_to_memory_v3(
-        agent_id=str(resolved_agent_id),
-        agent=agent,
-        legacy_entry=memory_entry,
-        world_turn=world_turn,
-    )
-
 
 def should_write_plan_monitor_memory_event(
     agent: Dict[str, Any],
@@ -2583,11 +2604,21 @@ def should_write_plan_monitor_memory_event(
         mem_turn = int(mem.get("world_turn", 0))
         if world_turn - mem_turn > dedup_turns:
             break
-
         effects = mem.get("effects", {})
-        if effects.get("action_kind") != action_kind:
+        if effects.get("action_kind") == action_kind and effects.get("dedup_signature") == signature:
+            return False
+
+    records = ((agent.get("memory_v3") or {}).get("records") or {}).values()
+    for record in records:
+        if not isinstance(record, dict):
             continue
-        if effects.get("dedup_signature") == signature:
+        rec_turn = int(record.get("created_turn", 0))
+        if world_turn - rec_turn > dedup_turns:
+            continue
+        details = record.get("details", {})
+        if str(record.get("kind", "")) != action_kind and details.get("action_kind") != action_kind:
+            continue
+        if details.get("dedup_signature") == signature:
             return False
     return True
 

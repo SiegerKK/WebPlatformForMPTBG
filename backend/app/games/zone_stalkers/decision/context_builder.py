@@ -148,7 +148,7 @@ def _entities_from_memory(
 ) -> list[dict[str, Any]]:
     """Return a deduplicated list of agents mentioned in the NPC's memory.
 
-    Performance note: iterates memory once (O(M) where M ≤ MAX_AGENT_MEMORY=2000).
+    Performance note: iterates memory once (O(M) where M ≤ MAX_AGENT_MEMORY=100 when enabled).
     This is acceptable at Phase 1 but could be optimised in Phase 5+ with a
     memory index keyed by observed agent_id.
     """
