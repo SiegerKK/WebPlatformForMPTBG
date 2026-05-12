@@ -9,9 +9,10 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_TRADE_BUY_ITEM,
     STEP_TRADE_SELL_ITEM,
     STEP_CONSUME_ITEM,
+    STEP_LOOT_CORPSE,
 )
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
-from app.games.zone_stalkers.decision.planner import _plan_seek_consumable
+from app.games.zone_stalkers.decision.planner import _plan_seek_consumable, build_plan
 from tests.decision.conftest import make_agent, make_state_with_trader
 
 
@@ -141,3 +142,67 @@ def test_emergency_survival_trade_does_not_sell_equipped_weapon_or_only_usable_a
     assert agent["equipment"]["weapon"] == initial_weapon
     assert agent["equipment"]["armor"] == initial_armor
     assert sum(1 for item in agent["inventory"] if item.get("type") == "ammo_9mm") == initial_ammo_count
+
+
+def test_seek_water_prefers_local_corpse_loot_before_trader_buy() -> None:
+    agent = make_agent(
+        money=0,
+        thirst=100,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_a")
+    state["locations"]["loc_a"]["corpses"] = [
+        {
+            "corpse_id": "corpse_water",
+            "agent_id": "dead_1",
+            "visible": True,
+            "lootable": True,
+            "inventory": [{"id": "water_from_corpse", "type": "water", "name": "Water", "value": 30}],
+            "money": 0,
+        }
+    ]
+
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    plan = _plan_seek_consumable(ctx, Intent(kind="seek_water", score=1.0), state, 100, need_result)
+
+    assert plan is not None
+    assert plan.steps
+    assert plan.steps[0].kind == STEP_LOOT_CORPSE
+    assert plan.steps[0].payload.get("corpse_id") == "corpse_water"
+
+
+def test_prepare_for_hunt_resupply_prefers_local_corpse_loot() -> None:
+    agent = make_agent(
+        money=0,
+        has_weapon=True,
+        has_armor=False,
+        has_ammo=False,
+    )
+    state = make_state_with_trader(agent=agent, trader_at="loc_a")
+    state["locations"]["loc_a"]["corpses"] = [
+        {
+            "corpse_id": "corpse_ammo",
+            "agent_id": "dead_2",
+            "visible": True,
+            "lootable": True,
+            "inventory": [{"id": "armor_loot", "type": "leather_jacket", "name": "Jacket", "value": 120}],
+            "money": 0,
+        }
+    ]
+
+    ctx = build_agent_context("bot1", agent, state)
+    intent = Intent(
+        kind="resupply",
+        score=1.0,
+        metadata={"objective_key": "PREPARE_FOR_HUNT"},
+    )
+    plan = build_plan(ctx, intent, state, 100)
+
+    assert plan is not None
+    assert plan.steps
+    assert plan.steps[0].kind == STEP_LOOT_CORPSE
+    assert plan.steps[0].payload.get("corpse_id") == "corpse_ammo"

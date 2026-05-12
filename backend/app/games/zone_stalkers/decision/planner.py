@@ -560,6 +560,21 @@ def _plan_seek_consumable(
         # Non-critical/low need: avoid spending inventory consumables.
         return None
 
+    loot_step = _build_local_corpse_loot_step(
+        agent=agent,
+        state=state,
+        preferred_categories={category},
+        take_money=True,
+    )
+    if loot_step is not None:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[loot_step],
+            interruptible=False,
+            confidence=0.95,
+            created_turn=world_turn,
+        )
+
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id")
 
@@ -1057,6 +1072,29 @@ def _plan_resupply(
                 _buy_category = "medical"
 
         if need_types is not None:
+            preferred_categories = {
+                "food" if _buy_category == "food" else "",
+                "drink" if _buy_category == "drink" else "",
+                "medical" if _buy_category in ("medical", "medicine") else "",
+                "weapon" if _buy_category == "weapon" else "",
+                "armor" if _buy_category == "armor" else "",
+                "ammo" if _buy_category == "ammo" else "",
+            } - {""}
+            loot_step = _build_local_corpse_loot_step(
+                agent=agent,
+                state=state,
+                preferred_categories=preferred_categories,
+                take_money=True,
+            )
+            if loot_step is not None:
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[loot_step],
+                    interruptible=False,
+                    confidence=0.95,
+                    created_turn=world_turn,
+                )
+
             mem_loc = _find_item_memory_location(agent, need_types, state)
             if mem_loc and mem_loc != agent_loc:
                 return Plan(
@@ -1182,6 +1220,29 @@ def _plan_resupply(
 
     if not buy_category:
         return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
+
+    preferred_categories = {
+        "food" if buy_category == "food" else "",
+        "drink" if buy_category == "drink" else "",
+        "medical" if buy_category == "medical" else "",
+        "weapon" if buy_category == "weapon" else "",
+        "armor" if buy_category == "armor" else "",
+        "ammo" if buy_category == "ammo" else "",
+    } - {""}
+    loot_step = _build_local_corpse_loot_step(
+        agent=agent,
+        state=state,
+        preferred_categories=preferred_categories,
+        take_money=True,
+    )
+    if loot_step is not None:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[loot_step],
+            interruptible=False,
+            confidence=0.95,
+            created_turn=world_turn,
+        )
 
     _dominant_actionable, _dominant_blocked_by = is_item_need_actionable(agent, dominant.key)
     if not _dominant_actionable:
@@ -1449,6 +1510,21 @@ def _plan_get_rich(
         else None
     )
     objective_key = str((intent.metadata or {}).get("objective_key") or "FIND_ARTIFACTS")
+
+    if objective_key == "GET_MONEY_FOR_RESUPPLY":
+        loot_step = _build_local_corpse_loot_step(
+            agent=agent,
+            state=state,
+            preferred_categories={"artifact"},
+            take_money=True,
+        )
+        if loot_step is not None:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[loot_step],
+                confidence=0.9,
+                created_turn=world_turn,
+            )
 
     # 1. Sell artifacts
     if has_artifacts and trader_loc:

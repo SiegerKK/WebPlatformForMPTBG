@@ -667,6 +667,19 @@ class TestHuntExecutors:
 
         target = state["agents"]["target_1"]
         target["is_alive"] = False
+        state["locations"]["loc_a"]["corpses"] = [
+            {
+                "corpse_id": "corpse_target_1_100",
+                "agent_id": "target_1",
+                "agent_name": "Target 1",
+                "location_id": "loc_a",
+                "created_turn": state["world_turn"],
+                "death_cause": "combat",
+                "killer_id": "bot1",
+                "visible": True,
+                "decay_turn": state["world_turn"] + 7200,
+            }
+        ]
         for combat in state.get("combat_interactions", {}).values():
             combat["ended"] = True
             combat["ended_turn"] = state["world_turn"]

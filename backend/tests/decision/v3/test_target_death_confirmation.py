@@ -98,6 +98,29 @@ def test_hunter_travels_to_corpse_and_confirms_kill() -> None:
     assert hunter.get("global_goal_achieved") is True
 
 
+def test_confirm_kill_requires_visible_corpse_not_only_dead_target_location() -> None:
+    hunter, target, state = _build_hunter_and_target_state()
+    _kill_target_by_emission(state, target, world_turn=100)
+
+    hunter["location_id"] = "loc_b"
+    state["locations"]["loc_a"]["agents"] = []
+    state["locations"]["loc_b"]["agents"] = ["hunter"]
+    state["locations"]["loc_b"]["corpses"] = []
+    target["location_id"] = "loc_b"
+
+    plan = Plan(
+        intent_kind="hunt_target",
+        steps=[PlanStep(kind=STEP_CONFIRM_KILL, payload={"target_id": "target"})],
+        created_turn=101,
+    )
+    execute_plan_step(build_agent_context("hunter", hunter, state), plan, state, 101)
+
+    assert not has_v3_action(hunter, "target_death_confirmed")
+    hunt_failed = v3_action_records(hunter, "hunt_failed")
+    assert hunt_failed
+    assert hunt_failed[-1]["details"].get("reason") == "no_direct_confirmation"
+
+
 def test_personal_combat_kill_confirms_goal_immediately() -> None:
     from app.games.zone_stalkers.rules.tick_rules import _combat_shoot
 
