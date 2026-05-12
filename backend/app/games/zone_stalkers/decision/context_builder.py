@@ -409,9 +409,10 @@ def _traders_from_visible_and_memory(
     visible: list[dict[str, Any]],
     agent: dict[str, Any],
     locations: dict[str, Any],
-    traders_by_id: dict[str, Any],
+    traders: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Collect known trader info from co-located agents and memory."""
+    trader_lookup = traders
     traders: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -426,18 +427,18 @@ def _traders_from_visible_and_memory(
         for record in _memory_v3_records(agent):
             if not _record_is_active(record):
                 continue
-            trader_id = _record_trader_id(record, traders_by_id)
+            trader_id = _record_trader_id(record, trader_lookup)
             if trader_id and trader_id not in seen:
                 seen.add(trader_id)
                 details = _record_details(record)
                 traders.append({
                     "agent_id": trader_id,
                     "name": details.get("trader_name")
-                    or traders_by_id.get(trader_id, {}).get("name")
+                    or trader_lookup.get(trader_id, {}).get("name")
                     or trader_id,
                     "location_id": record.get("location_id")
                     or details.get("location_id")
-                    or traders_by_id.get(trader_id, {}).get("location_id"),
+                    or trader_lookup.get(trader_id, {}).get("location_id"),
                     "source": "memory_v3",
                     "memory_turn": _record_memory_turn(record),
                 })
