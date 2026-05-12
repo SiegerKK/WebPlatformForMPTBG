@@ -409,11 +409,10 @@ def _traders_from_visible_and_memory(
     visible: list[dict[str, Any]],
     agent: dict[str, Any],
     locations: dict[str, Any],
-    traders: dict[str, Any],
+    traders_dict: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Collect known trader info from co-located agents and memory."""
-    trader_lookup = traders
-    traders: list[dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     # Co-located traders
@@ -421,28 +420,28 @@ def _traders_from_visible_and_memory(
         if entity.get("is_trader"):
             aid = entity["agent_id"]
             seen.add(aid)
-            traders.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
+            result.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
 
     if _memory_v3_is_usable(agent):
         for record in _memory_v3_records(agent):
             if not _record_is_active(record):
                 continue
-            trader_id = _record_trader_id(record, trader_lookup)
+            trader_id = _record_trader_id(record, traders_dict)
             if trader_id and trader_id not in seen:
                 seen.add(trader_id)
                 details = _record_details(record)
-                traders.append({
+                result.append({
                     "agent_id": trader_id,
                     "name": details.get("trader_name")
-                    or trader_lookup.get(trader_id, {}).get("name")
+                    or traders_dict.get(trader_id, {}).get("name")
                     or trader_id,
                     "location_id": record.get("location_id")
                     or details.get("location_id")
-                    or trader_lookup.get(trader_id, {}).get("location_id"),
+                    or traders_dict.get(trader_id, {}).get("location_id"),
                     "source": "memory_v3",
                     "memory_turn": _record_memory_turn(record),
                 })
-        return traders
+        return result
 
     # Traders remembered from memory
     for mem in agent.get("memory", []):
@@ -453,14 +452,14 @@ def _traders_from_visible_and_memory(
             trader_id = effects.get("trader_id")
             if trader_id and trader_id not in seen:
                 seen.add(trader_id)
-                traders.append({
+                result.append({
                     "agent_id": trader_id,
                     "name": effects.get("trader_name", trader_id),
                     "location_id": effects.get("location_id"),
                     "source": "memory",
                     "memory_turn": mem.get("world_turn", 0),
                 })
-    return traders
+    return result
 
 
 def _targets_from_agent(

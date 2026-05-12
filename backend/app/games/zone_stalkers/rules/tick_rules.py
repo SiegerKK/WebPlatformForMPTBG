@@ -792,13 +792,13 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             )
             _records_populated = bool(_mem_complete and _mem_v3.get("records"))
             _legacy_mem = _pr3_agent.get("memory")
-            _legacy_oversized = isinstance(_legacy_mem, list) and len(_legacy_mem) > MAX_AGENT_MEMORY
+            _legacy_needs_trim = isinstance(_legacy_mem, list) and len(_legacy_mem) > MAX_AGENT_MEMORY
             _records_oversized = (
                 isinstance(_mem_v3, dict)
                 and isinstance(_mem_v3.get("records"), dict)
                 and len(_mem_v3.get("records", {})) > _MEMORY_V3_MAX_RECORDS
             )
-            _needs_normalization = _legacy_oversized or not _mem_complete or _records_oversized
+            _needs_normalization = _legacy_needs_trim or not _mem_complete or _records_oversized
             _needs_memory_cow = (
                 not _mem_complete
                 or not _records_populated

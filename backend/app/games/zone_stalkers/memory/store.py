@@ -264,7 +264,9 @@ def normalize_agent_memory_state(agent: dict[str, Any]) -> dict[str, int]:
             for rid, raw in records.items():
                 layer = str(raw.get("layer", ""))
                 kind = str(raw.get("kind", ""))
-                if rid not in by_layer.get(layer, []) or rid not in by_kind.get(kind, []):
+                by_layer_set = set(by_layer.get(layer, []))
+                by_kind_set = set(by_kind.get(kind, []))
+                if rid not in by_layer_set or rid not in by_kind_set:
                     index_incomplete = True
                     break
             if index_incomplete:
