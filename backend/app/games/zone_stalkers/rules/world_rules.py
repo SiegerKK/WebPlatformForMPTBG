@@ -327,7 +327,7 @@ def resolve_world_command(
             kill_target_id=kill_target_id,
         )
         state.setdefault("agents", {})[new_agent_id] = agent
-        state["locations"][loc_id]["agents"].append(new_agent_id)
+        state["locations"][loc_id].setdefault("agents", []).append(new_agent_id)
         events.append({"event_type": "debug_stalker_spawned", "payload": {"agent_id": new_agent_id, "loc_id": loc_id}})
         return state, events
 
