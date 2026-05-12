@@ -10,4 +10,4 @@ This directory covers Zone Stalkers performance optimizations.
 
 ## Archived planning/history
 
-[`planned/`](./planned/) — Archived planning documents and implementation-era PR notes, superseded by the consolidated PR1–PR5 applied document above.
+[`archive/`](./archive/) — Historical planning documents and implementation-era PR notes (CPU PR1–PR5), superseded by the consolidated applied document above.

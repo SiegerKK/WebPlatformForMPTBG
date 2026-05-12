@@ -26,7 +26,7 @@ Network and CPU optimization architecture.
 | [optimization/README.md](./optimization/README.md) | Overview of implemented and planned optimizations |
 | [optimization/network_and_debug_optimization.md](./optimization/network_and_debug_optimization.md) | Implemented: zone_delta, projections, debug subscriptions, on-demand hunt traces |
 | [optimization/cpu_optimization_applied_pr1_pr5.md](./optimization/cpu_optimization_applied_pr1_pr5.md) | Consolidated applied CPU optimization results for PR1–PR5 |
-| [optimization/planned/README.md](./optimization/planned/README.md) | Archived CPU planning documents (superseded) |
+| [optimization/archive/](./optimization/archive/README.md) | Archived CPU planning documents (superseded) |
 
 ### [`future/`](./future/)
 
@@ -34,7 +34,7 @@ Planned gameplay features not yet implemented.
 
 | Document | Description |
 |---|---|
-| [future/combat_encounter_system.md](./future/combat_encounter_system.md) | Round-based text combat, wounds, advanced hunt tactics, text quest narrative |
+| [future/combat_encounter_system_pr_implementation.md](./future/combat_encounter_system_pr_implementation.md) | Round-based text combat, wounds, advanced hunt tactics, text quest narrative |
 
 ### [`../archive/`](../archive/README.md)
 
