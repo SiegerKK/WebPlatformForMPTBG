@@ -6,12 +6,10 @@ sync/migrate helpers so that both world_rules.py and router.py stay in sync.
 """
 from __future__ import annotations
 
-VALID_LOCATION_IMAGE_SLOTS: frozenset[str] = frozenset(
-    {"clear", "fog", "rain", "night_clear", "night_rain"}
-)
 ORDERED_LOCATION_IMAGE_SLOTS: tuple[str, ...] = (
     "clear", "fog", "rain", "night_clear", "night_rain"
 )
+VALID_LOCATION_IMAGE_SLOTS: frozenset[str] = frozenset(ORDERED_LOCATION_IMAGE_SLOTS)
 
 
 def sync_location_primary_image_url(loc: dict) -> None:

@@ -56,6 +56,15 @@ _VALID_GLOBAL_GOALS = frozenset([
     "unravel_zone_mystery",
     "kill_stalker",
 ])
+_MAP_BUMP_FIELDS_DEBUG_LOCATION = frozenset({
+    "name",
+    "terrain_type",
+    "region",
+    "exit_zone",
+    "image_url",
+    "image_slots",
+    "primary_image_slot",
+})
 
 # Image slot constants and helpers — single source of truth in location_images.py
 from app.games.zone_stalkers.location_images import (
@@ -253,9 +262,7 @@ def resolve_world_command(
         loc = state["locations"][loc_id]
         # Ensure image_slots exists before applying any image changes (P1-4)
         migrate_location_images(loc)
-        _map_bump_fields = {"name", "terrain_type", "region", "exit_zone",
-                            "image_url", "image_slots", "primary_image_slot"}
-        _needs_map_bump = bool(_map_bump_fields & set(payload.keys()))
+        _needs_map_bump = bool(_MAP_BUMP_FIELDS_DEBUG_LOCATION & set(payload.keys()))
         loc["name"] = str(payload.get("name", loc["name"])).strip()
         if "terrain_type" in payload:
             loc["terrain_type"] = payload["terrain_type"]

@@ -28,6 +28,7 @@ ProjectionModeParam = Literal["zone-lite", "game", "debug-map", "debug-map-lite"
 MEDIA_ROOT = os.environ.get("MEDIA_ROOT", "/app/media")
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_MEDIA_CLEANUP_DEPTH = 4
 
 _EXT_MAP = {
     "image/jpeg": ".jpg",
@@ -298,7 +299,7 @@ def _cleanup_parent_dirs_deep(abs_paths: list[str]) -> None:
         if not abs_path:
             continue
         current = os.path.dirname(abs_path)
-        for _ in range(4):
+        for _ in range(MAX_MEDIA_CLEANUP_DEPTH):
             if not current:
                 break
             try:
