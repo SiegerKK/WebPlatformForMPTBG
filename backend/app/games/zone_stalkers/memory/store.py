@@ -257,6 +257,19 @@ def normalize_agent_memory_state(agent: dict[str, Any]) -> dict[str, int]:
         if not required_keys.issubset(set(indexes.keys())):
             _rebuild_indexes_from_records(mem_v3)
             indexes_rebuilt = 1
+        elif records:
+            index_incomplete = False
+            by_layer = indexes.get("by_layer", {})
+            by_kind = indexes.get("by_kind", {})
+            for rid, raw in records.items():
+                layer = str(raw.get("layer", ""))
+                kind = str(raw.get("kind", ""))
+                if rid not in by_layer.get(layer, []) or rid not in by_kind.get(kind, []):
+                    index_incomplete = True
+                    break
+            if index_incomplete:
+                _rebuild_indexes_from_records(mem_v3)
+                indexes_rebuilt = 1
     mem_v3["stats"]["records_count"] = len(mem_v3.get("records", {}))
     return {
         "legacy_trimmed": legacy_trimmed,

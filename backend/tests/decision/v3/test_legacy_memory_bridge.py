@@ -291,7 +291,7 @@ def test_intel_from_stalker_bridges_to_target_intel_memory_v3() -> None:
 
 def test_add_memory_bridges_new_legacy_entry_to_memory_v3() -> None:
     agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
-    state = {"agents": {"bot1": agent}}
+    state = {"agents": {"bot1": agent}, "legacy_memory_write_enabled": False}
 
     _add_memory(
         agent,
@@ -313,7 +313,7 @@ def test_add_memory_bridges_new_legacy_entry_to_memory_v3() -> None:
 
 def test_add_memory_does_not_bridge_sleep_interval_applied() -> None:
     agent: dict = {"name": "bot1", "memory": [], "memory_v3": None}
-    state = {"agents": {"bot1": agent}}
+    state = {"agents": {"bot1": agent}, "legacy_memory_write_enabled": False}
 
     _add_memory(
         agent,
@@ -349,4 +349,4 @@ def test_legacy_memory_write_can_be_enabled_for_compatibility() -> None:
     legacy = agent["memory"][0]
     assert legacy.get("summary") == "купил хлеб"
     assert legacy.get("effects", {}).get("action_kind") == "trade_buy"
-    assert "item_type" not in legacy.get("effects", {})
+    assert legacy.get("effects", {}).get("item_type") == "bread"

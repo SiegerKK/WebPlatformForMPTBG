@@ -49,6 +49,7 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "active_plan_aborted": (LAYER_GOAL, "active_plan_aborted", ("active_plan", "threat")),
     "active_plan_completed": (LAYER_GOAL, "active_plan_completed", ("active_plan",)),
     "global_goal_completed": (LAYER_GOAL, "global_goal_completed", ("goal", "completion")),
+    "objective_decision": (LAYER_GOAL, "objective_decision", ("objective", "decision")),
 
     # Threat / environment
     "emission_imminent": (LAYER_THREAT, "emission_warning", ("emission", "danger")),
@@ -201,7 +202,7 @@ def _map_legacy_to_record(
         importance = 0.5
 
     # Retention guidance for target-related memory kinds.
-    if kind in {"target_equipment_seen", "target_combat_strength_observed", "target_death_confirmed"}:
+    if kind in {"target_equipment_seen", "target_combat_strength_observed", "target_death_confirmed", "target_intel"}:
         importance = max(importance, 0.85)
     elif kind in {"target_seen", "target_not_found", "target_moved", "target_last_known_location", "target_route_observed"}:
         importance = max(importance, 0.65)

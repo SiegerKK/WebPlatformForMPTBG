@@ -2495,26 +2495,8 @@ def _add_memory(
     )
 
     # Optional compact legacy write for compatibility.
-    legacy_memory_write_enabled = bool(state.get("legacy_memory_write_enabled", False))
+    legacy_memory_write_enabled = bool(state.get("legacy_memory_write_enabled", True))
     if legacy_memory_write_enabled:
-        compact_effects_keys = (
-            "action_kind",
-            "objective_key",
-            "location_id",
-            "agent_id",
-            "target_id",
-        )
-        compact_effects = {
-            key: effects[key]
-            for key in compact_effects_keys
-            if key in effects
-        }
-        compact_entry: Dict[str, Any] = {
-            "world_turn": world_turn,
-            "type": memory_type,
-            "summary": summary or title,
-            "effects": compact_effects,
-        }
         # Use COW-safe mutable list when a runtime is active so appending does
         # not mutate the original (input) agent dict.
         if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
@@ -2524,7 +2506,7 @@ def _add_memory(
                 mem = agent.setdefault("memory", [])
         else:
             mem = agent.setdefault("memory", [])
-        mem.append(compact_entry)
+        mem.append(memory_entry)
         if len(mem) > MAX_AGENT_MEMORY:
             _runtime_set_agent_field(resolved_agent_id, "memory", mem[-MAX_AGENT_MEMORY:], agent)
 
