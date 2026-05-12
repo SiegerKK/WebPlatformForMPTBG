@@ -109,4 +109,4 @@ If intel collection did not produce a usable location, repair/re-evaluation prev
 
 ## Current Combat and Hunt Integration
 
-Combat itself is currently a simple flow (`start_combat → monitor_combat → confirm_kill`). Full round-based combat, wounds, ambush, intercept, and stakeout are planned features — see [`../../archive/combat_encounter_system_pr_implementation.md`](../../archive/combat_encounter_system_pr_implementation.md).
+Combat itself is currently a simple flow (`start_combat → monitor_combat → confirm_kill`). Full round-based combat, wounds, ambush, intercept, and stakeout are planned features — see [`../future/combat_encounter_system_pr_implementation.md`](../future/combat_encounter_system_pr_implementation.md).

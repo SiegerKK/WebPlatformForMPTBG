@@ -32,7 +32,9 @@ Network and CPU optimization architecture.
 
 Planned gameplay features not yet implemented.
 
-*(No documents yet — planned combat encounter system docs are in [`../archive/`](../archive/README.md).)*
+| Document | Description |
+|---|---|
+| [future/combat_encounter_system_pr_implementation.md](./future/combat_encounter_system_pr_implementation.md) | Round-based text combat, wounds, advanced hunt tactics, text quest narrative |
 
 ### [`../archive/`](../archive/README.md)
 

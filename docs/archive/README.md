@@ -15,4 +15,3 @@ For current documentation, see:
 |---|---|
 | `zone_stalkers_tick_process_optimization_plan.md` | Stale top-level tick-process optimization planning document (superseded by CPU optimization applied doc) |
 | `location_image_upload_bugfix_copilot_instructions.md` | Copilot task instruction for location image upload bugfix (one-time task doc, no longer active) |
-| `combat_encounter_system_pr_implementation.md` | Combat encounter system PR implementation doc (future feature, not yet implemented) |
