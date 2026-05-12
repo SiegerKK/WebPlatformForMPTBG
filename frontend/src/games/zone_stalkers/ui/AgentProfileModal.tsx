@@ -155,7 +155,7 @@ export interface AgentForProfile {
   has_left_zone?: boolean;
   global_goal_achieved?: boolean;
   kill_target_id?: string | null;
-  memory?: Array<{
+  story_events?: Array<{
     world_turn: number;
     world_day?: number;
     world_hour?: number;
@@ -315,7 +315,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     return () => clearInterval(id);
   }, [fetchMemory, contextId]);
 
-  const displayMemory: MemEntry[] = fetchedMemory ?? (agent.memory ?? []);
+  const displayMemory: MemEntry[] = fetchedMemory ?? (agent.story_events ?? []);
 
   const storyTimelineForObjective = displayMemory.slice(-120).map(toCompactTimelineEntry);
   const latestTraceEvent = getLatestTraceEvent(agent.brain_trace);
@@ -374,7 +374,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
 
   // ── Exports ──────────────────────────────────────────────────────────────
   const handleFullDebugExport = () => {
-    const exportData = { ...agent, memory: fetchedMemory ?? agent.memory ?? [] };
+    const exportData = { ...agent, story_events: fetchedMemory ?? agent.story_events ?? [] };
     downloadJson(`stalker_${agent.name.replace(/\s+/g, '_')}_full_debug.json`, exportData);
   };
 

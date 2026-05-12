@@ -19,12 +19,12 @@ import type {
 
 export type { BrainTrace, BrainTraceEvent, BrainTraceObjectiveInfo, BrainTraceMemoryUsed, BrainTraceNeed };
 
-export type MemEntry = NonNullable<AgentForProfile['memory']>[number];
+export type MemEntry = NonNullable<AgentForProfile['story_events']>[number];
 
 // ─── CompactNpcHistoryExport ─────────────────────────────────────────────────
 
 export type CompactNpcHistoryExport = {
-  export_schema: 'npc_history_v1';
+  export_schema: 'npc_history_v2';
   exported_at: string;
 
   agent: {
@@ -470,7 +470,7 @@ export const buildCompactNpcHistoryExport = (
     : undefined;
 
   return {
-    export_schema: 'npc_history_v1',
+    export_schema: 'npc_history_v2',
     exported_at: new Date().toISOString(),
     agent: {
       id: agent.id,

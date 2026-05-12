@@ -124,8 +124,19 @@ def resolve_exploration_command(
                     },
                 })
                 if agent["hp"] <= 0:
-                    agent["is_alive"] = False
-                    events.append({"event_type": "agent_died", "payload": {"agent_id": agent_id, "cause": "anomaly"}})
+                    from app.games.zone_stalkers.rules.agent_lifecycle import kill_agent as _kill_agent
+                    _kill_agent(
+                        agent_id=agent_id,
+                        agent=agent,
+                        state=state,
+                        world_turn=state.get("world_turn", 1),
+                        cause="anomaly",
+                        memory_title="💀 Смерть",
+                        memory_summary="Погиб от аномалии.",
+                        memory_effects={"action_kind": "death", "cause": "anomaly",
+                                        "anomaly_type": anom["type"]},
+                        events=events,
+                    )
 
         events.append({
             "event_type": "agent_moved",

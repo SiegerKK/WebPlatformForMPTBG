@@ -199,6 +199,15 @@ _OBJECTIVE_TO_GOAL: Dict[str, str] = {
 _INTENT_TO_OBJECTIVE_KEY_FALLBACK: Dict[str, str] = {
     # Preserve canonical objective key when objective pipeline falls back to intent-only path.
     "leave_zone": "LEAVE_ZONE",
+    "flee_emission": "REACH_SAFE_SHELTER",
+    "wait_in_shelter": "WAIT_IN_SHELTER",
+    "seek_water": "RESTORE_WATER",
+    "seek_food": "RESTORE_FOOD",
+    "rest": "REST",
+    "heal_self": "HEAL_SELF",
+    "escape_danger": "HEAL_SELF",
+    "sell_artifacts": "SELL_ARTIFACTS",
+    "get_rich": "FIND_ARTIFACTS",
 }
 
 
@@ -450,9 +459,21 @@ def _enqueue_brain_decision(
     }
 
 
-def _brain_valid_until_turn(agent: Dict[str, Any], world_turn: int) -> int:
+def _brain_valid_until_turn(agent: Dict[str, Any], state: Dict[str, Any], world_turn: int) -> int:
     objective_key = str((agent.get("brain_v3_context") or {}).get("objective_key") or "")
-    if objective_key in {"ENGAGE_TARGET", "REACH_SAFE_SHELTER", "WAIT_IN_SHELTER"}:
+
+    if objective_key == "WAIT_IN_SHELTER":
+        # Stay valid until emission ends to avoid plan-churn spam.
+        emission_ends_turn = state.get("emission_ends_turn")
+        if emission_ends_turn is not None:
+            return max(world_turn + 1, min(int(emission_ends_turn), world_turn + 30))
+        return world_turn + 5
+
+    if objective_key == "REACH_SAFE_SHELTER":
+        # Re-evaluate frequently while still trying to reach shelter.
+        return world_turn
+
+    if objective_key == "ENGAGE_TARGET":
         return world_turn
 
     sched = agent.get("scheduled_action")
@@ -467,11 +488,11 @@ def _brain_valid_until_turn(agent: Dict[str, Any], world_turn: int) -> int:
     return world_turn + 5
 
 
-def _post_brain_decision_runtime_update(agent: Dict[str, Any], world_turn: int) -> None:
+def _post_brain_decision_runtime_update(agent: Dict[str, Any], state: Dict[str, Any], world_turn: int) -> None:
     br = ensure_brain_runtime(agent, world_turn)
     clear_brain_invalidators(agent)
     br["last_decision_turn"] = int(world_turn)
-    br["valid_until_turn"] = int(_brain_valid_until_turn(agent, world_turn))
+    br["valid_until_turn"] = int(_brain_valid_until_turn(agent, state, world_turn))
     br["decision_revision"] = int(br.get("decision_revision") or 0) + 1
     ctx = agent.get("brain_v3_context") or {}
     br["last_objective_key"] = ctx.get("objective_key") if isinstance(ctx, dict) else None
@@ -1448,7 +1469,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         _npc_brain_decision_count += 1
         events.extend(bot_evs)
         _agent = _runtime_agent(_agent_id, _agent)
-        _post_brain_decision_runtime_update(_agent, world_turn)
+        _post_brain_decision_runtime_update(_agent, state, world_turn)
 
         if _budget_enabled:
             if _priority in {"high", "normal"}:
@@ -1727,13 +1748,22 @@ def _mark_agent_dead(
     """Centralized death handler: mark agent dead, clean up runtime state,
     write death memory, emit ``agent_died`` event, and update brain_trace.
 
-    Using this helper ensures the invariant:
-        is_alive == False  →  scheduled_action is None, action_queue == [].
+    Invariants enforced:
+        is_alive == False
+        hp == 0
+        scheduled_action is None
+        action_queue == []
+        active_plan_v3 is None
+        current_goal == "dead"
+        brain_runtime.queued == False, last_skip_reason == "dead"
+        brain_v3_context: intent/objective/adapter cleared
     """
     from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
 
     agent = _runtime_agent(agent_id, agent)
     _runtime_set_agent_field(agent_id, "is_alive", False, agent)
+    _runtime_set_agent_field(agent_id, "hp", 0, agent)
+    _runtime_set_agent_field(agent_id, "current_goal", "dead", agent)
     agent = _runtime_agent(agent_id, agent)
     active_plan = get_active_plan(agent)
     if active_plan is not None:
@@ -1762,18 +1792,43 @@ def _mark_agent_dead(
     _runtime_set_agent_field(agent_id, "action_queue", [], agent)
     _runtime_set_agent_field(agent_id, "action_used", False, agent)
 
+    # Brain runtime cleanup — agent must not be queued for decisions after death.
+    _br = ensure_brain_runtime(agent, world_turn)
+    _br["invalidated"] = False
+    _br["invalidators"] = []
+    _br["queued"] = False
+    _br["queued_turn"] = None
+    _br["queued_priority"] = None
+    _br["last_skip_reason"] = "dead"
+    _br["valid_until_turn"] = world_turn
+
+    # Brain v3 context cleanup.
+    _ctx = agent.get("brain_v3_context")
+    if isinstance(_ctx, dict):
+        _ctx["intent_kind"] = None
+        _ctx["objective_key"] = None
+        _ctx["objective_score"] = 0
+        _ctx["objective_reason"] = f"dead:{cause}"
+        _ctx["adapter_intent"] = None
+
     _add_memory(
         agent, world_turn, state, "observation",
         memory_title,
         memory_effects,
         summary=memory_summary,
     )
+    _loc_id = memory_effects.get("location_id") or agent.get("location_id")
     events.append({
         "event_type": "agent_died",
-        "payload": {"agent_id": agent_id, "cause": cause},
+        "payload": {
+            "agent_id": agent_id,
+            "cause": cause,
+            "location_id": _loc_id,
+            "world_turn": world_turn,
+        },
     })
     # Overwrite brain_trace so it does not remain as "continue sleep" or similar.
-    _death_thought = "Погиб; дальнейшие решения не принимаются."
+    _death_thought = f"Погиб ({cause}); дальнейшие решения не принимаются."
     append_brain_trace_event(
         agent,
         world_turn=world_turn,
@@ -2883,7 +2938,6 @@ def _combat_shoot(
                         "combat_id": cid},
         })
         if target.get("hp", 0) <= 0:
-            target["is_alive"] = False
             _add_memory(
                 agent, world_turn, state, "observation",
                 f"💀 Убил «{target_name}»",
@@ -2909,18 +2963,19 @@ def _combat_shoot(
                      "target_id": target_id, "target_name": target_name},
                     summary=f"Цель подтверждена мёртвой — «{target_name}»",
                 )
-            _add_memory(
-                target, world_turn, state, "observation",
-                "💀 Убит в бою",
-                {"observed": "combat_killed", "combat_id": cid,
-                 "killer_id": agent_id, "killer_name": atk_name},
-                summary=f"Я был убит «{atk_name}» в бою",
+            # Use canonical kill helper for all death-state invariants.
+            _mark_agent_dead(
+                agent_id=target_id,
+                agent=target,
+                state=state,
+                world_turn=world_turn,
+                cause="combat",
+                memory_title="💀 Убит в бою",
+                memory_effects={"observed": "combat_killed", "combat_id": cid,
+                                "killer_id": agent_id, "killer_name": atk_name},
+                memory_summary=f"Я был убит «{atk_name}» в бою",
+                events=events,
             )
-            events.append({
-                "event_type": "agent_died",
-                "payload": {"agent_id": target_id, "cause": "combat",
-                            "killer_id": agent_id, "combat_id": cid},
-            })
     _runtime_set_action_used(agent, True)
     return events
 

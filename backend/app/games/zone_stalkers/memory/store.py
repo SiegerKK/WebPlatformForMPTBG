@@ -180,10 +180,43 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
+def _retention_priority(raw: dict[str, Any]) -> int:
+    """Return a retention priority score (higher = keep longer)."""
+    kind = str(raw.get("kind") or "")
+    layer = str(raw.get("layer") or "")
+    details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+    action_kind = str(details.get("action_kind") or kind)
+
+    if kind in {
+        "combat_killed",
+        "combat_kill",
+        "target_death_confirmed",
+        "target_intel",
+        "emission_warning",
+        "emission_started",
+        "anomaly_detected",
+        "global_goal_completed",
+        "death",
+    }:
+        return 100
+
+    if layer == "semantic":
+        return 80
+
+    if kind == "objective_decision":
+        return 60
+
+    if action_kind.startswith("active_plan_"):
+        return 10
+
+    return 40
+
+
 def _eviction_sort_key(record_id: str, raw: dict[str, Any], *, protected_penalty: int) -> tuple:
-    protected = 1 if str(raw.get("layer") or "") in _PROTECTED_LAYERS else 0
+    # Use semantic retention priority instead of broad layer protection.
+    retention = _retention_priority(raw)
     return (
-        protected * protected_penalty,
+        retention * protected_penalty // 100,
         _status_evict_rank(raw.get("status")),
         _coerce_float(raw.get("importance"), 0.5),
         _coerce_float(raw.get("confidence"), 1.0),
