@@ -162,6 +162,53 @@ def _is_location_exhausted_for_money(
     return False
 
 
+def _is_support_source_exhausted(
+    agent: dict[str, Any],
+    *,
+    location_id: str | None,
+    target_id: str | None,
+    objective_key: str,
+    world_turn: int,
+) -> bool:
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+    location_id_str = str(location_id or "")
+    target_id_str = str(target_id or "")
+    objective_key_str = str(objective_key or "")
+    for rec in records.values():
+        if not isinstance(rec, dict):
+            continue
+        details = rec.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        action_kind = str(details.get("action_kind") or rec.get("kind") or "")
+        if action_kind not in {"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"}:
+            continue
+        rec_location_id = str(details.get("location_id") or rec.get("location_id") or "")
+        if location_id_str and rec_location_id and rec_location_id != location_id_str:
+            continue
+        rec_target_id = str(details.get("target_id") or "")
+        if target_id_str and rec_target_id and rec_target_id != target_id_str:
+            continue
+        rec_objective_key = str(details.get("objective_key") or "")
+        if rec_objective_key and rec_objective_key != objective_key_str:
+            continue
+        cooldown_until = details.get("cooldown_until_turn")
+        if isinstance(cooldown_until, (int, float)) and int(cooldown_until) <= world_turn:
+            continue
+        if action_kind == "anomaly_search_exhausted" and objective_key_str in {"GET_MONEY_FOR_RESUPPLY", "FIND_ARTIFACTS"}:
+            return True
+        if action_kind in {"support_source_exhausted", "witness_source_exhausted"} and objective_key_str in {
+            "GATHER_INTEL",
+            "LOCATE_TARGET",
+            "VERIFY_LEAD",
+            "TRACK_TARGET",
+            "GET_MONEY_FOR_RESUPPLY",
+        }:
+            return True
+    return False
+
+
 # ── Plan builders ─────────────────────────────────────────────────────────────
 
 def _plan_flee_emission(
@@ -511,19 +558,30 @@ def _plan_seek_consumable(
                 compatible_item_types=compatible_types,
             )
             if afford.can_buy_now:
+                consume_type = afford.cheapest_viable_item_type
                 return Plan(
                     intent_kind=intent.kind,
-                    steps=[PlanStep(
-                        STEP_TRADE_BUY_ITEM,
-                        {
-                            "item_category": category,
-                            "reason": f"buy_{category}_survival",
-                            "buy_mode": "survival_cheapest",
-                            "compatible_item_types": sorted(compatible_types),
-                            "required_price": afford.required_price,
-                        },
-                        interruptible=False,
-                    )],
+                    steps=[
+                        PlanStep(
+                            STEP_TRADE_BUY_ITEM,
+                            {
+                                "item_category": category,
+                                "reason": f"buy_{category}_survival",
+                                "buy_mode": "survival_cheapest",
+                                "compatible_item_types": sorted(compatible_types),
+                                "required_price": afford.required_price,
+                            },
+                            interruptible=False,
+                        ),
+                        PlanStep(
+                            STEP_CONSUME_ITEM,
+                            {
+                                "item_type": consume_type,
+                                "reason": f"emergency_{category}",
+                            },
+                            interruptible=False,
+                        ),
+                    ],
                     interruptible=False, confidence=1.0, created_turn=world_turn,
                 )
 
@@ -552,6 +610,14 @@ def _plan_seek_consumable(
                             "buy_mode": "survival_cheapest",
                             "compatible_item_types": sorted(compatible_types),
                             "required_price": afford.required_price,
+                        },
+                        interruptible=False,
+                    ),
+                    PlanStep(
+                        STEP_CONSUME_ITEM,
+                        {
+                            "item_type": afford.cheapest_viable_item_type,
+                            "reason": f"emergency_{category}",
                         },
                         interruptible=False,
                     ),
@@ -604,6 +670,14 @@ def _plan_seek_consumable(
                                  "compatible_item_types": sorted(compatible_types),
                              },
                              interruptible=False),
+                    PlanStep(
+                        STEP_CONSUME_ITEM,
+                        {
+                            "item_type": remote_afford.cheapest_viable_item_type,
+                            "reason": f"emergency_{category}",
+                        },
+                        interruptible=False,
+                    ),
                 ]
                 return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
             steps = [
@@ -618,6 +692,14 @@ def _plan_seek_consumable(
                              "compatible_item_types": sorted(compatible_types),
                          },
                          interruptible=False),
+                PlanStep(
+                    STEP_CONSUME_ITEM,
+                    {
+                        "item_type": remote_afford.cheapest_viable_item_type,
+                        "reason": f"emergency_{category}",
+                    },
+                    interruptible=False,
+                ),
             ]
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
 
@@ -1388,6 +1470,20 @@ def _plan_hunt_target(
     target_id = intent.target_id or ctx.self_state.get("kill_target_id")
     target_loc = intent.target_location_id
     agent_loc = ctx.self_state.get("location_id")
+
+    if objective_key and _is_support_source_exhausted(
+        ctx.self_state,
+        location_id=target_loc,
+        target_id=target_id,
+        objective_key=objective_key,
+        world_turn=world_turn,
+    ):
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(STEP_WAIT, {"reason": "support_source_exhausted_preplan"})],
+            confidence=0.3,
+            created_turn=world_turn,
+        )
 
     if objective_key == "ENGAGE_TARGET":
         if target_loc and target_loc != agent_loc:

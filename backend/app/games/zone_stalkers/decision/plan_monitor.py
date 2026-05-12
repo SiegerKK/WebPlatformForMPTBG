@@ -7,11 +7,16 @@ from typing import Any, Literal
 
 from app.games.zone_stalkers.rules.tick_constants import (
     CRITICAL_HP_THRESHOLD,
-    CRITICAL_HUNGER_THRESHOLD,
-    CRITICAL_THIRST_THRESHOLD,
     THIRST_INCREASE_PER_HOUR,
     HUNGER_INCREASE_PER_HOUR,
 )
+
+_HARD_INTERRUPT_THIRST_THRESHOLD = 90
+_HARD_INTERRUPT_HUNGER_THRESHOLD = 90
+_SOFT_INTERRUPT_THIRST_THRESHOLD = 70
+_SOFT_INTERRUPT_HUNGER_THRESHOLD = 70
+_SOFT_INTERRUPT_SLEEPINESS_THRESHOLD = 75
+_SOFT_INTERRUPT_MAX_REMAINING_TURNS = 2
 
 
 @dataclass(slots=True)
@@ -76,6 +81,20 @@ def _brain_context(agent: dict[str, Any]) -> dict[str, Any]:
     return ctx if isinstance(ctx, dict) else {}
 
 
+def _scheduled_action_remaining_turns(
+    *,
+    scheduled_action: dict[str, Any],
+    world_turn: int,
+) -> int:
+    turns_remaining = scheduled_action.get("turns_remaining")
+    if isinstance(turns_remaining, (int, float)):
+        return max(0, int(turns_remaining))
+    ends_turn = scheduled_action.get("ends_turn")
+    if isinstance(ends_turn, (int, float)):
+        return max(0, int(ends_turn) - int(world_turn))
+    return 0
+
+
 def _has_active_support_exhaustion(
     *,
     agent: dict[str, Any],
@@ -136,6 +155,9 @@ def evaluate_scheduled_action_interrupts(
         "critical_hp",
         "critical_thirst",
         "critical_hunger",
+        "soft_sleepiness",
+        "soft_thirst",
+        "soft_hunger",
         "emission",
         "target_visible",
         "support_source_exhausted",
@@ -146,9 +168,9 @@ def evaluate_scheduled_action_interrupts(
         interrupt_triggered = "emission_danger"
     elif float(agent.get("hp", 100)) <= CRITICAL_HP_THRESHOLD:
         interrupt_triggered = "critical_hp"
-    elif _projected(float(agent.get("thirst", 0)), int(state.get("world_minute", 0)), THIRST_INCREASE_PER_HOUR) >= CRITICAL_THIRST_THRESHOLD:
+    elif _projected(float(agent.get("thirst", 0)), int(state.get("world_minute", 0)), THIRST_INCREASE_PER_HOUR) >= _HARD_INTERRUPT_THIRST_THRESHOLD:
         interrupt_triggered = "critical_thirst"
-    elif _projected(float(agent.get("hunger", 0)), int(state.get("world_minute", 0)), HUNGER_INCREASE_PER_HOUR) >= CRITICAL_HUNGER_THRESHOLD:
+    elif _projected(float(agent.get("hunger", 0)), int(state.get("world_minute", 0)), HUNGER_INCREASE_PER_HOUR) >= _HARD_INTERRUPT_HUNGER_THRESHOLD:
         interrupt_triggered = "critical_hunger"
     elif bool(agent.get("global_goal_achieved")) and objective_key not in {"LEAVE_ZONE", "CONFIRM_KILL"}:
         interrupt_triggered = "global_goal_completed"
@@ -176,6 +198,11 @@ def evaluate_scheduled_action_interrupts(
     }:
         support_objective_for = "kill_stalker"
 
+    thirst_projected = _projected(float(agent.get("thirst", 0)), int(state.get("world_minute", 0)), THIRST_INCREASE_PER_HOUR)
+    hunger_projected = _projected(float(agent.get("hunger", 0)), int(state.get("world_minute", 0)), HUNGER_INCREASE_PER_HOUR)
+    sleepiness = float(agent.get("sleepiness", 0))
+    remaining_turns = _scheduled_action_remaining_turns(scheduled_action=scheduled_action, world_turn=world_turn)
+
     return {
         "objective_key": objective_key or None,
         "intent_kind": intent_kind or None,
@@ -189,6 +216,23 @@ def evaluate_scheduled_action_interrupts(
         "not_attacking_reasons": not_attacking_reasons,
         "interrupts_checked": interrupts_checked,
         "interrupt_triggered": interrupt_triggered,
+        "soft_interrupt": {
+            "thirst_projected": thirst_projected,
+            "hunger_projected": hunger_projected,
+            "sleepiness": sleepiness,
+            "remaining_turns": remaining_turns,
+            "max_remaining_turns": _SOFT_INTERRUPT_MAX_REMAINING_TURNS,
+            "should_interrupt": bool(
+                sleepiness >= _SOFT_INTERRUPT_SLEEPINESS_THRESHOLD
+                or thirst_projected >= _SOFT_INTERRUPT_THIRST_THRESHOLD
+                or hunger_projected >= _SOFT_INTERRUPT_HUNGER_THRESHOLD
+            ) and remaining_turns > _SOFT_INTERRUPT_MAX_REMAINING_TURNS,
+        },
+        "sleep_need": {
+            "raw_sleepiness": int(sleepiness),
+            "interpreted_fatigue": int(sleepiness),
+            "scale": "sleepiness_high_means_tired",
+        },
     }
 
 
@@ -240,6 +284,7 @@ def assess_scheduled_action_v3(
     hp = float(agent.get("hp", 100))
     thirst = _projected(float(agent.get("thirst", 0)), world_minute, THIRST_INCREASE_PER_HOUR)
     hunger = _projected(float(agent.get("hunger", 0)), world_minute, HUNGER_INCREASE_PER_HOUR)
+    sleepiness = float(agent.get("sleepiness", 0))
 
     if interrupt_triggered == "critical_hp" or hp <= CRITICAL_HP_THRESHOLD:
         return PlanMonitorResult(
@@ -252,7 +297,7 @@ def assess_scheduled_action_v3(
             debug_context=debug_context,
         )
 
-    if interrupt_triggered == "critical_thirst" or thirst >= CRITICAL_THIRST_THRESHOLD:
+    if interrupt_triggered == "critical_thirst" or thirst >= _HARD_INTERRUPT_THIRST_THRESHOLD:
         return PlanMonitorResult(
             decision="abort",
             reason="critical_thirst",
@@ -263,7 +308,7 @@ def assess_scheduled_action_v3(
             debug_context=debug_context,
         )
 
-    if interrupt_triggered == "critical_hunger" or hunger >= CRITICAL_HUNGER_THRESHOLD:
+    if interrupt_triggered == "critical_hunger" or hunger >= _HARD_INTERRUPT_HUNGER_THRESHOLD:
         return PlanMonitorResult(
             decision="abort",
             reason="critical_hunger",
@@ -278,6 +323,23 @@ def assess_scheduled_action_v3(
         return PlanMonitorResult(
             decision="abort",
             reason=str(interrupt_triggered),
+            should_run_decision_pipeline=True,
+            should_clear_action_queue=True,
+            debug_context=debug_context,
+        )
+
+    soft_needs_triggered = (
+        sleepiness >= _SOFT_INTERRUPT_SLEEPINESS_THRESHOLD
+        or thirst >= _SOFT_INTERRUPT_THIRST_THRESHOLD
+        or hunger >= _SOFT_INTERRUPT_HUNGER_THRESHOLD
+    )
+    remaining_turns = _scheduled_action_remaining_turns(scheduled_action=scheduled_action, world_turn=world_turn)
+    if soft_needs_triggered and remaining_turns > _SOFT_INTERRUPT_MAX_REMAINING_TURNS:
+        return PlanMonitorResult(
+            decision="abort",
+            reason="soft_restore_needs_interrupt",
+            dominant_pressure="restore_needs",
+            dominant_pressure_value=max(sleepiness, thirst, hunger),
             should_run_decision_pipeline=True,
             should_clear_action_queue=True,
             debug_context=debug_context,

@@ -16,6 +16,7 @@ from .models import (
     LAYER_THREAT,
     LAYER_SPATIAL,
     LAYER_GOAL,
+    LAYER_SEMANTIC,
 )
 from .store import ensure_memory_v3, add_memory_record
 
@@ -145,6 +146,8 @@ _NO_DEDUP_KINDS: frozenset[str] = frozenset({
     "global_goal_completed",
 })
 MEMORY_EVENT_DEDUP_WINDOW_TURNS = 30
+STALKERS_SEEN_DEDUP_WINDOW_TURNS = 60
+STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION = 5
 
 
 def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | None:
@@ -199,6 +202,259 @@ def _find_recent_dedup_record(
     return best
 
 
+def _entity_overlap_ratio(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    base = max(1, min(len(left), len(right)))
+    return len(left.intersection(right)) / float(base)
+
+
+def _find_stalkers_seen_match(
+    *,
+    records: dict[str, Any],
+    location_id: str,
+    world_turn: int,
+    entity_set: set[str],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    cutoff = world_turn - STALKERS_SEEN_DEDUP_WINDOW_TURNS
+    best_episodic: dict[str, Any] | None = None
+    best_semantic: dict[str, Any] | None = None
+    best_ep_turn = -1
+    best_sem_turn = -1
+    for raw in records.values():
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("location_id") or "") != location_id:
+            continue
+        rec_turn = int(raw.get("created_turn", 0))
+        details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        last_turn = int(details.get("last_seen_turn", rec_turn))
+        if last_turn < cutoff:
+            continue
+        raw_entities = raw.get("entity_ids") or []
+        rec_entities = {str(entity_id) for entity_id in raw_entities if entity_id}
+        overlap = _entity_overlap_ratio(entity_set, rec_entities) if rec_entities else 0.0
+        same_or_overlap = rec_entities == entity_set or overlap >= 0.7
+        if not same_or_overlap:
+            continue
+        kind = str(raw.get("kind") or "")
+        if kind == "stalkers_seen" and last_turn >= best_ep_turn:
+            best_ep_turn = last_turn
+            best_episodic = raw
+        elif kind == "semantic_stalkers_seen" and last_turn >= best_sem_turn:
+            best_sem_turn = last_turn
+            best_semantic = raw
+    return best_episodic, best_semantic
+
+
+def _update_stalkers_seen_record(
+    *,
+    raw: dict[str, Any],
+    world_turn: int,
+    entity_ids: tuple[str, ...],
+    seen_names: list[str],
+) -> None:
+    details = raw.setdefault("details", {})
+    first_seen_turn = int(details.get("first_seen_turn", raw.get("created_turn", world_turn)))
+    details["first_seen_turn"] = first_seen_turn
+    details["last_seen_turn"] = world_turn
+    details["times_seen"] = int(details.get("times_seen", 1)) + 1
+    details["last_observed_group_size"] = len(entity_ids)
+    details["unique_entity_count"] = len(entity_ids)
+    if seen_names:
+        prev_names = [str(name) for name in (details.get("seen_names") or []) if name]
+        details["seen_names"] = list(dict.fromkeys(prev_names + seen_names))
+    raw["entity_ids"] = list(entity_ids)
+    raw["confidence"] = min(1.0, float(raw.get("confidence", 0.7)) + 0.01)
+
+
+def _upsert_semantic_stalkers_seen(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    world_turn: int,
+    location_id: str,
+    entity_ids: tuple[str, ...],
+    seen_names: list[str],
+    base_summary: str,
+    existing_semantic: dict[str, Any] | None,
+) -> None:
+    if existing_semantic is not None:
+        _update_stalkers_seen_record(
+            raw=existing_semantic,
+            world_turn=world_turn,
+            entity_ids=entity_ids,
+            seen_names=seen_names,
+        )
+        existing_semantic["layer"] = LAYER_SEMANTIC
+        existing_semantic["kind"] = "semantic_stalkers_seen"
+        existing_semantic["summary"] = base_summary
+        existing_semantic["tags"] = list(dict.fromkeys(list(existing_semantic.get("tags", [])) + ["social", "location_population", "stalkers_seen"]))
+        return
+
+    semantic_record = MemoryRecord(
+        id="mem_sem_stalkers_" + uuid.uuid4().hex[:10],
+        agent_id=agent_id,
+        layer=LAYER_SEMANTIC,
+        kind="semantic_stalkers_seen",
+        created_turn=world_turn,
+        last_accessed_turn=None,
+        summary=base_summary,
+        details={
+            "first_seen_turn": world_turn,
+            "last_seen_turn": world_turn,
+            "times_seen": 1,
+            "seen_names": list(dict.fromkeys(seen_names)),
+            "unique_entity_count": len(entity_ids),
+            "last_observed_group_size": len(entity_ids),
+            "memory_type": "observation",
+            "action_kind": "stalkers_seen",
+        },
+        location_id=location_id,
+        entity_ids=entity_ids,
+        tags=("social", "location_population", "stalkers_seen"),
+        importance=0.65,
+        confidence=0.72,
+        source="inferred",
+    )
+    add_memory_record(agent, semantic_record)
+
+
+def _trim_stalkers_seen_per_location(
+    *,
+    records: dict[str, Any],
+    location_id: str,
+) -> None:
+    episodic: list[tuple[str, int]] = []
+    for record_id, raw in records.items():
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("kind") or "") != "stalkers_seen":
+            continue
+        if str(raw.get("location_id") or "") != location_id:
+            continue
+        episodic.append((record_id, int(raw.get("created_turn", 0))))
+    if len(episodic) <= STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION:
+        return
+    episodic.sort(key=lambda pair: pair[1])
+    to_archive = episodic[: max(0, len(episodic) - STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION)]
+    for record_id, _ in to_archive:
+        raw = records.get(record_id)
+        if isinstance(raw, dict):
+            raw["status"] = "archived"
+
+
+def _handle_stalkers_seen_event(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    record: MemoryRecord,
+    world_turn: int,
+) -> bool:
+    mem_v3 = ensure_memory_v3(agent)
+    records: dict[str, Any] = mem_v3.get("records", {})
+    location_id = str(record.location_id or "")
+    if not location_id:
+        return False
+
+    seen_names = [str(name) for name in (record.details.get("names") or []) if name]
+    entity_set = {str(entity_id) for entity_id in record.entity_ids if entity_id}
+    episodic_match, semantic_match = _find_stalkers_seen_match(
+        records=records,
+        location_id=location_id,
+        world_turn=world_turn,
+        entity_set=entity_set,
+    )
+
+    _upsert_semantic_stalkers_seen(
+        agent_id=agent_id,
+        agent=agent,
+        world_turn=world_turn,
+        location_id=location_id,
+        entity_ids=record.entity_ids,
+        seen_names=seen_names,
+        base_summary=record.summary,
+        existing_semantic=semantic_match,
+    )
+
+    if episodic_match is not None:
+        _update_stalkers_seen_record(
+            raw=episodic_match,
+            world_turn=world_turn,
+            entity_ids=record.entity_ids,
+            seen_names=seen_names,
+        )
+        return True
+
+    add_memory_record(agent, record)
+    _trim_stalkers_seen_per_location(records=records, location_id=location_id)
+    return True
+
+
+def _upsert_semantic_route_traveled(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    record: MemoryRecord,
+    world_turn: int,
+) -> bool:
+    details = record.details if isinstance(record.details, dict) else {}
+    from_location_id = str(details.get("from_location_id") or details.get("from_loc") or "")
+    to_location_id = str(details.get("to_location_id") or details.get("to_loc") or record.location_id or "")
+    if not from_location_id or not to_location_id:
+        return False
+
+    mem_v3 = ensure_memory_v3(agent)
+    records: dict[str, Any] = mem_v3.get("records", {})
+    existing_semantic: dict[str, Any] | None = None
+    for raw in records.values():
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("kind") or "") != "semantic_route_traveled":
+            continue
+        raw_details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        if str(raw_details.get("from_location_id") or "") != from_location_id:
+            continue
+        if str(raw_details.get("to_location_id") or "") != to_location_id:
+            continue
+        existing_semantic = raw
+        break
+
+    if existing_semantic is not None:
+        raw_details = existing_semantic.setdefault("details", {})
+        raw_details["times_traveled"] = int(raw_details.get("times_traveled", 1)) + 1
+        raw_details["last_traveled_turn"] = world_turn
+        existing_semantic["confidence"] = min(1.0, float(existing_semantic.get("confidence", 0.72)) + 0.01)
+        return True
+
+    semantic_record = MemoryRecord(
+        id="mem_sem_route_" + uuid.uuid4().hex[:10],
+        agent_id=agent_id,
+        layer=LAYER_SPATIAL,
+        kind="semantic_route_traveled",
+        created_turn=world_turn,
+        last_accessed_turn=None,
+        summary=record.summary,
+        details={
+            "from_location_id": from_location_id,
+            "to_location_id": to_location_id,
+            "times_traveled": 1,
+            "last_traveled_turn": world_turn,
+            "known_safe": True,
+            "known_risky": False,
+            "memory_type": "action",
+            "action_kind": "travel_hop",
+        },
+        location_id=to_location_id,
+        tags=("route", "travel", "spatial"),
+        importance=0.6,
+        confidence=0.72,
+        source="inferred",
+    )
+    add_memory_record(agent, semantic_record)
+    return True
+
+
 def write_memory_event_to_v3(
     *,
     agent_id: str,
@@ -227,6 +483,23 @@ def write_memory_event_to_v3(
     )
     if record is None:
         return
+
+    if record.kind == "stalkers_seen":
+        if _handle_stalkers_seen_event(
+            agent_id=agent_id,
+            agent=agent,
+            record=record,
+            world_turn=world_turn,
+        ):
+            return
+
+    if record.kind == "travel_hop":
+        _upsert_semantic_route_traveled(
+            agent_id=agent_id,
+            agent=agent,
+            record=record,
+            world_turn=world_turn,
+        )
 
     # Dedup low-value repeated observations within the window.
     if record.kind in _DEDUP_KINDS and record.kind not in _NO_DEDUP_KINDS:
@@ -370,6 +643,10 @@ def _map_event_to_record(
 
 def _extract_entity_ids(effects: dict[str, Any]) -> tuple[str, ...]:
     ids: list[str] = []
+    for key in ("entity_ids", "seen_agent_ids", "agent_ids"):
+        value = effects.get(key)
+        if isinstance(value, (list, tuple)):
+            ids.extend(str(v) for v in value if v)
     for key in (
         "agent_id",
         "target_id",

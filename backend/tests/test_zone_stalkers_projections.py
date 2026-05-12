@@ -281,3 +281,28 @@ def test_size_report_includes_debug_map_lite():
     assert report["debug_map_lite_projection_size_bytes"] > 0
     # lite should be smaller than full/raw state
     assert report["debug_map_lite_projection_size_bytes"] <= report["state_size_bytes"]
+
+
+def test_full_projection_includes_memory_stats_story_and_terminal_state():
+    state = _sample_state()
+    state["agents"]["a1"]["has_left_zone"] = True
+    state["agents"]["a1"]["global_goal_achieved"] = True
+    state["agents"]["a1"]["current_goal"] = "restore_needs"
+    state["agents"]["a1"]["scheduled_action"] = {"type": "explore_anomaly_location", "turns_remaining": 5}
+    state["agents"]["a1"]["memory_v3"]["records"]["r2"] = {
+        "id": "r2",
+        "kind": "stalkers_seen",
+        "layer": "episodic",
+        "created_turn": 11,
+        "summary": "saw stalkers",
+        "details": {"action_kind": "stalkers_seen", "memory_type": "observation"},
+    }
+    projected = project_zone_state(state=state, mode="full")
+    agent = projected["agents"]["a1"]
+    assert "memory_v3_stats" in agent
+    assert "memory_health" in agent
+    assert "story_events" in agent
+    assert "sleep_need" in agent
+    assert agent["current_goal"] == "left_zone"
+    assert agent["scheduled_action"] is None
+    assert agent["terminal_state"]["kind"] == "left_zone"

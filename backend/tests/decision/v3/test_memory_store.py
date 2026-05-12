@@ -11,6 +11,7 @@ from app.games.zone_stalkers.memory.store import (
     MEMORY_V3_MAX_RECORDS,
     trim_memory_v3_to_cap,
     normalize_agent_memory_state,
+    MEMORY_V3_MAX_STALKERS_SEEN_RECORDS,
 )
 
 
@@ -202,3 +203,19 @@ def test_trim_memory_v3_to_cap_returns_evicted_count() -> None:
     evicted = trim_memory_v3_to_cap(agent)
     assert evicted == 1
     assert len(agent["memory_v3"]["records"]) == MEMORY_V3_MAX_RECORDS
+
+
+def test_trim_memory_v3_enforces_stalkers_seen_budget() -> None:
+    agent: dict = {}
+    for i in range(MEMORY_V3_MAX_STALKERS_SEEN_RECORDS + 10):
+        add_memory_record(
+            agent,
+            _make_record(
+                record_id=f"st_{i:04d}",
+                kind="stalkers_seen",
+                created_turn=100 + i,
+            ),
+        )
+    records = agent["memory_v3"]["records"]
+    stalkers_seen_count = sum(1 for raw in records.values() if raw.get("kind") == "stalkers_seen")
+    assert stalkers_seen_count == MEMORY_V3_MAX_STALKERS_SEEN_RECORDS

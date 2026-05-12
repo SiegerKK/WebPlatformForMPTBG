@@ -62,7 +62,7 @@ def test_assess_continues_emergency_flee() -> None:
 
 def test_assess_projects_hour_boundary_values() -> None:
     agent = _base_agent()
-    agent["thirst"] = 76
+    agent["thirst"] = 86
     result = assess_scheduled_action_v3(
         agent_id="bot1",
         agent=agent,
@@ -146,3 +146,32 @@ def test_combat_ready_visible_target_interrupts_support_action() -> None:
     )
     assert result.decision == "abort"
     assert result.reason == "target_visible_and_combat_ready"
+
+
+def test_soft_rest_need_allows_short_action_to_finish() -> None:
+    agent = _base_agent()
+    agent["sleepiness"] = 85
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "explore_anomaly_location", "turns_remaining": 2},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "continue"
+
+
+def test_soft_rest_need_interrupts_long_action() -> None:
+    agent = _base_agent()
+    agent["sleepiness"] = 85
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "explore_anomaly_location", "turns_remaining": 8},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "abort"
+    assert result.reason == "soft_restore_needs_interrupt"
+    assert result.debug_context is not None
+    assert result.debug_context["sleep_need"]["scale"] == "sleepiness_high_means_tired"

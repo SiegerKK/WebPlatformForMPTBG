@@ -16,6 +16,7 @@ MEMORY_V3_MAX_RECORDS = 500
 MEMORY_V3_IMPORT_LEGACY_LIMIT = 200
 MEMORY_V3_RETRIEVAL_MAX_RESULTS = 50
 MEMORY_V3_RETRIEVAL_MAX_CANDIDATES = 200
+MEMORY_V3_MAX_STALKERS_SEEN_RECORDS = 75
 
 # Layers whose records must not be deleted during cap-trimming.
 _PROTECTED_LAYERS = frozenset({"threat", "goal", "semantic"})
@@ -250,10 +251,25 @@ def trim_memory_v3_to_cap(
     """Evict records until hard cap is respected and indexes are rebuilt."""
     mem_v3 = ensure_memory_v3(agent)
     records: dict[str, Any] = mem_v3.get("records", {})
+    evicted_total = 0
+
+    # Soft per-kind budget: keep stalkers_seen from dominating the store.
+    stalkers_seen_ids = [
+        rid for rid, raw in records.items()
+        if isinstance(raw, dict) and str(raw.get("kind") or "") == "stalkers_seen"
+    ]
+    if len(stalkers_seen_ids) > MEMORY_V3_MAX_STALKERS_SEEN_RECORDS:
+        stalkers_seen_ids.sort(key=lambda rid: _coerce_int(records[rid].get("created_turn"), 0))
+        for rid in stalkers_seen_ids[: len(stalkers_seen_ids) - MEMORY_V3_MAX_STALKERS_SEEN_RECORDS]:
+            records.pop(rid, None)
+            evicted_total += 1
+
     over = len(records) - max_records
     if over <= 0:
+        if evicted_total > 0:
+            _rebuild_indexes_from_records(mem_v3)
         mem_v3["stats"]["records_count"] = len(records)
-        return 0
+        return evicted_total
 
     ranked = sorted(
         records.keys(),
@@ -262,10 +278,11 @@ def trim_memory_v3_to_cap(
     evicted_ids = ranked[:over]
     for rid in evicted_ids:
         records.pop(rid, None)
+    evicted_total += len(evicted_ids)
 
     _rebuild_indexes_from_records(mem_v3)
     mem_v3["stats"]["records_count"] = len(records)
-    return len(evicted_ids)
+    return evicted_total
 
 
 def normalize_agent_memory_state(agent: dict[str, Any]) -> dict[str, int]:
