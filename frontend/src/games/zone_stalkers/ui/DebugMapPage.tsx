@@ -13,7 +13,7 @@
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
-import type { DebugMapPageProps, LocationConn, ZoneLocation } from './debugMap/types';
+import type { DebugMapPageProps, LocationConn, ZoneLocation, LocationImageSlot } from './debugMap/types';
 import {
   CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
@@ -1302,7 +1302,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       ref={pageWrapRef}
       style={{
         ...s.page,
-        ...(isFullscreen ? { background: '#060b14', height: '100vh', padding: 8, boxSizing: 'border-box', alignItems: 'stretch' } : {}),
+        ...(isFullscreen ? { background: '#060b14', height: '100vh', padding: 8, boxSizing: 'border-box', alignItems: 'stretch', gridTemplateColumns: 'minmax(600px, 1fr) minmax(460px, 560px)' } : {}),
       }}
     >
       {/* ── Canvas ────────────────────────────────────────── */}
@@ -1945,6 +1945,28 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             onAgentClick={(agentId) => setProfileAgentId(agentId)}
             onTraderClick={(traderId) => setProfileTraderId(traderId)}
             onDeleteLoc={() => handleDeleteLoc(selectedLocId!)}
+            onUploadLocationImageSlot={contextId ? async (slot: LocationImageSlot, file: File) => {
+              const resp = await locationsApi.uploadImageSlot(contextId, selectedLocId!, file, slot);
+              const url = resp.data.image_url ?? resp.data.url;
+              await sendCommand('debug_update_location', {
+                loc_id: selectedLocId!,
+                image_slots: { [slot]: url },
+                primary_image_slot: resp.data.primary_image_slot ?? slot,
+              });
+            } : undefined}
+            onDeleteLocationImageSlot={contextId ? async (slot: LocationImageSlot) => {
+              await locationsApi.deleteImageSlot(contextId, selectedLocId!, slot);
+              await sendCommand('debug_update_location', {
+                loc_id: selectedLocId!,
+                image_slots: { [slot]: null },
+              });
+            } : undefined}
+            onSetPrimaryImageSlot={async (slot: LocationImageSlot) => {
+              await sendCommand('debug_set_location_primary_image', {
+                loc_id: selectedLocId!,
+                slot,
+              });
+            }}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
           <RegionDetailPanel

@@ -2,9 +2,15 @@
  * DetailPanels — the right-hand side panels shown when a location or region
  * is selected, plus the empty hint when nothing is selected.
  */
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { AgentCreateModal } from '../AgentProfileModal';
-import type { ZoneLocation, ZoneMapState, LocationConn } from './types';
+import type { ZoneLocation, ZoneMapState, LocationConn, LocationImageSlot } from './types';
+import {
+  LOCATION_IMAGE_SLOTS,
+  LOCATION_IMAGE_SLOT_LABELS,
+  LOCATION_IMAGE_SLOT_ICONS,
+  getPrimaryLocationImageUrl,
+} from './types';
 import { TERRAIN_TYPE_LABELS, REGION_COLOR_PALETTE } from './constants';
 import { s } from './styles';
 import { Badge, Section, DetailRow, EmptyRow } from './UIKit';
@@ -30,6 +36,9 @@ export function LocationDetailPanel({
   onAgentClick,
   onTraderClick,
   onDeleteLoc,
+  onUploadLocationImageSlot,
+  onDeleteLocationImageSlot,
+  onSetPrimaryImageSlot,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -56,10 +65,25 @@ export function LocationDetailPanel({
   onTraderClick?: (traderId: string) => void;
   /** Called when the user wants to delete this location entirely. */
   onDeleteLoc?: () => void;
+  /** Upload an image for a specific slot. */
+  onUploadLocationImageSlot?: (slot: LocationImageSlot, file: File) => Promise<void>;
+  /** Delete the image for a specific slot. */
+  onDeleteLocationImageSlot?: (slot: LocationImageSlot) => Promise<void>;
+  /** Set the primary image slot. */
+  onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | 'item' | null>(null);
+  const [selectedSlot, setSelectedSlot] = useState<LocationImageSlot>('clear');
+  const [imgUploading, setImgUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Build a unified person list from loc.agents — IDs may belong to agents OR traders.
+  // ── Safe collection lookups ──────────────────────────────────────────────
+  const agentsById = zoneState.agents ?? {};
+  const tradersById = zoneState.traders ?? {};
+  const mutantsById = zoneState.mutants ?? {};
+  const occupantIds: string[] = Array.isArray(loc.agents) ? loc.agents : [];
+
+  // Build a unified person list from occupantIds — IDs may belong to agents OR traders.
   type PersonEntry = {
     id: string;
     name: string;
@@ -69,17 +93,45 @@ export function LocationDetailPanel({
     is_alive: boolean;
     controller: { kind: string };
   };
-  const allPersons: PersonEntry[] = loc.agents.flatMap((id): PersonEntry[] => {
-    const stalker = zoneState.agents[id];
-    if (stalker) return [{ id: stalker.id, name: stalker.name, isTrader: false, hp: stalker.hp, max_hp: stalker.max_hp, is_alive: stalker.is_alive, controller: stalker.controller }];
-    const trader = zoneState.traders[id];
-    if (trader) return [{ id: trader.id, name: trader.name, isTrader: true, hp: 100, max_hp: 100, is_alive: true, controller: { kind: 'npc' } }];
+  const allPersons: PersonEntry[] = occupantIds.flatMap((id): PersonEntry[] => {
+    const stalker = agentsById[id];
+    if (stalker) {
+      return [{
+        id: stalker.id ?? id,
+        name: stalker.name ?? id,
+        isTrader: false,
+        hp: Number.isFinite(stalker.hp) ? stalker.hp : 0,
+        max_hp: Number.isFinite(stalker.max_hp) ? stalker.max_hp : 100,
+        is_alive: stalker.is_alive ?? true,
+        controller: stalker.controller ?? { kind: 'bot' },
+      }];
+    }
+    const trader = tradersById[id];
+    if (trader) {
+      return [{
+        id: trader.id ?? id,
+        name: trader.name ?? id,
+        isTrader: true,
+        hp: 100,
+        max_hp: 100,
+        is_alive: true,
+        controller: { kind: 'npc' },
+      }];
+    }
     return [];
   });
 
-  const mutants = loc.agents.map((id) => zoneState.mutants[id]).filter(Boolean);
+  const mutants = occupantIds
+    .map((id) => mutantsById[id])
+    .filter((m): m is NonNullable<typeof m> => Boolean(m));
   const aliveMutants = mutants.filter((m) => m.is_alive);
   const deadMutants = mutants.filter((m) => !m.is_alive);
+
+  // IDs that are in loc.agents but not found in any known collection
+  const unknownOccupantIds = occupantIds.filter(
+    (id) => !agentsById[id] && !tradersById[id] && !mutantsById[id],
+  );
+
   const locationTrace = zoneState.debug?.location_hunt_traces?.[loc.id];
   const positiveLeads = locationTrace?.positive_leads ?? [];
   const negativeLeads = locationTrace?.negative_leads ?? [];
@@ -89,15 +141,29 @@ export function LocationDetailPanel({
   const combatHuntEvents = locationTrace?.combat_hunt_events ?? [];
   const getAgentName = (id?: string | null) => {
     if (!id) return "unknown";
-    return zoneState.agents[id]?.name ?? zoneState.traders[id]?.name ?? id;
+    return agentsById[id]?.name ?? tradersById[id]?.name ?? id;
+  };
+
+  const primaryImageUrl = getPrimaryLocationImageUrl(loc);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !onUploadLocationImageSlot) return;
+    setImgUploading(true);
+    try {
+      await onUploadLocationImageSlot(selectedSlot, file);
+    } finally {
+      setImgUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   return (
     <div style={s.detail}>
       {/* Header */}
       <div style={s.detailHeader}>
-        <div>
-          <div style={s.detailName}>{loc.name}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ ...s.detailName, wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{loc.name}</div>
           <div style={s.detailMeta}>
             {TERRAIN_TYPE_LABELS[loc.terrain_type ?? ''] ?? (loc.terrain_type ?? '—')}
             {(loc.anomaly_activity ?? 0) > 0 && (
@@ -105,7 +171,7 @@ export function LocationDetailPanel({
             )}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', flexShrink: 0 }}>
           <button onClick={onEdit} style={s.editDetailBtn} title="Редактировать локацию">
             ✏ Редактировать
           </button>
@@ -122,24 +188,140 @@ export function LocationDetailPanel({
         </div>
       </div>
 
-      {/* Image */}
-      {loc.image_url && (
-        <Section label="🖼 Изображение">
+      {/* Image Slots */}
+      <Section label="🖼 Изображения локации">
+        {/* Primary image preview */}
+        {primaryImageUrl ? (
           <img
-            key={loc.image_url}
-            src={loc.image_url}
+            key={primaryImageUrl}
+            src={primaryImageUrl}
             alt={loc.name}
-            style={{ width: '100%', borderRadius: 6, objectFit: 'cover', maxHeight: 200, border: '1px solid #1e3a5f' }}
+            style={{
+              width: '100%',
+              maxHeight: 360,
+              minHeight: 220,
+              borderRadius: 8,
+              objectFit: 'cover',
+              border: '1px solid #1e3a5f',
+              background: '#020617',
+              display: 'block',
+            }}
           />
-        </Section>
-      )}
+        ) : (
+          <div style={{
+            width: '100%',
+            minHeight: 80,
+            borderRadius: 8,
+            border: '1px dashed #1e3a5f',
+            background: '#020617',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#334155',
+            fontSize: '0.75rem',
+          }}>
+            Нет изображения
+          </div>
+        )}
+
+        {/* Slot selector buttons (show primary / has-image indicators) */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+          {LOCATION_IMAGE_SLOTS.map((slot) => {
+            const hasImage = Boolean(loc.image_slots?.[slot]);
+            const isPrimary = loc.primary_image_slot === slot || (!loc.primary_image_slot && slot === 'clear' && Boolean(loc.image_url) && !loc.image_slots);
+            return (
+              <button
+                key={slot}
+                onClick={() => {
+                  if (hasImage && onSetPrimaryImageSlot) onSetPrimaryImageSlot(slot);
+                }}
+                disabled={!hasImage || !onSetPrimaryImageSlot}
+                title={hasImage ? 'Сделать приоритетной' : 'Сначала загрузите изображение'}
+                style={{
+                  padding: '2px 7px',
+                  fontSize: '0.68rem',
+                  cursor: hasImage && onSetPrimaryImageSlot ? 'pointer' : 'default',
+                  background: isPrimary ? '#1d4ed8' : (hasImage ? '#1e293b' : '#0f172a'),
+                  color: isPrimary ? '#bfdbfe' : (hasImage ? '#94a3b8' : '#334155'),
+                  borderTop: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+                  borderRight: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+                  borderBottom: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+                  borderLeft: `3px solid ${isPrimary ? '#60a5fa' : (hasImage ? '#334155' : '#1e293b')}`,
+                  borderRadius: 4,
+                  transition: 'background 0.15s',
+                }}
+              >
+                {LOCATION_IMAGE_SLOT_ICONS[slot]} {isPrimary ? '★ ' : ''}{LOCATION_IMAGE_SLOT_LABELS[slot]}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Upload / delete controls */}
+        {(onUploadLocationImageSlot || onDeleteLocationImageSlot) && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 6 }}>
+            <select
+              value={selectedSlot}
+              onChange={(e) => setSelectedSlot(e.target.value as LocationImageSlot)}
+              style={{
+                background: '#0f172a',
+                color: '#94a3b8',
+                border: '1px solid #334155',
+                borderRadius: 4,
+                fontSize: '0.72rem',
+                padding: '2px 4px',
+                cursor: 'pointer',
+              }}
+            >
+              {LOCATION_IMAGE_SLOTS.map((slot) => (
+                <option key={slot} value={slot}>
+                  {LOCATION_IMAGE_SLOT_ICONS[slot]} {LOCATION_IMAGE_SLOT_LABELS[slot]}
+                </option>
+              ))}
+            </select>
+
+            {onUploadLocationImageSlot && (
+              <label
+                style={{
+                  ...s.spawnBtn,
+                  color: '#86efac',
+                  cursor: imgUploading ? 'wait' : 'pointer',
+                  opacity: imgUploading ? 0.6 : 1,
+                  display: 'inline-block',
+                }}
+                title={`Загрузить изображение для слота «${LOCATION_IMAGE_SLOT_LABELS[selectedSlot]}»`}
+              >
+                {imgUploading ? '⏳' : '📤'} Загрузить
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  style={{ display: 'none' }}
+                  onChange={handleFileChange}
+                  disabled={imgUploading}
+                />
+              </label>
+            )}
+
+            {onDeleteLocationImageSlot && loc.image_slots?.[selectedSlot] && (
+              <button
+                style={{ ...s.spawnBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
+                onClick={() => onDeleteLocationImageSlot(selectedSlot)}
+                title={`Удалить изображение слота «${LOCATION_IMAGE_SLOT_LABELS[selectedSlot]}»`}
+              >
+                🗑 Удалить
+              </button>
+            )}
+          </div>
+        )}
+      </Section>
 
       {/* Characteristics */}
       <Section label="🌍 Характеристики">
         {regionName && (
           <DetailRow>
             <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Регион</span>
-            <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>{regionName}</span>
+            <span style={{ color: '#cbd5e1', fontSize: '0.8rem', minWidth: 0, wordBreak: 'break-word' }}>{regionName}</span>
           </DetailRow>
         )}
         {loc.terrain_type && (
@@ -152,7 +334,7 @@ export function LocationDetailPanel({
         )}
         <DetailRow>
           <span style={{ color: '#94a3b8', fontSize: '0.72rem', width: 110, flexShrink: 0 }}>Аном. активность</span>
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
             <div style={{ flex: 1, height: 5, background: '#0f172a', borderRadius: 3, overflow: 'hidden' }}>
               <div style={{ height: '100%', width: `${((loc.anomaly_activity ?? 0) / 10) * 100}%`, background: '#a855f7', borderRadius: 3 }} />
             </div>
@@ -182,10 +364,10 @@ export function LocationDetailPanel({
             const target = zoneState.locations[c.to];
             return (
               <DetailRow key={c.to}>
-                <span style={{ color: '#cbd5e1', fontSize: '0.8rem', flex: 1 }}>
+                <span style={{ color: '#cbd5e1', fontSize: '0.8rem', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {target?.name ?? c.to}
                 </span>
-                <span style={{ color: c.type === 'dangerous' ? '#ef4444' : '#475569', fontSize: '0.68rem', marginRight: 4 }}>
+                <span style={{ color: c.type === 'dangerous' ? '#ef4444' : '#475569', fontSize: '0.68rem', marginRight: 4, flexShrink: 0 }}>
                   {c.type}
                 </span>
                 <input
@@ -208,9 +390,10 @@ export function LocationDetailPanel({
                     padding: '1px 4px',
                     textAlign: 'center',
                     marginRight: 4,
+                    flexShrink: 0,
                   }}
                 />
-                <span style={{ color: '#475569', fontSize: '0.65rem', marginRight: 4 }}>м</span>
+                <span style={{ color: '#475569', fontSize: '0.65rem', marginRight: 4, flexShrink: 0 }}>м</span>
                 <button
                   style={{
                     background: 'none',
@@ -219,6 +402,7 @@ export function LocationDetailPanel({
                     fontSize: '0.8rem',
                     padding: '0 4px',
                     color: c.closed ? '#ef4444' : '#475569',
+                    flexShrink: 0,
                   }}
                   onClick={() => onToggleConnectionClosed(c.to)}
                   title={c.closed ? 'Открыть переход' : 'Закрыть переход'}
@@ -266,10 +450,10 @@ export function LocationDetailPanel({
 
             {positiveLeads.slice(0, 8).map((lead) => (
               <DetailRow key={`lead-${lead.id}`}>
-                <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1 }}>
+                <span style={{ color: '#cbd5e1', fontSize: '0.75rem', flex: 1, minWidth: 0 }}>
                   {lead.kind} · {Math.round(lead.confidence * 100)}% · t{lead.turn}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>
                   {getAgentName(lead.hunter_id)} → {lead.target_id ?? "target?"}
                 </span>
               </DetailRow>
@@ -277,7 +461,7 @@ export function LocationDetailPanel({
 
             {negativeLeads.slice(0, 10).map((lead) => (
               <DetailRow key={`neg-${lead.id}`}>
-                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1 }}>
+                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1, minWidth: 0 }}>
                   {lead.kind}
                   {lead.source_kind ? ` · src=${lead.source_kind}` : ""}
                   {lead.failed_search_count != null && lead.failed_search_count > 0 ? ` · miss=${lead.failed_search_count}` : ""}
@@ -285,7 +469,7 @@ export function LocationDetailPanel({
                   {" · "}
                   {Math.round(lead.confidence * 100)}% · t{lead.turn}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>
                   {lead.source_ref}
                 </span>
               </DetailRow>
@@ -293,12 +477,12 @@ export function LocationDetailPanel({
 
             {exhaustedFor.slice(0, 8).map((item) => (
               <DetailRow key={`exh-${item.hunter_id}-${item.target_id ?? "target"}`}>
-                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1 }}>
+                <span style={{ color: '#fda4af', fontSize: '0.75rem', flex: 1, minWidth: 0 }}>
                   ⛔ exhausted
                   {item.failed_search_count ? ` · miss=${item.failed_search_count}` : ""}
                   {item.cooldown_until_turn ? ` · cd→${item.cooldown_until_turn}` : ""}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>
                   {getAgentName(item.hunter_id)} → {item.target_id ?? "target?"}
                 </span>
               </DetailRow>
@@ -306,28 +490,28 @@ export function LocationDetailPanel({
 
             {routesIn.slice(0, 10).map((route) => (
               <DetailRow key={`in-${route.source_ref}`}>
-                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1 }}>
+                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1, minWidth: 0 }}>
                   ← {route.from_location_id ?? 'unknown'} · {Math.round(route.confidence * 100)}% · {route.reason} · t{route.turn}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{getAgentName(route.hunter_id)}</span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{getAgentName(route.hunter_id)}</span>
               </DetailRow>
             ))}
 
             {routesOut.slice(0, 10).map((route) => (
               <DetailRow key={`out-${route.source_ref}`}>
-                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1 }}>
+                <span style={{ color: '#a5b4fc', fontSize: '0.75rem', flex: 1, minWidth: 0 }}>
                   → {route.to_location_id ?? 'unknown'} · {Math.round(route.confidence * 100)}% · {route.reason} · t{route.turn}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{getAgentName(route.hunter_id)}</span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{getAgentName(route.hunter_id)}</span>
               </DetailRow>
             ))}
 
             {combatHuntEvents.slice(0, 10).map((event) => (
               <DetailRow key={`evt-${event.source_ref}`}>
-                <span style={{ color: '#fbbf24', fontSize: '0.75rem', flex: 1 }}>
+                <span style={{ color: '#fbbf24', fontSize: '0.75rem', flex: 1, minWidth: 0 }}>
                   {event.kind} · t{event.turn} · {event.summary}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{getAgentName(event.hunter_id)}</span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{getAgentName(event.hunter_id)}</span>
               </DetailRow>
             ))}
           </>
@@ -350,7 +534,7 @@ export function LocationDetailPanel({
                 style={isClickable ? { cursor: 'pointer' } : undefined}
                 onClick={handleClick}
               >
-                <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem', flex: 1 }}>
+                <span style={{ color: a.is_alive ? '#f8fafc' : '#475569', fontSize: '0.8rem', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {a.name}
                   {!a.is_alive && (
                     <span style={{ color: '#ef4444', fontSize: '0.65rem', marginLeft: 4 }}>(мёртв)</span>
@@ -360,7 +544,7 @@ export function LocationDetailPanel({
                   )}
                 </span>
                 {!a.isTrader && (
-                  <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{a.hp}/{a.max_hp} HP</span>
+                  <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{a.hp}/{a.max_hp} HP</span>
                 )}
                 <span style={{
                   background: a.isTrader ? '#78350f' : (a.controller.kind === 'human' ? '#1d4ed8' : '#1e293b'),
@@ -378,6 +562,19 @@ export function LocationDetailPanel({
         )}
       </Section>
 
+      {/* Unknown occupants — debug only */}
+      {unknownOccupantIds.length > 0 && (
+        <Section label={`⚠️ Unknown occupants (${unknownOccupantIds.length})`}>
+          {unknownOccupantIds.map((id) => (
+            <DetailRow key={id}>
+              <span style={{ color: '#fca5a5', fontSize: '0.75rem', wordBreak: 'break-all', flex: 1 }}>
+                {id}
+              </span>
+            </DetailRow>
+          ))}
+        </Section>
+      )}
+
       {/* Mutants */}
       <Section label={`☣️ Мутанты (${mutants.length})`}>
         {mutants.length === 0 ? (
@@ -392,10 +589,10 @@ export function LocationDetailPanel({
             </div>
             {mutants.map((m) => (
               <DetailRow key={m.id}>
-                <span style={{ color: m.is_alive ? '#fca5a5' : '#475569', fontSize: '0.8rem', flex: 1 }}>
+                <span style={{ color: m.is_alive ? '#fca5a5' : '#475569', fontSize: '0.8rem', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {m.name}
                 </span>
-                <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{m.hp}/{m.max_hp} HP</span>
+                <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{m.hp}/{m.max_hp} HP</span>
               </DetailRow>
             ))}
           </>
@@ -407,8 +604,8 @@ export function LocationDetailPanel({
         <Section label="💎 Artifacts">
           {loc.artifacts.map((a) => (
             <DetailRow key={a.id}>
-              <span style={{ color: '#a5b4fc', fontSize: '0.8rem' }}>{a.name}</span>
-              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{a.value}&nbsp;RU</span>
+              <span style={{ color: '#a5b4fc', fontSize: '0.8rem', flex: 1, minWidth: 0 }}>{a.name}</span>
+              <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{a.value}&nbsp;RU</span>
             </DetailRow>
           ))}
         </Section>
@@ -419,8 +616,8 @@ export function LocationDetailPanel({
         <Section label="📦 Ground items">
           {loc.items.map((item) => (
             <DetailRow key={item.id}>
-              <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>{item.name}</span>
-              <span style={{ color: '#64748b', fontSize: '0.68rem' }}>{item.type}</span>
+              <span style={{ color: '#cbd5e1', fontSize: '0.8rem', flex: 1, minWidth: 0 }}>{item.name}</span>
+              <span style={{ color: '#64748b', fontSize: '0.68rem', flexShrink: 0 }}>{item.type}</span>
             </DetailRow>
           ))}
         </Section>
@@ -519,7 +716,7 @@ export function RegionDetailPanel({
   return (
     <div style={s.detail}>
       <div style={s.detailHeader}>
-        <div style={s.detailName}>🗺 {region.name}</div>
+        <div style={{ ...s.detailName, wordBreak: 'break-word', overflowWrap: 'anywhere', minWidth: 0, flex: 1 }}>🗺 {region.name}</div>
         <button onClick={onClose} style={s.closeBtn}>✕</button>
       </div>
       <div style={{ color: '#475569', fontSize: '0.65rem', marginBottom: 8 }}>ID: {regionId}</div>
@@ -531,8 +728,8 @@ export function RegionDetailPanel({
         ) : (
           locations.map((loc) => (
             <DetailRow key={loc.id}>
-              <span style={{ color: '#cbd5e1', fontSize: '0.8rem' }}>{loc.name}</span>
-              <span style={{ color: '#334155', fontSize: '0.65rem' }}>{loc.id}</span>
+              <span style={{ color: '#cbd5e1', fontSize: '0.8rem', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{loc.name}</span>
+              <span style={{ color: '#334155', fontSize: '0.65rem', flexShrink: 0 }}>{loc.id}</span>
             </DetailRow>
           ))
         )}
@@ -598,5 +795,5 @@ export function EmptyDetailHint({ totalLocs }: { totalLocs: number }) {
   );
 }
 
-// Re-export Badge so consumers only need one import for card rendering
+// Re-export Badge for backward compat with DebugMapPage import
 export { Badge };
