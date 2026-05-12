@@ -93,6 +93,13 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     # Exploration
     "explore_confirmed_empty": (LAYER_SPATIAL, "location_empty", ("exploration", "spatial")),
     "travel_hop": (LAYER_EPISODIC, "travel_hop", ("travel",)),
+    "anomaly_search_exhausted": (LAYER_GOAL, "anomaly_search_exhausted", ("support", "money", "cooldown")),
+    "support_objective_progress": (LAYER_GOAL, "support_objective_progress", ("support", "progress")),
+    "support_objective_failed": (LAYER_GOAL, "support_objective_failed", ("support", "failure")),
+    "support_source_exhausted": (LAYER_GOAL, "support_source_exhausted", ("support", "cooldown")),
+    "no_witnesses": (LAYER_SOCIAL, "no_witnesses", ("target", "intel", "social", "negative_observation")),
+    "witness_source_exhausted": (LAYER_SOCIAL, "witness_source_exhausted", ("target", "intel", "social", "cooldown")),
+    "no_tracks_found": (LAYER_SPATIAL, "no_tracks_found", ("target", "tracking", "negative_observation")),
 
     # PR3 hunt prerequisites (taxonomy only; no hunt logic here)
     "target_seen": (LAYER_SOCIAL, "target_seen", ("target", "tracking", "social")),
@@ -125,6 +132,9 @@ _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
 _DEDUP_KINDS: frozenset[str] = frozenset({
     "travel_hop",
     "trader_visited",
+    "no_tracks_found",
+    "no_witnesses",
+    "witness_source_exhausted",
 })
 # Never deduplicate these — each occurrence is individually important.
 _NO_DEDUP_KINDS: frozenset[str] = frozenset({
@@ -137,15 +147,38 @@ _NO_DEDUP_KINDS: frozenset[str] = frozenset({
 MEMORY_EVENT_DEDUP_WINDOW_TURNS = 30
 
 
+def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | None:
+    details = raw.details if isinstance(raw, MemoryRecord) else raw.get("details", {})
+    if not isinstance(details, dict):
+        details = {}
+    kind = str(raw.kind if isinstance(raw, MemoryRecord) else raw.get("kind") or "")
+    location_id = str(
+        (raw.location_id if isinstance(raw, MemoryRecord) else raw.get("location_id"))
+        or details.get("location_id")
+        or ""
+    )
+    if kind == "travel_hop":
+        return (
+            kind,
+            str(details.get("from_location_id") or details.get("from_loc") or ""),
+            str(details.get("to_location_id") or details.get("to_loc") or location_id),
+        )
+    if kind in {"trader_visited", "witness_source_exhausted", "no_witnesses", "no_tracks_found"}:
+        return (
+            kind,
+            location_id,
+            str(details.get("target_id") or ""),
+            str(details.get("trader_id") or ""),
+        )
+    return None
+
+
 def _find_recent_dedup_record(
     agent: dict[str, Any],
-    kind: str,
-    location_id: str | None,
-    entity_ids: tuple[str, ...],
+    signature: tuple[Any, ...],
     world_turn: int,
 ) -> dict[str, Any] | None:
     """Return the most recent existing record that matches the dedup signature, or None."""
-    from .store import ensure_memory_v3
     mem_v3 = agent.get("memory_v3")
     if not isinstance(mem_v3, dict):
         return None
@@ -155,17 +188,11 @@ def _find_recent_dedup_record(
     best: dict[str, Any] | None = None
     best_turn = -1
     for raw in records.values():
-        if raw.get("kind") != kind:
+        if _dedup_signature(raw) != signature:
             continue
         rec_turn = int(raw.get("created_turn", 0))
         if rec_turn < cutoff:
             continue
-        if location_id and raw.get("location_id") != location_id:
-            continue
-        if entity_ids:
-            rec_entities = tuple(sorted(raw.get("entity_ids") or []))
-            if rec_entities != tuple(sorted(entity_ids)):
-                continue
         if rec_turn > best_turn:
             best_turn = rec_turn
             best = raw
@@ -203,9 +230,8 @@ def write_memory_event_to_v3(
 
     # Dedup low-value repeated observations within the window.
     if record.kind in _DEDUP_KINDS and record.kind not in _NO_DEDUP_KINDS:
-        existing = _find_recent_dedup_record(
-            agent, record.kind, record.location_id, record.entity_ids, world_turn
-        )
+        signature = _dedup_signature(record)
+        existing = _find_recent_dedup_record(agent, signature, world_turn) if signature is not None else None
         if existing is not None:
             # Update in-place instead of appending a new record.
             details = existing.setdefault("details", {})

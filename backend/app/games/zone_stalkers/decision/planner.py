@@ -73,8 +73,6 @@ from .models.plan import (
 
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD = 50
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_DRINK = 40
-
-
 def build_plan(
     ctx: AgentContext,
     intent: Intent,
@@ -132,6 +130,36 @@ def build_plan(
 
     # Fallback idle plan
     return _idle_plan(intent, world_turn)
+
+
+def _is_location_exhausted_for_money(
+    agent: dict[str, Any],
+    *,
+    location_id: str,
+    objective_key: str,
+    world_turn: int,
+) -> bool:
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+    for rec in records.values():
+        if not isinstance(rec, dict):
+            continue
+        details = rec.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        action_kind = str(details.get("action_kind") or rec.get("kind") or "")
+        if action_kind != "anomaly_search_exhausted":
+            continue
+        rec_location_id = str(details.get("location_id") or rec.get("location_id") or "")
+        if rec_location_id != location_id:
+            continue
+        rec_objective_key = str(details.get("objective_key") or "")
+        if rec_objective_key and rec_objective_key != objective_key:
+            continue
+        cooldown_until = details.get("cooldown_until_turn")
+        if isinstance(cooldown_until, (int, float)) and int(cooldown_until) > world_turn:
+            return True
+    return False
 
 
 # ── Plan builders ─────────────────────────────────────────────────────────────
@@ -1238,6 +1266,7 @@ def _plan_get_rich(
         if isinstance(intent.reason, str) and "fallback_get_money" in intent.reason
         else None
     )
+    objective_key = str((intent.metadata or {}).get("objective_key") or "FIND_ARTIFACTS")
 
     # 1. Sell artifacts
     if has_artifacts and trader_loc:
@@ -1270,7 +1299,16 @@ def _plan_get_rich(
     # 2. Explore current location if it has anomaly and isn't confirmed empty
     confirmed_empty = _confirmed_empty_locations(agent)
     loc = ctx.location_state
-    if loc.get("anomaly_activity", 0) > 0 and agent_loc not in confirmed_empty:
+    if (
+        loc.get("anomaly_activity", 0) > 0
+        and agent_loc not in confirmed_empty
+        and not _is_location_exhausted_for_money(
+            agent,
+            location_id=str(agent_loc),
+            objective_key=objective_key,
+            world_turn=world_turn,
+        )
+    ):
         explore_payload: dict[str, Any] = {
             "target_id": agent_loc,
             "reason": "get_rich_explore_here",
@@ -1301,6 +1339,13 @@ def _plan_get_rich(
             continue
         if cand_id in confirmed_empty:
             continue
+        if _is_location_exhausted_for_money(
+            agent,
+            location_id=str(cand_id),
+            objective_key=objective_key,
+            world_turn=world_turn,
+        ):
+            continue
         cand = locations.get(cand_id, {})
         if cand.get("anomaly_activity", 0) <= 0:
             continue
@@ -1330,7 +1375,7 @@ def _plan_get_rich(
     # 4. No candidates — wait
     return Plan(
         intent_kind=intent.kind,
-        steps=[PlanStep(STEP_WAIT, {"reason": "get_rich_no_candidates"})],
+        steps=[PlanStep(STEP_WAIT, {"reason": "get_rich_sources_exhausted"})],
         confidence=0.3, created_turn=world_turn,
     )
 

@@ -23,6 +23,7 @@ class PlanMonitorResult:
     interruptible: bool = True
     should_run_decision_pipeline: bool = False
     should_clear_action_queue: bool = False
+    debug_context: dict[str, Any] | None = None
 
 
 def _is_emission_threat_for_monitor(
@@ -70,6 +71,127 @@ def _projected(value: float, world_minute: int, increase_per_hour: int) -> float
     return value
 
 
+def _brain_context(agent: dict[str, Any]) -> dict[str, Any]:
+    ctx = agent.get("brain_v3_context")
+    return ctx if isinstance(ctx, dict) else {}
+
+
+def _has_active_support_exhaustion(
+    *,
+    agent: dict[str, Any],
+    objective_key: str,
+    location_id: str,
+    target_id: str,
+    world_turn: int,
+) -> bool:
+    from app.games.zone_stalkers.rules.tick_rules import _v3_action_kind, _v3_details, _v3_records_desc  # noqa: PLC0415
+
+    objective_key = str(objective_key or "")
+    for rec in _v3_records_desc(agent):
+        action_kind = _v3_action_kind(rec)
+        if action_kind not in {"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"}:
+            continue
+        details = _v3_details(rec)
+        cooldown_until = details.get("cooldown_until_turn")
+        if isinstance(cooldown_until, (int, float)) and int(cooldown_until) <= world_turn:
+            continue
+        rec_location_id = str(details.get("location_id") or rec.get("location_id") or "")
+        if location_id and rec_location_id and rec_location_id != location_id:
+            continue
+        rec_target_id = str(details.get("target_id") or "")
+        if target_id and rec_target_id and rec_target_id != target_id:
+            continue
+        if action_kind == "anomaly_search_exhausted" and objective_key in {"GET_MONEY_FOR_RESUPPLY", "FIND_ARTIFACTS"}:
+            return True
+        if action_kind in {"support_source_exhausted", "witness_source_exhausted"} and objective_key in {
+            "GATHER_INTEL", "LOCATE_TARGET", "VERIFY_LEAD", "TRACK_TARGET", "GET_MONEY_FOR_RESUPPLY",
+        }:
+            return True
+    return False
+
+
+def evaluate_scheduled_action_interrupts(
+    *,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    context: Any,
+    scheduled_action: dict[str, Any],
+    world_turn: int,
+) -> dict[str, Any]:
+    ctx = context if isinstance(context, dict) else _brain_context(agent)
+    target_belief = ctx.get("hunt_target_belief") if isinstance(ctx.get("hunt_target_belief"), dict) else {}
+    objective_key = str(ctx.get("objective_key") or "")
+    intent_kind = str(ctx.get("intent_kind") or "")
+    global_goal = str(agent.get("global_goal") or "")
+    active_plan = agent.get("active_plan_v3")
+    active_plan_id = active_plan.get("id") if isinstance(active_plan, dict) else None
+    not_attacking_reasons = list(ctx.get("not_attacking_reasons") or [])
+    combat_ready = bool(ctx.get("combat_ready")) if ctx.get("combat_ready") is not None else None
+    target_visible_now = bool(target_belief.get("visible_now")) if target_belief else False
+    target_co_located = bool(target_belief.get("co_located")) if target_belief else False
+    location_id = str(agent.get("location_id") or scheduled_action.get("target_id") or "")
+    target_id = str(agent.get("kill_target_id") or target_belief.get("target_id") or "")
+
+    interrupts_checked = [
+        "critical_hp",
+        "critical_thirst",
+        "critical_hunger",
+        "emission",
+        "target_visible",
+        "support_source_exhausted",
+        "global_goal_completed",
+    ]
+    interrupt_triggered: str | None = None
+    if _is_emission_threat_for_monitor(agent, state):
+        interrupt_triggered = "emission_danger"
+    elif float(agent.get("hp", 100)) <= CRITICAL_HP_THRESHOLD:
+        interrupt_triggered = "critical_hp"
+    elif _projected(float(agent.get("thirst", 0)), int(state.get("world_minute", 0)), THIRST_INCREASE_PER_HOUR) >= CRITICAL_THIRST_THRESHOLD:
+        interrupt_triggered = "critical_thirst"
+    elif _projected(float(agent.get("hunger", 0)), int(state.get("world_minute", 0)), HUNGER_INCREASE_PER_HOUR) >= CRITICAL_HUNGER_THRESHOLD:
+        interrupt_triggered = "critical_hunger"
+    elif bool(agent.get("global_goal_achieved")):
+        interrupt_triggered = "global_goal_completed"
+    elif _has_active_support_exhaustion(
+        agent=agent,
+        objective_key=objective_key,
+        location_id=location_id,
+        target_id=target_id,
+        world_turn=world_turn,
+    ):
+        interrupt_triggered = "support_source_exhausted"
+    elif global_goal == "kill_stalker" and target_visible_now and bool(combat_ready):
+        interrupt_triggered = "target_visible_and_combat_ready"
+
+    support_objective_for = ctx.get("support_objective_for")
+    if support_objective_for is None and global_goal == "kill_stalker" and objective_key in {
+        "GET_MONEY_FOR_RESUPPLY",
+        "PREPARE_FOR_HUNT",
+        "RESUPPLY_WEAPON",
+        "RESUPPLY_AMMO",
+        "RESUPPLY_ARMOR",
+        "RESUPPLY_FOOD",
+        "RESUPPLY_DRINK",
+        "RESUPPLY_MEDICINE",
+    }:
+        support_objective_for = "kill_stalker"
+
+    return {
+        "objective_key": objective_key or None,
+        "intent_kind": intent_kind or None,
+        "global_goal": global_goal or None,
+        "support_objective_for": support_objective_for,
+        "scheduled_action_type": scheduled_action.get("type"),
+        "active_plan_id": active_plan_id,
+        "target_visible_now": target_visible_now,
+        "target_co_located": target_co_located,
+        "combat_ready": combat_ready,
+        "not_attacking_reasons": not_attacking_reasons,
+        "interrupts_checked": interrupts_checked,
+        "interrupt_triggered": interrupt_triggered,
+    }
+
+
 def assess_scheduled_action_v3(
     *,
     agent_id: str,
@@ -78,24 +200,32 @@ def assess_scheduled_action_v3(
     state: dict[str, Any],
     world_turn: int,
 ) -> PlanMonitorResult:
-    _ = (agent_id, world_turn)
+    ctx = _brain_context(agent)
+    debug_context = evaluate_scheduled_action_interrupts(
+        agent=agent,
+        state=state,
+        context=ctx,
+        scheduled_action=scheduled_action,
+        world_turn=world_turn,
+    )
+    _ = agent_id
 
     if not is_v3_monitored_bot(agent):
-        return PlanMonitorResult(decision="continue", reason="not_monitored")
+        return PlanMonitorResult(decision="continue", reason="not_monitored", debug_context=debug_context)
 
     if not scheduled_action:
-        return PlanMonitorResult(decision="continue", reason="no_scheduled_action")
+        return PlanMonitorResult(decision="continue", reason="no_scheduled_action", debug_context=debug_context)
 
     if scheduled_action.get("emergency_flee"):
         return PlanMonitorResult(
             decision="continue",
             reason="emergency_flee_is_uninterruptible",
             interruptible=False,
+            debug_context=debug_context,
         )
 
-    # Emission threat interrupts any monitored action (especially sleep).
-    # Emergency flee is already protected above.
-    if _is_emission_threat_for_monitor(agent, state):
+    interrupt_triggered = debug_context.get("interrupt_triggered")
+    if interrupt_triggered == "emission_danger":
         return PlanMonitorResult(
             decision="abort",
             reason="emission_threat",
@@ -103,6 +233,7 @@ def assess_scheduled_action_v3(
             dominant_pressure_value=1.0,
             should_run_decision_pipeline=True,
             should_clear_action_queue=True,
+            debug_context=debug_context,
         )
 
     world_minute = int(state.get("world_minute", 0))
@@ -110,7 +241,7 @@ def assess_scheduled_action_v3(
     thirst = _projected(float(agent.get("thirst", 0)), world_minute, THIRST_INCREASE_PER_HOUR)
     hunger = _projected(float(agent.get("hunger", 0)), world_minute, HUNGER_INCREASE_PER_HOUR)
 
-    if hp <= CRITICAL_HP_THRESHOLD:
+    if interrupt_triggered == "critical_hp" or hp <= CRITICAL_HP_THRESHOLD:
         return PlanMonitorResult(
             decision="abort",
             reason="critical_hp",
@@ -118,9 +249,10 @@ def assess_scheduled_action_v3(
             dominant_pressure_value=hp,
             should_run_decision_pipeline=True,
             should_clear_action_queue=True,
+            debug_context=debug_context,
         )
 
-    if thirst >= CRITICAL_THIRST_THRESHOLD:
+    if interrupt_triggered == "critical_thirst" or thirst >= CRITICAL_THIRST_THRESHOLD:
         return PlanMonitorResult(
             decision="abort",
             reason="critical_thirst",
@@ -128,9 +260,10 @@ def assess_scheduled_action_v3(
             dominant_pressure_value=thirst,
             should_run_decision_pipeline=True,
             should_clear_action_queue=True,
+            debug_context=debug_context,
         )
 
-    if hunger >= CRITICAL_HUNGER_THRESHOLD:
+    if interrupt_triggered == "critical_hunger" or hunger >= CRITICAL_HUNGER_THRESHOLD:
         return PlanMonitorResult(
             decision="abort",
             reason="critical_hunger",
@@ -138,6 +271,16 @@ def assess_scheduled_action_v3(
             dominant_pressure_value=hunger,
             should_run_decision_pipeline=True,
             should_clear_action_queue=True,
+            debug_context=debug_context,
+        )
+
+    if interrupt_triggered in {"support_source_exhausted", "target_visible_and_combat_ready", "global_goal_completed"}:
+        return PlanMonitorResult(
+            decision="abort",
+            reason=str(interrupt_triggered),
+            should_run_decision_pipeline=True,
+            should_clear_action_queue=True,
+            debug_context=debug_context,
         )
 
     return PlanMonitorResult(
@@ -145,4 +288,5 @@ def assess_scheduled_action_v3(
         reason="action_still_valid",
         dominant_pressure=None,
         dominant_pressure_value=None,
+        debug_context=debug_context,
     )

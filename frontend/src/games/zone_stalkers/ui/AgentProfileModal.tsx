@@ -10,6 +10,7 @@ import {
   currentGoalLabel,
   downloadJson,
   buildCompactNpcHistoryExport,
+  buildStoryEvents,
   getCurrentObjectiveFromAgent,
   getLatestTraceEvent,
   getLatestDecisionEvent,
@@ -315,7 +316,7 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
     return () => clearInterval(id);
   }, [fetchMemory, contextId]);
 
-  const displayMemory: MemEntry[] = fetchedMemory ?? (agent.story_events ?? []);
+  const displayMemory: MemEntry[] = buildStoryEvents(agent, fetchedMemory ?? []);
 
   const storyTimelineForObjective = displayMemory.slice(-120).map(toCompactTimelineEntry);
   const latestTraceEvent = getLatestTraceEvent(agent.brain_trace);

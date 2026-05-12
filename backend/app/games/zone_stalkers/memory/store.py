@@ -192,11 +192,13 @@ def _retention_priority(raw: dict[str, Any]) -> int:
         "combat_kill",
         "target_death_confirmed",
         "target_intel",
+        "target_seen",
         "emission_warning",
         "emission_started",
         "anomaly_detected",
         "global_goal_completed",
         "death",
+        "support_source_exhausted",
     }:
         return 100
 

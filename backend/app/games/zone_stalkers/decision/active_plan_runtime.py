@@ -735,6 +735,7 @@ def handle_v3_monitor_abort(
         scheduled_action_type=scheduled_action.get("type"),
         dominant_pressure_key=monitor_result.dominant_pressure,
         dominant_pressure_value=monitor_result.dominant_pressure_value,
+        extra_context=monitor_result.debug_context,
         state=state,
     )
     if should_write_plan_monitor_memory_event(

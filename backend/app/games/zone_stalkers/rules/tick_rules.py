@@ -58,6 +58,7 @@ from app.games.zone_stalkers.decision.plan_monitor import (
     assess_scheduled_action_v3,
     is_v3_monitored_bot,
 )
+from app.games.zone_stalkers.rules.agent_lifecycle import kill_agent
 from app.games.zone_stalkers.rules.tick_constants import (
     CRITICAL_HUNGER_THRESHOLD,
     CRITICAL_THIRST_THRESHOLD,
@@ -205,10 +206,34 @@ _INTENT_TO_OBJECTIVE_KEY_FALLBACK: Dict[str, str] = {
     "seek_food": "RESTORE_FOOD",
     "rest": "REST",
     "heal_self": "HEAL_SELF",
-    "escape_danger": "HEAL_SELF",
+    "escape_danger": "ESCAPE_DANGER",
     "sell_artifacts": "SELL_ARTIFACTS",
     "get_rich": "FIND_ARTIFACTS",
+    "hunt_target": "HUNT_TARGET",
+    "resupply": "RESUPPLY",
 }
+
+_RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY: Dict[str, str] = {
+    "weapon": "RESUPPLY_WEAPON",
+    "armor": "RESUPPLY_ARMOR",
+    "ammo": "RESUPPLY_AMMO",
+    "food": "RESUPPLY_FOOD",
+    "drink": "RESUPPLY_DRINK",
+    "medical": "RESUPPLY_MEDICINE",
+    "medicine": "RESUPPLY_MEDICINE",
+}
+
+
+def _fallback_objective_key_for_intent(intent: Any) -> str | None:
+    metadata = intent.metadata if hasattr(intent, "metadata") and isinstance(intent.metadata, dict) else {}
+    if metadata.get("objective_key"):
+        return str(metadata["objective_key"])
+    intent_kind = str(getattr(intent, "kind", "") or "")
+    if intent_kind == "resupply":
+        forced_category = str(metadata.get("forced_resupply_category") or "")
+        if forced_category:
+            return _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY.get(forced_category, "RESUPPLY")
+    return _INTENT_TO_OBJECTIVE_KEY_FALLBACK.get(intent_kind)
 
 
 def _migrate_brain_v3_context(agent: Dict[str, Any]) -> None:
@@ -976,8 +1001,27 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                     world_turn=world_turn,
                     decision="continue",
                     reason=monitor_result.reason,
-                    summary=f"Продолжаю {sched.get('type')} — {monitor_result.reason}.",
+                    summary=(
+                        f"Продолжаю {sched.get('type')} — {monitor_result.reason}."
+                        + (
+                            f" objective={monitor_result.debug_context.get('objective_key')},"
+                            f" intent={monitor_result.debug_context.get('intent_kind')}."
+                            if monitor_result.debug_context
+                            and (
+                                monitor_result.debug_context.get("objective_key")
+                                or monitor_result.debug_context.get("intent_kind")
+                            )
+                            else ""
+                        )
+                        + (
+                            f" Не атакую: {', '.join(monitor_result.debug_context.get('not_attacking_reasons') or [])}."
+                            if monitor_result.debug_context
+                            and monitor_result.debug_context.get("not_attacking_reasons")
+                            else ""
+                        )
+                    ),
                     scheduled_action_type=sched.get("type"),
+                    extra_context=monitor_result.debug_context,
                     state=state,
                 )
             new_evs = _process_scheduled_action(agent_id, agent, sched, state, world_turn)
@@ -1745,99 +1789,21 @@ def _mark_agent_dead(
     memory_summary: str,
     events: List[Dict[str, Any]],
 ) -> None:
-    """Centralized death handler: mark agent dead, clean up runtime state,
-    write death memory, emit ``agent_died`` event, and update brain_trace.
-
-    Invariants enforced:
-        is_alive == False
-        hp == 0
-        scheduled_action is None
-        action_queue == []
-        active_plan_v3 is None
-        current_goal == "dead"
-        brain_runtime.queued == False, last_skip_reason == "dead"
-        brain_v3_context: intent/objective/adapter cleared
-    """
-    from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
-
+    """Compatibility wrapper around the canonical death helper."""
     agent = _runtime_agent(agent_id, agent)
-    _runtime_set_agent_field(agent_id, "is_alive", False, agent)
-    _runtime_set_agent_field(agent_id, "hp", 0, agent)
-    _runtime_set_agent_field(agent_id, "current_goal", "dead", agent)
-    agent = _runtime_agent(agent_id, agent)
-    active_plan = get_active_plan(agent)
-    if active_plan is not None:
-        active_plan.abort("death", world_turn)
-        save_active_plan(agent, active_plan)
-        _write_active_plan_trace_event(
-            agent,
-            world_turn=world_turn,
-            state=state,
-            event="active_plan_aborted",
-            active_plan=active_plan,
-            reason="death",
-            summary=f"ActivePlan {active_plan.objective_key}: прерван из-за смерти.",
-        )
-        _write_active_plan_memory_event(
-            agent,
-            world_turn=world_turn,
-            state=state,
-            action_kind="active_plan_aborted",
-            active_plan=active_plan,
-            add_memory=_add_memory,
-            reason="death",
-        )
-        clear_active_plan(agent)
-    _runtime_set_agent_field(agent_id, "scheduled_action", None, agent)
-    _runtime_set_agent_field(agent_id, "action_queue", [], agent)
-    _runtime_set_agent_field(agent_id, "action_used", False, agent)
-
-    # Brain runtime cleanup — agent must not be queued for decisions after death.
-    _br = ensure_brain_runtime(agent, world_turn)
-    _br["invalidated"] = False
-    _br["invalidators"] = []
-    _br["queued"] = False
-    _br["queued_turn"] = None
-    _br["queued_priority"] = None
-    _br["last_skip_reason"] = "dead"
-    _br["valid_until_turn"] = world_turn
-
-    # Brain v3 context cleanup.
-    _ctx = agent.get("brain_v3_context")
-    if isinstance(_ctx, dict):
-        _ctx["intent_kind"] = None
-        _ctx["objective_key"] = None
-        _ctx["objective_score"] = 0
-        _ctx["objective_reason"] = f"dead:{cause}"
-        _ctx["adapter_intent"] = None
-
-    _add_memory(
-        agent, world_turn, state, "observation",
-        memory_title,
-        memory_effects,
-        summary=memory_summary,
-    )
-    _loc_id = memory_effects.get("location_id") or agent.get("location_id")
-    events.append({
-        "event_type": "agent_died",
-        "payload": {
-            "agent_id": agent_id,
-            "cause": cause,
-            "location_id": _loc_id,
-            "world_turn": world_turn,
-        },
-    })
-    # Overwrite brain_trace so it does not remain as "continue sleep" or similar.
-    _death_thought = f"Погиб ({cause}); дальнейшие решения не принимаются."
-    append_brain_trace_event(
-        agent,
-        world_turn=world_turn,
-        mode="system",
-        decision="no_op",
-        summary=_death_thought,
-        reason=cause,
+    kill_agent(
+        agent_id=agent_id,
+        agent=agent,
         state=state,
+        world_turn=world_turn,
+        cause=cause,
+        location_id=str(memory_effects.get("location_id") or agent.get("location_id") or ""),
+        memory_title=memory_title,
+        memory_summary=memory_summary,
+        memory_effects=memory_effects,
+        events=events,
     )
+    _runtime_set_agent_field(agent_id, "action_used", False, agent)
 
 
 def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:
@@ -2222,6 +2188,13 @@ def _resolve_exploration(
     existing_artifacts = loc.get("artifacts", [])
     found_artifacts: List[Dict[str, Any]] = []
     loc_name = loc.get("name", loc_id)
+    active_plan = get_active_plan(agent)
+    objective_key = (
+        active_plan.objective_key
+        if active_plan is not None
+        else str((agent.get("brain_v3_context") or {}).get("objective_key") or "")
+    )
+    money_objective = objective_key in {"GET_MONEY_FOR_RESUPPLY", "FIND_ARTIFACTS"}
 
     artifact_found = bool(existing_artifacts)
     if artifact_found:
@@ -2269,6 +2242,22 @@ def _resolve_exploration(
             "event_type": "exploration_found_artifact",
             "payload": {"agent_id": agent_id, "artifact": art},
         })
+        if money_objective:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "decision",
+                "📈 Прогресс добычи",
+                {
+                    "action_kind": "support_objective_progress",
+                    "objective_key": objective_key,
+                    "location_id": loc_id,
+                    "artifact_type": art.get("type"),
+                    "artifact_value": art.get("value", 0),
+                },
+                summary=f"По цели {objective_key} добыл артефакт в «{loc_name}».",
+            )
     else:
         # Did not pick up an artifact — write an observation that blocks re-searching
         # this location.  We treat both a genuinely empty zone and a bad-luck miss
@@ -2281,6 +2270,34 @@ def _resolve_exploration(
             {"action_kind": "explore_confirmed_empty", "location_id": loc_id},
             summary=f"Исследовал аномалию в «{loc_name}», но артефакт не найден",
         )
+        if money_objective:
+            recent_attempts = sum(
+                1
+                for rec in _v3_records_desc(agent)
+                if _v3_action_kind(rec) in {"explore_confirmed_empty", "anomaly_search_exhausted"}
+                and str(_v3_details(rec).get("location_id") or rec.get("location_id") or "") == loc_id
+                and str(_v3_details(rec).get("objective_key") or objective_key or "") == objective_key
+            )
+            _cooldown_until_turn = world_turn + 180
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                "🚫 Источник денег исчерпан",
+                {
+                    "action_kind": "anomaly_search_exhausted",
+                    "objective_key": objective_key,
+                    "location_id": loc_id,
+                    "reason": "no_artifact_found_after_exploration",
+                    "attempt_count": recent_attempts,
+                    "cooldown_until_turn": _cooldown_until_turn,
+                },
+                summary=(
+                    f"Локация «{loc_name}» временно исчерпана для {objective_key}: "
+                    f"после {recent_attempts} попыток артефакты не найдены."
+                ),
+            )
 
     # Always record that an exploration action was performed (satisfies memory tests
     # and gives the agent a record of every search attempt regardless of outcome).
@@ -5759,8 +5776,7 @@ def _run_npc_brain_v3_decision_inner(
         selected_objective.key
         if selected_objective is not None
         else (
-            ((intent.metadata or {}).get("objective_key") if isinstance(intent.metadata, dict) else None)
-            or _INTENT_TO_OBJECTIVE_KEY_FALLBACK.get(intent.kind)
+            _fallback_objective_key_for_intent(intent)
         )
     )
     _selected_objective_score = (
@@ -5768,6 +5784,14 @@ def _run_npc_brain_v3_decision_inner(
         if selected_objective_score is not None
         else ((intent.metadata or {}).get("objective_score") if isinstance(intent.metadata, dict) else None)
     )
+
+    _selected_objective_metadata = (
+        selected_objective.metadata
+        if selected_objective is not None and isinstance(selected_objective.metadata, dict)
+        else {}
+    )
+    _selected_combat_ready = _selected_objective_metadata.get("combat_ready")
+    _selected_not_attacking_reasons = list(_selected_objective_metadata.get("not_attacking_reasons") or [])
 
     # Store context for observability / debug
     agent.pop("_v2_context", None)
@@ -5789,6 +5813,13 @@ def _run_npc_brain_v3_decision_inner(
         "objective_score": _selected_objective_score,
         "objective_reason": "; ".join(selected_objective.reasons) if selected_objective and selected_objective.reasons else (intent.reason or None),
         "objective_switch_decision": objective_decision.switch_decision if objective_decision else None,
+        "global_goal": agent.get("global_goal"),
+        "support_objective_for": _selected_objective_metadata.get("support_objective_for"),
+        "combat_ready": _selected_combat_ready,
+        "not_attacking_reasons": _selected_not_attacking_reasons,
+        "target_visible_now": _selected_objective_metadata.get("target_visible_now"),
+        "target_co_located": _selected_objective_metadata.get("target_co_located"),
+        "target_strength": _selected_objective_metadata.get("target_strength"),
         "hunt_target_belief": {
             "target_id": target_belief.target_id,
             "is_known": target_belief.is_known,
@@ -5883,6 +5914,12 @@ def _run_npc_brain_v3_decision_inner(
                 "objective_reason": _objective_reason,
                 "adapter_intent_kind": intent.kind,
                 "adapter_intent_score": round(intent.score, 3),
+                "global_goal": agent.get("global_goal"),
+                "support_objective_for": _selected_objective_metadata.get("support_objective_for"),
+                "target_visible_now": _selected_objective_metadata.get("target_visible_now"),
+                "target_co_located": _selected_objective_metadata.get("target_co_located"),
+                "combat_ready": _selected_combat_ready,
+                "not_attacking_reasons": _selected_not_attacking_reasons,
                 # Legacy compatibility fields.
                 "intent_kind": intent.kind,
                 "intent_score": round(intent.score, 3),
@@ -5893,6 +5930,11 @@ def _run_npc_brain_v3_decision_inner(
                 f"Выбрана цель «{_objective_label}» ({round(float(_selected_objective_score or intent.score) * 100)}%)."
                 + (f" {_objective_reason}." if _objective_reason else "")
                 + f" Адаптер intent: {intent.kind}."
+                + (
+                    f" Не атакую: {', '.join(_selected_not_attacking_reasons)}."
+                    if _selected_not_attacking_reasons
+                    else ""
+                )
                 + f" Топ потребности: {_needs_str}"
             ),
         )

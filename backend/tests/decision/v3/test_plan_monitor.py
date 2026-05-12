@@ -5,6 +5,7 @@ from app.games.zone_stalkers.decision.plan_monitor import assess_scheduled_actio
 
 def _base_agent() -> dict:
     return {
+        "id": "bot1",
         "archetype": "stalker_agent",
         "controller": {"kind": "bot"},
         "is_alive": True,
@@ -12,6 +13,7 @@ def _base_agent() -> dict:
         "hp": 100,
         "hunger": 0,
         "thirst": 0,
+        "global_goal": "get_rich",
     }
 
 
@@ -70,3 +72,77 @@ def test_assess_projects_hour_boundary_values() -> None:
     )
     assert result.decision == "abort"
     assert result.reason == "critical_thirst"
+
+
+def test_assess_preserves_objective_and_intent_in_debug_context() -> None:
+    agent = _base_agent()
+    agent["brain_v3_context"] = {
+        "objective_key": "GET_MONEY_FOR_RESUPPLY",
+        "intent_kind": "get_rich",
+        "support_objective_for": "kill_stalker",
+        "combat_ready": False,
+        "not_attacking_reasons": ["target_too_strong", "no_armor"],
+    }
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "explore_anomaly_location", "turns_remaining": 5},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "continue"
+    assert result.debug_context is not None
+    assert result.debug_context["objective_key"] == "GET_MONEY_FOR_RESUPPLY"
+    assert result.debug_context["intent_kind"] == "get_rich"
+    assert result.debug_context["support_objective_for"] == "kill_stalker"
+    assert result.debug_context["not_attacking_reasons"] == ["target_too_strong", "no_armor"]
+
+
+def test_support_source_exhausted_interrupts_explore_action() -> None:
+    agent = _base_agent()
+    agent["location_id"] = "loc_a"
+    agent["brain_v3_context"] = {"objective_key": "GET_MONEY_FOR_RESUPPLY", "intent_kind": "get_rich"}
+    agent["memory_v3"] = {
+        "records": {
+            "m1": {
+                "kind": "anomaly_search_exhausted",
+                "created_turn": 95,
+                "location_id": "loc_a",
+                "details": {
+                    "action_kind": "anomaly_search_exhausted",
+                    "objective_key": "GET_MONEY_FOR_RESUPPLY",
+                    "location_id": "loc_a",
+                    "cooldown_until_turn": 130,
+                },
+            }
+        }
+    }
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "explore_anomaly_location", "turns_remaining": 5, "target_id": "loc_a"},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "abort"
+    assert result.reason == "support_source_exhausted"
+
+
+def test_combat_ready_visible_target_interrupts_support_action() -> None:
+    agent = _base_agent()
+    agent["global_goal"] = "kill_stalker"
+    agent["brain_v3_context"] = {
+        "objective_key": "GET_MONEY_FOR_RESUPPLY",
+        "intent_kind": "get_rich",
+        "combat_ready": True,
+        "hunt_target_belief": {"visible_now": True, "co_located": True, "target_id": "enemy_1"},
+    }
+    result = assess_scheduled_action_v3(
+        agent_id="bot1",
+        agent=agent,
+        scheduled_action={"type": "explore_anomaly_location", "turns_remaining": 5},
+        state=_base_state(),
+        world_turn=100,
+    )
+    assert result.decision == "abort"
+    assert result.reason == "target_visible_and_combat_ready"
