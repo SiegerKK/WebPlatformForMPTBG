@@ -192,6 +192,11 @@ async def upload_location_image(
         db.flush()
 
     # Save file to disk
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    if os.path.commonpath([media_root_abs, os.path.realpath(abs_dir)]) != media_root_abs:
+        raise HTTPException(status_code=400, detail="invalid media directory path")
+    if os.path.commonpath([media_root_abs, os.path.realpath(abs_path)]) != media_root_abs:
+        raise HTTPException(status_code=400, detail="invalid media file path")
     os.makedirs(abs_dir, exist_ok=True)
     with open(abs_path, "wb") as f:
         f.write(contents)
