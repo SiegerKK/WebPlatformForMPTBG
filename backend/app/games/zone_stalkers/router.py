@@ -9,7 +9,7 @@ import os
 import uuid
 from typing import List, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -119,24 +119,56 @@ def _rel_path_from_media_url(url: str | None) -> str | None:
     return rel
 
 
+_VALID_IMAGE_SLOTS = frozenset(["clear", "fog", "rain", "night_clear", "night_rain"])
+_ORDERED_IMAGE_SLOTS = ["clear", "fog", "rain", "night_clear", "night_rain"]
+
+
+def _sync_loc_image_url(loc: dict) -> None:
+    """Mirror of world_rules._sync_location_primary_image_url for use in router."""
+    slots = loc.get("image_slots") or {}
+    primary = loc.get("primary_image_slot")
+    if primary and slots.get(primary):
+        loc["image_url"] = slots[primary]
+        return
+    if loc.get("image_url") and not any(v for v in slots.values() if v):
+        return
+    for key in _ORDERED_IMAGE_SLOTS:
+        if slots.get(key):
+            loc["primary_image_slot"] = key
+            loc["image_url"] = slots[key]
+            return
+    loc["image_url"] = None
+
+
+def _safe_slot_segment(slot: str) -> str:
+    if not slot or slot not in _VALID_IMAGE_SLOTS:
+        raise HTTPException(status_code=400, detail=f"Invalid slot '{slot}'. Must be one of: {sorted(_VALID_IMAGE_SLOTS)}")
+    return slot
+
+
 @router.post("/locations/{context_id}/{location_id}/image")
 async def upload_location_image(
     context_id: uuid.UUID,
     location_id: str,
     file: UploadFile = File(...),
+    slot: str = Form("clear"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload an image for a location.
+    """Upload an image for a location slot.
 
-    The image is stored on disk and the URL is returned so the caller can
-    persist it in the game state via the ``debug_update_location`` command.
-    Any previously stored image for the same ``(context_id, location_id)``
-    pair is deleted before the new file is saved.
+    The image is stored on disk under locations/<context_id>/<location_id>/<slot>/<uuid>.<ext>.
+    The slot defaults to "clear". Any previously stored image for the same
+    ``(context_id, location_id, slot)`` triple is deleted before the new file is saved.
+    The location state is updated with the new image URL in image_slots[slot] and
+    image_url is synced to the primary slot.
     """
     from app.core.contexts.models import GameContext
     from app.games.zone_stalkers.models import LocationImage
     from app.core.state_cache.service import load_context_state, save_context_state
+
+    # Validate slot
+    _safe_slot_segment(slot)
 
     # Validate context exists
     ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
@@ -168,20 +200,19 @@ async def upload_location_image(
 
     ext = _EXT_MAP[content_type]
     image_id = uuid.uuid4().hex
-    rel_dir = os.path.join("locations", str(context_id), location_segment)
+    rel_dir = os.path.join("locations", str(context_id), location_segment, slot)
     rel_path = os.path.join(rel_dir, f"{image_id}{ext}")
     abs_dir = _resolve_media_path(rel_dir)
     abs_path = _resolve_media_path(rel_path)
     written_abs_path: str | None = None
 
-    # Remove any existing image files for this location (may differ in extension)
-    # Keep .all() here to clean up potential legacy duplicates that existed
-    # before the DB unique constraint was introduced.
+    # Remove any existing image for this (location, slot) pair
     existing_records = (
         db.query(LocationImage)
         .filter(
             LocationImage.context_id == context_id,
             LocationImage.location_id == location_id,
+            LocationImage.slot == slot,
         )
         .all()
     )
@@ -201,6 +232,7 @@ async def upload_location_image(
     record = LocationImage(
         context_id=context_id,
         location_id=location_id,
+        slot=slot,
         filename=file.filename or f"{image_id}{ext}",
         content_type=content_type,
         file_path=rel_path,
@@ -208,7 +240,14 @@ async def upload_location_image(
     db.add(record)
 
     url = _normalize_media_url(rel_path)
-    loc["image_url"] = url
+    # Update image_slots
+    loc.setdefault("image_slots", {slot: None for slot in _ORDERED_IMAGE_SLOTS})
+    loc["image_slots"][slot] = url
+    # Set primary if not already set
+    if not loc.get("primary_image_slot"):
+        loc["primary_image_slot"] = slot
+    _sync_loc_image_url(loc)
+
     state["state_revision"] = int(state.get("state_revision", 0)) + 1
     state["map_revision"] = int(state.get("map_revision", 0)) + 1
     try:
@@ -220,7 +259,7 @@ async def upload_location_image(
         removed = _safe_remove_media_file(written_abs_path)
         if removed:
             cleanup_abs_paths.append(removed)
-        _cleanup_parent_dirs(cleanup_abs_paths)
+        _cleanup_parent_dirs_deep(cleanup_abs_paths)
         raise HTTPException(
             status_code=409,
             detail="Location image was updated concurrently; retry upload",
@@ -231,26 +270,59 @@ async def upload_location_image(
         removed = _safe_remove_media_file(written_abs_path)
         if removed:
             cleanup_abs_paths.append(removed)
-        _cleanup_parent_dirs(cleanup_abs_paths)
+        _cleanup_parent_dirs_deep(cleanup_abs_paths)
         raise
 
     return {
         "url": url,
-        "image_url": url,
+        "image_url": loc.get("image_url"),
+        "slot": slot,
+        "primary_image_slot": loc.get("primary_image_slot"),
+        "image_slots": loc.get("image_slots"),
         "location_id": location_id,
         "state_revision": state.get("state_revision"),
         "map_revision": state.get("map_revision"),
     }
 
 
+def _cleanup_parent_dirs_deep(abs_paths: list[str]) -> None:
+    """Walk up up to 4 directory levels trying to remove empty directories."""
+    media_root_abs = os.path.realpath(MEDIA_ROOT)
+    for abs_path in abs_paths:
+        if not abs_path:
+            continue
+        current = os.path.dirname(abs_path)
+        for _ in range(4):
+            if not current:
+                break
+            try:
+                rel_dir = os.path.relpath(current, media_root_abs)
+            except ValueError:
+                break
+            safe_dir = _abs_media_path(rel_dir)
+            if safe_dir is None or safe_dir == media_root_abs:
+                break
+            try:
+                os.rmdir(safe_dir)
+            except OSError:
+                break
+            current = os.path.dirname(current)
+
+
 @router.delete("/locations/{context_id}/{location_id}/image")
 def delete_location_image(
     context_id: uuid.UUID,
     location_id: str,
+    slot: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete the image attached to a location and clear it from zone state."""
+    """Delete the image(s) attached to a location and clear from zone state.
+
+    Without ``slot``: deletes ALL slot images and clears all image state.
+    With ``slot``: deletes only that slot's image; primary_image_slot falls
+    back to next available slot automatically.
+    """
     from app.core.contexts.models import GameContext
     from app.core.state_cache.service import load_context_state, save_context_state
     from app.games.zone_stalkers.models import LocationImage
@@ -265,44 +337,96 @@ def delete_location_image(
         raise HTTPException(status_code=404, detail="Location not found in zone state")
     _safe_location_segment(location_id)
 
-    # Keep .all() here to clean up potential legacy duplicates that existed
-    # before the DB unique constraint was introduced.
-    existing_records = (
-        db.query(LocationImage)
-        .filter(
-            LocationImage.context_id == context_id,
-            LocationImage.location_id == location_id,
-        )
-        .all()
-    )
-    has_image_url = bool(loc.get("image_url"))
-    if not existing_records and not has_image_url:
-        raise HTTPException(status_code=404, detail="No image found for this location")
+    if slot is not None and slot not in _VALID_IMAGE_SLOTS:
+        raise HTTPException(status_code=400, detail=f"Invalid slot '{slot}'")
 
-    fallback_abs_paths: list[str] = []
-    _delete_location_images(existing_records)
-    for existing in existing_records:
-        db.delete(existing)
-    if not existing_records:
-        rel = _rel_path_from_media_url(loc.get("image_url"))
-        if rel:
-            old_abs = _abs_media_path(rel)
+    removed_abs_paths: list[str] = []
+
+    if slot is None:
+        # Delete ALL slot images
+        existing_records = (
+            db.query(LocationImage)
+            .filter(
+                LocationImage.context_id == context_id,
+                LocationImage.location_id == location_id,
+            )
+            .all()
+        )
+        has_image = bool(loc.get("image_url")) or bool(existing_records)
+        if not has_image:
+            raise HTTPException(status_code=404, detail="No image found for this location")
+
+        for rec in existing_records:
+            old_abs = _abs_media_path(rec.file_path)
             removed = _safe_remove_media_file(old_abs)
             if removed:
-                fallback_abs_paths.append(removed)
-    _cleanup_parent_dirs(fallback_abs_paths)
+                removed_abs_paths.append(removed)
+            db.delete(rec)
+        # Legacy fallback: also delete file referenced by raw image_url
+        if not existing_records:
+            rel = _rel_path_from_media_url(loc.get("image_url"))
+            if rel:
+                old_abs = _abs_media_path(rel)
+                removed = _safe_remove_media_file(old_abs)
+                if removed:
+                    removed_abs_paths.append(removed)
+        _cleanup_parent_dirs_deep(removed_abs_paths)
 
-    loc["image_url"] = None
+        loc["image_url"] = None
+        loc["image_slots"] = {s: None for s in _ORDERED_IMAGE_SLOTS}
+        loc["primary_image_slot"] = None
+    else:
+        # Delete only the specified slot
+        existing_records = (
+            db.query(LocationImage)
+            .filter(
+                LocationImage.context_id == context_id,
+                LocationImage.location_id == location_id,
+                LocationImage.slot == slot,
+            )
+            .all()
+        )
+        slot_url = (loc.get("image_slots") or {}).get(slot)
+        if not existing_records and not slot_url:
+            raise HTTPException(status_code=404, detail=f"No image found for slot '{slot}'")
+
+        for rec in existing_records:
+            old_abs = _abs_media_path(rec.file_path)
+            removed = _safe_remove_media_file(old_abs)
+            if removed:
+                removed_abs_paths.append(removed)
+            db.delete(rec)
+        # Fallback: if no DB record but state has URL for this slot
+        if not existing_records and slot_url:
+            rel = _rel_path_from_media_url(slot_url)
+            if rel:
+                old_abs = _abs_media_path(rel)
+                removed = _safe_remove_media_file(old_abs)
+                if removed:
+                    removed_abs_paths.append(removed)
+        _cleanup_parent_dirs_deep(removed_abs_paths)
+
+        loc.setdefault("image_slots", {})
+        loc["image_slots"][slot] = None
+        # If this was the primary slot, reselect
+        if loc.get("primary_image_slot") == slot:
+            loc["primary_image_slot"] = None
+        _sync_loc_image_url(loc)
+
     state["state_revision"] = int(state.get("state_revision", 0)) + 1
     state["map_revision"] = int(state.get("map_revision", 0)) + 1
     save_context_state(ctx.id, state, ctx, force_persist=True)
     db.commit()
-    return {
+
+    result: dict = {
         "status": "deleted",
         "location_id": location_id,
         "state_revision": state.get("state_revision"),
         "map_revision": state.get("map_revision"),
     }
+    if slot is not None:
+        result["slot"] = slot
+    return result
 
 
 class ZoneEventCreate(BaseModel):

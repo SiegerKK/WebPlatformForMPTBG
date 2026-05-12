@@ -57,6 +57,55 @@ _VALID_GLOBAL_GOALS = frozenset([
     "kill_stalker",
 ])
 
+_VALID_LOCATION_IMAGE_SLOTS = frozenset([
+    "clear",
+    "fog",
+    "rain",
+    "night_clear",
+    "night_rain",
+])
+
+_ORDERED_IMAGE_SLOTS = ["clear", "fog", "rain", "night_clear", "night_rain"]
+
+
+def _sync_location_primary_image_url(loc: dict) -> None:
+    """Sync loc['image_url'] to reflect the primary slot or best available image."""
+    slots = loc.get("image_slots") or {}
+    primary = loc.get("primary_image_slot")
+
+    if primary and slots.get(primary):
+        loc["image_url"] = slots[primary]
+        return
+
+    # If no slots populated but we have a raw image_url, keep it (legacy)
+    if loc.get("image_url") and not any(v for v in slots.values() if v):
+        return
+
+    # Auto-select first available slot
+    for key in _ORDERED_IMAGE_SLOTS:
+        if slots.get(key):
+            loc["primary_image_slot"] = key
+            loc["image_url"] = slots[key]
+            return
+
+    loc["image_url"] = None
+
+
+def migrate_location_images(loc: dict) -> None:
+    """Migrate a location that only has image_url into the image_slots model."""
+    if "image_slots" not in loc:
+        loc["image_slots"] = {}
+
+    slots = loc["image_slots"]
+    existing_url = loc.get("image_url")
+
+    # If image_url is set but no slots are populated, migrate it to 'clear'
+    if existing_url and not any(v for v in slots.values() if v):
+        slots["clear"] = existing_url
+        loc.setdefault("primary_image_slot", "clear")
+
+    _sync_location_primary_image_url(loc)
+
 
 def validate_world_command(
     command_type: str,
@@ -118,6 +167,9 @@ def validate_world_command(
 
     if command_type == "debug_explain_agent_v2":
         return _validate_debug_preview_bot_decision(payload, state)  # same validation
+
+    if command_type == "debug_set_location_primary_image":
+        return _validate_debug_set_location_primary_image(payload, state)
 
     if command_type == "debug_add_item":
         return _validate_debug_add_item(payload, state)
@@ -250,6 +302,19 @@ def resolve_world_command(
             loc["exit_zone"] = bool(payload["exit_zone"])
         if "image_url" in payload:
             loc["image_url"] = payload["image_url"] or None
+        if "image_slots" in payload:
+            incoming = payload.get("image_slots") or {}
+            current = loc.setdefault("image_slots", {})
+            for slot, url in incoming.items():
+                if slot not in _VALID_LOCATION_IMAGE_SLOTS:
+                    continue
+                current[slot] = url or None
+            _sync_location_primary_image_url(loc)
+        if "primary_image_slot" in payload:
+            slot = payload.get("primary_image_slot") or None
+            if slot is None or slot in _VALID_LOCATION_IMAGE_SLOTS:
+                loc["primary_image_slot"] = slot
+                _sync_location_primary_image_url(loc)
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
         return state, events
 
@@ -275,6 +340,9 @@ def resolve_world_command(
             "artifacts": [],
             "agents": [],
             "items": [],
+            "image_slots": {slot: None for slot in _ORDERED_IMAGE_SLOTS},
+            "primary_image_slot": None,
+            "image_url": None,
         }
         state["locations"][new_id] = new_loc
         # If a canvas position was provided, persist it immediately
@@ -306,7 +374,9 @@ def resolve_world_command(
         import random as _random
         from app.games.zone_stalkers.generators.zone_generator import _make_stalker_agent
         loc_id = payload["loc_id"]
-        existing_agents = state.get("agents", {})
+        state.setdefault("agents", {})
+        state.setdefault("locations", {})
+        existing_agents = state["agents"]
         n = len(existing_agents)
         new_agent_id = f"agent_debug_{n}"
         while new_agent_id in existing_agents:
@@ -326,8 +396,23 @@ def resolve_world_command(
             global_goal=global_goal,
             kill_target_id=kill_target_id,
         )
-        state.setdefault("agents", {})[new_agent_id] = agent
-        state["locations"][loc_id]["agents"].append(new_agent_id)
+        # Ensure all UI-required fields are present
+        agent.setdefault("id", new_agent_id)
+        agent.setdefault("name", name)
+        agent.setdefault("location_id", loc_id)
+        agent.setdefault("hp", 100)
+        agent.setdefault("max_hp", 100)
+        agent.setdefault("is_alive", True)
+        agent.setdefault("controller", {"kind": "bot", "participant_id": None})
+        agent.setdefault("inventory", [])
+        agent.setdefault("equipment", {"weapon": None, "armor": None, "detector": None})
+        agent.setdefault("scheduled_action", None)
+        agent.setdefault("action_queue", [])
+        state["agents"][new_agent_id] = agent
+        # Add to loc.agents without duplicates
+        loc_agents = state["locations"][loc_id].setdefault("agents", [])
+        if new_agent_id not in loc_agents:
+            loc_agents.append(new_agent_id)
         events.append({"event_type": "debug_stalker_spawned", "payload": {"agent_id": new_agent_id, "loc_id": loc_id}})
         return state, events
 
@@ -628,6 +713,26 @@ def resolve_world_command(
         events.append({
             "event_type": "debug_item_removed",
             "payload": {"agent_id": target_id, "item_id": item_id, "removed": removed},
+        })
+        return state, events
+
+    # ── debug_set_location_primary_image: meta-command ───────────────────────
+    if command_type == "debug_set_location_primary_image":
+        loc_id = str(payload["loc_id"])
+        slot = str(payload["slot"])
+        if loc_id not in state.get("locations", {}):
+            events.append({"event_type": "debug_error", "payload": {"error": f"Location {loc_id!r} not found"}})
+            return state, events
+        if slot not in _VALID_LOCATION_IMAGE_SLOTS:
+            events.append({"event_type": "debug_error", "payload": {"error": f"Invalid slot {slot!r}"}})
+            return state, events
+        loc = state["locations"][loc_id]
+        loc.setdefault("image_slots", {})
+        loc["primary_image_slot"] = slot
+        _sync_location_primary_image_url(loc)
+        events.append({
+            "event_type": "debug_location_primary_image_set",
+            "payload": {"loc_id": loc_id, "slot": slot},
         })
         return state, events
 
@@ -1549,5 +1654,25 @@ def _validate_debug_set_agent_threshold(
         return RuleCheckResult(
             valid=False,
             error=f"amount must be between {MATERIAL_THRESHOLD_MIN} and {MATERIAL_THRESHOLD_MAX}"
+        )
+    return RuleCheckResult(valid=True)
+
+
+def _validate_debug_set_location_primary_image(
+    payload: Dict[str, Any],
+    state: Dict[str, Any],
+) -> RuleCheckResult:
+    loc_id = payload.get("loc_id")
+    if not loc_id:
+        return RuleCheckResult(valid=False, error="loc_id is required")
+    if loc_id not in state.get("locations", {}):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    slot = payload.get("slot")
+    if not slot:
+        return RuleCheckResult(valid=False, error="slot is required")
+    if slot not in _VALID_LOCATION_IMAGE_SLOTS:
+        return RuleCheckResult(
+            valid=False,
+            error=f"Invalid slot '{slot}'. Must be one of: {sorted(_VALID_LOCATION_IMAGE_SLOTS)}",
         )
     return RuleCheckResult(valid=True)
