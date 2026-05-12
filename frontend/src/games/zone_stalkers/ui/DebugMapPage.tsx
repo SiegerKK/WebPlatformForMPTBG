@@ -64,6 +64,17 @@ function normalizeImageSlots(loc: ZoneLocation): LocationImageSlots {
   return slots;
 }
 
+function emptyImageSlots(): LocationImageSlots {
+  const slots: LocationImageSlots = {};
+  for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = null;
+  return slots;
+}
+
+function safeNormalizeImageSlots(loc?: ZoneLocation | null): LocationImageSlots {
+  if (!loc) return emptyImageSlots();
+  return normalizeImageSlots(loc);
+}
+
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
 /** Resolves the bg/border colours for a region, falling back to static maps. */
@@ -1165,7 +1176,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       setLocalImageSlotsByLoc((prev) => ({
         ...prev,
         [locId]: {
-          ...normalizeImageSlots(zoneState.locations[locId]),
+          ...safeNormalizeImageSlots(zoneState.locations[locId]),
           ...imageSlots,
         },
       }));
@@ -1187,7 +1198,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       setLocalImageSlotsByLoc((prev) => ({
         ...prev,
         [locId]: {
-          ...normalizeImageSlots(zoneState.locations[locId]),
+          ...safeNormalizeImageSlots(zoneState.locations[locId]),
           ...imageSlots,
         },
       }));
@@ -1291,7 +1302,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     merged.image_url = getPrimaryLocationImageUrl(merged);
     return merged;
   }, [detailLoc, localImageSlotsByLoc, localPrimaryImageSlotByLoc]);
-  const detailConns = selectedLocId ? (localConns[selectedLocId] ?? []) : [];
+  const detailConns = selectedLocId
+    ? (localConns[selectedLocId] ?? normalizeLocationConnections(zoneState.locations[selectedLocId]))
+    : [];
 
   useEffect(() => {
     setLocalImageSlotsByLoc((prev) => {

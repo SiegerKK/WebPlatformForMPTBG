@@ -320,7 +320,6 @@ export function LocationModal({
             <>
               <div style={{
                 width: '100%',
-                minHeight: 80,
                 borderRadius: 8,
                 border: '1px solid #1e3a5f',
                 background: '#020617',
@@ -333,7 +332,7 @@ export function LocationModal({
                 overflow: 'hidden',
               }}>
                 {primaryImageUrl ? (
-                  <img src={primaryImageUrl} alt={name || 'location'} style={{ width: '100%', maxHeight: 180, objectFit: 'cover' }} />
+                  <img src={primaryImageUrl} alt={name || 'location'} style={{ width: '100%', height: 'auto', objectFit: 'contain', display: 'block' }} />
                 ) : (
                   'Нет изображения'
                 )}
