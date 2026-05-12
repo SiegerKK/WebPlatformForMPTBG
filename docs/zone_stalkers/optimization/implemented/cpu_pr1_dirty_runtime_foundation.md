@@ -1,5 +1,8 @@
 # CPU Optimization PR 1 — Dirty Runtime Foundation
 
+> ⚠️ Archived PR document.
+> Superseded by [`../cpu_optimization_applied_pr1_pr5.md`](../cpu_optimization_applied_pr1_pr5.md).
+
 > Goal:
 >
 > ```text

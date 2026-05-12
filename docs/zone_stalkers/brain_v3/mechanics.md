@@ -351,4 +351,4 @@ If useful intel was not produced, repair logic prevents repeating the same no-pr
 
 - `action_queue` remains as legacy compatibility only; v3 bots should not use it.
 - Full hunt operation (intercept, ambush, stakeout) is planned but not yet implemented — see [`../future/combat_encounter_system.md`](../future/combat_encounter_system.md).
-- Brain trace is written for all v3 NPCs by default; gating to selected agents is a planned CPU optimization — see [`../optimization/planned/`](../optimization/planned/README.md).
+- Brain trace is written for all v3 NPCs by default; CPU optimization status is tracked in [`../optimization/cpu_optimization_applied_pr1_pr5.md`](../optimization/cpu_optimization_applied_pr1_pr5.md).

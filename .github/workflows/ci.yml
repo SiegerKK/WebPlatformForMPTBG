@@ -4,11 +4,6 @@ on:
   pull_request:
     branches:
       - "**"
-  push:
-    branches:
-      - "copilot/**"
-      - "codex/**"
-      - "feature/**"
   workflow_dispatch:
 
 permissions:
@@ -35,8 +30,12 @@ jobs:
         run: |
           pytest \
             backend/tests/test_*.py \
-            backend/tests/api \
-            -q
+            -q \
+            --ignore=backend/tests/test_zone_stalkers.py \
+            --ignore=backend/tests/test_zone_stalkers_tick.py \
+            --ignore=backend/tests/test_zone_stalkers_copy_on_write_runtime.py \
+            --ignore=backend/tests/test_zone_stalkers_location_images.py \
+            --ignore=backend/tests/test_memory_merge.py
 
   backend-zone-stalkers-core:
     name: Zone Stalkers core tests

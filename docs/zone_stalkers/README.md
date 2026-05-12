@@ -25,11 +25,8 @@ Network and CPU optimization architecture.
 |---|---|
 | [optimization/README.md](./optimization/README.md) | Overview of implemented and planned optimizations |
 | [optimization/network_and_debug_optimization.md](./optimization/network_and_debug_optimization.md) | Implemented: zone_delta, projections, debug subscriptions, on-demand hunt traces |
-| [optimization/planned/README.md](./optimization/planned/README.md) | Planned CPU optimization PRs (not yet implemented) |
-| [optimization/planned/cpu_pr1_dirty_runtime_foundation.md](./optimization/planned/cpu_pr1_dirty_runtime_foundation.md) | PR plan: TickProfiler, DirtySet, pathfinding cache |
-| [optimization/planned/cpu_pr2_copy_on_write_runtime.md](./optimization/planned/cpu_pr2_copy_on_write_runtime.md) | PR plan: remove full deepcopy, copy-on-write state |
-| [optimization/planned/cpu_pr3_event_driven_actions_lazy_needs.md](./optimization/planned/cpu_pr3_event_driven_actions_lazy_needs.md) | PR plan: event-driven long actions, lazy needs model |
-| [optimization/planned/cpu_pr4_brain_invalidation_ai_budget.md](./optimization/planned/cpu_pr4_brain_invalidation_ai_budget.md) | PR plan: brain invalidation cache, AI decision budget |
+| [optimization/cpu_optimization_applied_pr1_pr5.md](./optimization/cpu_optimization_applied_pr1_pr5.md) | Consolidated applied CPU optimization results for PR1–PR5 |
+| [optimization/planned/README.md](./optimization/planned/README.md) | Archived CPU planning documents (superseded) |
 
 ### [`future/`](./future/)
 
