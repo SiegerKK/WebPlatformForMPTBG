@@ -43,6 +43,7 @@ from app.games.zone_stalkers.decision.models.intent import (
 )
 from app.games.zone_stalkers.decision.models.plan import STEP_CONSUME_ITEM, STEP_SLEEP_FOR_HOURS
 from tests.decision.conftest import make_agent, make_minimal_state
+from tests.decision.v3.memory_assertions import v3_action_records, v3_records
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -116,7 +117,6 @@ def _sleeping_bot(
         "material_threshold": 3000,
         "equipment": {"weapon": {"type": "pistol"}, "armor": {"type": "leather_jacket"}},
         "inventory": inv,
-        "memory": [],
         "action_queue": [],
         "scheduled_action": {
             "type": "sleep",
@@ -218,11 +218,7 @@ def test_sleep_memory_not_written_during_intervals():
     for _ in range(SLEEP_EFFECT_INTERVAL_TURNS * 2):
         state, _ = tick_zone_map(state)
 
-    mem = state["agents"]["bot1"].get("memory", [])
-    sleep_completed_entries = [
-        m for m in mem
-        if m.get("effects", {}).get("action_kind") == "sleep_completed"
-    ]
+    sleep_completed_entries = v3_action_records(state["agents"]["bot1"], "sleep_completed")
     assert sleep_completed_entries == []  # still sleeping
 
 
@@ -238,11 +234,7 @@ def test_sleep_completion_memory_written_and_no_double_reset():
     for _ in range(turns + 1):
         state, _ = tick_zone_map(state)
 
-    mem = state["agents"]["bot1"].get("memory", [])
-    completion_entries = [
-        m for m in mem
-        if m.get("effects", {}).get("action_kind") == "sleep_completed"
-    ]
+    completion_entries = v3_action_records(state["agents"]["bot1"], "sleep_completed")
     assert len(completion_entries) == 1
 
     # Sleepiness is NOT set to 0 artificially — it's only reduced by intervals.
@@ -263,12 +255,9 @@ def test_sleep_wakes_up_early_when_sleepiness_reaches_zero():
 
     bot_state = state["agents"]["bot1"]
     assert bot_state.get("scheduled_action") is None
-    completion_entries = [
-        m for m in bot_state.get("memory", [])
-        if m.get("effects", {}).get("action_kind") == "sleep_completed"
-    ]
+    completion_entries = v3_action_records(bot_state, "sleep_completed")
     assert completion_entries, "Expected sleep_completed memory after early wake"
-    assert completion_entries[-1]["effects"].get("hours_slept", 0) <= 1.0
+    assert (completion_entries[-1].get("details") or {}).get("hours_slept", 0) <= 1.0
 
 
 def test_interrupted_sleep_keeps_partial_recovery():
@@ -489,7 +478,6 @@ def test_prepare_sleep_drink_records_consume_drink():
     agent: dict[str, Any] = {
         "inventory": [{"id": "w1", "type": "water", "value": 0, "effects": {"thirst": -30}}],
         "thirst": 75, "hunger": 10, "hp": 80, "max_hp": 100, "radiation": 0,
-        "memory": [],
         "archetype": "stalker_agent",
     }
     state: dict[str, Any] = {
@@ -510,8 +498,10 @@ def test_prepare_sleep_drink_records_consume_drink():
     ctx = build_agent_context("bot1", agent, state)
     _exec_consume("bot1", agent, step, ctx, state, 100)
 
-    mem_actions = [m for m in agent.get("memory", []) if m.get("type") == "action"]
-    kinds = [m.get("effects", {}).get("action_kind") for m in mem_actions]
+    kinds = [
+        (r.get("details") or {}).get("action_kind") or r.get("kind")
+        for r in v3_records(agent)
+    ]
     assert "consume_drink" in kinds, f"Expected consume_drink in {kinds}"
 
 
@@ -522,7 +512,6 @@ def test_prepare_sleep_food_records_consume_food():
     agent: dict[str, Any] = {
         "inventory": [{"id": "b1", "type": "bread", "value": 0, "effects": {"hunger": -30}}],
         "thirst": 10, "hunger": 72, "hp": 80, "max_hp": 100, "radiation": 0,
-        "memory": [],
         "archetype": "stalker_agent",
     }
     state = make_minimal_state(agent_id="bot1", agent=agent)
@@ -536,6 +525,8 @@ def test_prepare_sleep_food_records_consume_food():
     ctx = build_agent_context("bot1", agent, state)
     _exec_consume("bot1", agent, step, ctx, state, 100)
 
-    mem_actions = [m for m in agent.get("memory", []) if m.get("type") == "action"]
-    kinds = [m.get("effects", {}).get("action_kind") for m in mem_actions]
+    kinds = [
+        (r.get("details") or {}).get("action_kind") or r.get("kind")
+        for r in v3_records(agent)
+    ]
     assert "consume_food" in kinds, f"Expected consume_food in {kinds}"

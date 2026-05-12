@@ -52,7 +52,6 @@ def _hunter(*, goal: str, kill_target_id: str | None = None, ammo_count: int = 3
             "armor": {"type": "leather_jacket", "value": 200},
         },
         "inventory": inventory,
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
     }
@@ -78,7 +77,6 @@ def _target(*, location_id: str, hp: int = 1) -> dict[str, Any]:
         "global_goal": "get_rich",
         "equipment": {},
         "inventory": [],
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
     }

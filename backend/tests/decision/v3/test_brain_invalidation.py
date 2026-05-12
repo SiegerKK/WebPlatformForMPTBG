@@ -58,7 +58,6 @@ def _bot(agent_id: str) -> dict:
         "global_goal": "get_rich",
         "equipment": {"weapon": {"type": "pistol"}, "armor": {"type": "leather_jacket"}},
         "inventory": [{"id": "ammo1", "type": "ammo_9mm", "value": 0}],
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
         "active_plan_v3": None,

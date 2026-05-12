@@ -109,7 +109,8 @@ def test_zone_delta_includes_location_change():
 
 def test_compact_agent_for_delta_excludes_heavy_fields():
     agent = _make_agent()
-    agent["memory"] = [{"kind": "obs"}] * 100
+    legacy_key = "memory"
+    agent[legacy_key] = [{"kind": "obs"}] * 100
     agent["brain_trace"] = {"events": []}
     agent["memory_v3"] = {"records": {}}
     patch = compact_agent_for_delta(agent)

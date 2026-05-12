@@ -1,5 +1,8 @@
 # Zone Stalkers — оптимизация процесса тика и auto-run без специальных решений для пустой карты
 
+> ⚠️ Archived planning document.
+> Superseded by [`../cpu_optimization_applied_pr1_pr5.md`](../cpu_optimization_applied_pr1_pr5.md).
+
 ## Назначение документа
 
 Этот документ описывает общий план оптимизации процесса течения времени в `Zone Stalkers`.

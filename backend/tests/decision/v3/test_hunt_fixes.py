@@ -318,16 +318,18 @@ class TestWitnessSourceExhaustion:
 
         _exec_question_witnesses("bot1", agent, step, ctx, state, world_turn)
 
-        action_kinds = [m["effects"].get("action_kind") for m in agent.get("memory", [])]
+        from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_action_kind, _v3_details  # noqa: PLC0415
+        v3_records = _v3_records_desc(agent)
+        action_kinds = [_v3_action_kind(r) for r in v3_records]
         assert "witness_source_exhausted" in action_kinds, (
             f"Expected witness_source_exhausted in memory, got: {action_kinds}"
         )
 
-        exhausted_mem = next(
-            m for m in agent["memory"]
-            if m["effects"].get("action_kind") == "witness_source_exhausted"
+        exhausted_rec = next(
+            r for r in v3_records
+            if _v3_action_kind(r) == "witness_source_exhausted"
         )
-        effects = exhausted_mem["effects"]
+        effects = _v3_details(exhausted_rec)
         assert effects["target_id"] == "target_1"
         assert effects["location_id"] == "loc_a"
         cooldown = effects.get("cooldown_until_turn")

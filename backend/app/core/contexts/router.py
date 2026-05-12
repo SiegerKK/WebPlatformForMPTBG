@@ -14,8 +14,8 @@ router = APIRouter(tags=["contexts"])
 
 
 def _strip_agent_memory(state_blob: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a shallow-copy of *state_blob* with ``memory`` removed from every
-    agent and trader dict.
+    """Return a shallow-copy of *state_blob* with legacy ``memory`` removed from
+    every agent and trader dict.
 
     Agent memory can hold up to 2000 entries per entity.  Including it in every
     ``getTree`` / ``get`` response wastes bandwidth because the frontend only
@@ -27,7 +27,7 @@ def _strip_agent_memory(state_blob: Dict[str, Any]) -> Dict[str, Any]:
     for collection in ("agents", "traders"):
         if collection in stripped and isinstance(stripped[collection], dict):
             stripped[collection] = {
-                k: {**v, "memory": []} if isinstance(v, dict) and "memory" in v else v
+                k: ({kk: vv for kk, vv in v.items() if kk != "memory"} if isinstance(v, dict) else v)
                 for k, v in stripped[collection].items()
             }
     return stripped
@@ -102,4 +102,3 @@ def get_projection(context_id: uuid.UUID, current_user: User = Depends(get_curre
     policy = VisibilityPolicy()
     fog = FogProjection()
     return fog.project(ctx, current_user.id, policy, db)
-

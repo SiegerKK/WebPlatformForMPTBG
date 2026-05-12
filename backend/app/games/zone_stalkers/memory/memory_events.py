@@ -1,4 +1,9 @@
-"""memory/legacy_bridge.py — Bridge legacy ``agent["memory"]`` to ``memory_v3``."""
+"""memory/memory_events.py — Convert game memory events to ``memory_v3`` records.
+
+This module is the sole canonical path for writing agent memory.  Every call
+to ``_add_memory`` in tick_rules.py ultimately calls
+``write_memory_event_to_v3`` here.
+"""
 from __future__ import annotations
 
 import uuid
@@ -12,7 +17,7 @@ from .models import (
     LAYER_SPATIAL,
     LAYER_GOAL,
 )
-from .store import ensure_memory_v3, add_memory_record, MEMORY_V3_IMPORT_LEGACY_LIMIT
+from .store import ensure_memory_v3, add_memory_record
 
 _SKIP_ACTION_KINDS: frozenset[str] = frozenset({"sleep_interval_applied"})
 
@@ -49,6 +54,7 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "active_plan_aborted": (LAYER_GOAL, "active_plan_aborted", ("active_plan", "threat")),
     "active_plan_completed": (LAYER_GOAL, "active_plan_completed", ("active_plan",)),
     "global_goal_completed": (LAYER_GOAL, "global_goal_completed", ("goal", "completion")),
+    "objective_decision": (LAYER_GOAL, "objective_decision", ("objective", "decision")),
 
     # Threat / environment
     "emission_imminent": (LAYER_THREAT, "emission_warning", ("emission", "danger")),
@@ -91,20 +97,20 @@ _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
 }
 
 
-def bridge_legacy_entry_to_memory_v3(
+def write_memory_event_to_v3(
     *,
     agent_id: str,
     agent: dict[str, Any],
     legacy_entry: dict[str, Any],
     world_turn: int,
 ) -> None:
-    """Convert a single legacy memory entry into a MemoryRecord and store it."""
+    """Convert a single memory event entry into a MemoryRecord and store it in memory_v3."""
     effects: dict[str, Any] = legacy_entry.get("effects", {})
     action_kind = str(effects.get("action_kind", ""))
     if action_kind in _SKIP_ACTION_KINDS:
         return
 
-    record = _map_legacy_to_record(
+    record = _map_event_to_record(
         agent_id=agent_id,
         agent=agent,
         entry=legacy_entry,
@@ -114,35 +120,14 @@ def bridge_legacy_entry_to_memory_v3(
         add_memory_record(agent, record)
 
 
-def import_legacy_memory(agent: dict[str, Any], agent_id: str, world_turn: int) -> None:
-    """Import last N legacy entries when memory_v3 is still empty."""
-    mem_v3 = ensure_memory_v3(agent)
-    if mem_v3["records"]:
-        return
-
-    legacy_mem: list[dict[str, Any]] = agent.get("memory", [])
-    if not legacy_mem:
-        return
-
-    for entry in legacy_mem[-MEMORY_V3_IMPORT_LEGACY_LIMIT:]:
-        record = _map_legacy_to_record(
-            agent_id=agent_id,
-            agent=agent,
-            entry=entry,
-            world_turn=world_turn,
-        )
-        if record is not None:
-            add_memory_record(agent, record)
-
-
-def _map_legacy_to_record(
+def _map_event_to_record(
     *,
     agent_id: str,
     agent: dict[str, Any],
     entry: dict[str, Any],
     world_turn: int,
 ) -> MemoryRecord | None:
-    """Return a MemoryRecord for a legacy entry, or None to skip."""
+    """Return a MemoryRecord for a memory event entry, or None to skip."""
     effects: dict[str, Any] = entry.get("effects", {})
     action_kind = str(effects.get("action_kind", ""))
     memory_type = str(entry.get("type", "observation"))
@@ -151,7 +136,7 @@ def _map_legacy_to_record(
     if action_kind in _SKIP_ACTION_KINDS:
         return None
 
-    record_id = "mem_leg_" + uuid.uuid4().hex[:10]
+    record_id = "mem_ev_" + uuid.uuid4().hex[:10]
     layer, kind, base_tags = _resolve_layer_kind_tags(memory_type, action_kind, effects)
 
     extra_tags: list[str] = list(base_tags)
@@ -201,7 +186,7 @@ def _map_legacy_to_record(
         importance = 0.5
 
     # Retention guidance for target-related memory kinds.
-    if kind in {"target_equipment_seen", "target_combat_strength_observed", "target_death_confirmed"}:
+    if kind in {"target_equipment_seen", "target_combat_strength_observed", "target_death_confirmed", "target_intel"}:
         importance = max(importance, 0.85)
     elif kind in {"target_seen", "target_not_found", "target_moved", "target_last_known_location", "target_route_observed"}:
         importance = max(importance, 0.65)
@@ -229,6 +214,14 @@ def _map_legacy_to_record(
         if action_kind == "sleep_interrupted":
             importance = max(importance, 0.7)
 
+    # CRITICAL: Store the original memory type so that read functions can filter
+    # by "decision" / "observation" / "action" without inspecting the record kind.
+    details["memory_type"] = memory_type
+    # Store the original action_kind so that _v3_action_kind() always returns it
+    # even when _ACTION_KIND_MAP remaps the kind (e.g. "emission_imminent" → "emission_warning").
+    if action_kind:
+        details["action_kind"] = action_kind
+
     entity_ids = _extract_entity_ids(effects)
     all_tags = tuple(dict.fromkeys(extra_tags))
     summary = str(entry.get("summary") or entry.get("title") or f"{kind} at {location_id or 'unknown'}")
@@ -248,7 +241,7 @@ def _map_legacy_to_record(
         tags=all_tags,
         importance=importance,
         confidence=confidence,
-        source="legacy_import",
+        source="event",
     )
 
 

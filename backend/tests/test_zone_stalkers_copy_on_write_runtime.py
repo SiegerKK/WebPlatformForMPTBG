@@ -44,7 +44,6 @@ def _make_cow_tick_state(
         num_traders=num_traders,
     )
     state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
     state["world_turn"] = max(2, int(state.get("world_turn", 2)))
     _mem_v3_template = {
         "records": {},
@@ -204,7 +203,6 @@ def test_tick_zone_map_cow_does_not_copy_all_agents():
             "scheduled_action": None,
             "action_used": False,
             "inventory": [],
-            "memory": [],
             "hp": 100,
             "hunger": 0,
             "thirst": 0,
@@ -444,10 +442,10 @@ def test_cow_tick_travel_arrival_does_not_mutate_input():
 
 
 def test_cow_tick_emission_warning_memory_does_not_mutate_input():
-    """Emission warning memory write must not mutate input agent memory list."""
+    """Emission warning memory write must not mutate input agent state."""
     state = _make_cow_tick_state(seed=134, num_players=1, num_ai_stalkers=0, num_traders=0)
     for agent in state["agents"].values():
-        agent["memory"] = []
+        agent.pop("memory", None)
         agent["scheduled_action"] = None
         agent["has_left_zone"] = False
 
@@ -468,10 +466,12 @@ def test_cow_tick_emission_warning_memory_does_not_mutate_input():
     warning_events = [e for e in events if e.get("event_type") == "emission_warning"]
     assert warning_events, "Emission warning event should have been emitted"
     for agent_id, agent_after in new_state["agents"].items():
-        agent_memory = agent_after.get("memory", [])
+        records = list(((agent_after.get("memory_v3") or {}).get("records") or {}).values())
         assert any(
-            m.get("title") == "⚠️ Скоро выброс!" for m in agent_memory
-        ), f"Agent {agent_id} should have emission warning memory in new_state"
+            r.get("kind") == "emission_warning"
+            or (r.get("details") or {}).get("action_kind") in {"emission_imminent", "emission_started"}
+            for r in records
+        ), f"Agent {agent_id} should have emission warning memory_v3 record in new_state"
 
 
 def test_cow_tick_live_npc_bot_does_not_mutate_input():
@@ -484,7 +484,6 @@ def test_cow_tick_live_npc_bot_does_not_mutate_input():
         num_traders=0,
     )
     state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
     state["world_turn"] = 2
 
     for agent in state["agents"].values():
@@ -709,7 +708,6 @@ def test_cow_trade_buy_updates_new_state_not_input():
         "is_alive": True,
         "money": 50000,
         "inventory": [],
-        "memory": [],
     }
     state["locations"][loc_a]["agents"].append(trader_id)
 
@@ -741,7 +739,6 @@ def test_cow_trade_sell_updates_new_state_not_input():
         "is_alive": True,
         "money": 50000,
         "inventory": [],
-        "memory": [],
     }
     state["locations"][loc_a]["agents"].append(trader_id)
 

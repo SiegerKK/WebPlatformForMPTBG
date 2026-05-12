@@ -969,11 +969,12 @@ class TestRiskToleranceItemSelection:
         from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES
         state, agent = self._make_bot_state(agent_risk=0.5)
         _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
-        decision_entries = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
+        from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_memory_type, _v3_action_kind, _v3_details
+        decision_entries = [r for r in _v3_records_desc(agent) if _v3_memory_type(r) == "decision"]
         assert len(decision_entries) >= 1
-        last_decision = decision_entries[-1]
-        effects = last_decision.get("effects", {})
-        assert effects.get("action_kind") == "trade_decision"
+        last_decision = decision_entries[0]  # newest first
+        effects = _v3_details(last_decision)
+        assert _v3_action_kind(last_decision) == "trade_decision"
         assert "agent_risk_tolerance" in effects
         assert "score" in effects, "decision memory must contain composite score"
 
@@ -984,9 +985,10 @@ class TestRiskToleranceItemSelection:
         # WEAPON_ITEM_TYPES has 5 items — there will be runner-ups
         state, agent = self._make_bot_state(agent_risk=0.5)
         _bot_buy_from_trader("agent_p0", agent, WEAPON_ITEM_TYPES, state, world_turn=1)
-        decision_entries = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
-        last_decision = decision_entries[-1]
-        effects = last_decision.get("effects", {})
+        from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_memory_type, _v3_details
+        decision_entries = [r for r in _v3_records_desc(agent) if _v3_memory_type(r) == "decision"]
+        last_decision = decision_entries[0]  # newest first
+        effects = _v3_details(last_decision)
         runners_up = effects.get("runners_up", [])
         assert isinstance(runners_up, list), "runners_up must be a list"
         assert 1 <= len(runners_up) <= 2, f"expected 1-2 runner-ups, got {len(runners_up)}"
@@ -1176,8 +1178,9 @@ class TestEquipmentUpgrade:
         from app.games.zone_stalkers.rules.tick_rules import _bot_try_upgrade_equipment
         state, agent = self._make_state_with_agent(agent_risk=0.6, agent_money=50000, equipped_weapon="pistol")
         _bot_try_upgrade_equipment("agent_p0", agent, agent["location_id"], state, 1)
-        decision_mem = [m for m in agent.get("memory", []) if m.get("type") == "decision"]
-        kinds = [m.get("effects", {}).get("action_kind", "") for m in decision_mem]
+        from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_memory_type, _v3_action_kind
+        decision_mem = [r for r in _v3_records_desc(agent) if _v3_memory_type(r) == "decision"]
+        kinds = [_v3_action_kind(m) for m in decision_mem]
         assert "upgrade_decision" in kinds
 
     def test_no_upgrade_when_no_equipment(self):
@@ -2134,7 +2137,7 @@ class TestUnifiedStalkerModel:
         "experience", "skill_combat", "skill_stalker", "skill_trade",
         "skill_medicine", "skill_social",
         "global_goal", "current_goal", "risk_tolerance", "material_threshold",
-        "scheduled_action", "action_queue", "memory",
+        "scheduled_action", "action_queue",
     ]
 
     def test_player_agent_has_all_required_fields(self):

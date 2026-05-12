@@ -1,5 +1,8 @@
 # CPU Optimization PR 4 — Brain Invalidation and AI Decision Budget
 
+> ⚠️ Archived planning document.
+> Superseded by [`../cpu_optimization_applied_pr1_pr5.md`](../cpu_optimization_applied_pr1_pr5.md).
+
 > Base:
 >
 > ```text

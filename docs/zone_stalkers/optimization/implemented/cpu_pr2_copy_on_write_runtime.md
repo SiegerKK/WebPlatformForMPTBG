@@ -1,5 +1,8 @@
 # CPU Optimization PR 2 — Copy-on-Write Runtime and Remove Full Deepcopy
 
+> ⚠️ Archived PR document.
+> Superseded by [`../cpu_optimization_applied_pr1_pr5.md`](../cpu_optimization_applied_pr1_pr5.md).
+
 > Base:
 >
 > ```text

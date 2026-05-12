@@ -39,11 +39,12 @@ def _is_emission_threat_for_monitor(
         return True
     last_ended: int = 0
     last_imminent: int = 0
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "observation":
+    from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_action_kind, _v3_memory_type, _v3_turn  # noqa: PLC0415
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        mk = mem.get("effects", {}).get("action_kind")
-        mt = int(mem.get("world_turn", 0))
+        mk = _v3_action_kind(rec)
+        mt = _v3_turn(rec)
         if mk == "emission_ended" and mt > last_ended:
             last_ended = mt
         elif mk == "emission_imminent" and mt > last_imminent:

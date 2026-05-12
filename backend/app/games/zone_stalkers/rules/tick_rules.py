@@ -87,8 +87,41 @@ _HOUR_IN_TURNS = 60 // MINUTES_PER_TURN       # turns needed to pass 1 in-game h
 EXPLORE_DURATION_TURNS = 30 // MINUTES_PER_TURN  # turns needed for a 30-min exploration
 DEFAULT_SLEEP_HOURS = 6                         # default hours of sleep when no 'hours' key is present in sched
 
-# Agent memory cap — oldest entries are dropped when this limit is exceeded.
-MAX_AGENT_MEMORY = 2000
+# ── Memory v3 query helpers ────────────────────────────────────────────────────
+
+def _v3_records_desc(agent: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return memory_v3 records sorted by created_turn descending (newest first)."""
+    records = ((agent.get("memory_v3") or {}).get("records") or {})
+    if not isinstance(records, dict):
+        return []
+    return sorted(
+        (r for r in records.values() if isinstance(r, dict)),
+        key=lambda r: int(r.get("created_turn", 0) or 0),
+        reverse=True,
+    )
+
+
+def _v3_details(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the details dict from a memory_v3 record."""
+    d = rec.get("details")
+    return d if isinstance(d, dict) else {}
+
+
+def _v3_action_kind(rec: Dict[str, Any]) -> str:
+    """Return the action_kind from a memory_v3 record (from details or kind)."""
+    d = _v3_details(rec)
+    return str(d.get("action_kind") or rec.get("kind") or "")
+
+
+def _v3_memory_type(rec: Dict[str, Any]) -> str:
+    """Return the original memory type (decision/observation/action) from v3 record."""
+    return str(_v3_details(rec).get("memory_type") or "")
+
+
+def _v3_turn(rec: Dict[str, Any]) -> int:
+    """Return the created_turn of a memory_v3 record."""
+    return int(rec.get("created_turn", 0) or 0)
+
 PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
 MAX_DECISION_QUEUE_SIZE = 512
 
@@ -701,8 +734,6 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             try:
                 from app.games.zone_stalkers.runtime.zone_tick_runtime import ZoneTickRuntime as _ZoneTickRuntime
                 _tick_runtime = _ZoneTickRuntime(source_state=source_state, profiler=_tick_profiler)
-                if source_state.get("cpu_copy_on_write_legacy_bridge_enabled", False):
-                    _tick_runtime.prepare_for_legacy_mutation()
                 state = _tick_runtime.state
             except Exception:
                 _cow_fallback_to_deepcopy = 1
@@ -769,8 +800,11 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     # Decay runs every MEMORY_DECAY_INTERVAL_TURNS to reduce CPU; legacy import
     # still happens on every turn when memory_v3 is empty.
     MEMORY_DECAY_INTERVAL_TURNS = 30
-    from app.games.zone_stalkers.memory.store import ensure_memory_v3 as _ensure_mem_v3  # noqa: PLC0415
-    from app.games.zone_stalkers.memory.legacy_bridge import import_legacy_memory as _import_legacy  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.store import (  # noqa: PLC0415
+        MEMORY_V3_MAX_RECORDS as _MEMORY_V3_MAX_RECORDS,
+        ensure_memory_v3 as _ensure_mem_v3,
+        normalize_agent_memory_state as _normalize_agent_memory_state,
+    )
     from app.games.zone_stalkers.memory.decay import decay_memory as _decay_mem  # noqa: PLC0415
     _profiler_ctx_memory = _tick_profiler.section("memory_v3_ensure_ms") if _tick_profiler else __import__("contextlib").nullcontext()
     _is_decay_turn = (world_turn - 1) % MEMORY_DECAY_INTERVAL_TURNS == 0
@@ -787,16 +821,23 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                 and _MEM_IDX_KEYS.issubset(_mem_v3["indexes"])
             )
             _records_populated = bool(_mem_complete and _mem_v3.get("records"))
+            _records_oversized = (
+                isinstance(_mem_v3, dict)
+                and isinstance(_mem_v3.get("records"), dict)
+                and len(_mem_v3.get("records", {})) > _MEMORY_V3_MAX_RECORDS
+            )
+            _needs_normalization = not _mem_complete or _records_oversized
             _needs_memory_cow = (
                 not _mem_complete
                 or not _records_populated
                 or _is_decay_turn
+                or _needs_normalization
             )
             if _needs_memory_cow:
                 _pr3_agent = _runtime_agent(_pr3_agent_id, _pr3_agent)
+            if _needs_normalization:
+                _normalize_agent_memory_state(_pr3_agent)
             _ensure_mem_v3(_pr3_agent)
-            if not _pr3_agent.get("memory_v3", {}).get("records"):
-                _import_legacy(_pr3_agent, _pr3_agent_id, world_turn)
             if _is_decay_turn:
                 _decay_mem(_pr3_agent, world_turn)
 
@@ -1438,7 +1479,6 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     # Gate observations to every LOCATION_OBSERVATION_INTERVAL_TURNS turns to
     # reduce memory churn; travel-triggered observations still happen inline.
     LOCATION_OBSERVATION_INTERVAL_TURNS = 10
-    from app.games.zone_stalkers.rules.memory_merge import apply_staleness  # noqa: PLC0415
     for agent_id, agent in state.get("agents", {}).items():
         if not agent.get("is_alive", True):
             continue
@@ -1451,7 +1491,6 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             # Write observation every LOCATION_OBSERVATION_INTERVAL_TURNS turns.
             # (observation on travel is still written inline in travel logic)
             if (world_turn - 1) % LOCATION_OBSERVATION_INTERVAL_TURNS == 0:
-                apply_staleness(agent.get("memory", []), world_turn)
                 _write_location_observations(agent_id, agent, loc_id, state, world_turn)
 
     # 4. Advance world time (1 tick = 1 minute)
@@ -1753,11 +1792,9 @@ def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:
         return True
     _last_ended: int = 0
     _last_imminent: int = 0
-    for _mem in agent.get("memory", []):
-        if _mem.get("type") != "observation":
-            continue
-        _mk = _mem.get("effects", {}).get("action_kind")
-        _mt = _mem.get("world_turn", 0)
+    for _rec in _v3_records_desc(agent):
+        _mk = _v3_action_kind(_rec)
+        _mt = _v3_turn(_rec)
         if _mk == "emission_ended" and _mt > _last_ended:
             _last_ended = _mt
         elif _mk == "emission_imminent" and _mt > _last_imminent:
@@ -2473,17 +2510,26 @@ def _add_memory(
     if not resolved_agent_id:
         resolved_agent_id = "unknown"
 
-    # Use COW-safe mutable list when a runtime is active so that appending
-    # to the memory list does not mutate the original (input) agent dict.
+    from app.games.zone_stalkers.memory.memory_events import (  # noqa: PLC0415
+        write_memory_event_to_v3,
+    )
+
+    # Ensure memory_v3 is COW-copied before in-place mutations inside the bridge.
     _cow = _cow_runtime()
     if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
         try:
-            mem = _cow.mutable_agent_list(resolved_agent_id, "memory")
+            _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")
+            agent = _cow.agent(resolved_agent_id)
         except Exception:
-            mem = agent.setdefault("memory", [])
-    else:
-        mem = agent.setdefault("memory", [])
-    mem.append(memory_entry)
+            pass
+
+    # Write exclusively to memory_v3.
+    write_memory_event_to_v3(
+        agent_id=str(resolved_agent_id),
+        agent=agent,
+        legacy_entry=memory_entry,
+        world_turn=world_turn,
+    )
 
     _action_kind = str(effects.get("action_kind") or "")
     _observed_kind = str(effects.get("observed") or "")
@@ -2547,28 +2593,6 @@ def _add_memory(
             world_turn=world_turn,
         )
 
-    # Keep only the last MAX_AGENT_MEMORY memory entries
-    if len(mem) > MAX_AGENT_MEMORY:
-        _runtime_set_agent_field(resolved_agent_id, "memory", mem[-MAX_AGENT_MEMORY:], agent)
-
-    # PR 3: bridge this entry into memory_v3 using stable agent id.
-    from app.games.zone_stalkers.memory.legacy_bridge import bridge_legacy_entry_to_memory_v3  # noqa: PLC0415
-
-    # Ensure memory_v3 is COW-copied before in-place mutations inside the bridge.
-    if _cow is not None and resolved_agent_id and resolved_agent_id != "unknown":
-        try:
-            _cow.mutable_agent_dict(resolved_agent_id, "memory_v3")  # triggers COW copy
-            agent = _cow.agent(resolved_agent_id)  # full agent dict with copied memory_v3
-        except Exception:
-            pass
-
-    bridge_legacy_entry_to_memory_v3(
-        agent_id=str(resolved_agent_id),
-        agent=agent,
-        legacy_entry=memory_entry,
-        world_turn=world_turn,
-    )
-
 
 def should_write_plan_monitor_memory_event(
     agent: Dict[str, Any],
@@ -2579,15 +2603,17 @@ def should_write_plan_monitor_memory_event(
     dedup_turns: int = PLAN_MONITOR_MEMORY_DEDUP_TURNS,
 ) -> bool:
     """Return False when a semantically identical memory exists in the recent window."""
-    for mem in reversed(agent.get("memory", [])):
-        mem_turn = int(mem.get("world_turn", 0))
-        if world_turn - mem_turn > dedup_turns:
-            break
-
-        effects = mem.get("effects", {})
-        if effects.get("action_kind") != action_kind:
+    records = ((agent.get("memory_v3") or {}).get("records") or {}).values()
+    for record in records:
+        if not isinstance(record, dict):
             continue
-        if effects.get("dedup_signature") == signature:
+        rec_turn = int(record.get("created_turn", 0))
+        if world_turn - rec_turn > dedup_turns:
+            continue
+        details = record.get("details", {})
+        if str(record.get("kind", "")) != action_kind and details.get("action_kind") != action_kind:
+            continue
+        if details.get("dedup_signature") == signature:
             return False
     return True
 
@@ -2715,9 +2741,9 @@ def _combat_flee(
     )
     participant["fled"] = True
     prev_loc_id = None
-    for mem in reversed(agent.get("memory", [])):
-        fx = mem.get("effects", {})
-        if fx.get("action_kind") == "travel_arrived":
+    for rec in _v3_records_desc(agent):
+        fx = _v3_details(rec)
+        if _v3_action_kind(rec) == "travel_arrived":
             arr_loc = fx.get("to_loc")
             if arr_loc and arr_loc != loc_id:
                 prev_loc_id = arr_loc
@@ -3193,10 +3219,10 @@ def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Opti
     key = "names" if obs_type in ("stalkers", "mutants") else (
         "artifact_types" if obs_type == "artifacts" else "item_types"
     )
-    for entry in reversed(agent.get("memory", [])):
-        if entry.get("type") != "observation":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        fx = entry.get("effects", {})
+        fx = _v3_details(rec)
         if fx.get("observed") == obs_type and fx.get("location_id") == loc_id:
             return fx.get(key)
     return None
@@ -3205,18 +3231,9 @@ def _last_obs_content(agent: Dict[str, Any], obs_type: str, loc_id: str) -> Opti
 def _find_obs_entry(
     agent: Dict[str, Any], obs_type: str, loc_id: str
 ) -> Optional[Dict[str, Any]]:
-    """Return the most recent observation entry for *obs_type* at *loc_id*.
-
-    Unlike :func:`_last_obs_content`, this returns the **mutable entry dict**
-    itself so callers can update it in-place (merge logic).  Returns ``None``
-    when no such entry exists.
+    """Legacy in-place merge helper.  Always returns None now that
+    memory_v3 is the sole store — callers fall back to writing a fresh entry.
     """
-    for entry in reversed(agent.get("memory", [])):
-        if entry.get("type") != "observation":
-            continue
-        fx = entry.get("effects", {})
-        if fx.get("observed") == obs_type and fx.get("location_id") == loc_id:
-            return entry
     return None
 
 
@@ -3234,25 +3251,27 @@ def _confirmed_empty_locations(agent: Dict[str, Any]) -> "frozenset[str]":
     ``emission_ended`` memory entry is treated as stale — the agent knows the
     location may have been refilled and will be willing to re-explore it.
     """
-    memory = agent.get("memory", [])
-
     # Find the world_turn of the most recent emission_ended observation the agent holds.
     last_emission_ended_turn: int = 0
-    for mem in memory:
-        if mem.get("effects", {}).get("action_kind") == "emission_ended":
-            t = mem.get("world_turn", 0)
+    for rec in _v3_records_desc(agent):
+        if _v3_action_kind(rec) == "emission_ended":
+            t = _v3_turn(rec)
             if t > last_emission_ended_turn:
                 last_emission_ended_turn = t
 
     # A confirmed_empty entry is valid only when it was recorded AFTER the last
     # emission end the agent is aware of.
-    return frozenset(
-        mem.get("effects", {}).get("location_id")
-        for mem in memory
-        if mem.get("effects", {}).get("action_kind") == "explore_confirmed_empty"
-        and mem.get("effects", {}).get("location_id")
-        and mem.get("world_turn", 0) > last_emission_ended_turn
-    )
+    result: set = set()
+    for rec in _v3_records_desc(agent):
+        ak = _v3_action_kind(rec)
+        kind = str(rec.get("kind") or "")
+        if ak == "explore_confirmed_empty" or kind == "location_empty":
+            d = _v3_details(rec)
+            loc_id_v = rec.get("location_id") or d.get("location_id")
+            t = _v3_turn(rec)
+            if loc_id_v and t > last_emission_ended_turn:
+                result.add(loc_id_v)
+    return frozenset(result)
 
 
 def _write_location_observations(
@@ -3281,11 +3300,6 @@ def _write_location_observations(
     * **items** (AMBIENT, window=40): current item list replaces the stored one
       on each merge-update; a new entry is created only when outside the window.
     """
-    from app.games.zone_stalkers.rules.memory_merge import (  # noqa: PLC0415
-        find_mergeable_entry,
-        update_merged_entry,
-    )
-
     loc = state.get("locations", {}).get(loc_id, {})
     loc_name = loc.get("name", loc_id)
 
@@ -3304,35 +3318,12 @@ def _write_location_observations(
     stalker_names.sort()
 
     if stalker_names:
-        _stalker_effects_proto = {
-            "observed": "stalkers",
-            "location_id": loc_id,
-            "names": stalker_names,
-        }
-        _existing = find_mergeable_entry(
-            agent.get("memory", []), _stalker_effects_proto, world_turn
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу персонажей в «{loc_name}»",
+            {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
+            summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
         )
-        if _existing is not None:
-            # Semantic merge: union of previously-seen and currently-visible names.
-            _old_names = _existing["effects"].get("names", [])
-            _merged = sorted(set(_old_names) | set(stalker_names))
-            _existing["effects"]["names"] = _merged
-            update_merged_entry(_existing, world_turn)
-            if _merged != _old_names:
-                # Content changed (new name added) — bump the semantic change timestamp.
-                _existing["world_turn"] = world_turn
-            _existing["summary"] = (
-                f"В локации «{loc_name}» замечены: {', '.join(_merged)}"
-            )
-        else:
-            # No mergeable entry found — create a fresh one.
-            # new_obs_aggregate_fields is injected automatically by _add_memory.
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"Вижу персонажей в «{loc_name}»",
-                {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
-                summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
-            )
 
     # ── Mutants at this location ──────────────────────────────────────────────
     mutant_names = sorted(
@@ -3341,29 +3332,12 @@ def _write_location_observations(
         if m.get("location_id") == loc_id and m.get("is_alive", True)
     )
     if mutant_names:
-        _mutant_effects_proto = {
-            "observed": "mutants",
-            "location_id": loc_id,
-            "names": mutant_names,
-        }
-        _existing_mut = find_mergeable_entry(
-            agent.get("memory", []), _mutant_effects_proto, world_turn
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу мутантов в «{loc_name}»",
+            {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
+            summary=f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}",
         )
-        if _existing_mut is not None:
-            # Same mutant group visible again — merge.
-            _existing_mut["effects"]["names"] = mutant_names
-            update_merged_entry(_existing_mut, world_turn)
-            _existing_mut["summary"] = (
-                f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}"
-            )
-        else:
-            # Different group (or first sighting, or outside window) — new entry.
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"Вижу мутантов в «{loc_name}»",
-                {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
-                summary=f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}",
-            )
 
     # NOTE: Artifacts are NOT recorded as a location observation on arrival.
     # They can only be discovered and recorded through the explore action.
@@ -3372,33 +3346,12 @@ def _write_location_observations(
     # ── Loose items on the ground ─────────────────────────────────────────────
     item_types = sorted(it.get("type", "?") for it in loc.get("items", []))
     if item_types:
-        _item_effects_proto = {
-            "observed": "items",
-            "location_id": loc_id,
-            "item_types": item_types,
-        }
-        _existing_items = find_mergeable_entry(
-            agent.get("memory", []), _item_effects_proto, world_turn
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"Вижу предметы в «{loc_name}»",
+            {"observed": "items", "location_id": loc_id, "item_types": item_types},
+            summary=f"В локации «{loc_name}» на земле: {', '.join(item_types)}",
         )
-        if _existing_items is not None:
-            # Replace item list with current ground state; update aggregate fields.
-            _old_item_types = _existing_items["effects"].get("item_types", [])
-            if item_types != _old_item_types:
-                _existing_items["effects"]["item_types"] = item_types
-                _existing_items["summary"] = (
-                    f"В локации «{loc_name}» на земле: {', '.join(item_types)}"
-                )
-            update_merged_entry(_existing_items, world_turn)
-            if item_types != _old_item_types:
-                # Content changed — bump the semantic change timestamp.
-                _existing_items["world_turn"] = world_turn
-        else:
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"Вижу предметы в «{loc_name}»",
-                {"observed": "items", "location_id": loc_id, "item_types": item_types},
-                summary=f"В локации «{loc_name}» на земле: {', '.join(item_types)}",
-            )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -3588,32 +3541,8 @@ def _add_trader_memory(
     title: str,
     *call_args: Any,
 ) -> None:
-    """Append a memory entry to a trader NPC (same structure as agent memory).
-
-    Supports both new-style (6 args, effects_dict only) and legacy-style
-    (7 args, summary_str + effects_dict) calling conventions.
-    """
-    if len(call_args) == 2 and isinstance(call_args[0], str):
-        summary: str = call_args[0]
-        effects: Dict[str, Any] = call_args[1] if isinstance(call_args[1], dict) else {}
-    elif len(call_args) == 1:
-        summary = ""
-        effects = call_args[0] if isinstance(call_args[0], dict) else {}
-    else:
-        summary = ""
-        effects = {}
-
-    entry: Dict[str, Any] = {
-        "world_turn": world_turn,
-        "type": memory_type,
-        "title": title,
-        "effects": effects,
-    }
-    if summary:
-        entry["summary"] = summary
-    trader.setdefault("memory", []).append(entry)
-    if len(trader["memory"]) > MAX_AGENT_MEMORY:
-        trader["memory"] = trader["memory"][-MAX_AGENT_MEMORY:]
+    """Trader memory is no longer used; trade events are recorded on the stalker agent."""
+    pass
 
 
 def _bot_sell_to_trader(
@@ -4306,12 +4235,12 @@ def _bot_pickup_on_arrival(
     """
     loc_id = agent.get("location_id")
     # Find the most recent *decision* memory entry.
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("type") != "decision":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "decision":
             continue
         # We found the latest decision.
-        effects = mem.get("effects", {})
-        if effects.get("action_kind") != "seek_item":
+        effects = _v3_details(rec)
+        if _v3_action_kind(rec) != "seek_item":
             return []  # Latest decision was something else — no pending seek.
         if effects.get("destination") != loc_id:
             return []  # Still en-route to a different location.
@@ -4375,11 +4304,11 @@ def _bot_sell_on_arrival(
     Returns sell events on success, or an empty list if not applicable.
     """
     loc_id = agent.get("location_id")
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("type") != "decision":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "decision":
             continue
-        effects = mem.get("effects", {})
-        if effects.get("action_kind") != "sell_at_trader":
+        effects = _v3_details(rec)
+        if _v3_action_kind(rec) != "sell_at_trader":
             return []  # Latest decision was something else — no pending sell.
         if effects.get("destination") != loc_id:
             return []  # Still en-route to a different location.
@@ -4478,16 +4407,16 @@ def _item_not_found_locations(
     last_item_obs_turn: Dict[str, int] = {}   # loc_id → most recent observed-items turn
     last_resolved_turn: Dict[str, int] = {}   # loc_id → most recent resolved-search turn
 
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "observation":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        effects = mem.get("effects", {})
-        turn = mem.get("world_turn", 0)
-        loc_id = effects.get("location_id")
+        effects = _v3_details(rec)
+        turn = _v3_turn(rec)
+        loc_id = rec.get("location_id") or effects.get("location_id")
         if not loc_id:
             continue
 
-        if effects.get("action_kind") in ("item_not_found_here", "item_picked_up_here"):
+        if _v3_action_kind(rec) in ("item_not_found_here", "item_picked_up_here"):
             mem_types = frozenset(effects.get("item_types", []))
             if item_types.intersection(mem_types):
                 last_resolved_turn[loc_id] = max(last_resolved_turn.get(loc_id, 0), turn)
@@ -4531,13 +4460,13 @@ def _maybe_record_item_not_found(
     """
     # Only record if the agent explicitly decided to travel here for this item.
     found_seek = False
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("type") != "decision":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "decision":
             continue
-        effects = mem.get("effects", {})
+        effects = _v3_details(rec)
         if effects.get("destination") != loc_id or effects.get("item_category") != item_category:
             continue
-        ak = effects.get("action_kind")
+        ak = _v3_action_kind(rec)
         if ak == "seek_item":
             if effects.get("emergency"):
                 # Emergency seek_item decisions always target a trader for buying,
@@ -4598,13 +4527,13 @@ def _maybe_record_item_picked_up(
     """
     # Only record if the agent explicitly decided to travel here for this item.
     found_seek = False
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("type") != "decision":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "decision":
             continue
-        effects = mem.get("effects", {})
+        effects = _v3_details(rec)
         if effects.get("destination") != loc_id or effects.get("item_category") != item_category:
             continue
-        ak = effects.get("action_kind")
+        ak = _v3_action_kind(rec)
         if ak == "seek_item":
             if effects.get("emergency"):
                 # Emergency seek_item decisions always target a trader for buying.
@@ -4620,14 +4549,14 @@ def _maybe_record_item_picked_up(
         return
 
     # Suppress duplicates: don't write the same entry twice in the same turn.
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("world_turn") != world_turn:
+    for rec in _v3_records_desc(agent):
+        if _v3_turn(rec) != world_turn:
             break
-        effects = mem.get("effects", {})
+        fx = _v3_details(rec)
         if (
-            effects.get("action_kind") == "item_picked_up_here"
-            and effects.get("location_id") == loc_id
-            and frozenset(effects.get("item_types", [])).intersection(item_types)
+            _v3_action_kind(rec) == "item_picked_up_here"
+            and (rec.get("location_id") or fx.get("location_id")) == loc_id
+            and frozenset(fx.get("item_types", [])).intersection(item_types)
         ):
             return  # already recorded this turn
 
@@ -4668,13 +4597,13 @@ def _find_item_memory_location(
     locations = state.get("locations", {})
     agent_loc = agent.get("location_id", "")
     # Collect candidate locations from memory (newest first)
-    for mem in reversed(agent.get("memory", [])):
-        if mem.get("type") != "observation":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        effects = mem.get("effects", {})
+        effects = _v3_details(rec)
         if effects.get("observed") != "items":
             continue
-        loc_id = effects.get("location_id")
+        loc_id = rec.get("location_id") or effects.get("location_id")
         if not loc_id or loc_id not in locations:
             continue
         if loc_id in excluded:
@@ -4726,26 +4655,27 @@ def _bot_ask_colocated_stalkers_about_item(
     # Build a set of (source_agent_id, loc_id) pairs the asking agent already
     # knows (any turn) so we don't write duplicate entries.
     already_known: set = set()
-    for mem in agent.get("memory", []):
-        fx = mem.get("effects", {})
-        if fx.get("action_kind") == "intel_from_stalker":
-            already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+    for rec in _v3_records_desc(agent):
+        fx = _v3_details(rec)
+        if _v3_action_kind(rec) == "intel_from_stalker":
+            ak_loc = rec.get("location_id") or fx.get("location_id")
+            already_known.add((fx.get("source_agent_id"), ak_loc))
 
     # Precompute the most recent "resolved" turn per location for the asking agent.
     # Intel whose observation turn is <= the resolved turn is stale and should be skipped.
     resolved_turns: Dict[str, int] = {}
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "observation":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        fx = mem.get("effects", {})
-        if fx.get("action_kind") not in ("item_not_found_here", "item_picked_up_here"):
+        fx = _v3_details(rec)
+        if _v3_action_kind(rec) not in ("item_not_found_here", "item_picked_up_here"):
             continue
         mem_types = frozenset(fx.get("item_types", []))
         if not item_types.intersection(mem_types):
             continue
-        r_loc = fx.get("location_id")
+        r_loc = rec.get("location_id") or fx.get("location_id")
         if r_loc:
-            r_turn = mem.get("world_turn", 0)
+            r_turn = _v3_turn(rec)
             resolved_turns[r_loc] = max(resolved_turns.get(r_loc, 0), r_turn)
 
     first_loc: Optional[str] = None
@@ -4768,16 +4698,16 @@ def _bot_ask_colocated_stalkers_about_item(
         seen_locs_this_stalker: set = set()
 
         # Scan the other agent's memory (newest first) for items observations.
-        for mem in reversed(other.get("memory", [])):
-            if mem.get("type") != "observation":
+        for other_rec in _v3_records_desc(other):
+            if _v3_memory_type(other_rec) != "observation":
                 continue
-            fx = mem.get("effects", {})
-            if fx.get("observed") != "items":
+            other_fx = _v3_details(other_rec)
+            if other_fx.get("observed") != "items":
                 continue
-            obs_loc = fx.get("location_id")
+            obs_loc = other_rec.get("location_id") or other_fx.get("location_id")
             if not obs_loc:
                 continue
-            obs_types = frozenset(fx.get("item_types", []))
+            obs_types = frozenset(other_fx.get("item_types", []))
             if not obs_types.intersection(item_types):
                 continue
 
@@ -4792,7 +4722,7 @@ def _bot_ask_colocated_stalkers_about_item(
             # Skip stale intel: if the asking agent already resolved this location
             # (found or not-found) at a turn >= the other stalker's observation turn,
             # the intel predates our knowledge and is no longer actionable.
-            obs_turn = mem.get("world_turn", 0)
+            obs_turn = _v3_turn(other_rec)
             if obs_turn <= resolved_turns.get(obs_loc, -1):
                 continue
 
@@ -4805,25 +4735,8 @@ def _bot_ask_colocated_stalkers_about_item(
             matched_types = sorted(obs_types.intersection(item_types))
 
             if (other_id, obs_loc) in already_known:
-                # Entry already exists — update in-place if this intel is fresher.
-                for _em in agent.get("memory", []):
-                    _efx = _em.get("effects", {})
-                    if (
-                        _efx.get("action_kind") == "intel_from_stalker"
-                        and _efx.get("source_agent_id") == other_id
-                        and _efx.get("location_id") == obs_loc
-                        and _efx.get("observed") == "items"
-                    ):
-                        if obs_turn > _efx.get("obs_world_turn", 0):
-                            _efx["obs_world_turn"] = obs_turn
-                            _efx["item_types"] = matched_types
-                            _em["world_turn"] = world_turn
-                            _em["summary"] = (
-                                f"{other_name} рассказал, что видел {item_category_name} "
-                                f"в «{obs_loc_name}» (в {current_loc_name}). "
-                                f"Видел {_obs_time_label}."
-                            )
-                        break
+                # Entry already exists in memory_v3 — we skip re-writing it
+                # (memory_v3 cap handles size; no in-place mutation needed).
                 seen_locs_this_stalker.add(obs_loc)
                 if first_loc is None:
                     first_loc = obs_loc
@@ -4880,19 +4793,20 @@ def _bot_ask_colocated_stalkers_about_agent(
 
     # Build set of (source_agent_id, loc_id) pairs already known (any turn).
     already_known: set = set()
-    for mem in agent.get("memory", []):
-        fx = mem.get("effects", {})
-        if fx.get("action_kind") == "intel_from_stalker" and fx.get("observed") == "agent_location":
-            already_known.add((fx.get("source_agent_id"), fx.get("location_id")))
+    for rec in _v3_records_desc(agent):
+        fx = _v3_details(rec)
+        if _v3_action_kind(rec) == "intel_from_stalker" and fx.get("observed") == "agent_location":
+            ak_loc = rec.get("location_id") or fx.get("location_id")
+            already_known.add((fx.get("source_agent_id"), ak_loc))
 
     # Collect exhausted intel locations (base locations whose full neighbourhood
     # has already been searched and target was not found there).
     exhausted_locs: set = set()
-    for mem in agent.get("memory", []):
-        fx = mem.get("effects", {})
-        if (fx.get("action_kind") == "hunt_area_exhausted"
+    for rec in _v3_records_desc(agent):
+        fx = _v3_details(rec)
+        if (_v3_action_kind(rec) == "hunt_area_exhausted"
                 and fx.get("target_id") == target_agent_id):
-            exhausted_locs.add(fx.get("location_id"))
+            exhausted_locs.add(rec.get("location_id") or fx.get("location_id"))
 
     first_loc: Optional[str] = None
 
@@ -4909,16 +4823,16 @@ def _bot_ask_colocated_stalkers_about_agent(
         other_name = other.get("name", other_id)
         seen_locs_this_stalker: set = set()
 
-        for mem in reversed(other.get("memory", [])):
-            if mem.get("type") != "observation":
+        for other_rec in _v3_records_desc(other):
+            if _v3_memory_type(other_rec) != "observation":
                 continue
-            fx = mem.get("effects", {})
-            if fx.get("observed") != "stalkers":
+            other_fx = _v3_details(other_rec)
+            if other_fx.get("observed") != "stalkers":
                 continue
-            obs_loc = fx.get("location_id")
+            obs_loc = other_rec.get("location_id") or other_fx.get("location_id")
             if not obs_loc:
                 continue
-            names_seen = fx.get("names", [])
+            names_seen = other_fx.get("names", [])
             if target_agent_name not in names_seen:
                 continue
             if obs_loc in exhausted_locs:
@@ -4926,30 +4840,13 @@ def _bot_ask_colocated_stalkers_about_agent(
             if obs_loc in seen_locs_this_stalker:
                 continue
 
-            obs_turn = mem.get("world_turn", 0)
+            obs_turn = _v3_turn(other_rec)
             _obs_time_label = _turn_to_time_label(obs_turn)
             obs_loc_name = state.get("locations", {}).get(obs_loc, {}).get("name", obs_loc)
             current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
 
             if (other_id, obs_loc) in already_known:
-                # Entry already exists — update in-place if this intel is fresher.
-                for _em in agent.get("memory", []):
-                    _efx = _em.get("effects", {})
-                    if (
-                        _efx.get("action_kind") == "intel_from_stalker"
-                        and _efx.get("source_agent_id") == other_id
-                        and _efx.get("location_id") == obs_loc
-                        and _efx.get("observed") == "agent_location"
-                    ):
-                        if obs_turn > _efx.get("obs_world_turn", 0):
-                            _efx["obs_world_turn"] = obs_turn
-                            _em["world_turn"] = world_turn
-                            _em["summary"] = (
-                                f"{other_name} рассказал, что видел «{target_agent_name}» "
-                                f"в «{obs_loc_name}» (в {current_loc_name}). "
-                                f"Видел {_obs_time_label}."
-                            )
-                        break
+                # Entry already exists in memory_v3 — skip re-writing (no in-place mutation).
                 seen_locs_this_stalker.add(obs_loc)
                 if first_loc is None:
                     first_loc = obs_loc
@@ -5008,11 +4905,11 @@ def _bot_buy_hunt_intel_from_trader(
     loc_name = locations.get(loc_id, {}).get("name", loc_id)
 
     # Only purchase once per world_turn for this target.
-    for mem in agent.get("memory", []):
-        if mem.get("world_turn") != world_turn:
+    for rec in _v3_records_desc(agent):
+        if _v3_turn(rec) != world_turn:
             continue
-        fx = mem.get("effects", {})
-        if (fx.get("action_kind") == "intel_from_trader"
+        fx = _v3_details(rec)
+        if (_v3_action_kind(rec) == "intel_from_trader"
                 and fx.get("target_agent_id") == target_id):
             return False  # Already bought this turn
 
@@ -5084,42 +4981,42 @@ def _find_hunt_intel_location(
     Returns the most recent (last written) matching loc_id, or ``None``.
     """
     exhausted_locs: set = set()
-    for mem in agent.get("memory", []):
-        fx = mem.get("effects", {})
-        if (fx.get("action_kind") == "hunt_area_exhausted"
+    for rec in _v3_records_desc(agent):
+        fx = _v3_details(rec)
+        if (_v3_action_kind(rec) == "hunt_area_exhausted"
                 and fx.get("target_id") == target_agent_id):
-            exhausted_locs.add(fx.get("location_id"))
+            exhausted_locs.add(rec.get("location_id") or fx.get("location_id"))
 
     best_loc: Optional[str] = None
     best_turn: int = -1
-    for mem in agent.get("memory", []):
-        if mem.get("type") != "observation":
+    for rec in _v3_records_desc(agent):
+        if _v3_memory_type(rec) != "observation":
             continue
-        fx = mem.get("effects", {})
-        action_kind = fx.get("action_kind")
+        fx = _v3_details(rec)
+        ak = _v3_action_kind(rec)
 
         # Source 1: stalker / trader location intel
-        if action_kind in ("intel_from_stalker", "intel_from_trader"):
+        if ak in ("intel_from_stalker", "intel_from_trader"):
             if fx.get("observed") != "agent_location":
                 continue
             if fx.get("target_agent_id") != target_agent_id:
                 continue
-            obs_loc = fx.get("location_id")
+            obs_loc = rec.get("location_id") or fx.get("location_id")
             if not obs_loc or obs_loc in exhausted_locs:
                 continue
-            t = mem.get("world_turn", 0)
+            t = _v3_turn(rec)
             if t > best_turn:
                 best_turn = t
                 best_loc = obs_loc
 
         # Source 2: retreat_observed — the target was seen fleeing to to_location
-        elif action_kind == "retreat_observed":
+        elif ak == "retreat_observed":
             if fx.get("subject") != target_agent_id:
                 continue
             retreat_dest = fx.get("to_location")
             if not retreat_dest or retreat_dest in exhausted_locs:
                 continue
-            t = mem.get("world_turn", 0)
+            t = _v3_turn(rec)
             if t > best_turn:
                 best_turn = t
                 best_loc = retreat_dest
@@ -5138,13 +5035,13 @@ def _get_searched_locations_for_target(
     caller to limit the scope to the current search cycle.
     """
     searched: set = set()
-    for mem in agent.get("memory", []):
-        if mem.get("world_turn", 0) < since_turn:
+    for rec in _v3_records_desc(agent):
+        if _v3_turn(rec) < since_turn:
             continue
-        fx = mem.get("effects", {})
-        if (fx.get("action_kind") == "hunt_location_searched"
+        fx = _v3_details(rec)
+        if (_v3_action_kind(rec) == "hunt_location_searched"
                 and fx.get("target_id") == target_agent_id):
-            loc = fx.get("location_id")
+            loc = rec.get("location_id") or fx.get("location_id")
             if loc:
                 searched.add(loc)
     return searched
@@ -5897,12 +5794,12 @@ def _run_npc_brain_v3_decision_inner(
     # objective/intent fields and would cause the dedup guard to fail every tick.
     _prev_decision_key = next(
         (
-            m.get("effects", {}).get("objective_key")
-            or m.get("effects", {}).get("adapter_intent_kind")
-            or m.get("effects", {}).get("intent_kind")
-            for m in reversed(agent.get("memory", []))
-            if m.get("type") == "decision"
-            and m.get("effects", {}).get("action_kind") in {"v2_decision", "objective_decision"}
+            _v3_details(m).get("objective_key")
+            or _v3_details(m).get("adapter_intent_kind")
+            or _v3_details(m).get("intent_kind")
+            for m in _v3_records_desc(agent)
+            if _v3_memory_type(m) == "decision"
+            and _v3_action_kind(m) in {"v2_decision", "objective_decision"}
         ),
         None,
     )
@@ -6127,10 +6024,9 @@ def _check_global_goal_completion(
             if target_is_dead:
                 # Write target_death_confirmed memory if not already present
                 _already_confirmed = any(
-                    isinstance(m, dict)
-                    and m.get("effects", {}).get("action_kind") == "target_death_confirmed"
-                    and str(m.get("effects", {}).get("target_id") or "") == str(target_id)
-                    for m in agent.get("memory", [])
+                    _v3_action_kind(m) == "target_death_confirmed"
+                    and str(_v3_details(m).get("target_id") or "") == str(target_id)
+                    for m in _v3_records_desc(agent)
                 )
                 if not _already_confirmed:
                     target_name_c = target_agent.get("name", target_id) if target_agent else target_id
@@ -6233,11 +6129,11 @@ def _bot_route_to_exit(
 
     if _best_exit is None:
         # No exit found — log once
-        _last_kind = None
-        for _m in reversed(agent.get("memory", [])):
-            if _m.get("type") == "decision":
-                _last_kind = _m.get("effects", {}).get("action_kind")
-                break
+        _last_kind = next(
+            (_v3_action_kind(m) for m in _v3_records_desc(agent)
+             if _v3_memory_type(m) == "decision"),
+            None,
+        )
         if _last_kind != "no_exit_found":
             _add_memory(
                 agent, world_turn, state, "decision",
@@ -6248,11 +6144,11 @@ def _bot_route_to_exit(
         return []
 
     # Write "heading to exit" decision once
-    _last_kind = None
-    for _m in reversed(agent.get("memory", [])):
-        if _m.get("type") == "decision":
-            _last_kind = _m.get("effects", {}).get("action_kind")
-            break
+    _last_kind = next(
+        (_v3_action_kind(m) for m in _v3_records_desc(agent)
+         if _v3_memory_type(m) == "decision"),
+        None,
+    )
     if _last_kind not in ("heading_to_exit", "travel_arrived"):
         _exit_name = locations.get(_best_exit, {}).get("name", _best_exit)
         _add_memory(
@@ -6500,12 +6396,14 @@ def _compat_pursue_kill_stalker(
         None)
     if trader:
         # Anti-spam: if last decision was hunt_wait_at_trader, don't repeat
-        for mem in reversed(agent.get("memory", [])):
-            if mem.get("type") == "decision":
-                if mem.get("effects", {}).get("action_kind") == "hunt_wait_at_trader":
-                    _runtime_set_action_used(agent, True)
-                    return []
-                break  # last decision is different — may write
+        _hunt_last_dec = next(
+            (_v3_action_kind(m) for m in _v3_records_desc(agent)
+             if _v3_memory_type(m) == "decision"),
+            None,
+        )
+        if _hunt_last_dec == "hunt_wait_at_trader":
+            _runtime_set_action_used(agent, True)
+            return []
         bought = _bot_buy_hunt_intel_from_trader(
             agent_id, agent, target_id, target_name, state, world_turn
         )
@@ -6650,11 +6548,11 @@ def _compat_pursue_unravel(
         (t for t in state.get('traders', {}).values() if t.get('location_id') == loc_id and t.get('is_alive', True)),
         None)
     if trader:
-        last_wait = None
-        for mem in reversed(agent.get("memory", [])):
-            if mem.get("type") == "decision":
-                last_wait = mem.get("effects", {}).get("action_kind")
-                break
+        last_wait = next(
+            (_v3_action_kind(m) for m in _v3_records_desc(agent)
+             if _v3_memory_type(m) == "decision"),
+            None,
+        )
         if last_wait != "wait_at_trader":
             _add_memory(
                 agent, world_turn, state, "decision",

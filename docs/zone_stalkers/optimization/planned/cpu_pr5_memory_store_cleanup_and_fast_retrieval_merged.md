@@ -1,5 +1,8 @@
 # CPU Optimization PR 5 — Memory Store Cleanup and Fast Retrieval
 
+> ⚠️ Archived planning document.
+> Superseded by [`../cpu_optimization_applied_pr1_pr5.md`](../cpu_optimization_applied_pr1_pr5.md).
+
 > Goal:
 >
 > ```text

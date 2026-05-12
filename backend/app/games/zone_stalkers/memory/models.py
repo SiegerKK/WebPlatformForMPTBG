@@ -121,4 +121,5 @@ class MemoryQuery:
     item_types: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
     max_results: int = 10
+    max_candidates: int | None = None
     include_stale: bool = False

@@ -47,20 +47,16 @@ def _is_witness_source_exhausted(
     world_turn: int,
 ) -> bool:
     """Return True if the witness source at location_id is exhausted for target_id."""
-    memory = agent.get("memory") or []
-    for m in memory:
-        if not isinstance(m, dict):
+    from app.games.zone_stalkers.rules.tick_rules import _v3_records_desc, _v3_action_kind, _v3_details  # noqa: PLC0415
+    for rec in _v3_records_desc(agent):
+        if _v3_action_kind(rec) != "witness_source_exhausted":
             continue
-        effects = m.get("effects")
-        if not isinstance(effects, dict):
+        fx = _v3_details(rec)
+        if str(fx.get("target_id") or "") != target_id:
             continue
-        if effects.get("action_kind") != "witness_source_exhausted":
+        if str(fx.get("location_id") or rec.get("location_id") or "") != location_id:
             continue
-        if str(effects.get("target_id") or "") != target_id:
-            continue
-        if str(effects.get("location_id") or "") != location_id:
-            continue
-        cooldown_until = effects.get("cooldown_until_turn")
+        cooldown_until = fx.get("cooldown_until_turn")
         if isinstance(cooldown_until, (int, float)) and int(cooldown_until) > world_turn:
             return True
     return False

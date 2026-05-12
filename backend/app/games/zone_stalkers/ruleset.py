@@ -173,17 +173,17 @@ class ZoneStalkerRuleSet(RuleSet):
             if evt_state.get("phase") == "ended":
                 memory_template = evt_state.get("memory_template")
                 if memory_template:
+                    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3  # noqa: PLC0415
+                    world_turn = new_state.get("world_turn", 1)
                     for pid in evt_state.get("participants", {}):
                         agent_id = new_state.get("player_agents", {}).get(pid)
                         if agent_id and agent_id in new_state.get("agents", {}):
                             agent = new_state["agents"][agent_id]
-                            entry = {
-                                **memory_template,
-                                "world_turn": new_state.get("world_turn", 1),
-                            }
-                            agent.setdefault("memory", []).append(entry)
-                            if len(agent["memory"]) > 50:
-                                agent["memory"] = agent["memory"][-50:]
+                            write_memory_event_to_v3(
+                                agent_id=agent_id, agent=agent,
+                                legacy_entry={**memory_template, "world_turn": world_turn},
+                                world_turn=world_turn,
+                            )
                 active_events = new_state.get("active_events", [])
                 event_ctx_id = str(evt_ctx.id)
                 if event_ctx_id in active_events:

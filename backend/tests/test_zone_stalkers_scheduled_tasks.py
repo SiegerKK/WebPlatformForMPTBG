@@ -14,7 +14,6 @@ def _make_state() -> dict:
         num_traders=0,
     )
     state["cpu_copy_on_write_enabled"] = True
-    state["cpu_copy_on_write_legacy_bridge_enabled"] = False
     state["cpu_event_driven_actions_enabled"] = True
     return state
 

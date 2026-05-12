@@ -58,7 +58,6 @@ def make_agent(
         "material_threshold": material_threshold,
         "equipment": {},
         "inventory": list(inventory) if inventory else [],
-        "memory": [],
         "name": agent_id,
         "skill_stalker": 1,
         "risk_tolerance": 0.5,

@@ -62,7 +62,6 @@ def _bot() -> dict:
         "material_threshold": 3000,
         "equipment": {"weapon": {"type": "pistol"}, "armor": {"type": "leather_jacket"}},
         "inventory": [{"id": "art1", "type": "soul", "value": 1000}],
-        "memory": [],
         "action_queue": [],
         "scheduled_action": None,
     }
