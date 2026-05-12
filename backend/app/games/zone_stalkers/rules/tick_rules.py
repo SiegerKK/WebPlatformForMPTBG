@@ -2511,6 +2511,12 @@ def _add_memory(
 
     # Optional compact legacy write for compatibility.
     legacy_memory_write_enabled = bool(state.get("legacy_memory_write_enabled", True))
+    controller = agent.get("controller")
+    controller_kind = ""
+    if isinstance(controller, dict):
+        controller_kind = str(controller.get("kind", ""))
+    if controller_kind == "human":
+        legacy_memory_write_enabled = True
     if legacy_memory_write_enabled:
         # Use COW-safe mutable list when a runtime is active so appending does
         # not mutate the original (input) agent dict.

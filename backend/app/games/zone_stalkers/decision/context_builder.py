@@ -191,6 +191,10 @@ def _record_details(record: dict[str, Any]) -> dict[str, Any]:
     return details if isinstance(details, dict) else {}
 
 
+def _record_is_active(record: dict[str, Any]) -> bool:
+    return str(record.get("status", "active")) not in {"stale", "archived", "contradicted"}
+
+
 def _record_entity_ids(record: dict[str, Any]) -> list[str]:
     ids: list[str] = []
     for entity_id in record.get("entity_ids", []) or []:
@@ -247,6 +251,8 @@ def _entities_from_memory(
         seen_ids: set[str] = set()
         result: list[dict[str, Any]] = []
         for record in _memory_v3_records(agent):
+            if not _record_is_active(record):
+                continue
             last_known_location = None
             for location_id in _record_location_ids(record):
                 if location_id:
@@ -316,6 +322,8 @@ def _locations_from_memory(
         seen_ids: set[str] = set()
         result: list[dict[str, Any]] = []
         for record in _memory_v3_records(agent):
+            if not _record_is_active(record):
+                continue
             for loc_id in _record_location_ids(record):
                 if loc_id and loc_id not in seen_ids and loc_id in locations:
                     seen_ids.add(loc_id)
@@ -367,6 +375,8 @@ def _hazards_from_memory(agent: dict[str, Any]) -> list[dict[str, Any]]:
     if _memory_v3_is_usable(agent):
         hazards: list[dict[str, Any]] = []
         for record in _memory_v3_records(agent):
+            if not _record_is_active(record):
+                continue
             if str(record.get("kind", "")) not in _HAZARD_KINDS:
                 continue
             hazards.append({
@@ -414,6 +424,8 @@ def _traders_from_visible_and_memory(
 
     if _memory_v3_is_usable(agent):
         for record in _memory_v3_records(agent):
+            if not _record_is_active(record):
+                continue
             trader_id = _record_trader_id(record, traders_by_id)
             if trader_id and trader_id not in seen:
                 seen.add(trader_id)

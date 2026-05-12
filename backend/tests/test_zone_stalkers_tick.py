@@ -806,6 +806,7 @@ def _make_trader_scenario():
 
     # Generate a world with no bots/traders (we'll add them manually)
     state = generate_zone(seed=99, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+    state["legacy_memory_write_enabled"] = True
     # Offset world_turn so that the first exploration attempt uses an RNG seed that
     # guarantees a successful artifact pickup.
     #
@@ -1583,6 +1584,7 @@ def _make_bare_stalker_state(with_trader: bool = False, weapon: str | None = Non
     import random
 
     state = generate_zone(seed=7, num_players=0, num_ai_stalkers=0, num_mutants=0, num_traders=0)
+    state["legacy_memory_write_enabled"] = True
     locs = list(state["locations"].keys())
     stalker_loc = locs[0]
 
