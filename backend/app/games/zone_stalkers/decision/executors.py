@@ -825,6 +825,37 @@ def _exec_search_target(
                 },
                 summary="Зафиксировал видимое снаряжение цели.",
             )
+    elif target and not target.get("is_alive", True) and target_loc == current_loc:
+        corpse = next(
+            (
+                raw_corpse
+                for raw_corpse in (state.get("locations", {}).get(current_loc, {}).get("corpses") or [])
+                if isinstance(raw_corpse, dict)
+                and bool(raw_corpse.get("visible", True))
+                and str(raw_corpse.get("agent_id") or "") == target_id
+            ),
+            None,
+        )
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            f"☠️ Обнаружено тело цели: «{target.get('name', target_id)}»",
+            {
+                "action_kind": "target_corpse_seen",
+                "target_id": target_id,
+                "target_name": target.get("name", target_id),
+                "corpse_id": (corpse or {}).get("corpse_id"),
+                "corpse_location_id": current_loc,
+                "location_id": current_loc,
+                "death_cause": (corpse or {}).get("death_cause") or target.get("death_cause"),
+                "killer_id": (corpse or {}).get("killer_id"),
+                "directly_observed": True,
+                "confidence": 0.95,
+            },
+            summary="Нашёл тело цели в текущей локации.",
+        )
     else:
         expected_loc = step.payload.get("target_location_id") or current_loc
         failed_search_count = _count_target_not_found_failures(
@@ -961,24 +992,55 @@ def _exec_confirm_kill(
         return []
 
     target = state.get("agents", {}).get(target_id)
+    target_name = target.get("name", target_id) if isinstance(target, dict) else target_id
     if isinstance(target, dict) and not target.get("is_alive", True):
-        target_name = target.get("name", target_id)
-        _add_memory(
-            agent,
-            world_turn,
-            state,
-            "observation",
-            f"✅ Подтверждена ликвидация цели «{target_name}»",
-            {
-                "action_kind": "target_death_confirmed",
-                "target_id": target_id,
-                "target_name": target_name,
-                "location_id": target.get("location_id"),
-                "killer_id": agent_id,
-                "cause": "combat",
-            },
-            summary=f"Подтвердил, что цель «{target_name}» ликвидирована.",
-        )
+        current_loc = str(agent.get("location_id") or "")
+        corpse: dict[str, Any] | None = None
+        for raw_corpse in (state.get("locations", {}).get(current_loc, {}).get("corpses") or []):
+            if (
+                isinstance(raw_corpse, dict)
+                and bool(raw_corpse.get("visible", True))
+                and str(raw_corpse.get("agent_id") or "") == target_id
+            ):
+                corpse = raw_corpse
+                break
+
+        direct_confirmation = bool(corpse) or str(target.get("location_id") or "") == current_loc
+        if direct_confirmation:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                f"✅ Подтверждена ликвидация цели «{target_name}»",
+                {
+                    "action_kind": "target_death_confirmed",
+                    "target_id": target_id,
+                    "target_name": target_name,
+                    "confirmation_source": "self_observed_body",
+                    "directly_observed": True,
+                    "corpse_id": (corpse or {}).get("corpse_id"),
+                    "corpse_location_id": current_loc,
+                    "target_death_cause": (corpse or {}).get("death_cause") or target.get("death_cause"),
+                    "killer_id": (corpse or {}).get("killer_id"),
+                    "location_id": current_loc,
+                },
+                summary=f"Лично подтвердил смерть цели «{target_name}» по телу.",
+            )
+        else:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                "❌ Ликвидация цели не подтверждена",
+                {
+                    "action_kind": "hunt_failed",
+                    "target_id": target_id,
+                    "reason": "no_direct_confirmation",
+                },
+                summary="Цель мертва, но без прямого подтверждения на месте.",
+            )
     else:
         _add_memory(
             agent,

@@ -114,6 +114,9 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "target_intel": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social")),
     "intel_from_trader": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social", "trader")),
     "intel_from_stalker": (LAYER_SOCIAL, "target_intel", ("target", "intel", "social", "stalker")),
+    "corpse_seen": (LAYER_THREAT, "corpse_seen", ("target", "corpse", "death")),
+    "target_corpse_seen": (LAYER_THREAT, "target_corpse_seen", ("target", "corpse", "death", "confirmed")),
+    "target_corpse_reported": (LAYER_SOCIAL, "target_corpse_reported", ("target", "corpse", "intel")),
 }
 
 _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
@@ -136,6 +139,9 @@ _DEDUP_KINDS: frozenset[str] = frozenset({
     "no_tracks_found",
     "no_witnesses",
     "witness_source_exhausted",
+    "corpse_seen",
+    "target_corpse_seen",
+    "target_corpse_reported",
 })
 # Never deduplicate these — each occurrence is individually important.
 _NO_DEDUP_KINDS: frozenset[str] = frozenset({
@@ -172,6 +178,14 @@ def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | No
             location_id,
             str(details.get("target_id") or ""),
             str(details.get("trader_id") or ""),
+        )
+    if kind in {"corpse_seen", "target_corpse_seen", "target_corpse_reported"}:
+        return (
+            kind,
+            location_id,
+            str(details.get("target_id") or details.get("dead_agent_id") or ""),
+            str(details.get("corpse_id") or ""),
+            str(details.get("source_agent_id") or ""),
         )
     return None
 
@@ -645,8 +659,10 @@ def _extract_entity_ids(effects: dict[str, Any]) -> tuple[str, ...]:
         "trader_id",
         "killer_id",
         "victim_id",
+        "dead_agent_id",
         "source_agent_id",
         "other_agent_id",
+        "corpse_id",
     ):
         value = effects.get(key)
         if value:

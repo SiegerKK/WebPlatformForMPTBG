@@ -1639,6 +1639,19 @@ def _plan_hunt_target(
                 confidence=0.8,
                 created_turn=world_turn,
             )
+        if not target_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(
+                        STEP_QUESTION_WITNESSES,
+                        {"target_id": target_id, "reason": "confirm_kill_location_unknown"},
+                        expected_duration_ticks=1,
+                    )
+                ],
+                confidence=0.6,
+                created_turn=world_turn,
+            )
         return Plan(
             intent_kind=intent.kind,
             steps=[

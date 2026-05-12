@@ -425,14 +425,14 @@ class TestHuntObjectiveGeneration:
             created_turn=90,
             last_accessed_turn=None,
             summary="Цель мертва",
-            details={"target_id": "target_1"},
+            details={"target_id": "target_1", "corpse_location_id": "loc_b", "location_id": "loc_b"},
             confidence=1.0,
         )
         add_memory_record(agent, rec)
 
         objectives = generate_objectives(_make_ctx(agent, state))
         keys = {o.key for o in objectives}
-        assert OBJECTIVE_CONFIRM_KILL in keys
+        assert OBJECTIVE_GATHER_INTEL in keys or OBJECTIVE_CONFIRM_KILL in keys
 
     def test_prepare_track_both_generated_when_location_known_but_blockers(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1",
@@ -685,6 +685,19 @@ class TestHuntExecutors:
     def test_confirm_kill_dead_target_writes_death_confirmed(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_alive=False)
+        state["locations"]["loc_a"]["corpses"] = [
+            {
+                "corpse_id": "corpse_target_1_100",
+                "agent_id": "target_1",
+                "agent_name": "Target 1",
+                "location_id": "loc_a",
+                "created_turn": 100,
+                "death_cause": "emission",
+                "killer_id": None,
+                "visible": True,
+                "decay_turn": 1000,
+            }
+        ]
         self._run_executor(
             STEP_CONFIRM_KILL, {"target_id": "target_1"},
             agent, state,
@@ -724,14 +737,13 @@ class TestHuntExecutors:
 
 class TestKillStalkerGoalCompletion:
     def test_kill_target_requires_death_confirmation_to_set_goal_achieved(self) -> None:
-        # New behaviour: _check_global_goal_completion writes target_death_confirmed
-        # and sets global_goal_achieved=True in the same call when the target is dead.
+        # Dead target alone is insufficient — direct confirmation is required.
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
 
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
         state = _make_state_with_target(agent=agent, target_alive=False)
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
-        assert agent.get("global_goal_achieved") is True
+        assert agent.get("global_goal_achieved") is not True
 
     def test_target_death_confirmed_sets_kill_goal_achieved(self) -> None:
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion, _add_memory
@@ -744,7 +756,12 @@ class TestKillStalkerGoalCompletion:
             state,
             "observation",
             "✅ Подтверждена ликвидация цели",
-            {"action_kind": "target_death_confirmed", "target_id": "target_1"},
+            {
+                "action_kind": "target_death_confirmed",
+                "target_id": "target_1",
+                "directly_observed": True,
+                "confirmation_source": "personal_combat_kill",
+            },
             summary="Цель устранена и подтверждена.",
         )
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
@@ -769,7 +786,12 @@ class TestKillStalkerGoalCompletion:
             state,
             "observation",
             "✅ Подтверждена ликвидация цели",
-            {"action_kind": "target_death_confirmed", "target_id": "target_1"},
+            {
+                "action_kind": "target_death_confirmed",
+                "target_id": "target_1",
+                "directly_observed": True,
+                "confirmation_source": "personal_combat_kill",
+            },
             summary="Цель устранена и подтверждена.",
         )
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])

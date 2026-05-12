@@ -126,11 +126,15 @@ def _agent_story_events(agent: dict[str, Any]) -> tuple[list[dict[str, Any]], in
                 continue
             details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
             kind = str(details.get("action_kind") or raw.get("kind") or "")
+            world_turn = _record_created_turn(raw)
+            title = str(raw.get("title") or raw.get("summary") or kind)
             rows.append({
-                "turn": _record_created_turn(raw),
-                "kind": kind,
+                "world_turn": world_turn,
+                "type": kind,
+                "title": title,
                 "summary": str(raw.get("summary") or kind),
                 "source": "memory_v3",
+                "effects": dict(details),
             })
     trace = agent.get("brain_trace")
     if isinstance(trace, dict):
@@ -138,13 +142,22 @@ def _agent_story_events(agent: dict[str, Any]) -> tuple[list[dict[str, Any]], in
             if not isinstance(event, dict):
                 continue
             mode = str(event.get("mode") or "")
+            decision = str(event.get("decision") or mode or "trace_event")
+            world_turn = int(event.get("turn", 0) or 0)
             rows.append({
-                "turn": int(event.get("turn", 0) or 0),
-                "kind": mode or str(event.get("decision") or "trace_event"),
+                "world_turn": world_turn,
+                "type": decision,
+                "title": "Brain trace event",
                 "summary": str(event.get("summary") or mode or "trace_event"),
                 "source": "brain_trace",
+                "effects": {
+                    "mode": mode,
+                    "decision": decision,
+                    "objective_key": (event.get("active_objective") or {}).get("key") if isinstance(event.get("active_objective"), dict) else None,
+                    "intent_kind": event.get("intent_kind"),
+                },
             })
-    rows.sort(key=lambda row: (int(row.get("turn", 0) or 0), str(row.get("kind") or "")))
+    rows.sort(key=lambda row: (int(row.get("world_turn", 0) or 0), str(row.get("type") or "")))
     if not rows:
         return [], 0, False
 
@@ -160,11 +173,11 @@ def _agent_story_events(agent: dict[str, Any]) -> tuple[list[dict[str, Any]], in
         "global_goal_completed",
     }
     tail = rows[-FULL_DEBUG_STORY_EVENTS_LIMIT:]
-    tail_keys = {(row["turn"], row["kind"], row["source"], row["summary"]) for row in tail}
+    tail_keys = {(row["world_turn"], row["type"], row["source"], row["summary"]) for row in tail}
     extra = [
         row for row in rows[-200:]
-        if row.get("kind") in important_kinds
-        and (row["turn"], row["kind"], row["source"], row["summary"]) not in tail_keys
+        if row.get("type") in important_kinds
+        and (row["world_turn"], row["type"], row["source"], row["summary"]) not in tail_keys
     ]
     merged = (extra + tail)[-FULL_DEBUG_STORY_EVENTS_LIMIT:]
     return merged, total, total > len(merged)

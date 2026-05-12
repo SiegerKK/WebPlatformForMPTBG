@@ -306,3 +306,5 @@ def test_full_projection_includes_memory_stats_story_and_terminal_state():
     assert agent["current_goal"] == "left_zone"
     assert agent["scheduled_action"] is None
     assert agent["terminal_state"]["kind"] == "left_zone"
+    first_story = agent["story_events"][0]
+    assert {"world_turn", "type", "title", "summary", "source", "effects"} <= set(first_story.keys())

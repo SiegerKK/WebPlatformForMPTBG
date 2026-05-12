@@ -147,12 +147,15 @@ _MEMORY_V3_DETAIL_ENTITY_KEYS: tuple[str, ...] = (
     "agent_id",
     "other_agent_id",
     "target_id",
+    "dead_agent_id",
 )
 _MEMORY_V3_DETAIL_LOCATION_KEYS: tuple[str, ...] = (
     "location_id",
     "destination",
     "from_location",
     "to_location",
+    "corpse_location_id",
+    "reported_corpse_location_id",
 )
 _HAZARD_KINDS: frozenset[str] = frozenset({
     "emission_warning",

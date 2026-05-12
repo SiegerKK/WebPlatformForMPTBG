@@ -95,6 +95,90 @@ def _scheduled_action_remaining_turns(
     return 0
 
 
+def _active_plan_step(active_plan: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    if not isinstance(active_plan, dict):
+        return "", {}
+    steps = active_plan.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return "", {}
+    current_step_index = active_plan.get("current_step_index")
+    if not isinstance(current_step_index, int):
+        current_step_index = active_plan.get("current_step")
+    if not isinstance(current_step_index, int):
+        current_step_index = 0
+    if current_step_index < 0 or current_step_index >= len(steps):
+        return "", {}
+    step = steps[current_step_index]
+    if not isinstance(step, dict):
+        return "", {}
+    payload = step.get("payload")
+    return str(step.get("kind") or ""), payload if isinstance(payload, dict) else {}
+
+
+def _action_resolves_current_critical_need(
+    *,
+    objective_key: str,
+    intent_kind: str,
+    scheduled_action: dict[str, Any],
+    active_plan: dict[str, Any] | None,
+) -> bool:
+    objective_key = str(objective_key or "").upper()
+    intent_kind = str(intent_kind or "").lower()
+    action_type = str(scheduled_action.get("type") or "").lower()
+    plan_step_kind, plan_step_payload = _active_plan_step(active_plan)
+    plan_step_kind = plan_step_kind.lower()
+    reason = str(plan_step_payload.get("reason") or scheduled_action.get("reason") or "").lower()
+    item_category = str(plan_step_payload.get("item_category") or "").lower()
+    item_type = str(plan_step_payload.get("item_type") or "").lower()
+
+    def _is_water_resolution() -> bool:
+        if action_type == "travel":
+            return (
+                "water" in reason
+                or "drink" in reason
+                or item_category == "drink"
+            )
+        if action_type in {"sleep", "explore_anomaly_location"}:
+            return False
+        if plan_step_kind == "trade_buy_item":
+            return item_category == "drink" or "water" in reason or "drink" in reason
+        if plan_step_kind == "consume_item":
+            return item_type in {"water", "purified_water", "energy_drink", "vodka"} or "drink" in reason
+        return False
+
+    def _is_food_resolution() -> bool:
+        if action_type == "travel":
+            return "food" in reason or "eat" in reason or item_category == "food"
+        if action_type in {"sleep", "explore_anomaly_location"}:
+            return False
+        if plan_step_kind == "trade_buy_item":
+            return item_category == "food" or "food" in reason or "eat" in reason
+        if plan_step_kind == "consume_item":
+            return "food" in reason or "eat" in reason
+        return False
+
+    def _is_heal_resolution() -> bool:
+        if action_type == "travel":
+            return "heal" in reason or "medical" in reason or item_category == "medical"
+        if action_type in {"sleep", "explore_anomaly_location"}:
+            return False
+        if plan_step_kind == "trade_buy_item":
+            return item_category == "medical" or "heal" in reason or "medical" in reason
+        if plan_step_kind == "consume_item":
+            return "heal" in reason or "medical" in reason
+        return False
+
+    if objective_key == "RESTORE_WATER" or intent_kind == "seek_water":
+        return _is_water_resolution()
+    if objective_key == "RESTORE_FOOD" or intent_kind == "seek_food":
+        return _is_food_resolution()
+    if objective_key in {"HEAL_SELF", "ESCAPE_DANGER"} or intent_kind == "heal_self":
+        return _is_heal_resolution()
+    if objective_key == "REST" or intent_kind == "rest":
+        return action_type == "sleep"
+    return False
+
+
 def _has_active_support_exhaustion(
     *,
     agent: dict[str, Any],
@@ -290,6 +374,18 @@ def assess_scheduled_action_v3(
     sleepiness = float(agent.get("sleepiness", 0))
 
     if interrupt_triggered == "critical_hp" or hp <= CRITICAL_HP_THRESHOLD:
+        if _action_resolves_current_critical_need(
+            objective_key=str(debug_context.get("objective_key") or ""),
+            intent_kind=str(debug_context.get("intent_kind") or ""),
+            scheduled_action=scheduled_action,
+            active_plan=agent.get("active_plan_v3") if isinstance(agent.get("active_plan_v3"), dict) else None,
+        ):
+            return PlanMonitorResult(
+                decision="continue",
+                reason="critical_need_recovery_in_progress",
+                interruptible=True,
+                debug_context=debug_context,
+            )
         return PlanMonitorResult(
             decision="abort",
             reason="critical_hp",
@@ -301,6 +397,18 @@ def assess_scheduled_action_v3(
         )
 
     if interrupt_triggered == "critical_thirst" or thirst >= _HARD_INTERRUPT_THIRST_THRESHOLD:
+        if _action_resolves_current_critical_need(
+            objective_key=str(debug_context.get("objective_key") or ""),
+            intent_kind=str(debug_context.get("intent_kind") or ""),
+            scheduled_action=scheduled_action,
+            active_plan=agent.get("active_plan_v3") if isinstance(agent.get("active_plan_v3"), dict) else None,
+        ):
+            return PlanMonitorResult(
+                decision="continue",
+                reason="critical_need_recovery_in_progress",
+                interruptible=True,
+                debug_context=debug_context,
+            )
         return PlanMonitorResult(
             decision="abort",
             reason="critical_thirst",
@@ -312,6 +420,18 @@ def assess_scheduled_action_v3(
         )
 
     if interrupt_triggered == "critical_hunger" or hunger >= _HARD_INTERRUPT_HUNGER_THRESHOLD:
+        if _action_resolves_current_critical_need(
+            objective_key=str(debug_context.get("objective_key") or ""),
+            intent_kind=str(debug_context.get("intent_kind") or ""),
+            scheduled_action=scheduled_action,
+            active_plan=agent.get("active_plan_v3") if isinstance(agent.get("active_plan_v3"), dict) else None,
+        ):
+            return PlanMonitorResult(
+                decision="continue",
+                reason="critical_need_recovery_in_progress",
+                interruptible=True,
+                debug_context=debug_context,
+            )
         return PlanMonitorResult(
             decision="abort",
             reason="critical_hunger",

@@ -164,6 +164,7 @@ export interface AgentForProfile {
     type: string;
     title: string;
     summary?: string;
+    source?: string;
     effects?: Record<string, unknown>;
   }>;
   brain_trace?: BrainTrace | null;

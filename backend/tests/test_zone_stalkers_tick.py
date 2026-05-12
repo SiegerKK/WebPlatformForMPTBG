@@ -5451,13 +5451,25 @@ class TestKillStalkerGoal:
         )
 
     def test_check_goal_completion_on_kill(self):
-        """_check_global_goal_completion sets global_goal_achieved when target is confirmed dead."""
+        """_check_global_goal_completion sets global_goal_achieved only after direct confirmation."""
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion
         state = self._minimal_state()
         hunter = self._make_hunter("B", "agent_target")
         target = self._make_target("B")
         # Mark target as actually dead (combat killed them)
         target["is_alive"] = False
+        _setup_v3_memory(hunter, [{
+            "world_turn": 9,
+            "type": "observation",
+            "title": "confirmed kill",
+            "effects": {
+                "action_kind": "target_death_confirmed",
+                "target_id": "agent_target",
+                "directly_observed": True,
+                "confirmation_source": "personal_combat_kill",
+            },
+            "summary": "confirmed",
+        }])
         state["agents"]["agent_hunter"] = hunter
         state["agents"]["agent_target"] = target
         _check_global_goal_completion("agent_hunter", hunter, state, 10)

@@ -1537,6 +1537,8 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         # When disabled: brain_trace is not grown; only latest_decision_summary
         # (written inside _run_npc_brain_v3_decision) is kept.
 
+    _update_corpse_visibility(state=state, world_turn=world_turn)
+
     # 3b. Per-turn location observations for every alive stalker agent.
     # Writes a new observation entry only when content has changed since the last
     # entry of the same category; merges repeated observations via the semantic
@@ -1821,6 +1823,35 @@ def _mark_agent_dead(
     ):
         _runtime_set_agent_field(agent_id, key, temp_agent.get(key), runtime_agent)
     _runtime_set_agent_field(agent_id, "action_used", False, runtime_agent)
+
+
+def _update_corpse_visibility(
+    *,
+    state: Dict[str, Any],
+    world_turn: int,
+) -> None:
+    for loc_id, location in state.get("locations", {}).items():
+        if not isinstance(location, dict):
+            continue
+        corpses = location.get("corpses")
+        if not isinstance(corpses, list) or not corpses:
+            continue
+        updated: list[dict[str, Any]] = []
+        for corpse in corpses:
+            if not isinstance(corpse, dict):
+                continue
+            decay_turn = corpse.get("decay_turn")
+            is_visible = bool(corpse.get("visible", True))
+            if isinstance(decay_turn, (int, float)) and int(decay_turn) <= world_turn:
+                is_visible = False
+            corpse["visible"] = is_visible
+            if is_visible:
+                updated.append(corpse)
+            else:
+                dead_agent = state.get("agents", {}).get(str(corpse.get("agent_id") or ""))
+                if isinstance(dead_agent, dict):
+                    dead_agent["corpse_visible"] = False
+        _runtime_set_location_field(state, loc_id, "corpses", updated)
 
 
 def _is_emission_threat(agent: Dict[str, Any], state: Dict[str, Any]) -> bool:
@@ -2993,8 +3024,18 @@ def _combat_shoot(
                 _add_memory(
                     agent, world_turn, state, "observation",
                     f"✅ Подтверждена ликвидация цели: «{target_name}»",
-                    {"action_kind": "target_death_confirmed",
-                     "target_id": target_id, "target_name": target_name},
+                    {
+                        "action_kind": "target_death_confirmed",
+                        "target_id": target_id,
+                        "target_name": target_name,
+                        "confirmation_source": "personal_combat_kill",
+                        "directly_observed": True,
+                        "killer_id": agent_id,
+                        "combat_id": cid,
+                        "corpse_location_id": loc_id,
+                        "location_id": loc_id,
+                        "target_death_cause": "combat",
+                    },
                     summary=f"Цель подтверждена мёртвой — «{target_name}»",
                 )
             # Use canonical kill helper for all death-state invariants.
@@ -3428,6 +3469,59 @@ def _write_location_observations(
             {"observed": "mutants", "location_id": loc_id, "names": mutant_names},
             summary=f"В локации «{loc_name}» замечены мутанты: {', '.join(mutant_names)}",
         )
+
+    visible_corpses = [
+        corpse for corpse in (loc.get("corpses") or [])
+        if isinstance(corpse, dict) and bool(corpse.get("visible", True))
+    ]
+    for corpse in visible_corpses:
+        dead_agent_id = str(corpse.get("agent_id") or "")
+        if not dead_agent_id:
+            continue
+        dead_agent_name = str(corpse.get("agent_name") or dead_agent_id)
+        corpse_id = str(corpse.get("corpse_id") or f"corpse_{dead_agent_id}_{corpse.get('created_turn')}")
+        death_cause = str(corpse.get("death_cause") or "")
+        killer_id = corpse.get("killer_id")
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            f"☠️ Вижу тело: «{dead_agent_name}»",
+            {
+                "action_kind": "corpse_seen",
+                "dead_agent_id": dead_agent_id,
+                "dead_agent_name": dead_agent_name,
+                "corpse_id": corpse_id,
+                "location_id": loc_id,
+                "death_cause": death_cause,
+                "killer_id": killer_id,
+                "directly_observed": True,
+                "confidence": 0.95,
+            },
+            summary=f"Обнаружено тело «{dead_agent_name}» в «{loc_name}».",
+        )
+        if str(agent.get("kill_target_id") or "") == dead_agent_id:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                f"🎯 Нашёл тело цели: «{dead_agent_name}»",
+                {
+                    "action_kind": "target_corpse_seen",
+                    "target_id": dead_agent_id,
+                    "target_name": dead_agent_name,
+                    "corpse_id": corpse_id,
+                    "corpse_location_id": loc_id,
+                    "location_id": loc_id,
+                    "death_cause": death_cause,
+                    "killer_id": killer_id,
+                    "directly_observed": True,
+                    "confidence": 0.95,
+                },
+                summary=f"Лично подтвердил тело цели «{dead_agent_name}» в «{loc_name}».",
+            )
 
     # NOTE: Artifacts are NOT recorded as a location observation on arrival.
     # They can only be discovered and recorded through the explore action.
@@ -4885,7 +4979,9 @@ def _bot_ask_colocated_stalkers_about_agent(
     already_known: set = set()
     for rec in _v3_records_desc(agent):
         fx = _v3_details(rec)
-        if _v3_action_kind(rec) == "intel_from_stalker" and fx.get("observed") == "agent_location":
+        if (
+            _v3_action_kind(rec) == "intel_from_stalker" and fx.get("observed") == "agent_location"
+        ) or _v3_action_kind(rec) == "target_corpse_reported":
             ak_loc = rec.get("location_id") or fx.get("location_id")
             already_known.add((fx.get("source_agent_id"), ak_loc))
 
@@ -4917,15 +5013,26 @@ def _bot_ask_colocated_stalkers_about_agent(
             if _v3_memory_type(other_rec) != "observation":
                 continue
             other_fx = _v3_details(other_rec)
-            if other_fx.get("observed") != "stalkers":
-                continue
             obs_loc = other_rec.get("location_id") or other_fx.get("location_id")
             if not obs_loc:
                 continue
-            names_seen = other_fx.get("names", [])
-            if target_agent_name not in names_seen:
+            is_target_location_intel = False
+            is_target_corpse_report = False
+            if other_fx.get("observed") == "stalkers":
+                names_seen = other_fx.get("names", [])
+                if target_agent_name in names_seen:
+                    is_target_location_intel = True
+            else:
+                dead_agent_id = str(other_fx.get("dead_agent_id") or other_fx.get("target_id") or "")
+                if dead_agent_id == target_agent_id and _v3_action_kind(other_rec) in {
+                    "corpse_seen",
+                    "target_corpse_seen",
+                    "target_death_confirmed",
+                }:
+                    is_target_corpse_report = True
+            if not is_target_location_intel and not is_target_corpse_report:
                 continue
-            if obs_loc in exhausted_locs:
+            if obs_loc in exhausted_locs and not is_target_corpse_report:
                 continue
             if obs_loc in seen_locs_this_stalker:
                 continue
@@ -4942,27 +5049,50 @@ def _bot_ask_colocated_stalkers_about_agent(
                     first_loc = obs_loc
                 continue
 
-            _add_memory(
-                agent, world_turn, state, "observation",
-                f"💬 Разведданные от {other_name}",
-                {
-                    "action_kind": "intel_from_stalker",
-                    "observed": "agent_location",
-                    "location_id": obs_loc,
-                    "target_agent_id": target_agent_id,
-                    "target_agent_name": target_agent_name,
-                    "source_agent_id": other_id,
-                    "source_agent_name": other_name,
-                    "obs_world_turn": obs_turn,
-                    # Stalker witnesses are less reliable than trader network intel.
-                    "confidence": 0.55,
-                },
-                summary=(
-                    f"{other_name} рассказал, что видел «{target_agent_name}» "
-                    f"в «{obs_loc_name}» (в {current_loc_name}). "
-                    f"Видел {_obs_time_label}."
-                ),
-            )
+            if is_target_corpse_report:
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"💬 Свидетель сообщил о теле цели ({other_name})",
+                    {
+                        "action_kind": "target_corpse_reported",
+                        "target_id": target_agent_id,
+                        "target_name": target_agent_name,
+                        "reported_corpse_location_id": obs_loc,
+                        "location_id": obs_loc,
+                        "source_agent_id": other_id,
+                        "source_agent_name": other_name,
+                        "obs_world_turn": obs_turn,
+                        "confidence": 0.75,
+                        "directly_observed": False,
+                    },
+                    summary=(
+                        f"{other_name} сообщил, что видел тело цели «{target_agent_name}» "
+                        f"в «{obs_loc_name}» (в {current_loc_name}). "
+                        f"Свидетельство {_obs_time_label}."
+                    ),
+                )
+            else:
+                _add_memory(
+                    agent, world_turn, state, "observation",
+                    f"💬 Разведданные от {other_name}",
+                    {
+                        "action_kind": "intel_from_stalker",
+                        "observed": "agent_location",
+                        "location_id": obs_loc,
+                        "target_agent_id": target_agent_id,
+                        "target_agent_name": target_agent_name,
+                        "source_agent_id": other_id,
+                        "source_agent_name": other_name,
+                        "obs_world_turn": obs_turn,
+                        # Stalker witnesses are less reliable than trader network intel.
+                        "confidence": 0.55,
+                    },
+                    summary=(
+                        f"{other_name} рассказал, что видел «{target_agent_name}» "
+                        f"в «{obs_loc_name}» (в {current_loc_name}). "
+                        f"Видел {_obs_time_label}."
+                    ),
+                )
             seen_locs_this_stalker.add(obs_loc)
             already_known.add((other_id, obs_loc))
             if first_loc is None:
@@ -4999,16 +5129,34 @@ def _bot_buy_hunt_intel_from_trader(
         if _v3_turn(rec) != world_turn:
             continue
         fx = _v3_details(rec)
-        if (_v3_action_kind(rec) == "intel_from_trader"
-                and fx.get("target_agent_id") == target_id):
+        if (
+            (_v3_action_kind(rec) == "intel_from_trader" and fx.get("target_agent_id") == target_id)
+            or (_v3_action_kind(rec) == "target_corpse_reported" and str(fx.get("target_id") or "") == str(target_id))
+        ):
             return False  # Already bought this turn
 
     target = state.get("agents", {}).get(target_id)
-    if not target or not target.get("is_alive", True):
-        return False  # Target is dead or unknown
+    if not target:
+        return False
 
+    target_is_alive = bool(target.get("is_alive", True))
     target_loc = target.get("location_id")
-    if not target_loc:
+    corpse_loc = None
+    if not target_is_alive:
+        for _loc_id, _loc in state.get("locations", {}).items():
+            for _corpse in (_loc.get("corpses") or []):
+                if (
+                    isinstance(_corpse, dict)
+                    and bool(_corpse.get("visible", True))
+                    and str(_corpse.get("agent_id") or "") == str(target_id)
+                ):
+                    corpse_loc = str(_corpse.get("location_id") or _loc_id)
+                    break
+            if corpse_loc:
+                break
+        if not corpse_loc:
+            return False
+    elif not target_loc:
         return False
 
     traders = state.get("traders", {})
@@ -5028,29 +5176,51 @@ def _bot_buy_hunt_intel_from_trader(
     trader["money"] = trader.get("money", 0) + _HUNT_INTEL_PRICE
 
     trader_name = trader.get("name", trader.get("id", "Торговец"))
-    target_loc_name = locations.get(target_loc, {}).get("name", target_loc)
-
-    _add_memory(
-        agent, world_turn, state, "observation",
-        f"💰 Купил информацию: «{target_name}» замечен в «{target_loc_name}»",
-        {
-            "action_kind": "intel_from_trader",
-            "observed": "agent_location",
-            "location_id": target_loc,
-            "target_agent_id": target_id,
-            "target_agent_name": target_name,
-            "source_agent_id": trader.get("id", ""),
-            "source_agent_name": trader_name,
-            "price_paid": _HUNT_INTEL_PRICE,
-            # Trader network intel is more reliable than stalker word-of-mouth.
-            "confidence": 0.70,
-        },
-        summary=(
-            f"Я купил у торговца «{trader_name}» информацию о местонахождении "
-            f"«{target_name}» за {_HUNT_INTEL_PRICE} руб. "
-            f"По данным торговца, цель сейчас в «{target_loc_name}»."
-        ),
-    )
+    if target_is_alive:
+        target_loc_name = locations.get(target_loc, {}).get("name", target_loc)
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"💰 Купил информацию: «{target_name}» замечен в «{target_loc_name}»",
+            {
+                "action_kind": "intel_from_trader",
+                "observed": "agent_location",
+                "location_id": target_loc,
+                "target_agent_id": target_id,
+                "target_agent_name": target_name,
+                "source_agent_id": trader.get("id", ""),
+                "source_agent_name": trader_name,
+                "price_paid": _HUNT_INTEL_PRICE,
+                # Trader network intel is more reliable than stalker word-of-mouth.
+                "confidence": 0.70,
+            },
+            summary=(
+                f"Я купил у торговца «{trader_name}» информацию о местонахождении "
+                f"«{target_name}» за {_HUNT_INTEL_PRICE} руб. "
+                f"По данным торговца, цель сейчас в «{target_loc_name}»."
+            ),
+        )
+    else:
+        corpse_loc_name = locations.get(corpse_loc, {}).get("name", corpse_loc)
+        _add_memory(
+            agent, world_turn, state, "observation",
+            f"💰 Купил информацию о теле цели в «{corpse_loc_name}»",
+            {
+                "action_kind": "target_corpse_reported",
+                "target_id": target_id,
+                "target_name": target_name,
+                "reported_corpse_location_id": corpse_loc,
+                "location_id": corpse_loc,
+                "source_agent_id": trader.get("id", ""),
+                "source_agent_name": trader_name,
+                "price_paid": _HUNT_INTEL_PRICE,
+                "confidence": 0.80,
+                "directly_observed": False,
+            },
+            summary=(
+                f"Я купил у торговца «{trader_name}» информацию о месте, где видели тело "
+                f"«{target_name}»: «{corpse_loc_name}»."
+            ),
+        )
     return True
 
 
@@ -5099,7 +5269,32 @@ def _find_hunt_intel_location(
                 best_turn = t
                 best_loc = obs_loc
 
-        # Source 2: retreat_observed — the target was seen fleeing to to_location
+        # Source 2: witness reports about target corpse location
+        elif ak == "target_corpse_reported":
+            if str(fx.get("target_id") or "") != str(target_agent_id):
+                continue
+            corpse_loc = fx.get("reported_corpse_location_id") or rec.get("location_id") or fx.get("location_id")
+            if not corpse_loc:
+                continue
+            t = _v3_turn(rec)
+            if t > best_turn:
+                best_turn = t
+                best_loc = corpse_loc
+
+        # Source 3: direct corpse observations
+        elif ak in {"target_corpse_seen", "target_death_confirmed"}:
+            rec_target = str(fx.get("target_id") or fx.get("dead_agent_id") or "")
+            if rec_target != str(target_agent_id):
+                continue
+            corpse_loc = fx.get("corpse_location_id") or rec.get("location_id") or fx.get("location_id")
+            if not corpse_loc:
+                continue
+            t = _v3_turn(rec)
+            if t > best_turn:
+                best_turn = t
+                best_loc = corpse_loc
+
+        # Source 4: retreat_observed — the target was seen fleeing to to_location
         elif ak == "retreat_observed":
             if fx.get("subject") != target_agent_id:
                 continue
@@ -6134,23 +6329,16 @@ def _check_global_goal_completion(
         target_id = agent.get("kill_target_id")
         if target_id:
             target_agent = state.get("agents", {}).get(target_id, {})
-            target_is_dead = not target_agent.get("is_alive", True) if target_agent else False
-
-            if target_is_dead:
-                # Write target_death_confirmed memory if not already present
-                _already_confirmed = any(
-                    _v3_action_kind(m) == "target_death_confirmed"
-                    and str(_v3_details(m).get("target_id") or "") == str(target_id)
-                    for m in _v3_records_desc(agent)
-                )
-                if not _already_confirmed:
-                    target_name_c = target_agent.get("name", target_id) if target_agent else target_id
-                    _add_memory(
-                        agent, world_turn, state, "observation",
-                        f"💀 {target_name_c} мёртв",
-                        {"action_kind": "target_death_confirmed", "target_id": target_id},
-                        summary=f"Подтверждена гибель цели {target_name_c}",
-                    )
+            _confirmed_record = next(
+                (
+                    rec for rec in _v3_records_desc(agent)
+                    if _v3_action_kind(rec) == "target_death_confirmed"
+                    and str(_v3_details(rec).get("target_id") or "") == str(target_id)
+                    and bool(_v3_details(rec).get("directly_observed")) is True
+                ),
+                None,
+            )
+            if _confirmed_record is not None:
                 agent["global_goal_achieved"] = True
                 target_name = target_agent.get("name", target_id) if target_agent else target_id
                 _goal_summary = f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!"

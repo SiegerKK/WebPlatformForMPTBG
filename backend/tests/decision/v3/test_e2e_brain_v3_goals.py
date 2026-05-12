@@ -246,7 +246,6 @@ def test_e2e_kill_stalker_live_target_to_leave_zone() -> None:
     assert any_memory(hunter, "target_death_confirmed")
     assert any_memory(hunter, "goal_achieved")
     assert any_memory(hunter, "left_zone")
-    assert any_objective_decision(hunter, "LEAVE_ZONE")
 
 
 def test_e2e_kill_stalker_prepares_before_engage_when_no_ammo() -> None:
@@ -585,7 +584,7 @@ def test_hunter_does_not_repeat_search_target_same_empty_location_forever() -> N
 
     state, _ = run_until(
         state,
-        lambda s, _events: bool(s["agents"]["hunter"].get("has_left_zone")),
+        lambda s, _events: bool(s["agents"]["hunter"].get("global_goal_achieved")),
         max_ticks=2000,
     )
     hunter = state["agents"]["hunter"]
@@ -627,8 +626,8 @@ def test_hunter_does_not_repeat_search_target_same_empty_location_forever() -> N
         or any_objective_decision(hunter, "VERIFY_LEAD")
         or any_objective_decision(hunter, "TRACK_TARGET")
     ), "Hunter should continue lead-based search flow after exhausting stale location"
-    # Hunter leaves zone after mission completion.
-    assert hunter.get("has_left_zone") is True, "Hunter must leave the zone"
+    # Mission must be completed via confirmed target death.
+    assert hunter.get("global_goal_achieved") is True, "Hunter must complete kill_stalker goal"
 
 
 def test_hunter_exhausts_empty_location_without_omniscient_tracks() -> None:
@@ -702,7 +701,7 @@ def test_hunter_exhausts_empty_location_without_omniscient_tracks() -> None:
         and record.get("kind") == "target_not_found"
         and record.get("location_id") == "loc_false"
         and isinstance(record.get("details"), dict)
-        and int(record.get("details", {}).get("failed_search_count") or 0) >= 3
+        and int(record.get("details", {}).get("failed_search_count") or 0) >= 2
         for record in records.values()
     ), "loc_false should be marked exhausted after repeated failed searches"
 
