@@ -202,6 +202,8 @@ def evaluate_scheduled_action_interrupts(
     hunger_projected = _projected(float(agent.get("hunger", 0)), int(state.get("world_minute", 0)), HUNGER_INCREASE_PER_HOUR)
     sleepiness = float(agent.get("sleepiness", 0))
     remaining_turns = _scheduled_action_remaining_turns(scheduled_action=scheduled_action, world_turn=world_turn)
+    action_type = str(scheduled_action.get("type") or "")
+    soft_interruptible_action = action_type in {"explore_anomaly_location", "travel"}
 
     return {
         "objective_key": objective_key or None,
@@ -220,13 +222,14 @@ def evaluate_scheduled_action_interrupts(
             "thirst_projected": thirst_projected,
             "hunger_projected": hunger_projected,
             "sleepiness": sleepiness,
+            "scheduled_action_type": action_type,
             "remaining_turns": remaining_turns,
             "max_remaining_turns": _SOFT_INTERRUPT_MAX_REMAINING_TURNS,
             "should_interrupt": bool(
                 sleepiness >= _SOFT_INTERRUPT_SLEEPINESS_THRESHOLD
                 or thirst_projected >= _SOFT_INTERRUPT_THIRST_THRESHOLD
                 or hunger_projected >= _SOFT_INTERRUPT_HUNGER_THRESHOLD
-            ) and remaining_turns > _SOFT_INTERRUPT_MAX_REMAINING_TURNS,
+            ) and remaining_turns > _SOFT_INTERRUPT_MAX_REMAINING_TURNS and soft_interruptible_action,
         },
         "sleep_need": {
             "raw_sleepiness": int(sleepiness),
@@ -328,13 +331,15 @@ def assess_scheduled_action_v3(
             debug_context=debug_context,
         )
 
+    action_type = str(scheduled_action.get("type") or "")
+    soft_interruptible_action = action_type in {"explore_anomaly_location", "travel"}
     soft_needs_triggered = (
         sleepiness >= _SOFT_INTERRUPT_SLEEPINESS_THRESHOLD
         or thirst >= _SOFT_INTERRUPT_THIRST_THRESHOLD
         or hunger >= _SOFT_INTERRUPT_HUNGER_THRESHOLD
     )
     remaining_turns = _scheduled_action_remaining_turns(scheduled_action=scheduled_action, world_turn=world_turn)
-    if soft_needs_triggered and remaining_turns > _SOFT_INTERRUPT_MAX_REMAINING_TURNS:
+    if soft_interruptible_action and soft_needs_triggered and remaining_turns > _SOFT_INTERRUPT_MAX_REMAINING_TURNS:
         return PlanMonitorResult(
             decision="abort",
             reason="soft_restore_needs_interrupt",

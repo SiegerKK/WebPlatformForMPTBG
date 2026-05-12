@@ -359,7 +359,7 @@ def _handle_stalkers_seen_event(
 
     seen_names = [str(name) for name in (record.details.get("names") or []) if name]
     entity_set = {str(entity_id) for entity_id in record.entity_ids if entity_id}
-    episodic_match, semantic_match = _find_stalkers_seen_match(
+    _, semantic_match = _find_stalkers_seen_match(
         records=records,
         location_id=location_id,
         world_turn=world_turn,
@@ -376,15 +376,6 @@ def _handle_stalkers_seen_event(
         base_summary=record.summary,
         existing_semantic=semantic_match,
     )
-
-    if episodic_match is not None:
-        _update_stalkers_seen_record(
-            raw=episodic_match,
-            world_turn=world_turn,
-            entity_ids=record.entity_ids,
-            seen_names=seen_names,
-        )
-        return True
 
     add_memory_record(agent, record)
     _trim_stalkers_seen_per_location(records=records, location_id=location_id)
