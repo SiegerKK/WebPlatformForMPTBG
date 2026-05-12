@@ -210,7 +210,6 @@ _INTENT_TO_OBJECTIVE_KEY_FALLBACK: Dict[str, str] = {
     "sell_artifacts": "SELL_ARTIFACTS",
     "get_rich": "FIND_ARTIFACTS",
     "hunt_target": "HUNT_TARGET",
-    "resupply": "RESUPPLY",
 }
 
 _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY: Dict[str, str] = {
@@ -232,7 +231,8 @@ def _fallback_objective_key_for_intent(intent: Any) -> str | None:
     if intent_kind == "resupply":
         forced_category = str(metadata.get("forced_resupply_category") or "")
         if forced_category:
-            return _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY.get(forced_category, "RESUPPLY")
+            return _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY.get(forced_category)
+        return None
     return _INTENT_TO_OBJECTIVE_KEY_FALLBACK.get(intent_kind)
 
 
@@ -1788,6 +1788,7 @@ def _mark_agent_dead(
     memory_effects: Dict[str, Any],
     memory_summary: str,
     events: List[Dict[str, Any]],
+    event_payload_extra: Dict[str, Any] | None = None,
 ) -> None:
     """Compatibility wrapper around the canonical death helper."""
     runtime_agent = _runtime_agent(agent_id, agent)
@@ -1802,6 +1803,7 @@ def _mark_agent_dead(
         memory_title=memory_title,
         memory_summary=memory_summary,
         memory_effects=memory_effects,
+        event_payload_extra=event_payload_extra,
         events=events,
         use_runtime=False,
     )
@@ -3006,6 +3008,7 @@ def _combat_shoot(
                 memory_effects={"observed": "combat_killed", "combat_id": cid,
                                 "killer_id": agent_id, "killer_name": atk_name},
                 memory_summary=f"Я был убит «{atk_name}» в бою",
+                event_payload_extra={"killer_id": agent_id, "combat_id": cid},
                 events=events,
             )
     _runtime_set_action_used(agent, True)

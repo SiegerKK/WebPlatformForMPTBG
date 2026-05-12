@@ -39,6 +39,7 @@ def kill_agent(
     memory_title: str | None = None,
     memory_summary: str | None = None,
     memory_effects: dict[str, Any] | None = None,
+    event_payload_extra: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
     emit_event: bool = True,
     use_runtime: bool = True,
@@ -140,14 +141,21 @@ def kill_agent(
 
     # 7. Emit agent_died event
     if emit_event and events is not None:
+        payload: dict[str, Any] = {
+            "agent_id": agent_id,
+            "cause": cause,
+            "location_id": _loc_id,
+            "world_turn": world_turn,
+        }
+        if isinstance(event_payload_extra, dict):
+            for key, value in event_payload_extra.items():
+                if key in {"agent_id", "cause", "location_id", "world_turn"}:
+                    continue
+                if value is not None:
+                    payload[key] = value
         events.append({
             "event_type": "agent_died",
-            "payload": {
-                "agent_id": agent_id,
-                "cause": cause,
-                "location_id": _loc_id,
-                "world_turn": world_turn,
-            },
+            "payload": payload,
         })
 
     if runtime is not None and hasattr(runtime, "mark_agent_dirty"):

@@ -36,7 +36,7 @@ def test_no_unknown_for_common_intents() -> None:
     common_intents = [
         "flee_emission", "wait_in_shelter", "seek_water", "seek_food",
         "rest", "heal_self", "escape_danger", "sell_artifacts", "get_rich",
-        "hunt_target", "resupply",
+        "hunt_target",
     ]
     for intent in common_intents:
         mapped = _INTENT_TO_OBJECTIVE_KEY_FALLBACK.get(intent)
@@ -55,3 +55,8 @@ def test_hunt_target_maps_to_hunt_target() -> None:
 def test_resupply_forced_category_uses_specific_objective() -> None:
     intent = Intent(kind="resupply", score=0.7, metadata={"forced_resupply_category": "ammo"})
     assert _fallback_objective_key_for_intent(intent) == "RESUPPLY_AMMO"
+
+
+def test_resupply_without_forced_category_has_no_fallback_objective() -> None:
+    intent = Intent(kind="resupply", score=0.7, metadata={})
+    assert _fallback_objective_key_for_intent(intent) is None
