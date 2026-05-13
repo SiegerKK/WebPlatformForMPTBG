@@ -22,3 +22,11 @@ SOFT_RESTORE_FOOD_THRESHOLD: int = 50
 SOFT_RESTORE_DRINK_THRESHOLD: int = 40
 SOFT_REST_THRESHOLD: int = 50
 CRITICAL_REST_THRESHOLD: int = 80
+
+# ── Active-plan step timeout constants (Part 2) ───────────────────────────────
+# Number of turns a step may stay in PENDING status before being timed out.
+ACTIVE_PLAN_PENDING_TIMEOUT_TURNS: int = 5
+ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS: int = 5
+ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS: int = 5
+# Grace turns added on top of the expected step duration before calling a RUNNING step timed out.
+ACTIVE_PLAN_RUNNING_GRACE_TURNS: int = 5

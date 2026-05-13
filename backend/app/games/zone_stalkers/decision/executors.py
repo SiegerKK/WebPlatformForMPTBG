@@ -1630,3 +1630,56 @@ def _write_once_by_dest(
                 f"🔍 Ищу {item_category} в {destination}",
                 effects,
                 summary=f"Отправляюсь искать предметы категории {item_category}")
+
+
+# ── Public sellable-inventory API (Part 1a) ────────────────────────────────────
+
+def get_sellable_inventory_items(
+    agent: "dict[str, Any]",
+    *,
+    item_category: str = "artifact",
+) -> "list[dict[str, Any]]":
+    """Return inventory items that are sellable under *item_category*.
+
+    Parameters
+    ----------
+    agent:
+        Agent dict (reads ``agent["inventory"]``).
+    item_category:
+        ``"artifact"`` — only artifact-type items with a positive sell price.
+        ``"any_sellable"`` — any item with a positive sell price (excludes
+        medical, consumable, ammo, secret_document categories).
+
+    Returns
+    -------
+    list[dict]
+        Items matching the sell criterion.  Empty when nothing is sellable.
+    """
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART  # noqa: PLC0415
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _IT  # noqa: PLC0415
+
+    _art_cfg = dict(_ART)
+    _it_cfg = dict(_IT)
+    inventory = agent.get("inventory") or []
+
+    if item_category == "artifact":
+        return [
+            item for item in inventory
+            if str(item.get("type") or "") in frozenset(_art_cfg.keys())
+            and _artifact_sell_price(item, _art_cfg) > 0
+        ]
+    if item_category == "any_sellable":
+        return [
+            item for item in inventory
+            if _any_sellable_item_price(item, _it_cfg, _art_cfg) > 0
+        ]
+    return []
+
+
+def has_sellable_inventory(
+    agent: "dict[str, Any]",
+    *,
+    item_category: str = "artifact",
+) -> bool:
+    """Return True when the agent has at least one sellable item of *item_category*."""
+    return bool(get_sellable_inventory_items(agent, item_category=item_category))
