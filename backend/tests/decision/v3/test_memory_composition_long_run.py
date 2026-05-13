@@ -1,4 +1,4 @@
-"""Regression: memory_v3 composition over a synthetic long run (Fix 2+3).
+"""Regression: memory_v3 composition over a synthetic long run (Fix 2+3, PR1).
 
 One combined regression test: after 50 turns of mixed events including
 ActivePlan lifecycle noise, the memory store must NOT contain any
@@ -11,12 +11,12 @@ from app.games.zone_stalkers.memory.store import ensure_memory_v3, MEMORY_V3_MAX
 from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3, _SKIP_ACTION_KINDS
 
 
-def _write(agent: dict, action_kind: str, world_turn: int) -> None:
+def _write(agent: dict, action_kind: str, world_turn: int, **extra_effects) -> None:
     entry = {
         "world_turn": world_turn,
         "type": "action",
         "title": f"event_{action_kind}_{world_turn}",
-        "effects": {"action_kind": action_kind},
+        "effects": {"action_kind": action_kind, **extra_effects},
         "summary": f"{action_kind} at turn {world_turn}",
     }
     write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=world_turn)
@@ -53,3 +53,80 @@ def test_no_trace_only_records_after_long_run() -> None:
     assert len(records) <= MEMORY_HARD_CAP, (
         f"Memory hard cap exceeded: {len(records)} > {MEMORY_HARD_CAP}"
     )
+
+
+def test_plan_failure_loop_does_not_dominate_memory() -> None:
+    """200 repeated active_plan failures must produce << 200 records in memory_v3."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(1, 201):
+        _write(agent, "active_plan_step_failed",
+               turn,
+               objective_key="FIND_ARTIFACTS",
+               step_kind="travel_to_location",
+               reason="support_source_exhausted")
+        _write(agent, "active_plan_repair_requested",
+               turn,
+               objective_key="FIND_ARTIFACTS",
+               step_kind="travel_to_location",
+               reason="support_source_exhausted")
+
+    records = ensure_memory_v3(agent)["records"]
+    all_failure_kinds = {r.get("kind") for r in records.values()}
+    # Repeated failures must NOT produce raw active_plan_step_failed records.
+    assert "active_plan_step_failed" not in all_failure_kinds
+    # They should produce at most a handful of aggregate records.
+    agg_count = sum(1 for r in records.values() if r.get("kind") == "active_plan_failure_summary")
+    assert agg_count <= 5, f"Expected <= 5 failure aggregates, got {agg_count}"
+    assert len(records) < 20, f"Expected << 20 records for failure loop, got {len(records)}"
+
+
+def test_repeated_stalkers_seen_keeps_episodic_under_budget() -> None:
+    """200 stalkers_seen events at the same location must not produce 200 episodic records."""
+    from app.games.zone_stalkers.memory.memory_events import STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
+
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(100, 300):
+        entry = {
+            "world_turn": turn,
+            "type": "observation",
+            "title": "saw stalkers",
+            "summary": "saw stalkers",
+            "effects": {
+                "observed": "stalkers",
+                "location_id": "loc_repeat",
+                "entity_ids": ["agent_debug_0", "agent_debug_7"],
+                "names": ["Сталкер #0", "Сталкер #7"],
+            },
+        }
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    stalkers_seen = [r for r in records if r.get("kind") == "stalkers_seen" and r.get("status", "active") != "archived"]
+    semantic = [r for r in records if r.get("kind") == "semantic_stalkers_seen"]
+    assert len(stalkers_seen) <= STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
+    assert len(semantic) >= 1
+    assert int(semantic[0]["details"].get("times_seen", 0)) > 1
+
+
+def test_repeated_travel_hop_updates_route_aggregate() -> None:
+    """Repeated travel_hop events must update a single semantic_route_traveled aggregate."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(200, 230):
+        entry = {
+            "world_turn": turn,
+            "type": "action",
+            "title": "traveled",
+            "summary": f"traveled loc_a→loc_b at turn {turn}",
+            "effects": {
+                "action_kind": "travel_hop",
+                "location_id": "loc_b",
+                "from_location_id": "loc_a",
+                "to_location_id": "loc_b",
+            },
+        }
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    route_semantic = [r for r in records if r.get("kind") == "semantic_route_traveled"]
+    assert len(route_semantic) == 1
+    assert route_semantic[0]["details"]["times_traveled"] >= 30
+    assert route_semantic[0]["details"]["last_traveled_turn"] == 229
+

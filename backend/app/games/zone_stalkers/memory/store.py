@@ -18,6 +18,45 @@ MEMORY_V3_RETRIEVAL_MAX_RESULTS = 50
 MEMORY_V3_RETRIEVAL_MAX_CANDIDATES = 200
 MEMORY_V3_MAX_STALKERS_SEEN_RECORDS = 75
 
+# ── by_tag denylist and bucket cap (PR1) ─────────────────────────────────────
+# Tags in this set are too noisy/broad to be useful in the index.
+DO_NOT_INDEX_TAGS: frozenset[str] = frozenset({
+    "active_plan",
+    "repair",
+    "step",
+    "objective",
+    "decision",
+    "routine",
+})
+
+# Tag prefixes whose values are too specific/noisy (e.g. "objective:FIND_ARTIFACTS").
+DO_NOT_INDEX_TAG_PREFIXES: tuple[str, ...] = (
+    "objective:",
+    "step:",
+    "repair:",
+)
+
+# Maximum number of record IDs stored in any single by_tag bucket.
+MAX_TAG_BUCKET_SIZE = 64
+
+# Metrics counters for by_tag indexing (readable externally).
+_TAG_METRICS: dict[str, int] = {
+    "memory_by_tag_refs": 0,
+    "memory_by_tag_skipped_refs": 0,
+}
+
+
+def get_tag_metrics() -> dict[str, int]:
+    """Return a snapshot of by_tag indexing metrics."""
+    return dict(_TAG_METRICS)
+
+
+def reset_tag_metrics() -> None:
+    """Reset tag metrics to zero."""
+    for key in _TAG_METRICS:
+        _TAG_METRICS[key] = 0
+
+
 # Layers whose records must not be deleted during cap-trimming.
 _PROTECTED_LAYERS = frozenset({"threat", "goal", "semantic"})
 
@@ -126,6 +165,25 @@ def _index_record(mem_v3: dict[str, Any], record: MemoryRecord) -> None:
         if rid not in bucket[key]:
             bucket[key].append(rid)
 
+    def _add_tag(bucket: dict, tag: str, rid: str) -> None:
+        """Add a tag reference with denylist check and bucket-size cap."""
+        _TAG_METRICS["memory_by_tag_refs"] += 1
+        # Skip denied tag names.
+        if tag in DO_NOT_INDEX_TAGS:
+            _TAG_METRICS["memory_by_tag_skipped_refs"] += 1
+            return
+        # Skip denied tag prefixes.
+        if tag.startswith(DO_NOT_INDEX_TAG_PREFIXES):
+            _TAG_METRICS["memory_by_tag_skipped_refs"] += 1
+            return
+        bucket.setdefault(tag, [])
+        if rid in bucket[tag]:
+            return
+        # Enforce bucket-size cap: drop oldest entry if full.
+        if len(bucket[tag]) >= MAX_TAG_BUCKET_SIZE:
+            bucket[tag].pop(0)
+        bucket[tag].append(rid)
+
     _add(idx["by_layer"], record.layer, record.id)
     _add(idx["by_kind"],  record.kind,  record.id)
     if record.location_id:
@@ -135,7 +193,7 @@ def _index_record(mem_v3: dict[str, Any], record: MemoryRecord) -> None:
     for itype in record.item_types:
         _add(idx["by_item_type"], itype, record.id)
     for tag in record.tags:
-        _add(idx["by_tag"], tag, record.id)
+        _add_tag(idx["by_tag"], tag, record.id)
 
 
 def _deindex_record(mem_v3: dict[str, Any], record: MemoryRecord) -> None:

@@ -219,3 +219,65 @@ def test_trim_memory_v3_enforces_stalkers_seen_budget() -> None:
     records = agent["memory_v3"]["records"]
     stalkers_seen_count = sum(1 for raw in records.values() if raw.get("kind") == "stalkers_seen")
     assert stalkers_seen_count == MEMORY_V3_MAX_STALKERS_SEEN_RECORDS
+
+
+# ── PR1: by_tag denylist and bucket cap tests ────────────────────────────────
+
+def test_by_tag_denylist_skips_noisy_tags() -> None:
+    """Tags in DO_NOT_INDEX_TAGS must not appear in the by_tag index."""
+    from app.games.zone_stalkers.memory.store import DO_NOT_INDEX_TAGS, reset_tag_metrics
+
+    reset_tag_metrics()
+    agent: dict = {}
+    # Use every denied tag plus a valid one.
+    all_tags = tuple(DO_NOT_INDEX_TAGS) + ("valid_tag",)
+    rec = _make_record("mem_denylist", tags=all_tags)
+    add_memory_record(agent, rec)
+    idx = agent["memory_v3"]["indexes"]["by_tag"]
+
+    for denied_tag in DO_NOT_INDEX_TAGS:
+        assert "mem_denylist" not in idx.get(denied_tag, []), (
+            f"Denied tag {denied_tag!r} should not be in by_tag index"
+        )
+    assert "mem_denylist" in idx.get("valid_tag", [])
+
+
+def test_by_tag_prefix_denylist_skips_noisy_prefixes() -> None:
+    """Tags with denied prefixes (objective:, step:, repair:) must not appear in by_tag."""
+    agent: dict = {}
+    noisy_tags = ("objective:FIND_ARTIFACTS", "step:travel_to_location", "repair:reason_x", "safe_tag")
+    rec = _make_record("mem_prefix", tags=noisy_tags)
+    add_memory_record(agent, rec)
+    idx = agent["memory_v3"]["indexes"]["by_tag"]
+
+    for noisy in ("objective:FIND_ARTIFACTS", "step:travel_to_location", "repair:reason_x"):
+        assert "mem_prefix" not in idx.get(noisy, [])
+    assert "mem_prefix" in idx.get("safe_tag", [])
+
+
+def test_by_tag_bucket_size_is_capped() -> None:
+    """Adding more records than MAX_TAG_BUCKET_SIZE must not grow the bucket beyond the cap."""
+    from app.games.zone_stalkers.memory.store import MAX_TAG_BUCKET_SIZE
+
+    agent: dict = {}
+    num_records = MAX_TAG_BUCKET_SIZE + 20
+    for i in range(num_records):
+        add_memory_record(agent, _make_record(record_id=f"m_cap_{i:04d}", tags=("shared_tag",)))
+    idx = agent["memory_v3"]["indexes"]["by_tag"]
+    bucket = idx.get("shared_tag", [])
+    assert len(bucket) <= MAX_TAG_BUCKET_SIZE
+
+
+def test_by_tag_metrics_track_skipped_refs() -> None:
+    """Skipped tag refs must be counted in tag metrics."""
+    from app.games.zone_stalkers.memory.store import reset_tag_metrics, get_tag_metrics, DO_NOT_INDEX_TAGS
+
+    reset_tag_metrics()
+    agent: dict = {}
+    denied_tags = tuple(list(DO_NOT_INDEX_TAGS)[:3])
+    rec = _make_record("mem_metrics", tags=denied_tags + ("ok_tag",))
+    add_memory_record(agent, rec)
+    m = get_tag_metrics()
+    assert m["memory_by_tag_refs"] >= len(denied_tags) + 1
+    assert m["memory_by_tag_skipped_refs"] >= len(denied_tags)
+
