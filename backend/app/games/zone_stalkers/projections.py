@@ -19,6 +19,7 @@ _GAME_AGENT_STRIP_FIELDS = (
     "brain_trace",
     "active_plan_v3",
     "brain_v3_context",
+    "brain_context_cache",
 )
 
 
@@ -269,6 +270,13 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
         agent["knowledge_summary"] = build_knowledge_summary(agent, world_turn)
     except Exception:
         pass
+    # PR4: Expose brain_context_metrics in full/debug projection.
+    ctx_metrics = agent.get("brain_context_metrics")
+    if isinstance(ctx_metrics, dict):
+        agent["brain_context_metrics"] = dict(ctx_metrics)
+    # brain_context_cache is a large internal payload — strip it from the
+    # full projection payload to avoid bloating the serialised output.
+    agent.pop("brain_context_cache", None)
 
 
 # ── Explicit game projection helpers ─────────────────────────────────────────
@@ -513,6 +521,15 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
             agent_dict["brain_v3_context"] = compact_ctx
         if compact_brain_runtime is not None:
             agent_dict["brain_runtime"] = compact_brain_runtime
+        # PR4: Include compact context builder metrics summary; exclude heavy cache payload.
+        ctx_metrics = agent.get("brain_context_metrics")
+        if isinstance(ctx_metrics, dict):
+            agent_dict["brain_context_metrics"] = {
+                "calls": ctx_metrics.get("context_builder_calls", 0),
+                "hits": ctx_metrics.get("context_builder_cache_hits", 0),
+                "misses": ctx_metrics.get("context_builder_cache_misses", 0),
+                "hit_rate": ctx_metrics.get("context_builder_cache_hit_rate", 0.0),
+            }
         agents_out[agent_id] = agent_dict
 
     # ── Traders: compact per-trader dict (exclude memory, memory_v3, brain_trace) ─
@@ -617,6 +634,7 @@ def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[s
                 continue
             agent.pop("memory", None)
             agent.pop("memory_v3", None)
+            agent.pop("brain_context_cache", None)
             compact_ctx = _compact_brain_context(agent)
             if compact_ctx is not None:
                 agent["brain_v3_context"] = compact_ctx

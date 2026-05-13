@@ -315,3 +315,82 @@ def test_full_projection_includes_memory_stats_story_and_terminal_state():
     assert agent["terminal_state"]["kind"] == "left_zone"
     first_story = agent["story_events"][0]
     assert {"world_turn", "type", "title", "summary", "source", "effects"} <= set(first_story.keys())
+
+
+# ── PR4 projection tests: brain_context_cache / brain_context_metrics ─────────
+
+def test_game_projection_strips_brain_context_cache() -> None:
+    """PR4: brain_context_cache must not appear in game/zone-lite projections."""
+    state = _sample_state()
+    state["agents"]["a1"]["brain_context_cache"] = {
+        "cache_key": {"location_id": "loc_a"},
+        "derived": {"known_entities": []},
+    }
+    state["agents"]["a1"]["brain_context_metrics"] = {
+        "context_builder_calls": 5,
+        "context_builder_cache_hits": 3,
+    }
+    projected = project_zone_state(state=state, mode="game")
+    agent = projected["agents"]["a1"]
+    assert "brain_context_cache" not in agent
+    assert "brain_context_metrics" not in agent
+
+
+def test_debug_map_lite_strips_brain_context_cache_and_adds_metrics_summary() -> None:
+    """PR4: debug-map-lite must strip brain_context_cache but include compact metrics."""
+    state = _sample_state()
+    state["agents"]["a1"]["brain_context_cache"] = {
+        "cache_key": {"location_id": "loc_a"},
+        "derived": {"known_entities": [{"agent_id": "x"}] * 50},
+    }
+    state["agents"]["a1"]["brain_context_metrics"] = {
+        "context_builder_calls": 10,
+        "context_builder_cache_hits": 7,
+        "context_builder_cache_misses": 3,
+        "context_builder_cache_hit_rate": 0.7,
+        "context_builder_ms": 12.5,
+    }
+    projected = project_zone_state(state=state, mode="debug-map-lite")
+    agent = projected["agents"]["a1"]
+    assert "brain_context_cache" not in agent
+    assert "brain_context_metrics" in agent
+    m = agent["brain_context_metrics"]
+    assert m["calls"] == 10
+    assert m["hits"] == 7
+    assert m["misses"] == 3
+    assert m["hit_rate"] == 0.7
+
+
+def test_debug_map_projection_strips_brain_context_cache() -> None:
+    """PR4: debug-map deepcopy projection must strip brain_context_cache."""
+    state = _sample_state()
+    state["agents"]["a1"]["brain_context_cache"] = {
+        "cache_key": {"location_id": "loc_a"},
+        "derived": {"known_entities": []},
+    }
+    projected = project_zone_state(state=state, mode="debug-map")
+    agent = projected["agents"]["a1"]
+    assert "brain_context_cache" not in agent
+
+
+def test_full_projection_exposes_brain_context_metrics_and_strips_cache() -> None:
+    """PR4: full projection must include brain_context_metrics but strip brain_context_cache."""
+    state = _sample_state()
+    state["agents"]["a1"]["brain_context_cache"] = {
+        "cache_key": {"location_id": "loc_a"},
+        "derived": {"known_entities": []},
+    }
+    state["agents"]["a1"]["brain_context_metrics"] = {
+        "context_builder_calls": 8,
+        "context_builder_cache_hits": 5,
+        "context_builder_cache_misses": 3,
+        "context_builder_cache_hit_rate": 0.625,
+        "context_builder_ms": 7.1,
+    }
+    projected = project_zone_state(state=state, mode="full")
+    agent = projected["agents"]["a1"]
+    assert "brain_context_cache" not in agent
+    assert "brain_context_metrics" in agent
+    m = agent["brain_context_metrics"]
+    assert m["context_builder_calls"] == 8
+    assert m["context_builder_cache_hits"] == 5
