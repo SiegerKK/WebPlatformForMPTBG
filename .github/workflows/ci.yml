@@ -65,6 +65,7 @@ jobs:
   backend-decision-core:
     name: Decision core tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -82,7 +83,9 @@ jobs:
         run: |
           pytest \
             backend/tests/decision \
-            -q \
+            -vv -s \
+            --durations=25 \
+            --durations-min=1.0 \
             --ignore=backend/tests/decision/v3/test_e2e_brain_v3_goals.py
 
   backend-memory-pr5:
@@ -141,6 +144,7 @@ jobs:
   backend-full-sentinel:
     name: Backend full non-e2e sentinel
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -155,7 +159,7 @@ jobs:
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
-        run: pytest backend/tests -k "not e2e" -q
+        run: pytest backend/tests -k "not e2e" -vv -s --durations=25 --durations-min=1.0
 
   frontend-build:
     name: Frontend build
