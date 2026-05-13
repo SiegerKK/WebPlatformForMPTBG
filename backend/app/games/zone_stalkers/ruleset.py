@@ -183,6 +183,8 @@ class ZoneStalkerRuleSet(RuleSet):
                                 agent_id=agent_id, agent=agent,
                                 legacy_entry={**memory_template, "world_turn": world_turn},
                                 world_turn=world_turn,
+                                context_id=str(new_state.get("context_id") or new_state.get("_context_id") or "default"),
+                                cold_store_enabled=bool(new_state.get("cpu_cold_memory_store_enabled", False)),
                             )
                 active_events = new_state.get("active_events", [])
                 event_ctx_id = str(evt_ctx.id)

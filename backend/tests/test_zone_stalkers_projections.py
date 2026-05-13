@@ -1,7 +1,27 @@
 from __future__ import annotations
 
+from app.games.zone_stalkers.memory.cold_store import (
+    clear_in_memory_store,
+    get_cold_metrics,
+    get_agent_memory_ref,
+    migrate_agent_memory_to_cold_store,
+    reset_cold_metrics,
+)
 from app.games.zone_stalkers.performance_metrics import get_last_tick_metrics, get_tick_metrics, record_tick_metrics
 from app.games.zone_stalkers.projections import build_zone_state_size_report, json_size_bytes, project_zone_state
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+        self.set_calls: list[tuple[str, bytes, int | None]] = []
+
+    def get(self, key: str) -> bytes | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: bytes, ex: int | None = None) -> None:
+        self.values[key] = value
+        self.set_calls.append((key, value, ex))
 
 
 def _sample_state() -> dict:
@@ -394,3 +414,93 @@ def test_full_projection_exposes_brain_context_metrics_and_strips_cache() -> Non
     m = agent["brain_context_metrics"]
     assert m["context_builder_calls"] == 8
     assert m["context_builder_cache_hits"] == 5
+
+
+def test_debug_full_profile_loads_cold_memory() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    state = _sample_state()
+    state["context_id"] = "ctx_proj_full"
+    agent = state["agents"]["a1"]
+    migrate_agent_memory_to_cold_store(context_id="ctx_proj_full", agent_id="a1", agent=agent)
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"]["is_loaded"] = False
+
+    projected = project_zone_state(state=state, mode="full")
+    assert "memory_v3" in projected["agents"]["a1"]
+    assert int(get_cold_metrics()["cold_memory_loads"]) >= 1
+
+
+def test_debug_full_profile_does_not_create_empty_blob_when_cold_key_missing() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    state = _sample_state()
+    state["context_id"] = "ctx_proj_missing"
+    agent = state["agents"]["a1"]
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_ref"] = get_agent_memory_ref("ctx_proj_missing", "a1")
+    agent["memory_summary"] = {"is_loaded": False, "dirty": False}
+
+    projected = project_zone_state(state=state, mode="full")
+    proj_agent = projected["agents"]["a1"]
+    assert "memory_v3" not in proj_agent
+    assert proj_agent.get("memory_summary", {}).get("cold_load_error") == "missing_cold_memory_key"
+
+
+def test_game_projection_includes_memory_summary_but_not_memory_v3_or_knowledge_v1() -> None:
+    state = _sample_state()
+    state["agents"]["a1"]["memory_summary"] = {"records_count": 7, "dirty": False, "is_loaded": False}
+    state["agents"]["a1"]["knowledge_v1"] = {"revision": 3}
+    projected = project_zone_state(state=state, mode="game")
+    agent = projected["agents"]["a1"]
+    assert agent.get("memory_summary", {}).get("records_count") == 7
+    assert "memory_v3" not in agent
+    assert "knowledge_v1" not in agent
+
+
+def test_full_projection_uses_configured_redis_client() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    redis = FakeRedis()
+    state = _sample_state()
+    state["context_id"] = "ctx_full_redis"
+    agent = state["agents"]["a1"]
+    migrate_agent_memory_to_cold_store(
+        context_id="ctx_full_redis",
+        agent_id="a1",
+        agent=agent,
+        redis_client=redis,
+    )
+    clear_in_memory_store()
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"]["is_loaded"] = False
+    state["_zone_cold_memory_redis_client"] = redis
+
+    projected = project_zone_state(state=state, mode="full")
+    assert "memory_v3" in projected["agents"]["a1"]
+
+
+def test_full_projection_includes_story_events_from_cold_memory() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    redis = FakeRedis()
+    state = _sample_state()
+    state["context_id"] = "ctx_story_cold"
+    agent = state["agents"]["a1"]
+    migrate_agent_memory_to_cold_store(
+        context_id="ctx_story_cold",
+        agent_id="a1",
+        agent=agent,
+        redis_client=redis,
+    )
+    clear_in_memory_store()
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"]["is_loaded"] = False
+    state["_zone_cold_memory_redis_client"] = redis
+
+    projected = project_zone_state(state=state, mode="full")
+    assert isinstance(projected["agents"]["a1"].get("story_events"), list)

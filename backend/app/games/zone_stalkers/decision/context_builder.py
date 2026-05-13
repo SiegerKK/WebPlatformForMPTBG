@@ -160,6 +160,23 @@ def build_agent_context(
         derived_parts = cached_parts
     else:
         metrics["context_builder_cache_misses"] = int(metrics.get("context_builder_cache_misses", 0)) + 1
+        if agent.get("memory_ref") and (
+            not isinstance(agent.get("memory_v3"), dict) or not isinstance(agent.get("knowledge_v1"), dict)
+        ):
+            try:
+                from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                    ensure_agent_memory_loaded as _ensure_cold_loaded_for_context,
+                    get_zone_cold_memory_redis_client as _resolve_cold_redis_client,
+                    record_agent_cold_memory_error as _record_cold_error,
+                )
+                _ensure_cold_loaded_for_context(
+                    context_id=str(state.get("context_id") or state.get("_context_id") or "default"),
+                    agent_id=str(agent_id),
+                    agent=agent,
+                    redis_client=_resolve_cold_redis_client(state),
+                )
+            except Exception as exc:
+                _record_cold_error(agent, "load_failed", exc)
         derived_parts, scan_metrics = _build_derived_context_parts(
             agent=agent,
             agents=agents,

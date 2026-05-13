@@ -1092,6 +1092,9 @@ def write_memory_event_to_v3(
     agent: dict[str, Any],
     legacy_entry: dict[str, Any],
     world_turn: int,
+    context_id: str = "default",
+    cold_store_enabled: bool | None = None,
+    redis_client: Any | None = None,
 ) -> None:
     """Convert a single memory event entry into a MemoryRecord and store it in memory_v3.
 
@@ -1116,6 +1119,71 @@ def write_memory_event_to_v3(
         _METRICS["memory_write_trace_only"] += 1
         return
 
+    _cold_enabled = bool(cold_store_enabled) or bool(agent.get("memory_ref"))
+    _cold_redis_client = redis_client
+    if _cold_enabled and _cold_redis_client is None:
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                get_zone_cold_memory_redis_client as _resolve_cold_redis_client,
+            )
+
+            _cold_redis_client = _resolve_cold_redis_client(None)
+        except Exception:
+            _cold_redis_client = None
+
+    def _sync_cold_after_mutation() -> None:
+        if not _cold_enabled:
+            return
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                mark_agent_memory_dirty as _mark_dirty,
+                refresh_agent_memory_summary as _refresh_summary,
+            )
+            _refresh_summary(agent, dirty=True, is_loaded=True)
+            _mark_dirty(agent)
+        except Exception as exc:
+            from app.games.zone_stalkers.memory.cold_store import record_agent_cold_memory_error  # noqa: PLC0415
+
+            record_agent_cold_memory_error(agent, "save_refresh_failed", exc)
+
+    if _cold_enabled:
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                agent_memory_load_failed as _agent_load_failed,
+                ensure_agent_memory_loaded as _ensure_cold_mem_loaded,
+                migrate_agent_memory_to_cold_store as _migrate_to_cold,
+                record_agent_cold_memory_error as _record_cold_error,
+            )
+            if agent.get("memory_ref"):
+                _ensure_cold_mem_loaded(
+                    context_id=context_id,
+                    agent_id=str(agent_id),
+                    agent=agent,
+                    redis_client=_cold_redis_client,
+                )
+            elif bool(cold_store_enabled) and (
+                isinstance(agent.get("memory_v3"), dict) or isinstance(agent.get("knowledge_v1"), dict)
+            ):
+                _migrate_to_cold(
+                    context_id=context_id,
+                    agent_id=str(agent_id),
+                    agent=agent,
+                    redis_client=_cold_redis_client,
+                )
+                _ensure_cold_mem_loaded(
+                    context_id=context_id,
+                    agent_id=str(agent_id),
+                    agent=agent,
+                    redis_client=_cold_redis_client,
+                )
+            if _agent_load_failed(agent):
+                _METRICS["memory_write_discarded"] += 1
+                return
+        except Exception as exc:
+            _record_cold_error(agent, "load_failed", exc)
+            _METRICS["memory_write_discarded"] += 1
+            return
+
     # memory_aggregate → route to failure/noisy aggregate, never episodic.
     # Exception: plan_monitor_abort for sleep produces a meaningful sleep_interrupted record.
     if policy == "memory_aggregate" and not (
@@ -1131,6 +1199,7 @@ def write_memory_event_to_v3(
             world_turn=world_turn,
             summary=summary,
         )
+        _sync_cold_after_mutation()
         return
 
     record = _map_event_to_record(
@@ -1184,6 +1253,7 @@ def write_memory_event_to_v3(
                 world_turn=world_turn,
                 summary=summary,
             )
+            _sync_cold_after_mutation()
             return
         # Urgent decision falls through to normal episodic write below.
 
@@ -1200,6 +1270,7 @@ def write_memory_event_to_v3(
             effects=record.details if isinstance(record.details, dict) else {},
             world_turn=world_turn,
         )
+        _sync_cold_after_mutation()
         if record.kind == "stalkers_seen":
             if _handle_stalkers_seen_event(
                 agent_id=agent_id,
@@ -1208,6 +1279,7 @@ def write_memory_event_to_v3(
                 world_turn=world_turn,
             ):
                 _METRICS["memory_write_written"] += 1
+                _sync_cold_after_mutation()
                 return
         if record.kind == "travel_hop":
             _upsert_semantic_route_traveled(
@@ -1227,6 +1299,7 @@ def write_memory_event_to_v3(
             world_turn=world_turn,
         ):
             _METRICS["memory_write_written"] += 1
+            _sync_cold_after_mutation()
             return
 
     if record.kind == "travel_hop" and policy != "knowledge_upsert":
@@ -1252,6 +1325,7 @@ def write_memory_event_to_v3(
                     details[key] = incoming_details.get(key)
             existing["confidence"] = min(1.0, float(existing.get("confidence", 0.7)) + 0.02)
             _METRICS["memory_write_aggregated"] += 1
+            _sync_cold_after_mutation()
             return
 
     # Apply sanitization — truncate summary and details fields.
@@ -1263,6 +1337,7 @@ def write_memory_event_to_v3(
 
     if add_memory_record(agent, record):
         _METRICS["memory_write_written"] += 1
+        _sync_cold_after_mutation()
     else:
         _METRICS["memory_write_discarded"] += 1
 

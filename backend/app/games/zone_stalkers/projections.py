@@ -224,7 +224,25 @@ def _project_terminal_agent(agent: dict[str, Any]) -> None:
     }
 
 
-def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
+def _enrich_agent_full_projection(agent: dict[str, Any], *, redis_client: Any | None = None) -> None:
+    # PR5: If agent has memory_ref (cold memory), load it now for the debug projection.
+    if agent.get("memory_ref"):
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                ensure_agent_memory_loaded as _load_cold_for_proj,
+            )
+            _proj_context_id = str(agent.get("_context_id") or "default")
+            _load_cold_for_proj(
+                context_id=_proj_context_id,
+                agent_id=str(agent.get("id") or "unknown"),
+                agent=agent,
+                redis_client=redis_client,
+            )
+        except Exception as exc:
+            from app.games.zone_stalkers.memory.cold_store import record_agent_cold_memory_error  # noqa: PLC0415
+
+            record_agent_cold_memory_error(agent, "load_failed", exc)
+
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
     record_rows = [
@@ -244,6 +262,9 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
     }
     agent["memory_v3_stats"] = stats
     agent["memory_health"] = health
+    _ms = agent.get("memory_summary")
+    if isinstance(_ms, dict) and _ms.get("cold_load_error"):
+        agent["memory_health"]["cold_load_error"] = _ms.get("cold_load_error")
     story_events, story_events_count, story_events_truncated = _agent_story_events(agent)
     agent["story_events"] = story_events
     agent["story_events_count"] = story_events_count
@@ -277,6 +298,17 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
     # brain_context_cache is a large internal payload — strip it from the
     # full projection payload to avoid bloating the serialised output.
     agent.pop("brain_context_cache", None)
+    # PR5: Expose memory_summary and cold store metrics in debug projection.
+    memory_summary = agent.get("memory_summary")
+    if isinstance(memory_summary, dict):
+        agent["memory_summary"] = dict(memory_summary)
+    try:
+        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+            get_cold_metrics as _get_cold_metrics,
+        )
+        stats["cold_store_metrics"] = _get_cold_metrics()
+    except Exception:
+        pass
 
 
 # ── Explicit game projection helpers ─────────────────────────────────────────
@@ -359,6 +391,7 @@ def _project_agent_needs(agent: dict[str, Any], world_turn: int | None, lazy_ena
 def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
     _lazy_enabled = isinstance(agent.get("needs_state"), dict)
     _needs = _project_agent_needs(agent, world_turn, _lazy_enabled)
+    _memory_summary = agent.get("memory_summary")
     return {
         "id": agent.get("id"),
         "name": agent.get("name"),
@@ -384,6 +417,7 @@ def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) ->
         "action_used": agent.get("action_used"),
         "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action"), world_turn),
         "active_plan_summary": _compact_active_plan(agent.get("active_plan_v3")),
+        "memory_summary": dict(_memory_summary) if isinstance(_memory_summary, dict) else None,
         "equipment_summary": _compact_equipment(agent.get("equipment")),
         "inventory_summary": _compact_inventory(agent.get("inventory")),
         # Keep full equipment/inventory for player agent use in UI
@@ -607,16 +641,28 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
 
 def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[str, Any]:
     if mode == "full":
+        _redis_client = None
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                get_zone_cold_memory_redis_client as _resolve_cold_redis_client,
+            )
+
+            _redis_client = _resolve_cold_redis_client(state)
+        except Exception:
+            _redis_client = None
         projected = copy.deepcopy(state)
         _world_turn = int(projected.get("world_turn") or 0)
+        _context_id = str(projected.get("context_id") or projected.get("_context_id") or "default")
         agents = projected.get("agents")
         if isinstance(agents, dict):
             for agent in agents.values():
                 if isinstance(agent, dict):
                     # PR3: Inject world_turn so knowledge_summary can compute decay.
                     agent["_world_turn"] = _world_turn
-                    _enrich_agent_full_projection(agent)
+                    agent["_context_id"] = _context_id
+                    _enrich_agent_full_projection(agent, redis_client=_redis_client)
                     agent.pop("_world_turn", None)
+                    agent.pop("_context_id", None)
         return projected
 
     if mode in {"game", "zone-lite"}:
