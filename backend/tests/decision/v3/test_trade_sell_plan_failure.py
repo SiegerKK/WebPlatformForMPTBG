@@ -314,6 +314,37 @@ class TestExecTradeSellFailure:
         assert any((e.get("event_type") or "") == "trade_sell_failed" for e in events), events
         assert step.payload.get("_failure_reason") in {"no_items_sold", "no_sellable_items"}
 
+    def test_artifact_without_inline_value_uses_balance_price_and_sells(self) -> None:
+        """Artifacts lacking `value` in inventory should still be sellable via artifact balance data."""
+        from app.games.zone_stalkers.decision.executors import _exec_trade_sell
+        import app.games.zone_stalkers.rules.tick_rules as _tick
+
+        trader_agent = {
+            "id": "trader_1",
+            "name": "Sidorovich",
+            "location_id": "loc_a",
+            "money": 50000,
+            "inventory": [],
+        }
+        orig_find = getattr(_tick, "_find_trader_at_location", None)
+        _tick._find_trader_at_location = lambda loc_id, state: trader_agent
+        try:
+            agent = _make_artifact_agent(artifact_type="soul")  # intentionally no item.value
+            agent["money"] = 100
+            step = _make_trade_sell_step()
+            state = _make_minimal_state([agent, trader_agent])
+            ctx = _make_ctx("bot1", agent, state)
+            events = _exec_trade_sell(agent_id="bot1", agent=agent, step=step, ctx=ctx, state=state, world_turn=90)
+        finally:
+            if orig_find is not None:
+                _tick._find_trader_at_location = orig_find
+
+        event_types = {(e.get("event_type") or "") for e in events if isinstance(e, dict)}
+        assert "trade_sell_failed" not in event_types, f"Unexpected failure events: {events}"
+        assert "bot_sold_artifact" in event_types, f"Expected successful sale event, got: {events}"
+        assert int(agent.get("money") or 0) > 100
+        assert not any(i.get("type") == "soul" for i in agent.get("inventory", []))
+
 
 # ---------------------------------------------------------------------------
 # B7: memory_events cooldown injection

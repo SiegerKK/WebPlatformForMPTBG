@@ -31,7 +31,9 @@ from .models.active_plan import (
     MAX_REPAIR_COUNT,
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
+    STEP_STATUS_FAILED,
 )
+from .models.plan import STEP_TRADE_SELL_ITEM
 from .models.objective import ObjectiveDecision
 from .models.plan import Plan
 from .plan_monitor import _is_emission_threat_for_monitor
@@ -316,6 +318,14 @@ def assess_active_plan_v3(
     # ── Step-level assumption checks ──────────────────────────────────────────
     step = active_plan.current_step
     if step is not None:
+        if step.status == STEP_STATUS_FAILED:
+            failure_reason = str(step.failure_reason or "step_failed")
+            if step.kind == STEP_TRADE_SELL_ITEM:
+                if failure_reason.endswith("no_trader_at_location"):
+                    return ("repair", "trader_unavailable")
+                return ("abort", failure_reason)
+            return ("repair", failure_reason)
+
         # Trader unavailable: step payload has trader_id but that trader is not
         # in state["known_traders"].
         trader_id = step.payload.get("trader_id")

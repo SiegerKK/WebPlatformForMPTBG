@@ -3894,7 +3894,12 @@ def _bot_sell_to_trader(
     sell_price_total = 0
     sold_items = []
     for art in artifacts:
-        sell_price = int(art.get("value", 0) * 0.6)  # 60% of base value
+        art_type = str(art.get("type") or "")
+        artifact_cfg = ARTIFACT_TYPES.get(art_type, {})
+        artifact_value = int(art.get("value") or artifact_cfg.get("value") or 0)
+        sell_price = int(artifact_value * 0.6)  # 60% of base value
+        if sell_price <= 0:
+            continue
         if trader_money_st < sell_price:
             continue  # trader too poor; skip this item
         # Transfer money (agent money accumulated locally; trader updated in-place on COW copy)
