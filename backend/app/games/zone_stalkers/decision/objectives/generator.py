@@ -298,6 +298,26 @@ def evaluate_kill_target_combat_readiness(
     }
 
 
+def has_recent_trade_sell_failure(
+    ctx: "ObjectiveGenerationContext",
+    *,
+    trader_id: str | None,
+    location_id: str | None,
+    item_types: set[str],
+    world_turn: int,
+) -> bool:
+    """Return True if active trade_sell_failed cooldown matches trader/location/item overlap."""
+    from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
+
+    return has_recent_trade_sell_failure_for_agent(
+        getattr(ctx, "personality", None),
+        trader_id=trader_id,
+        location_id=location_id,
+        item_types=item_types,
+        world_turn=world_turn,
+    )
+
+
 def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     """Generate objective candidates from need_result, environment, goals and active plan."""
     result: list[Objective] = []
@@ -686,15 +706,57 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     if global_goal == "get_rich":
         from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
         artifact_types = frozenset(ARTIFACT_TYPES.keys())
-        has_artifact = any(i.get("type") in artifact_types for i in agent.get("inventory", []))
-        if has_artifact:
+        artifact_items_in_inventory = {
+            str(i.get("type") or "")
+            for i in agent.get("inventory", [])
+            if i.get("type") in artifact_types
+        }
+        has_artifact = bool(artifact_items_in_inventory)
+        current_location_id = str(agent.get("location_id") or "")
+        known_traders = tuple(ctx.belief_state.known_traders or ())
+        current_location_traders = tuple(
+            trader for trader in known_traders
+            if str(trader.get("location_id") or "") == current_location_id
+        )
+
+        current_location_cooldown = has_recent_trade_sell_failure(
+            ctx,
+            trader_id=None,
+            location_id=current_location_id,
+            item_types=artifact_items_in_inventory,
+            world_turn=ctx.world_turn,
+        )
+        current_trader_cooldown = any(
+            has_recent_trade_sell_failure(
+                ctx,
+                trader_id=str(trader.get("agent_id") or ""),
+                location_id=current_location_id,
+                item_types=artifact_items_in_inventory,
+                world_turn=ctx.world_turn,
+            )
+            for trader in current_location_traders
+        )
+        local_sell_blocked = current_location_cooldown or current_trader_cooldown
+        alternative_trader_available = any(
+            not has_recent_trade_sell_failure(
+                ctx,
+                trader_id=str(trader.get("agent_id") or ""),
+                location_id=str(trader.get("location_id") or ""),
+                item_types=artifact_items_in_inventory,
+                world_turn=ctx.world_turn,
+            )
+            for trader in known_traders
+        )
+
+        if has_artifact and (not local_sell_blocked or alternative_trader_available):
             sell_refs, sell_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_SELL_ARTIFACTS)
+            _sell_urgency = max(0.2, float(need_result.scores.trade))
             _append_unique(
                 result,
                 Objective(
                     key=OBJECTIVE_SELL_ARTIFACTS,
                     source="global_goal",
-                    urgency=max(0.2, float(need_result.scores.trade)),
+                    urgency=_sell_urgency,
                     expected_value=0.9,
                     risk=0.15,
                     time_cost=0.25,

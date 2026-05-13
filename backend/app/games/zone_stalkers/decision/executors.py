@@ -137,11 +137,17 @@ def execute_plan_step(
     # advance the plan index immediately.
     if step.kind in (
         STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM, STEP_LOOT_CORPSE,
-        STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM, STEP_TRADE_SELL_ITEM,
+        STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM,
         STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
         STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
     ):
         plan.advance()
+    elif step.kind == STEP_TRADE_SELL_ITEM:
+        if _trade_sell_succeeded(events):
+            plan.advance()
+        else:
+            step.payload["_trade_sell_failed"] = True
+            step.payload["_failure_reason"] = step.payload.get("_failure_reason") or "no_items_sold"
     elif step.kind == STEP_MONITOR_COMBAT and bool(step.payload.get("_monitor_complete")):
         plan.advance()
 
@@ -399,6 +405,105 @@ def _exec_trade_buy(
                                 purchase_reason=reason) or []
 
 
+
+def _event_type(event: dict[str, Any]) -> str:
+    return str(event.get("event_type") or event.get("type") or "")
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else event
+
+
+def _is_trade_sell_success_event(event: dict[str, Any]) -> bool:
+    event_type = _event_type(event)
+    payload = _event_payload(event)
+    # trade_sell — canonical success event from legacy sell paths.
+    # bot_sold_artifact / bot_sold_item are the raw events emitted by
+    # _bot_sell_to_trader and _bot_sell_items_for_cash respectively.
+    # All three represent a successful sale and must advance the plan step.
+    if event_type in ("trade_sell", "bot_sold_artifact", "bot_sold_item"):
+        return True
+    if str(payload.get("action_kind") or "") == "trade_sell":
+        return True
+    if payload.get("items_sold"):
+        return True
+    if int(payload.get("money_gained") or payload.get("money_delta") or 0) > 0:
+        return True
+    return False
+
+
+def _trade_sell_succeeded(events: list[dict[str, Any]]) -> bool:
+    return any(_is_trade_sell_success_event(ev) for ev in events if isinstance(ev, dict))
+
+
+def _trade_sell_failure_reason(events: list[dict[str, Any]]) -> str | None:
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if _event_type(event) != "trade_sell_failed":
+            continue
+        payload = _event_payload(event)
+        reason = str(payload.get("reason") or "").strip()
+        if reason:
+            return reason
+    return None
+
+
+def _make_trade_sell_failed_event(
+    *,
+    agent_id: str,
+    reason: str,
+    location_id: str,
+    trader_id: str | None,
+    item_types: list[str],
+    objective_key: str,
+) -> dict[str, Any]:
+    return {
+        "event_type": "trade_sell_failed",
+        "payload": {
+            "agent_id": agent_id,
+            "reason": reason,
+            "location_id": location_id,
+            "trader_id": trader_id,
+            "item_types": list(item_types),
+            "objective_key": objective_key,
+        },
+    }
+
+
+def _write_trade_sell_failed_memory(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    world_turn: int,
+    reason: str,
+    location_id: str,
+    trader_id: str | None,
+    item_types: list[str],
+    objective_key: str,
+) -> None:
+    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+    write_memory_event_to_v3(
+        agent_id=agent_id,
+        agent=agent,
+        legacy_entry={
+            "world_turn": world_turn,
+            "type": "action",
+            "title": "trade_sell_failed",
+            "effects": {
+                "action_kind": "trade_sell_failed",
+                "reason": reason,
+                "location_id": location_id,
+                "trader_id": trader_id,
+                "item_types": list(item_types),
+                "objective_key": objective_key,
+            },
+        },
+        world_turn=world_turn,
+    )
+
+
 def _exec_trade_sell(
     agent_id: str,
     agent: dict[str, Any],
@@ -409,25 +514,91 @@ def _exec_trade_sell(
 ) -> list[dict[str, Any]]:
     """Sell inventory items at a co-located trader.
 
-    Dispatches based on ``step.payload["item_category"]``:
-    - ``"any_sellable"`` — sell non-critical items (artifacts, detectors, spare
-      weapons/armor) to raise cash for urgent needs via ``_bot_sell_items_for_cash``.
-    - anything else (default) — sell all artifacts via ``_bot_sell_to_trader``.
+    Returns a trade_sell_failed event when no sale is possible.
     """
     from app.games.zone_stalkers.rules.tick_rules import (
         _bot_sell_to_trader,
         _bot_sell_items_for_cash,
         _find_trader_at_location,
     )
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART_TYPES
+
+    _art_set = frozenset(_ART_TYPES.keys())
+    objective_key = str(step.payload.get("objective_key") or "SELL_ARTIFACTS")
     loc_id = agent.get("location_id", "")
+    inventory_before = list(agent.get("inventory") or [])
+    artifact_types_before = sorted({
+        str(item.get("type") or "")
+        for item in inventory_before
+        if str(item.get("type") or "") in _art_set
+    })
+    sellable_count_before = (
+        len(inventory_before)
+        if step.payload.get("item_category", "artifact") == "any_sellable"
+        else sum(1 for item in inventory_before if str(item.get("type") or "") in _art_set)
+    )
     trader = _find_trader_at_location(loc_id, state)
-    if trader is None:
+    trader_id = str(trader.get("id") or trader.get("agent_id") or "") if isinstance(trader, dict) else ""
+
+    def _fail(reason: str, *, item_types: list[str] | None = None) -> list[dict[str, Any]]:
+        selected_item_types = list(item_types if item_types is not None else artifact_types_before)
+        failure_event = _make_trade_sell_failed_event(
+            agent_id=agent_id,
+            reason=reason,
+            location_id=str(loc_id),
+            trader_id=trader_id or None,
+            item_types=selected_item_types,
+            objective_key=objective_key,
+        )
+        step.payload["_failure_reason"] = reason
         agent["action_used"] = True
-        return []
+        _write_trade_sell_failed_memory(
+            agent_id=agent_id,
+            agent=agent,
+            world_turn=world_turn,
+            reason=reason,
+            location_id=str(loc_id),
+            trader_id=trader_id or None,
+            item_types=selected_item_types,
+            objective_key=objective_key,
+        )
+        return [failure_event]
+
+    if trader is None:
+        return _fail("no_trader_at_location")
+
     item_category = step.payload.get("item_category", "artifact")
+    if item_category == "artifact" and not artifact_types_before:
+        return _fail("no_sellable_items", item_types=[])
+    if item_category == "any_sellable" and not inventory_before:
+        return _fail("no_sellable_items", item_types=[])
+
+    money_before = int(agent.get("money") or 0)
+    inventory_before_len = len(inventory_before)
+
     if item_category == "any_sellable":
-        return _bot_sell_items_for_cash(agent_id, agent, trader, state, world_turn) or []
-    return _bot_sell_to_trader(agent_id, agent, trader, state, world_turn) or []
+        events = _bot_sell_items_for_cash(agent_id, agent, trader, state, world_turn) or []
+    else:
+        events = _bot_sell_to_trader(agent_id, agent, trader, state, world_turn) or []
+
+    money_after = int(agent.get("money") or 0)
+    inventory_after = list(agent.get("inventory") or [])
+    inventory_after_len = len(inventory_after)
+    sellable_count_after = (
+        len(inventory_after)
+        if item_category == "any_sellable"
+        else sum(1 for item in inventory_after if str(item.get("type") or "") in _art_set)
+    )
+    sold_by_state = money_after > money_before and sellable_count_after < sellable_count_before
+    sold_by_event = _trade_sell_succeeded(events)
+
+    if sold_by_event or sold_by_state:
+        return events
+
+    reason = _trade_sell_failure_reason(events)
+    if not reason:
+        reason = "no_sellable_items" if sellable_count_before <= 0 else "no_items_sold"
+    return _fail(reason)
 
 
 def _exec_consume(

@@ -1456,7 +1456,12 @@ def _plan_sell_artifacts(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
-    trader_loc = _nearest_trader_location(ctx, state, used_for="sell_artifacts")
+    trader_loc = _nearest_unblocked_trader_location_for_artifacts(
+        ctx,
+        state,
+        world_turn=world_turn,
+        used_for="sell_artifacts",
+    )
     agent_loc = ctx.self_state.get("location_id")
     if trader_loc == agent_loc:
         return Plan(
@@ -1502,7 +1507,12 @@ def _plan_get_rich(
     agent = ctx.self_state
     inventory = agent.get("inventory", [])
     has_artifacts = any(i.get("type") in artifact_types for i in inventory)
-    trader_loc = _nearest_trader_location(ctx, state)
+    trader_loc = _nearest_unblocked_trader_location_for_artifacts(
+        ctx,
+        state,
+        world_turn=world_turn,
+        used_for="get_rich_sell_artifacts",
+    )
     agent_loc = agent.get("location_id", "")
     fallback_reason = (
         intent.reason
@@ -2174,6 +2184,67 @@ def _nearest_trader_location(
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
     agent_loc = agent.get("location_id", "")
     return _find_nearest_trader_location(agent_loc, state)
+
+
+def _artifact_item_types(agent: dict[str, Any]) -> set[str]:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+
+    artifact_types = frozenset(ARTIFACT_TYPES.keys())
+    return {
+        str(item.get("type") or "")
+        for item in (agent.get("inventory") or [])
+        if item.get("type") in artifact_types
+    }
+
+
+def _nearest_unblocked_trader_location_for_artifacts(
+    ctx: AgentContext,
+    state: dict[str, Any],
+    *,
+    world_turn: int,
+    used_for: str,
+) -> Optional[str]:
+    from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
+
+    agent = ctx.self_state
+    agent_loc = str(agent.get("location_id") or "")
+    artifact_item_types = _artifact_item_types(agent)
+    if not artifact_item_types:
+        return _nearest_trader_location(ctx, state, used_for=used_for)
+
+    traders = state.get("traders")
+    if not isinstance(traders, dict) or not traders:
+        return _nearest_trader_location(ctx, state, used_for=used_for)
+
+    unblocked_locations: set[str] = set()
+    for trader_key, raw_trader in traders.items():
+        if not isinstance(raw_trader, dict):
+            continue
+        if raw_trader.get("is_alive", True) is False:
+            continue
+        location_id = str(raw_trader.get("location_id") or "")
+        if not location_id:
+            continue
+        trader_id = str(raw_trader.get("agent_id") or raw_trader.get("id") or trader_key or "")
+        if has_recent_trade_sell_failure_for_agent(
+            agent,
+            trader_id=trader_id,
+            location_id=location_id,
+            item_types=artifact_item_types,
+            world_turn=world_turn,
+        ):
+            continue
+        unblocked_locations.add(location_id)
+
+    if not unblocked_locations:
+        return None
+    if agent_loc in unblocked_locations:
+        return agent_loc
+
+    return min(
+        unblocked_locations,
+        key=lambda location_id: (_estimate_travel_ticks(ctx, location_id, state), location_id),
+    )
 
 
 def _nearest_safe_location(

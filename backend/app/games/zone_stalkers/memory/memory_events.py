@@ -58,6 +58,9 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "location_visited": "knowledge_upsert",
     "travel_hop": "knowledge_upsert",
 
+    # Regular gameplay memory — deduped within cooldown window.
+    "trade_sell_failed": "memory",
+
     # Important episodic memory — always written and never discarded.
     "death": "memory_critical",
     "combat_kill": "memory_critical",
@@ -180,6 +183,9 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "witness_source_exhausted": (LAYER_SOCIAL, "witness_source_exhausted", ("target", "intel", "social", "cooldown")),
     "no_tracks_found": (LAYER_SPATIAL, "no_tracks_found", ("target", "tracking", "negative_observation")),
 
+    # Trade failures
+    "trade_sell_failed": (LAYER_GOAL, "trade_sell_failed", ("trade", "failure", "cooldown")),
+
     # PR3 hunt prerequisites (taxonomy only; no hunt logic here)
     "target_seen": (LAYER_SOCIAL, "target_seen", ("target", "tracking", "social")),
     "target_last_known_location": (LAYER_SPATIAL, "target_last_known_location", ("target", "tracking", "spatial")),
@@ -214,6 +220,7 @@ _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
 # items_seen is also excluded as it writes individual spatial records without dedup.
 _DEDUP_KINDS: frozenset[str] = frozenset({
     "travel_hop",
+    "trade_sell_failed",
     "trader_visited",
     "no_tracks_found",
     "no_witnesses",
@@ -235,6 +242,7 @@ _NO_DEDUP_KINDS: frozenset[str] = frozenset({
 MEMORY_EVENT_DEDUP_WINDOW_TURNS = 30
 STALKERS_SEEN_DEDUP_WINDOW_TURNS = 60
 STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION = 5
+TRADE_SELL_FAILED_COOLDOWN_TURNS = 180
 
 
 # ── Metrics counters ─────────────────────────────────────────────────────────
@@ -433,8 +441,11 @@ def _upsert_active_plan_failure_aggregate(
         confidence=0.9,
         source="inferred",
     )
-    add_memory_record(agent, agg_record)
-    _METRICS["memory_write_aggregated"] += 1
+    stored = add_memory_record(agent, agg_record)
+    if stored:
+        _METRICS["memory_write_aggregated"] += 1
+    else:
+        _METRICS["memory_write_discarded"] += 1
 
 
 # ── Objective-decision dedup ─────────────────────────────────────────────────
@@ -526,8 +537,11 @@ def _upsert_objective_decision_aggregate(
         confidence=0.85,
         source="inferred",
     )
-    add_memory_record(agent, agg_record)
-    _METRICS["memory_write_aggregated"] += 1
+    stored = add_memory_record(agent, agg_record)
+    if stored:
+        _METRICS["memory_write_aggregated"] += 1
+    else:
+        _METRICS["memory_write_discarded"] += 1
 
 
 def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | None:
@@ -568,6 +582,13 @@ def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | No
             str(details.get("target_id") or details.get("dead_agent_id") or ""),
             str(details.get("corpse_id") or ""),
             str(details.get("source_agent_id") or ""),
+        )
+    if kind == "trade_sell_failed":
+        return (
+            kind,
+            location_id,
+            str(details.get("trader_id") or ""),
+            str(sorted(details.get("item_types") or [])),
         )
     return None
 
@@ -713,7 +734,8 @@ def _upsert_semantic_stalkers_seen(
         confidence=0.72,
         source="inferred",
     )
-    add_memory_record(agent, semantic_record)
+    if not add_memory_record(agent, semantic_record):
+        _METRICS["memory_write_discarded"] += 1
 
 
 def _trim_stalkers_seen_per_location(
@@ -773,9 +795,9 @@ def _handle_stalkers_seen_event(
         existing_semantic=semantic_match,
     )
 
-    add_memory_record(agent, record)
+    stored = add_memory_record(agent, record)
     _trim_stalkers_seen_per_location(records=records, location_id=location_id)
-    return True
+    return stored
 
 
 def _upsert_semantic_route_traveled(
@@ -838,7 +860,8 @@ def _upsert_semantic_route_traveled(
         confidence=0.72,
         source="inferred",
     )
-    add_memory_record(agent, semantic_record)
+    if not add_memory_record(agent, semantic_record):
+        _METRICS["memory_write_discarded"] += 1
     return True
 
 
@@ -898,6 +921,33 @@ def write_memory_event_to_v3(
     if record is None:
         _METRICS["memory_write_discarded"] += 1
         return
+
+    # trade_sell_failed: inject cooldown_until_turn into details if not already present
+    if record.kind == "trade_sell_failed":
+        _tsf_details = dict(record.details)
+        _tsf_details.setdefault("cooldown_until_turn", world_turn + TRADE_SELL_FAILED_COOLDOWN_TURNS)
+        record = MemoryRecord(
+            id=record.id,
+            agent_id=record.agent_id,
+            layer=record.layer,
+            kind=record.kind,
+            created_turn=record.created_turn,
+            last_accessed_turn=record.last_accessed_turn,
+            summary=record.summary,
+            details=_tsf_details,
+            location_id=record.location_id,
+            entity_ids=record.entity_ids,
+            item_types=record.item_types,
+            tags=record.tags,
+            importance=record.importance,
+            confidence=record.confidence,
+            emotional_weight=record.emotional_weight,
+            decay_rate=record.decay_rate,
+            status=record.status,
+            source=record.source,
+            evidence_refs=record.evidence_refs,
+            world_time=record.world_time,
+        )
 
     # objective_decision — routine (non-urgent) decisions are aggregated into a
     # summary record so repeated same-objective turns don't spam memory_v3.
@@ -982,8 +1032,10 @@ def write_memory_event_to_v3(
     if is_critical:
         _METRICS["memory_write_critical"] += 1
 
-    add_memory_record(agent, record)
-    _METRICS["memory_write_written"] += 1
+    if add_memory_record(agent, record):
+        _METRICS["memory_write_written"] += 1
+    else:
+        _METRICS["memory_write_discarded"] += 1
 
 
 def _map_event_to_record(

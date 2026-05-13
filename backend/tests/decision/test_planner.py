@@ -140,6 +140,94 @@ class TestSellArtifactsPlan:
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SELL_ARTIFACTS)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
 
+    def test_sell_artifacts_plan_uses_alternative_trader_when_current_trader_on_cooldown(self):
+        import uuid
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
+
+        artifact_type = next(iter(ARTIFACT_TYPES))
+        agent = make_agent(inventory=[{"type": artifact_type, "value": 500}], location_id="loc_a")
+        state = make_state_with_trader(agent=agent, trader_at="loc_a")
+        state["traders"]["trader_2"] = {
+            "name": "Бармен",
+            "location_id": "loc_b",
+            "is_alive": True,
+            "inventory": [],
+        }
+
+        memory_v3 = ensure_memory_v3(agent)
+        rec_id = str(uuid.uuid4())
+        memory_v3["records"][rec_id] = {
+            "id": rec_id,
+            "agent_id": "bot1",
+            "layer": "goal",
+            "kind": "trade_sell_failed",
+            "created_turn": 90,
+            "last_accessed_turn": None,
+            "summary": "sell failed at current trader",
+            "details": {
+                "action_kind": "trade_sell_failed",
+                "reason": "no_items_sold",
+                "trader_id": "trader_1",
+                "location_id": "loc_a",
+                "item_types": [artifact_type],
+                "cooldown_until_turn": 200,
+            },
+            "location_id": "loc_a",
+            "entity_ids": [],
+            "item_types": [artifact_type],
+            "tags": ["trade", "failure", "cooldown"],
+            "importance": 0.8,
+            "confidence": 1.0,
+            "status": "active",
+        }
+        memory_v3["stats"]["records_count"] = len(memory_v3["records"])
+
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SELL_ARTIFACTS)
+        assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
+        assert plan.steps[0].payload.get("target_id") == "loc_b"
+        assert plan.steps[1].kind == STEP_TRADE_SELL_ITEM
+
+    def test_sell_artifacts_plan_not_built_for_same_trader_location_during_cooldown(self):
+        import uuid
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
+
+        artifact_type = next(iter(ARTIFACT_TYPES))
+        agent = make_agent(inventory=[{"type": artifact_type, "value": 500}], location_id="loc_a")
+        state = make_state_with_trader(agent=agent, trader_at="loc_a")
+
+        memory_v3 = ensure_memory_v3(agent)
+        rec_id = str(uuid.uuid4())
+        memory_v3["records"][rec_id] = {
+            "id": rec_id,
+            "agent_id": "bot1",
+            "layer": "goal",
+            "kind": "trade_sell_failed",
+            "created_turn": 90,
+            "last_accessed_turn": None,
+            "summary": "sell failed at current trader",
+            "details": {
+                "action_kind": "trade_sell_failed",
+                "reason": "no_items_sold",
+                "trader_id": "trader_1",
+                "location_id": "loc_a",
+                "item_types": [artifact_type],
+                "cooldown_until_turn": 200,
+            },
+            "location_id": "loc_a",
+            "entity_ids": [],
+            "item_types": [artifact_type],
+            "tags": ["trade", "failure", "cooldown"],
+            "importance": 0.8,
+            "confidence": 1.0,
+            "status": "active",
+        }
+        memory_v3["stats"]["records_count"] = len(memory_v3["records"])
+
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SELL_ARTIFACTS)
+        assert plan.steps[0].kind == STEP_WAIT
+
 
 class TestSeekConsumablePlan:
     """Tests for seek_water / seek_food plan builder, including opportunistic consumption."""
