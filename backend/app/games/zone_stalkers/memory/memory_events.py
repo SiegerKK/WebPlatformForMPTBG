@@ -773,9 +773,9 @@ def _handle_stalkers_seen_event(
         existing_semantic=semantic_match,
     )
 
-    add_memory_record(agent, record)
+    stored = add_memory_record(agent, record)
     _trim_stalkers_seen_per_location(records=records, location_id=location_id)
-    return True
+    return stored
 
 
 def _upsert_semantic_route_traveled(
@@ -982,8 +982,10 @@ def write_memory_event_to_v3(
     if is_critical:
         _METRICS["memory_write_critical"] += 1
 
-    add_memory_record(agent, record)
-    _METRICS["memory_write_written"] += 1
+    if add_memory_record(agent, record):
+        _METRICS["memory_write_written"] += 1
+    else:
+        _METRICS["memory_write_discarded"] += 1
 
 
 def _map_event_to_record(
