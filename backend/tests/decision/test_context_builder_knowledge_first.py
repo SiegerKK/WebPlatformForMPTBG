@@ -7,6 +7,7 @@ from app.games.zone_stalkers.decision.context_builder import build_agent_context
 from app.games.zone_stalkers.knowledge.knowledge_store import (
     ensure_knowledge_v1,
     upsert_known_corpse,
+    upsert_known_hazard,
     upsert_known_location,
     upsert_known_npc,
     upsert_known_trader,
@@ -32,6 +33,9 @@ def test_context_builder_uses_known_npcs_without_memory_scan(monkeypatch) -> Non
         observed_agent=target,
     )
     upsert_known_location(agent, location_id="loc_b", name="Локация Б", world_turn=99)
+    state["traders"] = {"trader_1": {"name": "Сидорович", "location_id": "loc_b", "is_alive": True}}
+    upsert_known_trader(agent, trader_id="trader_1", location_id="loc_b", world_turn=99, name="Сидорович")
+    upsert_known_hazard(agent, location_id="loc_b", kind="anomaly_detected", world_turn=99, confidence=0.8)
 
     monkeypatch.setattr(
         context_builder_module,
@@ -51,7 +55,20 @@ def test_context_builder_uses_known_traders_without_memory_scan(monkeypatch) -> 
     state["traders"] = {
         "trader_1": {"name": "Сидорович", "location_id": "loc_b", "is_alive": True},
     }
+    state["agents"]["other_1"] = make_agent(agent_id="other_1", location_id="loc_b")
+    upsert_known_npc(
+        agent,
+        other_agent_id="other_1",
+        name="Other",
+        location_id="loc_b",
+        world_turn=99,
+        source="direct_observation",
+        confidence=0.9,
+        observed_agent=state["agents"]["other_1"],
+    )
+    upsert_known_location(agent, location_id="loc_b", name="Локация Б", world_turn=99)
     upsert_known_trader(agent, trader_id="trader_1", location_id="loc_b", world_turn=99, name="Сидорович")
+    upsert_known_hazard(agent, location_id="loc_b", kind="anomaly_detected", world_turn=99, confidence=0.8)
 
     monkeypatch.setattr(
         context_builder_module,

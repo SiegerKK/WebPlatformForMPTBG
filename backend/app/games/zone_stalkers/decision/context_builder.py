@@ -375,11 +375,12 @@ def _should_scan_memory_for_context(
     known_corpses = knowledge.get("known_corpses")
     hunt_evidence = knowledge.get("hunt_evidence")
 
-    has_routine_knowledge = any(
+    has_routine_knowledge = all(
         isinstance(table, dict) and bool(table)
-        for table in (known_npcs, known_locations, known_traders, known_hazards, known_corpses)
+        for table in (known_npcs, known_locations, known_traders, known_hazards)
     )
-    if not has_routine_knowledge:
+    has_corpse_knowledge = isinstance(known_corpses, dict) and bool(known_corpses)
+    if not has_routine_knowledge and not has_corpse_knowledge:
         return True
 
     if target_id:

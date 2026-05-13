@@ -330,7 +330,11 @@ def test_legacy_memory_fallback_used_when_knowledge_missing() -> None:
     mem = ensure_memory_v3(agent)
     mem["records"]["r1"] = {
         "id": "r1",
+        "agent_id": "bot1",
+        "layer": "spatial",
         "kind": "target_last_known_location",
+        "title": "target lead",
+        "summary": "target lead",
         "created_turn": 99,
         "status": "active",
         "location_id": "loc_b",

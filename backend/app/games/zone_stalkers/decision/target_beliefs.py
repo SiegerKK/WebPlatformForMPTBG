@@ -501,7 +501,6 @@ def build_hunt_leads_from_memory_v3_legacy(
     combat_strength: float | None = None
     combat_strength_confidence = 0.0
     last_seen_turn: int | None = None
-    target_alive_from_knowledge: bool | None = None
     target_alive_from_memory: bool | None = None
     records = _iter_memory_v3_records(agent)
 
@@ -636,6 +635,7 @@ def build_target_belief(
     combat_strength: float | None = None
     combat_strength_confidence = 0.0
     last_seen_turn: int | None = None
+    target_alive_from_knowledge: bool | None = None
     target_alive_from_memory: bool | None = None
     leads: list[HuntLead] = []
     lead_sources = {"visible": 0, "knowledge": 0, "memory_v3": 0, "debug_state": 0}
@@ -671,6 +671,7 @@ def build_target_belief(
                 source="direct_observation",
                 confidence=1.0,
                 observed_agent=target if isinstance(target, dict) else None,
+                death_status={"is_alive": True},
             )
         visible_lead = _build_visible_hunt_lead(target_id=target_id, location_id=current_loc or None, world_turn=world_turn)
         if visible_lead is not None:
@@ -693,7 +694,7 @@ def build_target_belief(
         for lead in knowledge_leads:
             if lead.source_ref:
                 source_refs.append(lead.source_ref)
-            if lead.kind == "target_seen":
+            if lead.kind in {"target_seen", "target_last_known_location"}:
                 last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
 
     knowledge = agent.get("knowledge_v1")
