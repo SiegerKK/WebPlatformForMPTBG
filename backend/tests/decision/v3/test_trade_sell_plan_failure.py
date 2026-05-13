@@ -46,10 +46,12 @@ def _make_plan_with_sell_step(**kw) -> Any:
 
 def _make_minimal_state(agents=None) -> dict:
     agent_list = agents or []
+    loc_agents = [a["id"] for a in agent_list if a.get("location_id") == "loc_a"]
     return {
         "world_turn": 10,
         "agents": {a["id"]: a for a in agent_list},
-        "locations": {"loc_a": {"id": "loc_a", "name": "Test Location", "agents": ["bot1"], "items": [], "terrain_type": "plain", "anomaly_activity": 0}},
+        "locations": {"loc_a": {"id": "loc_a", "name": "Test Location", "agents": loc_agents, "items": [], "terrain_type": "plain", "anomaly_activity": 0}},
+        "traders": {},
     }
 
 
@@ -219,6 +221,45 @@ class TestExecTradeSellFailure:
                 _tick._find_trader_at_location = original
         assert step.payload.get("_failure_reason") == "no_trader_at_location"
 
+    def test_no_trader_failed_sell_writes_cooldown_memory(self) -> None:
+        """P0: no_trader_at_location failure must still write cooldown memory."""
+        from app.games.zone_stalkers.decision.executors import _exec_trade_sell
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
+        import app.games.zone_stalkers.rules.tick_rules as _tick
+        original = getattr(_tick, "_find_trader_at_location", None)
+        _tick._find_trader_at_location = lambda loc_id, state: None
+        try:
+            agent = _make_artifact_agent()
+            step = _make_trade_sell_step()
+            state = _make_minimal_state([agent])
+            ctx = _make_ctx("bot1", agent, state)
+            _exec_trade_sell(agent_id="bot1", agent=agent, step=step, ctx=ctx, state=state, world_turn=50)
+        finally:
+            if original is not None:
+                _tick._find_trader_at_location = original
+        records = list(ensure_memory_v3(agent)["records"].values())
+        failed = [r for r in records if r.get("kind") == "trade_sell_failed"]
+        assert failed, "Expected trade_sell_failed memory to be written for no_trader_at_location"
+        details = failed[-1].get("details") or {}
+        assert int(details.get("cooldown_until_turn") or 0) > 50
+
+    def test_failed_trade_sell_marks_action_used(self) -> None:
+        """P0: failed trade_sell consumes action for the tick."""
+        from app.games.zone_stalkers.decision.executors import _exec_trade_sell
+        import app.games.zone_stalkers.rules.tick_rules as _tick
+        original = getattr(_tick, "_find_trader_at_location", None)
+        _tick._find_trader_at_location = lambda loc_id, state: None
+        try:
+            agent = _make_artifact_agent()
+            step = _make_trade_sell_step()
+            state = _make_minimal_state([agent])
+            ctx = _make_ctx("bot1", agent, state)
+            _exec_trade_sell(agent_id="bot1", agent=agent, step=step, ctx=ctx, state=state, world_turn=50)
+        finally:
+            if original is not None:
+                _tick._find_trader_at_location = original
+        assert agent.get("action_used") is True
+
     def test_no_items_sold_returns_failure_event(self) -> None:
         """B5: When trader present but nothing is sold, trade_sell_failed is emitted."""
         from app.games.zone_stalkers.decision.executors import _exec_trade_sell
@@ -240,6 +281,38 @@ class TestExecTradeSellFailure:
             if orig_sell is not None:
                 _tick._bot_sell_to_trader = orig_sell
         assert any((e.get("event_type") or "") == "trade_sell_failed" for e in events), f"Got: {events}"
+
+    def test_trade_sell_item_removed_without_money_is_failure(self) -> None:
+        """P1: removing an item without money gain must not be treated as successful sale."""
+        from app.games.zone_stalkers.decision.executors import _exec_trade_sell
+        import app.games.zone_stalkers.rules.tick_rules as _tick
+        trader_agent = {"id": "trader_1", "name": "Sidorovich", "location_id": "loc_a"}
+        orig_find = getattr(_tick, "_find_trader_at_location", None)
+        orig_sell = getattr(_tick, "_bot_sell_to_trader", None)
+        _tick._find_trader_at_location = lambda loc_id, state: trader_agent
+
+        def _sell_without_money(*args, **kwargs):
+            agent = args[1]
+            inventory = list(agent.get("inventory") or [])
+            if inventory:
+                agent["inventory"] = inventory[1:]
+            return []
+
+        _tick._bot_sell_to_trader = _sell_without_money
+        try:
+            agent = _make_artifact_agent(artifact_type="soul")
+            step = _make_trade_sell_step()
+            state = _make_minimal_state([agent, trader_agent])
+            ctx = _make_ctx("bot1", agent, state)
+            events = _exec_trade_sell(agent_id="bot1", agent=agent, step=step, ctx=ctx, state=state, world_turn=70)
+        finally:
+            if orig_find is not None:
+                _tick._find_trader_at_location = orig_find
+            if orig_sell is not None:
+                _tick._bot_sell_to_trader = orig_sell
+
+        assert any((e.get("event_type") or "") == "trade_sell_failed" for e in events), events
+        assert step.payload.get("_failure_reason") in {"no_items_sold", "no_sellable_items"}
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +356,17 @@ class TestTradeSellFailedMemoryEvent:
 # ---------------------------------------------------------------------------
 
 class TestGeneratorTradeSellCooldown:
-    def _make_gen_ctx(self, *, world_turn, has_artifact=True, cooldown_record_turn=None) -> Any:
+    def _make_gen_ctx(
+        self,
+        *,
+        world_turn: int,
+        has_artifact: bool = True,
+        cooldown_until_turn: int | None = None,
+        cooldown_trader_id: str = "trader_1",
+        cooldown_location_id: str = "loc_a",
+        cooldown_item_types: list[str] | None = None,
+        known_traders: list[dict[str, Any]] | None = None,
+    ) -> Any:
         import uuid
         from app.games.zone_stalkers.decision.models.objective import ObjectiveGenerationContext
         from app.games.zone_stalkers.memory.models import LAYER_GOAL
@@ -296,20 +379,58 @@ class TestGeneratorTradeSellCooldown:
         agent = _make_artifact_agent() if has_artifact else _make_agent()
         agent["global_goal"] = "get_rich"
 
-        if cooldown_record_turn is not None:
+        if cooldown_until_turn is not None:
             mem_v3 = ensure_memory_v3(agent)
             rec_id = str(uuid.uuid4())
             mem_v3["records"][rec_id] = {
                 "id": rec_id, "agent_id": "bot1", "layer": LAYER_GOAL,
-                "kind": "trade_sell_failed", "created_turn": cooldown_record_turn,
-                "last_accessed_turn": None, "summary": "tsf", "details": {},
-                "location_id": "loc_a", "entity_ids": [], "item_types": ["soul"],
+                "kind": "trade_sell_failed", "created_turn": max(0, world_turn - 1),
+                "last_accessed_turn": None, "summary": "tsf",
+                "details": {
+                    "action_kind": "trade_sell_failed",
+                    "cooldown_until_turn": cooldown_until_turn,
+                    "trader_id": cooldown_trader_id,
+                    "location_id": cooldown_location_id,
+                    "item_types": cooldown_item_types or ["soul"],
+                },
+                "location_id": cooldown_location_id, "entity_ids": [], "item_types": cooldown_item_types or ["soul"],
                 "tags": ["trade", "failure", "cooldown"], "importance": 0.9,
                 "confidence": 1.0, "status": "active",
             }
             mem_v3["stats"]["records_count"] = len(mem_v3["records"])
 
         state = _make_minimal_state([agent])
+        if known_traders is not None:
+            state["traders"] = {
+                str(trader.get("id") or trader.get("agent_id")): {
+                    **trader,
+                    "id": str(trader.get("id") or trader.get("agent_id")),
+                    "agent_id": str(trader.get("agent_id") or trader.get("id")),
+                    "is_trader": True,
+                }
+                for trader in known_traders
+                if trader.get("id") or trader.get("agent_id")
+            }
+            for trader_id, trader in state["traders"].items():
+                state["agents"][trader_id] = {
+                    "id": trader_id,
+                    "name": trader.get("name", trader_id),
+                    "location_id": trader.get("location_id"),
+                    "is_alive": True,
+                    "is_trader": True,
+                }
+                trader_loc = str(trader.get("location_id") or "")
+                if trader_loc and trader_loc in state["locations"]:
+                    state["locations"][trader_loc].setdefault("agents", []).append(trader_id)
+                elif trader_loc:
+                    state["locations"][trader_loc] = {
+                        "id": trader_loc,
+                        "name": trader_loc,
+                        "agents": [trader_id],
+                        "items": [],
+                        "terrain_type": "plain",
+                        "anomaly_activity": 0,
+                    }
         state["world_turn"] = world_turn
         ctx_base = build_agent_context("bot1", agent, state)
         belief = build_belief_state(ctx_base, agent, world_turn)
@@ -330,24 +451,117 @@ class TestGeneratorTradeSellCooldown:
 
     def test_sell_artifacts_generated_when_no_cooldown(self) -> None:
         from app.games.zone_stalkers.decision.objectives.generator import generate_objectives, OBJECTIVE_SELL_ARTIFACTS
-        ctx = self._make_gen_ctx(world_turn=500, has_artifact=True, cooldown_record_turn=None)
+        ctx = self._make_gen_ctx(world_turn=500, has_artifact=True, cooldown_until_turn=None)
         keys = [o.key for o in generate_objectives(ctx)]
         assert OBJECTIVE_SELL_ARTIFACTS in keys, f"Expected SELL_ARTIFACTS in {keys}"
 
     def test_sell_artifacts_suppressed_during_cooldown(self) -> None:
         from app.games.zone_stalkers.decision.objectives.generator import generate_objectives, OBJECTIVE_SELL_ARTIFACTS
-        ctx = self._make_gen_ctx(world_turn=450, has_artifact=True, cooldown_record_turn=400)
+        ctx = self._make_gen_ctx(world_turn=450, has_artifact=True, cooldown_until_turn=500)
         keys = [o.key for o in generate_objectives(ctx)]
         assert OBJECTIVE_SELL_ARTIFACTS not in keys, f"Expected suppressed, got: {keys}"
 
     def test_sell_artifacts_returns_after_cooldown_expires(self) -> None:
         from app.games.zone_stalkers.decision.objectives.generator import generate_objectives, OBJECTIVE_SELL_ARTIFACTS
-        ctx = self._make_gen_ctx(world_turn=400, has_artifact=True, cooldown_record_turn=100)
+        ctx = self._make_gen_ctx(world_turn=400, has_artifact=True, cooldown_until_turn=350)
         keys = [o.key for o in generate_objectives(ctx)]
         assert OBJECTIVE_SELL_ARTIFACTS in keys, f"Expected SELL_ARTIFACTS after cooldown, got: {keys}"
 
     def test_sell_artifacts_not_generated_without_artifact(self) -> None:
         from app.games.zone_stalkers.decision.objectives.generator import generate_objectives, OBJECTIVE_SELL_ARTIFACTS
-        ctx = self._make_gen_ctx(world_turn=500, has_artifact=False, cooldown_record_turn=None)
+        ctx = self._make_gen_ctx(world_turn=500, has_artifact=False, cooldown_until_turn=None)
         keys = [o.key for o in generate_objectives(ctx)]
         assert OBJECTIVE_SELL_ARTIFACTS not in keys, f"Expected no SELL_ARTIFACTS, got: {keys}"
+
+    def test_sell_artifacts_not_globally_blocked_for_other_trader(self) -> None:
+        from app.games.zone_stalkers.decision.objectives.generator import has_recent_trade_sell_failure
+        ctx = self._make_gen_ctx(
+            world_turn=450,
+            has_artifact=True,
+            cooldown_until_turn=700,
+            cooldown_trader_id="trader_a",
+            cooldown_location_id="loc_a",
+            cooldown_item_types=["soul"],
+            known_traders=[
+                {"id": "trader_a", "name": "A", "location_id": "loc_a", "is_trader": True},
+                {"id": "trader_b", "name": "B", "location_id": "loc_b", "is_trader": True},
+            ],
+        )
+        assert has_recent_trade_sell_failure(
+            ctx,
+            trader_id="trader_a",
+            location_id="loc_a",
+            item_types={"soul"},
+            world_turn=450,
+        ) is True
+        assert has_recent_trade_sell_failure(
+            ctx,
+            trader_id="trader_b",
+            location_id="loc_b",
+            item_types={"soul"},
+            world_turn=450,
+        ) is False
+
+
+class TestActivePlanFailureSummary:
+    def test_active_plan_latest_summary_not_completed_if_trade_sell_sells_nothing(self) -> None:
+        from app.games.zone_stalkers.decision.models.active_plan import (
+            ACTIVE_PLAN_STATUS_ACTIVE,
+            ActivePlanStep,
+            ActivePlanV3,
+            STEP_STATUS_PENDING,
+        )
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan
+        from app.games.zone_stalkers.decision.active_plan_runtime import start_or_continue_active_plan_step
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        import app.games.zone_stalkers.rules.tick_rules as _tick
+
+        memory_calls: list[dict[str, Any]] = []
+
+        def _capture_memory(*args, **kwargs):
+            effects = args[5] if len(args) > 5 else {}
+            if isinstance(effects, dict):
+                memory_calls.append(dict(effects))
+
+        trader_agent = {"id": "trader_1", "name": "Sidorovich", "location_id": "loc_a"}
+        orig_find = getattr(_tick, "_find_trader_at_location", None)
+        orig_sell = getattr(_tick, "_bot_sell_to_trader", None)
+        _tick._find_trader_at_location = lambda loc_id, state: trader_agent
+        _tick._bot_sell_to_trader = lambda *a, **kw: []
+        try:
+            agent = _make_artifact_agent()
+            agent["money"] = 336
+            state = _make_minimal_state([agent, trader_agent])
+            active_plan = ActivePlanV3(
+                objective_key="SELL_ARTIFACTS",
+                status=ACTIVE_PLAN_STATUS_ACTIVE,
+                created_turn=100,
+                updated_turn=100,
+                steps=[ActivePlanStep(kind=STEP_TRADE_SELL_ITEM, payload={}, status=STEP_STATUS_PENDING)],
+                current_step_index=0,
+            )
+            save_active_plan(agent, active_plan)
+            start_or_continue_active_plan_step(
+                "bot1",
+                agent,
+                active_plan,
+                state,
+                100,
+                add_memory=_capture_memory,
+            )
+        finally:
+            if orig_find is not None:
+                _tick._find_trader_at_location = orig_find
+            if orig_sell is not None:
+                _tick._bot_sell_to_trader = orig_sell
+
+        action_kinds = {str(mem.get("action_kind") or "") for mem in memory_calls}
+        assert "active_plan_step_failed" in action_kinds
+        assert "active_plan_completed" not in action_kinds
+        summary = (
+            ((agent.get("brain_v3_context") or {}).get("latest_decision_summary") or {}).get("summary")
+            or ""
+        )
+        assert "completed, 1/1" not in summary
+        assert any(i.get("type") == "soul" for i in agent.get("inventory", []))
+        assert int(agent.get("money") or 0) == 336

@@ -300,23 +300,43 @@ def evaluate_kill_target_combat_readiness(
 
 def has_recent_trade_sell_failure(
     ctx: "ObjectiveGenerationContext",
-    cooldown_turns: int = 180,
+    *,
+    trader_id: str | None,
+    location_id: str | None,
+    item_types: set[str],
+    world_turn: int,
 ) -> bool:
-    """Return True if the agent has a recent trade_sell_failed memory within cooldown_turns."""
-    from app.games.zone_stalkers.memory.memory_events import LAYER_GOAL
+    """Return True if active trade_sell_failed cooldown matches trader/location/item overlap."""
     personality = getattr(ctx, "personality", None)
     if personality is None:
         return False
     memory_v3 = personality.get("memory_v3") or {}
     records = memory_v3.get("records") or {}
-    current_turn = getattr(ctx, "world_turn", 0) or 0
+    target_items = {str(item) for item in item_types if item}
     for record in records.values():
         if not isinstance(record, dict):
             continue
-        if record.get("kind") == "trade_sell_failed" and record.get("layer") == LAYER_GOAL:
-            created = int(record.get("created_turn") or 0)
-            if current_turn - created < cooldown_turns:
-                return True
+        if str(record.get("kind") or "") != "trade_sell_failed":
+            continue
+        details = record.get("details") if isinstance(record.get("details"), dict) else {}
+        cooldown_until_turn = int(details.get("cooldown_until_turn") or 0)
+        if cooldown_until_turn <= world_turn:
+            continue
+
+        rec_trader_id = str(details.get("trader_id") or "")
+        rec_location_id = str(details.get("location_id") or record.get("location_id") or "")
+        same_trader = bool(trader_id) and bool(rec_trader_id) and rec_trader_id == str(trader_id)
+        same_location = bool(location_id) and bool(rec_location_id) and rec_location_id == str(location_id)
+        if not (same_trader or same_location):
+            continue
+
+        rec_items_raw = details.get("item_types")
+        if not isinstance(rec_items_raw, list):
+            rec_items_raw = record.get("item_types") or []
+        rec_items = {str(item) for item in rec_items_raw if item}
+        if target_items and rec_items and target_items.isdisjoint(rec_items):
+            continue
+        return True
     return False
 
 
@@ -708,8 +728,49 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     if global_goal == "get_rich":
         from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
         artifact_types = frozenset(ARTIFACT_TYPES.keys())
-        has_artifact = any(i.get("type") in artifact_types for i in agent.get("inventory", []))
-        if has_artifact and not has_recent_trade_sell_failure(ctx):
+        artifact_items_in_inventory = {
+            str(i.get("type") or "")
+            for i in agent.get("inventory", [])
+            if i.get("type") in artifact_types
+        }
+        has_artifact = bool(artifact_items_in_inventory)
+        current_location_id = str(agent.get("location_id") or "")
+        known_traders = tuple(ctx.belief_state.known_traders or ())
+        current_location_traders = tuple(
+            trader for trader in known_traders
+            if str(trader.get("location_id") or "") == current_location_id
+        )
+
+        current_location_cooldown = has_recent_trade_sell_failure(
+            ctx,
+            trader_id=None,
+            location_id=current_location_id,
+            item_types=artifact_items_in_inventory,
+            world_turn=ctx.world_turn,
+        )
+        current_trader_cooldown = any(
+            has_recent_trade_sell_failure(
+                ctx,
+                trader_id=str(trader.get("agent_id") or ""),
+                location_id=current_location_id,
+                item_types=artifact_items_in_inventory,
+                world_turn=ctx.world_turn,
+            )
+            for trader in current_location_traders
+        )
+        local_sell_blocked = current_location_cooldown or current_trader_cooldown
+        alternative_trader_available = any(
+            not has_recent_trade_sell_failure(
+                ctx,
+                trader_id=str(trader.get("agent_id") or ""),
+                location_id=str(trader.get("location_id") or ""),
+                item_types=artifact_items_in_inventory,
+                world_turn=ctx.world_turn,
+            )
+            for trader in known_traders
+        )
+
+        if has_artifact and (not local_sell_blocked or alternative_trader_available):
             sell_refs, sell_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_SELL_ARTIFACTS)
             _sell_urgency = max(0.2, float(need_result.scores.trade))
             _append_unique(
