@@ -120,6 +120,7 @@ def kill_agent(
     _corpse_id = f"corpse_{agent_id}_{world_turn}"
     _corpse_inventory = copy.deepcopy(agent.get("inventory", [])) if isinstance(agent.get("inventory"), list) else []
     _corpse_money = int(agent.get("money") or 0)
+    _fully_looted = (not _corpse_inventory and _corpse_money <= 0)
     agent["corpse_visible"] = True
     agent["death_turn"] = world_turn
     agent["death_cause"] = cause
@@ -162,11 +163,11 @@ def kill_agent(
                 ),
                 "visible": True,
                 "decay_turn": world_turn + CORPSE_DECAY_TURNS,
-                "lootable": True,
+                "lootable": (not _fully_looted),
                 "inventory": _corpse_inventory,
                 "money": _corpse_money,
                 "looted_by": [],
-                "fully_looted": (not _corpse_inventory and _corpse_money <= 0),
+                "fully_looted": _fully_looted,
             })
     agent["inventory"] = []
     agent["money"] = 0

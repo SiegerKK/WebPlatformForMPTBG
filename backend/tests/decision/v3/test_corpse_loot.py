@@ -80,6 +80,18 @@ def test_dead_agent_money_moves_to_corpse() -> None:
     assert int(target.get("money") or 0) == 0
 
 
+def test_empty_corpse_created_as_non_lootable_and_fully_looted() -> None:
+    looter, target, state = _build_loot_state()
+    _ = looter
+    target["inventory"] = []
+    target["money"] = 0
+
+    corpse = _kill_target(state, target)
+
+    assert corpse.get("fully_looted") is True
+    assert corpse.get("lootable") is False
+
+
 def test_living_agent_can_loot_corpse_items() -> None:
     looter, target, state = _build_loot_state()
     corpse = _kill_target(state, target)
