@@ -51,7 +51,7 @@ def test_emission_imminent_creates_threat_record() -> None:
 
 
 def test_plan_monitor_abort_creates_aggregate_record() -> None:
-    """plan_monitor_abort for a travel action must be aggregated (not a separate episodic record)."""
+    """plan_monitor_abort for a non-sleep action (travel) is aggregated into active_plan_failure_summary."""
     agent: dict = {"name": "bot1", "memory_v3": None}
     entry = _make_entry(
         action_kind="plan_monitor_abort",

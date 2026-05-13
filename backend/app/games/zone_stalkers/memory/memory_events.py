@@ -319,7 +319,7 @@ def _make_failure_aggregate_key(effects: dict[str, Any]) -> tuple[str, str, str]
     """Return (objective_key, step_kind, reason) as an aggregate signature."""
     return (
         str(effects.get("objective_key") or ""),
-        str(effects.get("step_kind") or effects.get("step_kind") or ""),
+        str(effects.get("step_kind") or effects.get("step_kind_label") or ""),
         str(effects.get("reason") or ""),
     )
 
