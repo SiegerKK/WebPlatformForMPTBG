@@ -209,8 +209,9 @@ _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
 
 
 # Low-value repeated observation kinds eligible for deduplication within a window.
-# NOTE: stalkers_seen/items_seen are intentionally excluded — they have their own
-# merge logic in memory_merge.py and tests rely on that path creating new records.
+# NOTE: stalkers_seen is excluded here — it is handled via dedicated semantic aggregation
+# (_handle_stalkers_seen_event) that creates/updates a semantic_stalkers_seen aggregate.
+# items_seen is also excluded as it writes individual spatial records without dedup.
 _DEDUP_KINDS: frozenset[str] = frozenset({
     "travel_hop",
     "trader_visited",
@@ -898,9 +899,22 @@ def write_memory_event_to_v3(
         _METRICS["memory_write_discarded"] += 1
         return
 
-    # objective_decision — tick_rules.py already deduplicates these using its own
-    # _prev_decision_key guard. Aggregating them here would lose adapter_intent_kind
-    # and other gameplay-critical fields. Let them fall through to the normal write path.
+    # objective_decision — routine (non-urgent) decisions are aggregated into a
+    # summary record so repeated same-objective turns don't spam memory_v3.
+    # Urgent decisions (objective changed, survival priority) fall through to the
+    # normal episodic write so that gameplay code can always retrieve them.
+    if record.kind == "objective_decision":
+        summary = str(legacy_entry.get("summary") or legacy_entry.get("title") or "objective_decision")
+        if not _is_urgent_objective_decision(effects):
+            _upsert_objective_decision_aggregate(
+                agent_id=agent_id,
+                agent=agent,
+                effects=effects,
+                world_turn=world_turn,
+                summary=summary,
+            )
+            return
+        # Urgent decision falls through to normal episodic write below.
 
     # knowledge_upsert — stalkers_seen handled by dedicated path.
     # travel_hop: update the semantic aggregate AND still write the episodic record

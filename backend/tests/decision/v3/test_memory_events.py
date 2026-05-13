@@ -469,35 +469,65 @@ def test_crowd_seen_summary_is_bounded() -> None:
 
 
 def test_objective_decision_writes_episodic_record() -> None:
-    """objective_decision events write episodic records; tick_rules handles dedup at source."""
+    """Urgent objective_decision (changed objective) writes a plain episodic record."""
     agent: dict = {"name": "bot1", "memory_v3": None}
     entry = _make_entry(
         world_turn=200,
         action_kind="objective_decision",
-        objective_key="FIND_ARTIFACTS",
-        adapter_intent_kind="seek_artifacts",
+        objective_key="LEAVE_ZONE",
+        changed_from="FIND_ARTIFACTS",
+        changed_to="LEAVE_ZONE",
+        adapter_intent_kind="leave_zone",
     )
     write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=200)
     records = list(ensure_memory_v3(agent)["records"].values())
     episodic = [r for r in records if r.get("kind") == "objective_decision"]
     assert len(episodic) == 1
-    assert episodic[0]["details"]["adapter_intent_kind"] == "seek_artifacts"
+    assert episodic[0]["details"]["adapter_intent_kind"] == "leave_zone"
 
 
-def test_urgent_objective_decision_is_written_episodically() -> None:
-    """Objective decision with changed objective must create an episodic record."""
+def test_repeated_routine_objective_decision_is_aggregated() -> None:
+    """50 routine objective_decision events with the same objective must produce
+    a single objective_decision_summary aggregate, not 50 separate episodic records."""
     agent: dict = {"name": "bot1", "memory_v3": None}
-    entry = _make_entry(
-        world_turn=300,
-        action_kind="objective_decision",
-        objective_key="LEAVE_ZONE",
-        changed_from="FIND_ARTIFACTS",
-        changed_to="LEAVE_ZONE",
-    )
-    write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=300)
+    for turn in range(200, 250):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="objective_decision",
+            objective_key="FIND_ARTIFACTS",
+            adapter_intent_kind="seek_artifacts",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    # No plain episodic objective_decision records.
+    raw_episodic = [r for r in records if r.get("kind") == "objective_decision"]
+    assert len(raw_episodic) == 0, "routine decisions must NOT create individual episodic records"
+    # Exactly one aggregate summary.
+    summary_recs = [r for r in records if r.get("kind") == "objective_decision_summary"]
+    assert len(summary_recs) == 1
+    d = summary_recs[0]["details"]
+    assert d["objective_key"] == "FIND_ARTIFACTS"
+    assert d["decision_count"] == 50
+    assert d["last_turn"] == 249
+
+
+def test_urgent_objective_decision_remains_episodic() -> None:
+    """Objective decisions that change the objective must remain individual episodic records."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(300, 310):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="objective_decision",
+            objective_key="LEAVE_ZONE",
+            changed_from="FIND_ARTIFACTS",
+            changed_to="LEAVE_ZONE",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
     records = list(ensure_memory_v3(agent)["records"].values())
     episodic = [r for r in records if r.get("kind") == "objective_decision"]
-    assert len(episodic) == 1
+    assert len(episodic) == 10, "each urgent decision must remain a separate episodic record"
+    # No aggregate for urgent decisions.
+    assert not [r for r in records if r.get("kind") == "objective_decision_summary"]
 
 
 def test_critical_target_death_confirmed_is_never_discarded() -> None:
