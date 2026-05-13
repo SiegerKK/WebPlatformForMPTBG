@@ -1,8 +1,12 @@
 """context_builder — build AgentContext from raw world state.
 
 ``build_agent_context`` is called **once per tick per agent** before any
-decision logic runs.  It must not mutate the state and must not make any
-gameplay decisions.
+decision logic runs.  It does not make gameplay decisions.
+
+This function may update the following **agent runtime-only** diagnostic and
+cache fields — these are intentional mutations, not gameplay side-effects:
+    - ``agent["brain_context_cache"]``   — derived context cache payload
+    - ``agent["brain_context_metrics"]`` — per-agent call/hit/miss counters
 
 Visibility model (Phase 1 MVP):
     An agent "sees":
@@ -36,6 +40,7 @@ def build_agent_context(
     state: dict[str, Any],
     *,
     force_refresh: bool = False,
+    deep_debug: bool = False,
 ) -> AgentContext:
     """Return a normalised ``AgentContext`` for the given agent.
 
@@ -46,12 +51,22 @@ def build_agent_context(
     agent
         The agent dict (``state["agents"][agent_id]``).
     state
-        The full world state dict (read-only semantics).
+        The full world state dict (read-only semantics for game data).
+    force_refresh
+        When ``True``, bypass the context cache and rebuild from scratch.
+    deep_debug
+        When ``True``, bypass the context cache for full diagnostic accuracy.
 
     Returns
     -------
     AgentContext
         Populated snapshot; never ``None``.
+
+    Notes
+    -----
+    This function may write to ``agent["brain_context_cache"]`` and
+    ``agent["brain_context_metrics"]`` as runtime-only diagnostic fields.
+    These are not gameplay decisions and do not affect game state semantics.
     """
     started = time.perf_counter()
     metrics = _ensure_context_builder_metrics(agent)
@@ -128,6 +143,7 @@ def build_agent_context(
         state=state,
         combat_context=combat_context,
         force_refresh=force_refresh,
+        deep_debug=deep_debug,
     )
 
     scan_metrics: dict[str, int] = {
@@ -294,6 +310,10 @@ def _build_context_cache_key(
     objective_key: str,
     target_id: str | None,
 ) -> dict[str, Any]:
+    # memory_revision is always included for correctness (MVP).
+    # When knowledge_v1 fully covers derived context, memory_revision can be
+    # excluded to improve hit-rate.  Left as future optimisation once
+    # knowledge-first coverage is confirmed complete.
     return {
         "knowledge_revision": _resolve_knowledge_revision(agent),
         "memory_revision": _resolve_memory_revision(agent),
@@ -325,8 +345,11 @@ def _should_bypass_context_cache(
     state: dict[str, Any],
     combat_context: dict[str, Any] | None,
     force_refresh: bool,
+    deep_debug: bool = False,
 ) -> bool:
     if force_refresh:
+        return True
+    if deep_debug:
         return True
     if combat_context is not None:
         return True
@@ -336,7 +359,8 @@ def _should_bypass_context_cache(
         return True
     if agent.get("has_left_zone"):
         return True
-    if state.get("debug", {}).get("deep_context_builder", False):
+    debug = state.get("debug")
+    if isinstance(debug, dict) and debug.get("deep_context_builder", False):
         return True
     return False
 
@@ -457,14 +481,17 @@ def _build_derived_context_parts(
     memory_traders = _traders_from_memory(agent, traders, memory_records=memory_records)
     known_traders = _merge_traders_by_id(visible_traders, knowledge_traders, memory_traders)
 
+    target_leads = _build_target_leads(agent, target_id, memory_records=memory_records)
+    corpse_leads = _build_corpse_leads(agent, target_id, memory_records=memory_records)
+
     return (
         {
             "known_entities": known_entities,
             "known_locations": known_locations,
             "known_hazards": known_hazards,
             "known_traders": known_traders,
-            "target_leads": [],
-            "corpse_leads": [],
+            "target_leads": target_leads,
+            "corpse_leads": corpse_leads,
         },
         {
             "memory_scan_records": memory_scan_records,
@@ -833,6 +860,102 @@ def _hazards_from_memory(
             "effects": _record_details(record),
         })
     return hazards
+
+
+_TARGET_LEAD_KINDS: frozenset[str] = frozenset({
+    "target_seen",
+    "target_intel",
+    "target_last_known_location",
+})
+_CORPSE_LEAD_KINDS: frozenset[str] = frozenset({
+    "corpse_seen",
+    "target_corpse_reported",
+    "target_corpse_seen",
+})
+
+
+def _build_target_leads(
+    agent: dict[str, Any],
+    target_id: str | None,
+    *,
+    memory_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return location leads for a hunt target from knowledge_v1 and memory_v3."""
+    leads: list[dict[str, Any]] = []
+    if not target_id:
+        return leads
+
+    # From knowledge_v1 known_npcs — highest priority source
+    knowledge = agent.get("knowledge_v1")
+    if isinstance(knowledge, dict):
+        npc_entry = knowledge.get("known_npcs", {}).get(target_id)
+        if isinstance(npc_entry, dict):
+            leads.append({
+                "source": "knowledge_v1",
+                "agent_id": target_id,
+                "last_seen_location_id": npc_entry.get("last_seen_location_id"),
+                "last_seen_turn": npc_entry.get("last_seen_turn"),
+                "confidence": npc_entry.get("confidence"),
+                "is_alive": npc_entry.get("is_alive", True),
+            })
+
+    # From memory_v3 target-related records
+    for record in memory_records:
+        if not _record_is_active(record):
+            continue
+        if str(record.get("kind", "")) not in _TARGET_LEAD_KINDS:
+            continue
+        details = _record_details(record)
+        # Only include if it matches our target (or has no specific target)
+        rec_target = str(
+            details.get("target_agent_id") or details.get("target_id") or ""
+        )
+        if rec_target and rec_target != target_id:
+            continue
+        leads.append({
+            "source": "memory_v3",
+            "kind": record.get("kind"),
+            "location_id": record.get("location_id") or details.get("location_id"),
+            "world_turn": _record_memory_turn(record),
+        })
+    return leads
+
+
+def _build_corpse_leads(
+    agent: dict[str, Any],
+    target_id: str | None,
+    *,
+    memory_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return corpse-location leads for a target from memory_v3."""
+    leads: list[dict[str, Any]] = []
+    for record in memory_records:
+        if not _record_is_active(record):
+            continue
+        if str(record.get("kind", "")) not in _CORPSE_LEAD_KINDS:
+            continue
+        details = _record_details(record)
+        if target_id:
+            rec_target = str(
+                details.get("target_agent_id")
+                or details.get("target_id")
+                or details.get("dead_agent_id")
+                or ""
+            )
+            if rec_target and rec_target != target_id:
+                continue
+        leads.append({
+            "source": "memory_v3",
+            "kind": record.get("kind"),
+            "location_id": (
+                record.get("location_id")
+                or details.get("corpse_location_id")
+                or details.get("reported_corpse_location_id")
+                or details.get("location_id")
+            ),
+            "world_turn": _record_memory_turn(record),
+        })
+    return leads
 
 
 def _traders_from_visible_and_memory(
