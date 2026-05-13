@@ -25,7 +25,11 @@ from app.games.zone_stalkers.decision.models.active_plan import (
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
 )
-from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_SEARCH_TARGET, STEP_TRADE_SELL_ITEM
+from app.games.zone_stalkers.decision.models.plan import (
+    Plan, PlanStep, STEP_SEARCH_TARGET, STEP_TRADE_SELL_ITEM,
+    STEP_TRADE_BUY_ITEM, STEP_EXPLORE_LOCATION, STEP_TRAVEL_TO_LOCATION,
+    STEP_SLEEP_FOR_HOURS,
+)
 from app.games.zone_stalkers.decision.plan_monitor import is_v3_monitored_bot
 
 AddMemoryFn = Callable[..., None]
@@ -979,15 +983,15 @@ def assess_active_plan_step_timeout(
         if step.kind == STEP_TRADE_SELL_ITEM:
             timeout = ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
             reason_key = "trade_sell_pending_timeout"
-        elif step.kind == "trade_buy_item":
+        elif step.kind == STEP_TRADE_BUY_ITEM:
             timeout = ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
             reason_key = "trade_buy_pending_timeout"
-        elif step.kind == "explore_location":
+        elif step.kind == STEP_EXPLORE_LOCATION:
             timeout = ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS
             # If no scheduled_action exists, it's stuck.  If one exists,
             # it should have already been marked running — still time out.
             reason_key = "explore_pending_timeout"
-        elif step.kind == "travel_to_location":
+        elif step.kind == STEP_TRAVEL_TO_LOCATION:
             timeout = ACTIVE_PLAN_PENDING_TIMEOUT_TURNS
             reason_key = "travel_pending_timeout"
         else:
@@ -999,7 +1003,7 @@ def assess_active_plan_step_timeout(
 
     elif step.status == STEP_STATUS_RUNNING:
         step_started_run = int(step.started_turn or plan_created)
-        if step.kind == "explore_location":
+        if step.kind == STEP_EXPLORE_LOCATION:
             try:
                 from app.games.zone_stalkers.rules.tick_rules import (  # noqa: PLC0415
                     EXPLORE_DURATION_TURNS,
@@ -1012,7 +1016,7 @@ def assess_active_plan_step_timeout(
                 if scheduled is None:
                     return (True, "explore_running_timeout")
                 # Scheduled action still present — let it complete normally.
-        elif step.kind == "sleep_for_hours":
+        elif step.kind == STEP_SLEEP_FOR_HOURS:
             scheduled = agent.get("scheduled_action")
             if scheduled is None:
                 # Sleep completed or cancelled — not a timeout but safe to complete.

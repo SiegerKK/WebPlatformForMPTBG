@@ -66,6 +66,13 @@ FIELD_INVENTORY = "inventory"
 FIELD_GLOBAL_GOAL = "global_goal"
 FIELD_CURRENT_GOAL = "current_goal"
 
+# Cache for ARTIFACT_TYPES (loaded once from the backend package if available).
+try:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ARTIFACT_TYPES  # type: ignore
+    _KNOWN_ARTIFACT_TYPES: frozenset[str] | None = frozenset(_ARTIFACT_TYPES.keys())
+except ImportError:
+    _KNOWN_ARTIFACT_TYPES = None
+
 
 # ---------------------------------------------------------------------------
 # ZIP / file loading
@@ -74,7 +81,7 @@ FIELD_CURRENT_GOAL = "current_goal"
 def _load_json_bytes(data: bytes) -> Any:
     try:
         return json.loads(data.decode("utf-8", errors="replace"))
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return None
 
 
@@ -146,16 +153,9 @@ def _memory_record_count(agent: dict[str, Any]) -> int:
 
 def _artifact_count(agent: dict[str, Any]) -> int:
     """Return number of artifact items in inventory (type must start with known prefix)."""
-    try:
-        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES  # type: ignore
-        art_types = frozenset(ARTIFACT_TYPES.keys())
-    except ImportError:
-        # Fallback: any item whose type name looks artifact-like
-        art_types = None
-
     inventory = agent.get(FIELD_INVENTORY) or []
-    if art_types:
-        return sum(1 for i in inventory if isinstance(i, dict) and i.get("type") in art_types)
+    if _KNOWN_ARTIFACT_TYPES:
+        return sum(1 for i in inventory if isinstance(i, dict) and i.get("type") in _KNOWN_ARTIFACT_TYPES)
     return sum(1 for i in inventory if isinstance(i, dict) and "artifact" in str(i.get("type", "")).lower())
 
 
@@ -435,8 +435,8 @@ def render_markdown_report(
 
     lines.append("## Fleet Overview")
     lines.append("")
-    lines.append(f"| Metric | Value |")
-    lines.append(f"|---|---|")
+    lines.append("| Metric | Value |")
+    lines.append("|---|---|")
     for k, v in fleet.items():
         if isinstance(v, dict):
             continue

@@ -16,9 +16,19 @@ import pytest
 # ---------------------------------------------------------------------------
 # Path setup — add the scripts directory to sys.path so we can import the
 # module directly without installing it as a package.
+# Repository layout: backend/tests/scripts/ → root is 3 levels up.
 # ---------------------------------------------------------------------------
 
-SCRIPTS_DIR = Path(__file__).parents[3] / "scripts" / "zone_stalkers"
+_REPO_ROOT = Path(__file__).parent
+for _ in range(4):  # walk up at most 4 levels looking for scripts/zone_stalkers
+    candidate = _REPO_ROOT / "scripts" / "zone_stalkers"
+    if candidate.is_dir():
+        SCRIPTS_DIR = candidate
+        break
+    _REPO_ROOT = _REPO_ROOT.parent
+else:
+    raise RuntimeError("Could not locate scripts/zone_stalkers relative to test file")
+
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
