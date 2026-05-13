@@ -771,30 +771,50 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         }
 
         if target_alive is False:
-            _append_unique(
-                result,
-                Objective(
-                    key=OBJECTIVE_CONFIRM_KILL,
-                    source="global_goal",
-                    urgency=0.85,
-                    expected_value=1.0,
-                    risk=0.1,
-                    time_cost=0.2,
-                    resource_cost=0.0,
-                    confidence=0.9,
-                    goal_alignment=1.0,
-                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONFIRM_KILL)[1],
-                    reasons=("Есть данные, что цель мертва — нужно подтвердить устранение",),
-                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONFIRM_KILL)[0],
-                    metadata={
-                        "is_blocking": False,
-                        "hunt_stage": "confirm",
-                        "target_id": target_id,
-                        "target_location_id": target_loc,
-                    },
-                    target={"target_id": target_id, "location_id": target_loc} if target_id else None,
-                ),
-            )
+            if target_loc:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_CONFIRM_KILL,
+                        source="global_goal",
+                        urgency=0.85,
+                        expected_value=1.0,
+                        risk=0.1,
+                        time_cost=0.2,
+                        resource_cost=0.0,
+                        confidence=0.9,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONFIRM_KILL)[1],
+                        reasons=("Есть данные, что цель мертва — нужно подтвердить устранение на месте",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONFIRM_KILL)[0],
+                        metadata={
+                            "is_blocking": False,
+                            "hunt_stage": "confirm",
+                            "target_id": target_id,
+                            "target_location_id": target_loc,
+                        },
+                        target={"target_id": target_id, "location_id": target_loc} if target_id else None,
+                    ),
+                )
+            else:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_GATHER_INTEL,
+                        source="global_goal",
+                        urgency=0.78,
+                        expected_value=0.78,
+                        risk=0.15,
+                        time_cost=0.35,
+                        resource_cost=0.05,
+                        confidence=0.72,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[1],
+                        reasons=("Цель вероятно мертва, но место тела неизвестно — собираю свидетельства",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[0],
+                        metadata={"is_blocking": False, "hunt_stage": "gather_intel", "target_id": target_id},
+                    ),
+                )
         elif target_co_located or target_visible_now:
             if combat_eval["recommended_support_objective"] == OBJECTIVE_GET_MONEY_FOR_RESUPPLY:
                 _replace_or_append(

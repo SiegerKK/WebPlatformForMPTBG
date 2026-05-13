@@ -91,7 +91,12 @@ def _confirm_target_death(
         state,
         "observation",
         "✅ Подтверждена ликвидация цели",
-        {"action_kind": "target_death_confirmed", "target_id": target_id},
+        {
+            "action_kind": "target_death_confirmed",
+            "target_id": target_id,
+            "directly_observed": True,
+            "confirmation_source": "personal_combat_kill",
+        },
         summary="Цель подтверждена как устранённая.",
         agent_id=agent_id,
     )

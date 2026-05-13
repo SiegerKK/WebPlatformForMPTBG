@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import Counter
 from typing import Any, Literal
-
-from app.games.zone_stalkers.location_images import migrate_location_images
 
 ProjectionMode = Literal["zone-lite", "game", "debug-map", "debug-map-lite", "full"]
 
 INVENTORY_PREVIEW_LIMIT = 20
+FULL_DEBUG_STORY_EVENTS_LIMIT = 50
 
 _GAME_AGENT_STRIP_FIELDS = (
     "memory",
@@ -77,6 +77,170 @@ def _compact_brain_runtime(agent: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(invalidators, list):
         compact["invalidators"] = list(invalidators[-5:])
     return compact or None
+
+
+def _record_created_turn(record: dict[str, Any]) -> int:
+    try:
+        return int(record.get("created_turn", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _memory_stats(records: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    count = len(records)
+    by_layer = Counter(str(record.get("layer") or "") for record in records if record.get("layer"))
+    by_kind = Counter(str(record.get("kind") or "") for record in records if record.get("kind"))
+    turns = [_record_created_turn(record) for record in records]
+    top_kind, top_count = (None, 0)
+    if by_kind:
+        top_kind, top_count = by_kind.most_common(1)[0]
+    stats = {
+        "records_count": count,
+        "records_cap": 500,
+        "cap_utilization": (count / 500.0) if count > 0 else 0.0,
+        "by_layer": dict(by_layer),
+        "top_kinds": [[kind, value] for kind, value in by_kind.most_common(8)],
+        "semantic_ratio": (by_layer.get("semantic", 0) / count) if count > 0 else 0.0,
+        "episodic_ratio": (by_layer.get("episodic", 0) / count) if count > 0 else 0.0,
+        "stalkers_seen_ratio": (by_kind.get("stalkers_seen", 0) / count) if count > 0 else 0.0,
+        "travel_hop_ratio": (by_kind.get("travel_hop", 0) / count) if count > 0 else 0.0,
+        "last_record_turn": max(turns) if turns else None,
+        "oldest_record_turn": min(turns) if turns else None,
+    }
+    health = {
+        "is_at_cap": count >= 500,
+        "stalkers_seen_dominates": (by_kind.get("stalkers_seen", 0) / count) > 0.5 if count > 0 else False,
+        "semantic_ratio_low": (by_layer.get("semantic", 0) / count) < 0.08 if count > 0 else True,
+        "top_kind": top_kind,
+    }
+    return stats, health
+
+
+def _agent_story_events(agent: dict[str, Any]) -> tuple[list[dict[str, Any]], int, bool]:
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
+    rows: list[dict[str, Any]] = []
+    if isinstance(records, dict):
+        for raw in records.values():
+            if not isinstance(raw, dict):
+                continue
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            kind = str(details.get("action_kind") or raw.get("kind") or "")
+            world_turn = _record_created_turn(raw)
+            title = str(raw.get("title") or raw.get("summary") or kind)
+            rows.append({
+                "world_turn": world_turn,
+                "type": kind,
+                "title": title,
+                "summary": str(raw.get("summary") or kind),
+                "source": "memory_v3",
+                "effects": dict(details),
+            })
+    trace = agent.get("brain_trace")
+    if isinstance(trace, dict):
+        for event in trace.get("events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            mode = str(event.get("mode") or "")
+            decision = str(event.get("decision") or mode or "trace_event")
+            world_turn = int(event.get("turn", 0) or 0)
+            rows.append({
+                "world_turn": world_turn,
+                "type": decision,
+                "title": "Brain trace event",
+                "summary": str(event.get("summary") or mode or "trace_event"),
+                "source": "brain_trace",
+                "effects": {
+                    "mode": mode,
+                    "decision": decision,
+                    "objective_key": (event.get("active_objective") or {}).get("key") if isinstance(event.get("active_objective"), dict) else None,
+                    "intent_kind": event.get("intent_kind"),
+                },
+            })
+    rows.sort(key=lambda row: (int(row.get("world_turn", 0) or 0), str(row.get("type") or "")))
+    if not rows:
+        return [], 0, False
+
+    total = len(rows)
+    important_kinds = {
+        "death",
+        "combat_kill",
+        "combat_killed",
+        "emission_imminent",
+        "emission_started",
+        "objective_decision",
+        "support_source_exhausted",
+        "global_goal_completed",
+    }
+    tail = rows[-FULL_DEBUG_STORY_EVENTS_LIMIT:]
+    tail_keys = {(row["world_turn"], row["type"], row["source"], row["summary"]) for row in tail}
+    extra = [
+        row for row in rows[-200:]
+        if row.get("type") in important_kinds
+        and (row["world_turn"], row["type"], row["source"], row["summary"]) not in tail_keys
+    ]
+    merged = (extra + tail)[-FULL_DEBUG_STORY_EVENTS_LIMIT:]
+    return merged, total, total > len(merged)
+
+
+def _project_terminal_agent(agent: dict[str, Any]) -> None:
+    left_zone = bool(agent.get("has_left_zone"))
+    if not left_zone:
+        return
+    terminal_turn = None
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
+    if isinstance(records, dict):
+        for raw in records.values():
+            if not isinstance(raw, dict):
+                continue
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            action_kind = str(details.get("action_kind") or raw.get("kind") or "")
+            if action_kind == "global_goal_completed":
+                terminal_turn = _record_created_turn(raw)
+    agent["current_goal"] = "left_zone"
+    agent["scheduled_action"] = None
+    agent["terminal_state"] = {
+        "kind": "left_zone",
+        "global_goal_achieved": bool(agent.get("global_goal_achieved")),
+        "left_zone_turn": terminal_turn,
+    }
+    context = agent.get("brain_v3_context")
+    if isinstance(context, dict):
+        context["objective_key"] = "LEFT_ZONE"
+        context["objective_score"] = 0
+        context["objective_reason"] = "NPC покинул Зону"
+        context["adapter_intent"] = None
+        context["intent_kind"] = None
+    agent["active_objective"] = {
+        "key": "LEFT_ZONE",
+        "score": 0,
+        "source": "terminal_state",
+        "reason": "NPC покинул Зону",
+    }
+
+
+def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
+    record_rows = [
+        raw for raw in (records.values() if isinstance(records, dict) else [])
+        if isinstance(raw, dict)
+    ]
+    stats, health = _memory_stats(record_rows)
+    agent["memory_v3_stats"] = stats
+    agent["memory_health"] = health
+    story_events, story_events_count, story_events_truncated = _agent_story_events(agent)
+    agent["story_events"] = story_events
+    agent["story_events_count"] = story_events_count
+    agent["story_events_truncated"] = story_events_truncated
+    raw_sleepiness = int(agent.get("sleepiness", 0) or 0)
+    agent["sleep_need"] = {
+        "raw_sleepiness": raw_sleepiness,
+        "interpreted_fatigue": raw_sleepiness,
+        "scale": "sleepiness_high_means_tired",
+    }
+    _project_terminal_agent(agent)
 
 
 # ── Explicit game projection helpers ─────────────────────────────────────────
@@ -211,28 +375,20 @@ def _project_locations_game(locations: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(loc, dict):
             result[loc_id] = loc
             continue
-        # Keep projection read-only: migrate a local copy, never mutate source state.
-        loc_for_projection = dict(loc)
-        if isinstance(loc_for_projection.get("image_slots"), dict):
-            loc_for_projection["image_slots"] = dict(loc_for_projection["image_slots"])
-        # P1-4: ensure image_slots is initialised on-the-fly (no separate migration job needed)
-        migrate_location_images(loc_for_projection)
         result[loc_id] = {
-            "id": loc_for_projection.get("id"),
-            "name": loc_for_projection.get("name"),
-            "terrain_type": loc_for_projection.get("terrain_type"),
-            "anomaly_activity": loc_for_projection.get("anomaly_activity"),
-            "dominant_anomaly_type": loc_for_projection.get("dominant_anomaly_type"),
-            "connections": loc_for_projection.get("connections"),
-            "agents": loc_for_projection.get("agents"),
-            "exit_zone": loc_for_projection.get("exit_zone"),
-            "artifacts": loc_for_projection.get("artifacts"),
-            "items": loc_for_projection.get("items"),
-            "region": loc_for_projection.get("region"),
-            "image_url": loc_for_projection.get("image_url"),
-            "image_slots": loc_for_projection.get("image_slots"),
-            "primary_image_slot": loc_for_projection.get("primary_image_slot"),
-            "debug_layout": loc_for_projection.get("debug_layout"),
+            "id": loc.get("id"),
+            "name": loc.get("name"),
+            "terrain_type": loc.get("terrain_type"),
+            "anomaly_activity": loc.get("anomaly_activity"),
+            "dominant_anomaly_type": loc.get("dominant_anomaly_type"),
+            "connections": loc.get("connections"),
+            "agents": loc.get("agents"),
+            "exit_zone": loc.get("exit_zone"),
+            "artifacts": loc.get("artifacts"),
+            "items": loc.get("items"),
+            "region": loc.get("region"),
+            "image_url": loc.get("image_url"),
+            "debug_layout": loc.get("debug_layout"),
         }
     return result
 
@@ -406,7 +562,13 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
 
 def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[str, Any]:
     if mode == "full":
-        return copy.deepcopy(state)
+        projected = copy.deepcopy(state)
+        agents = projected.get("agents")
+        if isinstance(agents, dict):
+            for agent in agents.values():
+                if isinstance(agent, dict):
+                    _enrich_agent_full_projection(agent)
+        return projected
 
     if mode in {"game", "zone-lite"}:
         return _project_zone_game(state)

@@ -15,6 +15,7 @@ kill_agent.  This guarantees consistent state invariants after death:
 """
 from __future__ import annotations
 
+import copy
 import uuid
 from typing import Any
 
@@ -26,6 +27,8 @@ from app.games.zone_stalkers.decision.active_plan_manager import (
 )
 from app.games.zone_stalkers.decision.debug.brain_trace import append_brain_trace_event
 from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+
+CORPSE_DECAY_TURNS = 7200
 
 
 def kill_agent(
@@ -114,6 +117,61 @@ def kill_agent(
 
     # 6. Death memory record
     _loc_id = location_id or agent.get("location_id")
+    _corpse_id = f"corpse_{agent_id}_{world_turn}"
+    _corpse_inventory = copy.deepcopy(agent.get("inventory", [])) if isinstance(agent.get("inventory"), list) else []
+    _corpse_money = int(agent.get("money") or 0)
+    _fully_looted = (not _corpse_inventory and _corpse_money <= 0)
+    agent["corpse_visible"] = True
+    agent["death_turn"] = world_turn
+    agent["death_cause"] = cause
+    agent["corpse_location_id"] = _loc_id
+    agent["corpse_id"] = _corpse_id
+    if _loc_id:
+        _corpses: list[dict[str, Any]] | None = None
+        if runtime is not None and hasattr(runtime, "mutable_location_list"):
+            try:
+                _corpses = runtime.mutable_location_list(_loc_id, "corpses")
+            except Exception:
+                _corpses = None
+        if _corpses is None:
+            try:
+                from app.games.zone_stalkers.rules import tick_rules as _tick_rules  # noqa: PLC0415
+
+                _corpses = _tick_rules._runtime_mutable_location_list(state, _loc_id, "corpses")
+            except Exception:
+                _corpses = None
+        if _corpses is None:
+            _locations = state.get("locations", {})
+            _loc_state = _locations.get(_loc_id)
+            if isinstance(_loc_state, dict):
+                _value = _loc_state.get("corpses")
+                if not isinstance(_value, list):
+                    _value = []
+                    _loc_state["corpses"] = _value
+                _corpses = _value
+        if isinstance(_corpses, list):
+            _corpses.append({
+                "corpse_id": _corpse_id,
+                "agent_id": agent_id,
+                "agent_name": agent.get("name", agent_id),
+                "location_id": _loc_id,
+                "created_turn": world_turn,
+                "death_cause": cause,
+                "killer_id": (
+                    (memory_effects or {}).get("killer_id")
+                    or (event_payload_extra or {}).get("killer_id")
+                ),
+                "visible": True,
+                "decay_turn": world_turn + CORPSE_DECAY_TURNS,
+                "lootable": (not _fully_looted),
+                "inventory": _corpse_inventory,
+                "money": _corpse_money,
+                "looted_by": [],
+                "fully_looted": _fully_looted,
+            })
+    agent["inventory"] = []
+    agent["money"] = 0
+    agent["loot_transferred_to_corpse"] = True
     _title = memory_title or "💀 Смерть"
     _summary = memory_summary or f"Агент погиб. Причина: {cause}."
     _effects: dict[str, Any] = {"action_kind": "death", "cause": cause}

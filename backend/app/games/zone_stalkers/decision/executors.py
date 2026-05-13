@@ -53,6 +53,7 @@ from .models.plan import (
     STEP_CONSUME_ITEM,
     STEP_EQUIP_ITEM,
     STEP_PICKUP_ITEM,
+    STEP_LOOT_CORPSE,
     STEP_ASK_FOR_INTEL,
     STEP_LOOK_FOR_TRACKS,
     STEP_QUESTION_WITNESSES,
@@ -115,6 +116,7 @@ def execute_plan_step(
         STEP_CONSUME_ITEM:         _exec_consume,
         STEP_EQUIP_ITEM:           _exec_equip,
         STEP_PICKUP_ITEM:          _exec_pickup,
+        STEP_LOOT_CORPSE:          _exec_loot_corpse,
         STEP_HEAL_SELF:            _exec_consume,   # same as consume
         STEP_ASK_FOR_INTEL:        _exec_ask_for_intel,
         STEP_LOOK_FOR_TRACKS:      _exec_look_for_tracks,
@@ -134,7 +136,7 @@ def execute_plan_step(
     # If the step is a one-tick action (not a scheduled multi-tick action),
     # advance the plan index immediately.
     if step.kind in (
-        STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM,
+        STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM, STEP_LOOT_CORPSE,
         STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM, STEP_TRADE_SELL_ITEM,
         STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
         STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
@@ -502,6 +504,156 @@ def _exec_pickup(
     return _bot_pickup_item_from_ground(agent_id, agent, item_types, state, world_turn) or []
 
 
+def _exec_loot_corpse(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    from app.games.zone_stalkers.balance.items import (
+        AMMO_ITEM_TYPES,
+        FOOD_ITEM_TYPES,
+        DRINK_ITEM_TYPES,
+        HEAL_ITEM_TYPES,
+        WEAPON_ITEM_TYPES,
+        ARMOR_ITEM_TYPES,
+        AMMO_FOR_WEAPON,
+    )
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
+    _ = ctx
+    location_id = str(agent.get("location_id") or step.payload.get("location_id") or "")
+    corpse_id = str(step.payload.get("corpse_id") or "")
+    take_money = bool(step.payload.get("take_money", True))
+    take_all = bool(step.payload.get("take_all", False))
+    max_items = int(step.payload.get("max_items") or 0)
+    if not location_id:
+        agent["action_used"] = True
+        return []
+
+    loc = state.get("locations", {}).get(location_id, {})
+    corpses = loc.get("corpses") if isinstance(loc, dict) else None
+    if not isinstance(corpses, list):
+        agent["action_used"] = True
+        return []
+
+    def _is_important(item: dict[str, Any]) -> bool:
+        item_type = str(item.get("type") or "")
+        if item_type in ARTIFACT_TYPES:
+            return True
+        if item_type in FOOD_ITEM_TYPES or item_type in DRINK_ITEM_TYPES or item_type in HEAL_ITEM_TYPES:
+            return True
+        if item_type in WEAPON_ITEM_TYPES and not isinstance((agent.get("equipment") or {}).get("weapon"), dict):
+            return True
+        if item_type in ARMOR_ITEM_TYPES and not isinstance((agent.get("equipment") or {}).get("armor"), dict):
+            return True
+        if item_type in AMMO_ITEM_TYPES:
+            weapon = (agent.get("equipment") or {}).get("weapon") or {}
+            weapon_type = str(weapon.get("type") or "")
+            compatible = AMMO_FOR_WEAPON.get(weapon_type)
+            return bool(compatible and compatible == item_type)
+        return False
+
+    target_corpse: dict[str, Any] | None = None
+    for corpse in corpses:
+        if not isinstance(corpse, dict):
+            continue
+        if not bool(corpse.get("visible", True)):
+            continue
+        if not bool(corpse.get("lootable", True)):
+            continue
+        if corpse_id and str(corpse.get("corpse_id") or "") != corpse_id:
+            continue
+        target_corpse = corpse
+        break
+    if target_corpse is None:
+        agent["action_used"] = True
+        return []
+
+    corpse_inventory = target_corpse.get("inventory")
+    if not isinstance(corpse_inventory, list):
+        corpse_inventory = []
+        target_corpse["inventory"] = corpse_inventory
+    selected_pairs = [
+        (idx, item)
+        for idx, item in enumerate(corpse_inventory)
+        if isinstance(item, dict) and (take_all or _is_important(item))
+    ]
+    if max_items > 0:
+        selected_pairs = selected_pairs[:max_items]
+
+    selected_indices = {idx for idx, _ in selected_pairs}
+    selected_items = [item for _, item in selected_pairs]
+    items_taken = [dict(item) for item in selected_items]
+    if items_taken:
+        agent_inventory = agent.get("inventory")
+        if not isinstance(agent_inventory, list):
+            agent_inventory = []
+            agent["inventory"] = agent_inventory
+        agent_inventory.extend(items_taken)
+    target_corpse["inventory"] = [
+        item for idx, item in enumerate(corpse_inventory)
+        if idx not in selected_indices
+    ]
+
+    money_taken = 0
+    corpse_money = int(target_corpse.get("money") or 0)
+    if take_money and corpse_money > 0:
+        money_taken = corpse_money
+        target_corpse["money"] = 0
+        agent["money"] = int(agent.get("money") or 0) + money_taken
+
+    looted_by = target_corpse.get("looted_by")
+    if not isinstance(looted_by, list):
+        looted_by = []
+        target_corpse["looted_by"] = looted_by
+    if agent_id not in looted_by and (items_taken or money_taken > 0):
+        looted_by.append(agent_id)
+
+    target_corpse["fully_looted"] = (
+        len(target_corpse.get("inventory") or []) == 0 and int(target_corpse.get("money") or 0) <= 0
+    )
+    if target_corpse["fully_looted"]:
+        target_corpse["lootable"] = False
+
+    important_items_taken = [str(item.get("type") or "") for item in items_taken]
+    if items_taken or money_taken > 0:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "action",
+            "💼 Обыскал труп",
+            {
+                "action_kind": "corpse_looted",
+                "corpse_id": str(target_corpse.get("corpse_id") or ""),
+                "dead_agent_id": str(target_corpse.get("agent_id") or ""),
+                "location_id": location_id,
+                "items_taken_count": len(items_taken),
+                "money_taken": money_taken,
+                "important_items_taken": important_items_taken,
+            },
+            summary=f"Обыскал труп и забрал {len(items_taken)} предмет(ов) и {money_taken} денег.",
+        )
+
+    agent["action_used"] = True
+    return [
+        {
+            "event_type": "corpse_looted",
+            "payload": {
+                "agent_id": agent_id,
+                "corpse_id": str(target_corpse.get("corpse_id") or ""),
+                "location_id": location_id,
+                "items_taken_count": len(items_taken),
+                "money_taken": money_taken,
+            },
+        }
+    ]
+
+
 def _exec_ask_for_intel(
     agent_id: str,
     agent: dict[str, Any],
@@ -825,6 +977,37 @@ def _exec_search_target(
                 },
                 summary="Зафиксировал видимое снаряжение цели.",
             )
+    elif target and not target.get("is_alive", True) and target_loc == current_loc:
+        corpse = next(
+            (
+                raw_corpse
+                for raw_corpse in (state.get("locations", {}).get(current_loc, {}).get("corpses") or [])
+                if isinstance(raw_corpse, dict)
+                and bool(raw_corpse.get("visible", True))
+                and str(raw_corpse.get("agent_id") or "") == target_id
+            ),
+            None,
+        )
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "observation",
+            f"☠️ Обнаружено тело цели: «{target.get('name', target_id)}»",
+            {
+                "action_kind": "target_corpse_seen",
+                "target_id": target_id,
+                "target_name": target.get("name", target_id),
+                "corpse_id": (corpse or {}).get("corpse_id"),
+                "corpse_location_id": current_loc,
+                "location_id": current_loc,
+                "death_cause": (corpse or {}).get("death_cause") or target.get("death_cause"),
+                "killer_id": (corpse or {}).get("killer_id"),
+                "directly_observed": True,
+                "confidence": 0.95,
+            },
+            summary="Нашёл тело цели в текущей локации.",
+        )
     else:
         expected_loc = step.payload.get("target_location_id") or current_loc
         failed_search_count = _count_target_not_found_failures(
@@ -961,24 +1144,55 @@ def _exec_confirm_kill(
         return []
 
     target = state.get("agents", {}).get(target_id)
+    target_name = target.get("name", target_id) if isinstance(target, dict) else target_id
     if isinstance(target, dict) and not target.get("is_alive", True):
-        target_name = target.get("name", target_id)
-        _add_memory(
-            agent,
-            world_turn,
-            state,
-            "observation",
-            f"✅ Подтверждена ликвидация цели «{target_name}»",
-            {
-                "action_kind": "target_death_confirmed",
-                "target_id": target_id,
-                "target_name": target_name,
-                "location_id": target.get("location_id"),
-                "killer_id": agent_id,
-                "cause": "combat",
-            },
-            summary=f"Подтвердил, что цель «{target_name}» ликвидирована.",
-        )
+        current_loc = str(agent.get("location_id") or "")
+        corpse: dict[str, Any] | None = None
+        for raw_corpse in (state.get("locations", {}).get(current_loc, {}).get("corpses") or []):
+            if (
+                isinstance(raw_corpse, dict)
+                and bool(raw_corpse.get("visible", True))
+                and str(raw_corpse.get("agent_id") or "") == target_id
+            ):
+                corpse = raw_corpse
+                break
+
+        direct_confirmation = bool(corpse)
+        if direct_confirmation:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                f"✅ Подтверждена ликвидация цели «{target_name}»",
+                {
+                    "action_kind": "target_death_confirmed",
+                    "target_id": target_id,
+                    "target_name": target_name,
+                    "confirmation_source": "self_observed_body",
+                    "directly_observed": True,
+                    "corpse_id": (corpse or {}).get("corpse_id"),
+                    "corpse_location_id": current_loc,
+                    "target_death_cause": (corpse or {}).get("death_cause") or target.get("death_cause"),
+                    "killer_id": (corpse or {}).get("killer_id"),
+                    "location_id": current_loc,
+                },
+                summary=f"Лично подтвердил смерть цели «{target_name}» по телу.",
+            )
+        else:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                "❌ Ликвидация цели не подтверждена",
+                {
+                    "action_kind": "hunt_failed",
+                    "target_id": target_id,
+                    "reason": "no_direct_confirmation",
+                },
+                summary="Цель мертва, но без прямого подтверждения на месте.",
+            )
     else:
         _add_memory(
             agent,

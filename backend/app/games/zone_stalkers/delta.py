@@ -31,7 +31,6 @@ _AGENT_DELTA_FIELDS: frozenset[str] = frozenset({
 _LOCATION_HOT_FIELDS: frozenset[str] = frozenset({
     "agents", "artifacts", "items", "anomaly_activity",
     "dominant_anomaly_type",
-    "image_url", "image_slots", "primary_image_slot",
 })
 
 # Fields compared per trader to detect changes
@@ -132,9 +131,6 @@ def compact_location_for_delta(location: dict[str, Any]) -> dict[str, Any]:
         "items": items[:5] if items else [],
         "anomaly_activity": location.get("anomaly_activity"),
         "dominant_anomaly_type": location.get("dominant_anomaly_type"),
-        "image_url": location.get("image_url"),
-        "image_slots": location.get("image_slots"),
-        "primary_image_slot": location.get("primary_image_slot"),
     }
 
 

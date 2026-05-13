@@ -6,7 +6,7 @@ from app.games.zone_stalkers.decision.models.agent_context import AgentContext
 from app.games.zone_stalkers.decision.models.intent import Intent
 from app.games.zone_stalkers.decision.models.plan import STEP_TRAVEL_TO_LOCATION, STEP_WAIT
 from app.games.zone_stalkers.decision.objectives.generator import evaluate_kill_target_combat_readiness
-from app.games.zone_stalkers.decision.planner import _plan_get_rich
+from app.games.zone_stalkers.decision.planner import _plan_get_rich, _plan_hunt_target
 
 
 def test_killer_attacks_visible_target_when_combat_ready() -> None:
@@ -142,3 +142,49 @@ def test_get_money_for_resupply_waits_when_all_sources_exhausted() -> None:
     assert plan is not None
     assert plan.steps[0].kind == STEP_WAIT
     assert plan.steps[0].payload["reason"] == "get_rich_sources_exhausted"
+
+
+def test_planner_prefilters_exhausted_witness_source_before_travel() -> None:
+    agent = {
+        "id": "npc_1",
+        "location_id": "loc_a",
+        "kill_target_id": "enemy_1",
+        "equipment": {"weapon": {"type": "pistol"}},
+        "memory_v3": {
+            "records": {
+                "m1": {
+                    "kind": "witness_source_exhausted",
+                    "created_turn": 90,
+                    "location_id": "loc_b",
+                    "details": {
+                        "action_kind": "witness_source_exhausted",
+                        "objective_key": "TRACK_TARGET",
+                        "location_id": "loc_b",
+                        "target_id": "enemy_1",
+                        "cooldown_until_turn": 150,
+                    },
+                }
+            }
+        },
+    }
+    locations = {
+        "loc_a": {"id": "loc_a", "anomaly_activity": 0, "connections": [{"to": "loc_b", "travel_time": 10}]},
+        "loc_b": {"id": "loc_b", "anomaly_activity": 0, "connections": [{"to": "loc_a", "travel_time": 10}]},
+    }
+    ctx = AgentContext(
+        agent_id="npc_1",
+        self_state=agent,
+        location_state=locations["loc_a"],
+        world_context={},
+    )
+    intent = Intent(
+        kind="hunt_target",
+        score=0.8,
+        target_id="enemy_1",
+        target_location_id="loc_b",
+        metadata={"objective_key": "TRACK_TARGET"},
+    )
+    plan = _plan_hunt_target(ctx, intent, {"locations": locations, "agents": {}}, world_turn=100)
+    assert plan is not None
+    assert plan.steps[0].kind == STEP_WAIT
+    assert plan.steps[0].payload["reason"] == "support_source_exhausted_preplan"

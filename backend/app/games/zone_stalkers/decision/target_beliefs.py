@@ -48,6 +48,9 @@ _LEAD_WEIGHTS: dict[str, float] = {
 _KIND_ALIASES: dict[str, str] = {
     "intel_from_trader": "target_intel",
     "intel_from_stalker": "target_intel",
+    "target_corpse_reported": "target_last_known_location",
+    "target_corpse_seen": "target_last_known_location",
+    "target_death_confirmed": "target_last_known_location",
 }
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
@@ -153,7 +156,12 @@ def _record_to_hunt_lead(record: dict[str, Any], *, target_id: str, world_turn: 
         return None
 
     created_turn = _coerce_int(record.get("created_turn")) or 0
-    location_id = record.get("location_id") or details.get("location_id")
+    location_id = (
+        record.get("location_id")
+        or details.get("location_id")
+        or details.get("reported_corpse_location_id")
+        or details.get("corpse_location_id")
+    )
     route_from_id = details.get("from_location_id") or details.get("route_from_id")
     route_to_id = details.get("to_location_id") or details.get("route_to_id")
     if kind in {"target_moved", "target_route_observed"} and not route_to_id and location_id:
@@ -295,6 +303,7 @@ def _aggregate_location_hypotheses(
     route_source_refs: dict[tuple[str | None, str | None], list[str]] = defaultdict(list)
     route_reasons: dict[tuple[str | None, str | None], tuple[float, str]] = {}
     route_freshness: dict[tuple[str | None, str | None], float] = defaultdict(float)
+    has_corpse_evidence: dict[str, bool] = defaultdict(bool)
 
     failed_counts, cooldowns = _collect_failed_search_stats(leads, world_turn=world_turn)
     exhausted_locations = tuple(
@@ -317,6 +326,9 @@ def _aggregate_location_hypotheses(
             prev_reason = location_reasons.get(location_id)
             if prev_reason is None or reason_score > prev_reason[0]:
                 location_reasons[location_id] = (reason_score, lead.kind)
+            action_kind = str((lead.details or {}).get("action_kind") or "")
+            if action_kind in {"target_corpse_reported", "target_corpse_seen", "target_death_confirmed"}:
+                has_corpse_evidence[location_id] = True
 
         if lead.kind in {"target_moved", "target_route_observed"} and (lead.route_from_id or lead.route_to_id):
             route_key = (lead.route_from_id, lead.route_to_id or lead.location_id)
@@ -329,6 +341,8 @@ def _aggregate_location_hypotheses(
                 route_reasons[route_key] = (effective, lead.kind)
 
     for location_id, score in list(location_scores.items()):
+        if has_corpse_evidence.get(location_id):
+            continue
         miss_count = int(failed_counts.get(location_id, 0))
         if miss_count <= 0:
             continue
@@ -460,7 +474,8 @@ def build_target_belief(
 
     for record in _iter_memory_v3_records(agent):
         details = _coerce_details(record)
-        kind = _canonical_kind(str(record.get("kind") or ""))
+        raw_kind = str(record.get("kind") or "")
+        kind = _canonical_kind(raw_kind)
         if kind == "target_equipment_seen":
             equipment_known = True
             if record.get("id"):
@@ -477,7 +492,7 @@ def build_target_belief(
                 if record.get("id"):
                     source_refs.append(f"memory:{record.get('id')}")
             continue
-        if kind == "target_death_confirmed":
+        if raw_kind == "target_death_confirmed":
             target_alive_from_memory = False
             if record.get("id"):
                 source_refs.append(f"memory:{record.get('id')}")

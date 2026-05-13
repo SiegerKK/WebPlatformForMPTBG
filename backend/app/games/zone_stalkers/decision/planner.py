@@ -59,6 +59,7 @@ from .models.plan import (
     STEP_TRADE_BUY_ITEM,
     STEP_TRADE_SELL_ITEM,
     STEP_CONSUME_ITEM,
+    STEP_LOOT_CORPSE,
     STEP_ASK_FOR_INTEL,
     STEP_LOOK_FOR_TRACKS,
     STEP_QUESTION_WITNESSES,
@@ -162,6 +163,53 @@ def _is_location_exhausted_for_money(
     return False
 
 
+def _is_support_source_exhausted(
+    agent: dict[str, Any],
+    *,
+    location_id: str | None,
+    target_id: str | None,
+    objective_key: str,
+    world_turn: int,
+) -> bool:
+    memory_v3 = agent.get("memory_v3")
+    records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+    location_id_str = str(location_id or "")
+    target_id_str = str(target_id or "")
+    objective_key_str = str(objective_key or "")
+    for rec in records.values():
+        if not isinstance(rec, dict):
+            continue
+        details = rec.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        action_kind = str(details.get("action_kind") or rec.get("kind") or "")
+        if action_kind not in {"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"}:
+            continue
+        rec_location_id = str(details.get("location_id") or rec.get("location_id") or "")
+        if location_id_str and rec_location_id and rec_location_id != location_id_str:
+            continue
+        rec_target_id = str(details.get("target_id") or "")
+        if target_id_str and rec_target_id and rec_target_id != target_id_str:
+            continue
+        rec_objective_key = str(details.get("objective_key") or "")
+        if rec_objective_key and rec_objective_key != objective_key_str:
+            continue
+        cooldown_until = details.get("cooldown_until_turn")
+        if isinstance(cooldown_until, (int, float)) and int(cooldown_until) <= world_turn:
+            continue
+        if action_kind == "anomaly_search_exhausted" and objective_key_str in {"GET_MONEY_FOR_RESUPPLY", "FIND_ARTIFACTS"}:
+            return True
+        if action_kind in {"support_source_exhausted", "witness_source_exhausted"} and objective_key_str in {
+            "GATHER_INTEL",
+            "LOCATE_TARGET",
+            "VERIFY_LEAD",
+            "TRACK_TARGET",
+            "GET_MONEY_FOR_RESUPPLY",
+        }:
+            return True
+    return False
+
+
 # ── Plan builders ─────────────────────────────────────────────────────────────
 
 def _plan_flee_emission(
@@ -250,6 +298,21 @@ def _plan_heal_or_flee(
         return Plan(
             intent_kind=intent.kind, steps=[step], interruptible=False,
             confidence=1.0, created_turn=world_turn,
+        )
+
+    loot_step = _build_local_corpse_loot_step(
+        agent=agent,
+        state=state,
+        preferred_categories={"medical"},
+        take_money=True,
+    )
+    if loot_step is not None:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[loot_step],
+            interruptible=False,
+            confidence=0.95,
+            created_turn=world_turn,
         )
 
     # No heal item in inventory — evaluate buy affordability.
@@ -497,6 +560,21 @@ def _plan_seek_consumable(
         # Non-critical/low need: avoid spending inventory consumables.
         return None
 
+    loot_step = _build_local_corpse_loot_step(
+        agent=agent,
+        state=state,
+        preferred_categories={category},
+        take_money=True,
+    )
+    if loot_step is not None:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[loot_step],
+            interruptible=False,
+            confidence=0.95,
+            created_turn=world_turn,
+        )
+
     trader_loc = _nearest_trader_location(ctx, state)
     agent_loc = agent.get("location_id")
 
@@ -511,19 +589,30 @@ def _plan_seek_consumable(
                 compatible_item_types=compatible_types,
             )
             if afford.can_buy_now:
+                consume_type = afford.cheapest_viable_item_type
                 return Plan(
                     intent_kind=intent.kind,
-                    steps=[PlanStep(
-                        STEP_TRADE_BUY_ITEM,
-                        {
-                            "item_category": category,
-                            "reason": f"buy_{category}_survival",
-                            "buy_mode": "survival_cheapest",
-                            "compatible_item_types": sorted(compatible_types),
-                            "required_price": afford.required_price,
-                        },
-                        interruptible=False,
-                    )],
+                    steps=[
+                        PlanStep(
+                            STEP_TRADE_BUY_ITEM,
+                            {
+                                "item_category": category,
+                                "reason": f"buy_{category}_survival",
+                                "buy_mode": "survival_cheapest",
+                                "compatible_item_types": sorted(compatible_types),
+                                "required_price": afford.required_price,
+                            },
+                            interruptible=False,
+                        ),
+                        PlanStep(
+                            STEP_CONSUME_ITEM,
+                            {
+                                "item_type": consume_type,
+                                "reason": f"emergency_{category}",
+                            },
+                            interruptible=False,
+                        ),
+                    ],
                     interruptible=False, confidence=1.0, created_turn=world_turn,
                 )
 
@@ -552,6 +641,14 @@ def _plan_seek_consumable(
                             "buy_mode": "survival_cheapest",
                             "compatible_item_types": sorted(compatible_types),
                             "required_price": afford.required_price,
+                        },
+                        interruptible=False,
+                    ),
+                    PlanStep(
+                        STEP_CONSUME_ITEM,
+                        {
+                            "item_type": afford.cheapest_viable_item_type,
+                            "reason": f"emergency_{category}",
                         },
                         interruptible=False,
                     ),
@@ -604,6 +701,14 @@ def _plan_seek_consumable(
                                  "compatible_item_types": sorted(compatible_types),
                              },
                              interruptible=False),
+                    PlanStep(
+                        STEP_CONSUME_ITEM,
+                        {
+                            "item_type": remote_afford.cheapest_viable_item_type,
+                            "reason": f"emergency_{category}",
+                        },
+                        interruptible=False,
+                    ),
                 ]
                 return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
             steps = [
@@ -618,6 +723,14 @@ def _plan_seek_consumable(
                              "compatible_item_types": sorted(compatible_types),
                          },
                          interruptible=False),
+                PlanStep(
+                    STEP_CONSUME_ITEM,
+                    {
+                        "item_type": remote_afford.cheapest_viable_item_type,
+                        "reason": f"emergency_{category}",
+                    },
+                    interruptible=False,
+                ),
             ]
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
 
@@ -793,6 +906,90 @@ def _find_immediate_need(
     return None
 
 
+def _build_local_corpse_loot_step(
+    *,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    preferred_categories: set[str],
+    take_money: bool = True,
+) -> PlanStep | None:
+    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    from app.games.zone_stalkers.balance.items import (
+        AMMO_ITEM_TYPES,
+        AMMO_FOR_WEAPON,
+        ARMOR_ITEM_TYPES,
+        DRINK_ITEM_TYPES,
+        FOOD_ITEM_TYPES,
+        HEAL_ITEM_TYPES,
+        WEAPON_ITEM_TYPES,
+    )
+
+    location_id = str(agent.get("location_id") or "")
+    if not location_id:
+        return None
+    corpses = (state.get("locations", {}).get(location_id, {}) or {}).get("corpses")
+    if not isinstance(corpses, list):
+        return None
+
+    preferred = {str(category).strip().lower() for category in preferred_categories}
+    weapon = (agent.get("equipment") or {}).get("weapon") or {}
+    weapon_type = str(weapon.get("type") or "")
+    compatible_ammo = AMMO_FOR_WEAPON.get(weapon_type)
+
+    for corpse in corpses:
+        if not isinstance(corpse, dict):
+            continue
+        if not bool(corpse.get("visible", True)) or not bool(corpse.get("lootable", True)):
+            continue
+        inventory = corpse.get("inventory")
+        if not isinstance(inventory, list):
+            inventory = []
+        corpse_money = int(corpse.get("money") or 0)
+        has_useful = False
+        for item in inventory:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if "artifact" in preferred and item_type in ARTIFACT_TYPES:
+                has_useful = True
+                break
+            if "food" in preferred and item_type in FOOD_ITEM_TYPES:
+                has_useful = True
+                break
+            if "drink" in preferred and item_type in DRINK_ITEM_TYPES:
+                has_useful = True
+                break
+            if "medical" in preferred and item_type in HEAL_ITEM_TYPES:
+                has_useful = True
+                break
+            if "weapon" in preferred and item_type in WEAPON_ITEM_TYPES:
+                has_useful = True
+                break
+            if "armor" in preferred and item_type in ARMOR_ITEM_TYPES:
+                has_useful = True
+                break
+            if "ammo" in preferred and item_type in AMMO_ITEM_TYPES:
+                if compatible_ammo is None or compatible_ammo == item_type:
+                    has_useful = True
+                    break
+            if "any" in preferred:
+                has_useful = True
+                break
+        if not has_useful and not (take_money and corpse_money > 0):
+            continue
+        return PlanStep(
+            kind=STEP_LOOT_CORPSE,
+            payload={
+                "corpse_id": str(corpse.get("corpse_id") or ""),
+                "location_id": location_id,
+                "take_money": take_money,
+            },
+            interruptible=False,
+            expected_duration_ticks=1,
+        )
+    return None
+
+
 def _desired_supply_count(risk_tolerance: float, min_count: int, max_count: int) -> int:
     """Desired inventory count for a supply category based on risk tolerance.
 
@@ -875,6 +1072,29 @@ def _plan_resupply(
                 _buy_category = "medical"
 
         if need_types is not None:
+            preferred_categories = {
+                "food" if _buy_category == "food" else "",
+                "drink" if _buy_category == "drink" else "",
+                "medical" if _buy_category in ("medical", "medicine") else "",
+                "weapon" if _buy_category == "weapon" else "",
+                "armor" if _buy_category == "armor" else "",
+                "ammo" if _buy_category == "ammo" else "",
+            } - {""}
+            loot_step = _build_local_corpse_loot_step(
+                agent=agent,
+                state=state,
+                preferred_categories=preferred_categories,
+                take_money=True,
+            )
+            if loot_step is not None:
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[loot_step],
+                    interruptible=False,
+                    confidence=0.95,
+                    created_turn=world_turn,
+                )
+
             mem_loc = _find_item_memory_location(agent, need_types, state)
             if mem_loc and mem_loc != agent_loc:
                 return Plan(
@@ -1000,6 +1220,29 @@ def _plan_resupply(
 
     if not buy_category:
         return _plan_resupply_upgrade(ctx, intent, state, world_turn, need_result)
+
+    preferred_categories = {
+        "food" if buy_category == "food" else "",
+        "drink" if buy_category == "drink" else "",
+        "medical" if buy_category == "medical" else "",
+        "weapon" if buy_category == "weapon" else "",
+        "armor" if buy_category == "armor" else "",
+        "ammo" if buy_category == "ammo" else "",
+    } - {""}
+    loot_step = _build_local_corpse_loot_step(
+        agent=agent,
+        state=state,
+        preferred_categories=preferred_categories,
+        take_money=True,
+    )
+    if loot_step is not None:
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[loot_step],
+            interruptible=False,
+            confidence=0.95,
+            created_turn=world_turn,
+        )
 
     _dominant_actionable, _dominant_blocked_by = is_item_need_actionable(agent, dominant.key)
     if not _dominant_actionable:
@@ -1268,6 +1511,21 @@ def _plan_get_rich(
     )
     objective_key = str((intent.metadata or {}).get("objective_key") or "FIND_ARTIFACTS")
 
+    if objective_key == "GET_MONEY_FOR_RESUPPLY":
+        loot_step = _build_local_corpse_loot_step(
+            agent=agent,
+            state=state,
+            preferred_categories={"artifact"},
+            take_money=True,
+        )
+        if loot_step is not None:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[loot_step],
+                confidence=0.9,
+                created_turn=world_turn,
+            )
+
     # 1. Sell artifacts
     if has_artifacts and trader_loc:
         sell_payload: dict[str, Any] = {"item_category": "artifact"}
@@ -1388,6 +1646,20 @@ def _plan_hunt_target(
     target_id = intent.target_id or ctx.self_state.get("kill_target_id")
     target_loc = intent.target_location_id
     agent_loc = ctx.self_state.get("location_id")
+
+    if objective_key and _is_support_source_exhausted(
+        ctx.self_state,
+        location_id=target_loc,
+        target_id=target_id,
+        objective_key=objective_key,
+        world_turn=world_turn,
+    ):
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[PlanStep(STEP_WAIT, {"reason": "support_source_exhausted_preplan"})],
+            confidence=0.3,
+            created_turn=world_turn,
+        )
 
     if objective_key == "ENGAGE_TARGET":
         if target_loc and target_loc != agent_loc:
@@ -1541,6 +1813,19 @@ def _plan_hunt_target(
                     ),
                 ],
                 confidence=0.8,
+                created_turn=world_turn,
+            )
+        if not target_loc:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(
+                        STEP_QUESTION_WITNESSES,
+                        {"target_id": target_id, "reason": "confirm_kill_location_unknown"},
+                        expected_duration_ticks=1,
+                    )
+                ],
+                confidence=0.6,
                 created_turn=world_turn,
             )
         return Plan(

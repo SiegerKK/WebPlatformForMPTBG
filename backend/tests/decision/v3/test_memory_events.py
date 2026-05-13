@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.games.zone_stalkers.memory.store import ensure_memory_v3
 from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+from app.games.zone_stalkers.memory.memory_events import STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
 from app.games.zone_stalkers.rules.tick_rules import _add_memory
 
 
@@ -317,3 +318,105 @@ def test_write_event_stores_action_kind_in_details() -> None:
     rec = next(iter(ensure_memory_v3(agent)["records"].values()))
     assert rec["kind"] == "emission_warning"  # remapped
     assert rec["details"].get("action_kind") == "emission_imminent"  # original preserved
+
+
+def test_repeated_stalkers_seen_merges_into_semantic_record() -> None:
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(100, 112):
+        entry = _make_entry(
+            world_turn=turn,
+            memory_type="observation",
+            observed="stalkers",
+            location_id="loc_bunker",
+            entity_ids=["agent_debug_0", "agent_debug_7", "trader_sidor"],
+            names=["Сталкер #0", "Сталкер #7", "Сидорович"],
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+
+    records = list(ensure_memory_v3(agent)["records"].values())
+    semantic = [record for record in records if record.get("kind") == "semantic_stalkers_seen"]
+    episodic = [
+        record for record in records
+        if record.get("kind") == "stalkers_seen" and record.get("location_id") == "loc_bunker"
+    ]
+    active_episodic = [record for record in episodic if record.get("status", "active") != "archived"]
+    assert len(semantic) == 1
+    assert len(active_episodic) <= 5
+    sem = semantic[0]
+    assert sem["layer"] == "semantic"
+    assert sem["details"]["times_seen"] >= 11
+    assert sem["details"]["last_seen_turn"] == 111
+    assert sem["details"]["unique_entity_count"] == 3
+
+
+def test_repeated_travel_hop_updates_route_semantic_memory() -> None:
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(200, 206):
+        entry = _make_entry(
+            world_turn=turn,
+            memory_type="action",
+            action_kind="travel_hop",
+            location_id="loc_b",
+            from_location_id="loc_a",
+            to_location_id="loc_b",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+
+    records = list(ensure_memory_v3(agent)["records"].values())
+    route_semantic = [record for record in records if record.get("kind") == "semantic_route_traveled"]
+    assert len(route_semantic) == 1
+    route = route_semantic[0]
+    assert route["layer"] == "spatial"
+    assert route["details"]["from_location_id"] == "loc_a"
+    assert route["details"]["to_location_id"] == "loc_b"
+    assert route["details"]["times_traveled"] >= 6
+    assert route["details"]["last_traveled_turn"] == 205
+
+
+def test_repeated_stalkers_seen_keeps_episodic_under_budget() -> None:
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(100, 300):
+        entry = _make_entry(
+            world_turn=turn,
+            memory_type="observation",
+            observed="stalkers",
+            location_id="loc_repeat",
+            entity_ids=["agent_debug_0", "agent_debug_7"],
+            names=["Сталкер #0", "Сталкер #7"],
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    stalkers_seen = [
+        rec for rec in records
+        if rec.get("kind") == "stalkers_seen" and rec.get("status", "active") != "archived"
+    ]
+    semantic = [rec for rec in records if rec.get("kind") == "semantic_stalkers_seen"]
+    assert len(stalkers_seen) <= STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
+    assert len(semantic) >= 1
+    assert int(semantic[0]["details"].get("times_seen", 0)) > 1
+
+
+def test_repeated_stalkers_seen_updates_semantic_last_seen_turn() -> None:
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in (4010, 4020, 4030):
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry=_make_entry(
+                world_turn=turn,
+                memory_type="observation",
+                observed="stalkers",
+                location_id="loc_semantic",
+                entity_ids=["agent_a", "agent_b"],
+                names=["А", "Б"],
+            ),
+            world_turn=turn,
+        )
+    semantic = [
+        rec for rec in ensure_memory_v3(agent)["records"].values()
+        if rec.get("kind") == "semantic_stalkers_seen"
+    ]
+    assert len(semantic) == 1
+    details = semantic[0]["details"]
+    assert details["times_seen"] >= 3
+    assert details["last_seen_turn"] == 4030

@@ -206,31 +206,6 @@ def test_game_projection_locations_include_required_fields():
     assert loc["terrain_type"] == "military_buildings"
 
 
-def test_game_projection_location_image_migration_does_not_mutate_source_state():
-    state = _sample_state()
-    state["locations"] = {
-        "C1": {
-            "id": "C1",
-            "name": "Loc",
-            "terrain_type": "plain",
-            "anomaly_activity": 0,
-            "dominant_anomaly_type": None,
-            "connections": [],
-            "agents": [],
-            "artifacts": [],
-            "items": [],
-            "image_url": "/media/legacy.jpg",
-        }
-    }
-    projected = project_zone_state(state=state, mode="game")
-    loc = projected["locations"]["C1"]
-    assert (loc.get("image_slots") or {}).get("clear") == "/media/legacy.jpg"
-    assert loc.get("primary_image_slot") == "clear"
-    # Source state must remain untouched by projection.
-    assert "image_slots" not in state["locations"]["C1"]
-    assert "primary_image_slot" not in state["locations"]["C1"]
-
-
 
 # ── debug-map-lite projection tests ──────────────────────────────────────────
 
@@ -306,3 +281,30 @@ def test_size_report_includes_debug_map_lite():
     assert report["debug_map_lite_projection_size_bytes"] > 0
     # lite should be smaller than full/raw state
     assert report["debug_map_lite_projection_size_bytes"] <= report["state_size_bytes"]
+
+
+def test_full_projection_includes_memory_stats_story_and_terminal_state():
+    state = _sample_state()
+    state["agents"]["a1"]["has_left_zone"] = True
+    state["agents"]["a1"]["global_goal_achieved"] = True
+    state["agents"]["a1"]["current_goal"] = "restore_needs"
+    state["agents"]["a1"]["scheduled_action"] = {"type": "explore_anomaly_location", "turns_remaining": 5}
+    state["agents"]["a1"]["memory_v3"]["records"]["r2"] = {
+        "id": "r2",
+        "kind": "stalkers_seen",
+        "layer": "episodic",
+        "created_turn": 11,
+        "summary": "saw stalkers",
+        "details": {"action_kind": "stalkers_seen", "memory_type": "observation"},
+    }
+    projected = project_zone_state(state=state, mode="full")
+    agent = projected["agents"]["a1"]
+    assert "memory_v3_stats" in agent
+    assert "memory_health" in agent
+    assert "story_events" in agent
+    assert "sleep_need" in agent
+    assert agent["current_goal"] == "left_zone"
+    assert agent["scheduled_action"] is None
+    assert agent["terminal_state"]["kind"] == "left_zone"
+    first_story = agent["story_events"][0]
+    assert {"world_turn", "type", "title", "summary", "source", "effects"} <= set(first_story.keys())
