@@ -576,3 +576,48 @@ def test_memory_details_list_truncated_to_limit() -> None:
     sanitized = _sanitize_record_payload(rec, is_critical=False)
     assert len(sanitized.details["items"]) == MEMORY_DETAILS_LIST_MAX_ITEMS
 
+
+def test_repeated_support_source_exhausted_is_deduped_or_bounded() -> None:
+    """support_source_exhausted should keep planner fields while deduplicating repeated spam."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(500, 620):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="support_source_exhausted",
+            target_id="agent_target_1",
+            location_id="loc_support",
+            objective_key="GET_MONEY_FOR_RESUPPLY",
+            cooldown_until_turn=turn + 50,
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    support_recs = [r for r in records if r.get("kind") == "support_source_exhausted"]
+    assert support_recs, "support_source_exhausted should remain retrievable for planner/monitor"
+    assert len(support_recs) <= 5, f"expected dedup/bounded records, got {len(support_recs)}"
+    details = support_recs[-1]["details"]
+    assert details.get("location_id") == "loc_support"
+    assert details.get("target_id") == "agent_target_1"
+    assert details.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
+    assert isinstance(details.get("cooldown_until_turn"), int)
+
+
+def test_anomaly_search_exhausted_preserves_cooldown_until_turn_for_planner() -> None:
+    """anomaly_search_exhausted must keep cooldown_until_turn in retrievable memory."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(700, 730):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="anomaly_search_exhausted",
+            location_id="loc_anomaly",
+            objective_key="GET_MONEY_FOR_RESUPPLY",
+            cooldown_until_turn=turn + 120,
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    exhausted = [r for r in records if r.get("kind") == "anomaly_search_exhausted"]
+    assert exhausted
+    assert len(exhausted) <= 3
+    details = exhausted[-1]["details"]
+    assert details.get("location_id") == "loc_anomaly"
+    assert details.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
+    assert isinstance(details.get("cooldown_until_turn"), int)

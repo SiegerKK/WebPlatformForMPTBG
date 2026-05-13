@@ -57,6 +57,12 @@ def test_active_plan_completed_not_stored() -> None:
     assert len(ensure_memory_v3(agent)["records"]) == 0
 
 
+def test_active_plan_repaired_not_stored() -> None:
+    agent = _make_agent()
+    _write(agent, "active_plan_repaired")
+    assert len(ensure_memory_v3(agent)["records"]) == 0
+
+
 def test_sleep_interval_not_stored() -> None:
     agent = _make_agent()
     _write(agent, "sleep_interval_applied")

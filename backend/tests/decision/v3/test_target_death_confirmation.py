@@ -11,6 +11,7 @@ from app.games.zone_stalkers.rules.tick_rules import (
     _check_global_goal_completion,
     _write_location_observations,
 )
+from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
 from tests.decision.conftest import make_agent, make_minimal_state
 from tests.decision.v3.memory_assertions import has_v3_action, v3_action_records
 
@@ -77,6 +78,89 @@ def test_hunter_gets_corpse_report_but_goal_not_completed() -> None:
     assert has_v3_action(hunter, "target_corpse_reported")
     _check_global_goal_completion("hunter", hunter, state, world_turn=103)
     assert hunter.get("global_goal_achieved") is not True
+
+
+def test_corpse_seen_still_creates_retrievable_memory_before_knowledge_tables() -> None:
+    hunter, target, state = _build_hunter_and_target_state()
+    _kill_target_by_emission(state, target, world_turn=100)
+
+    write_memory_event_to_v3(
+        agent_id="hunter",
+        agent=hunter,
+        legacy_entry={
+            "world_turn": 101,
+            "type": "observation",
+            "summary": "Вижу труп цели в loc_b",
+            "effects": {
+                "action_kind": "corpse_seen",
+                "target_id": "target",
+                "corpse_id": "corpse_target",
+                "location_id": "loc_b",
+            },
+        },
+        world_turn=101,
+    )
+
+    corpse_seen_records = v3_action_records(hunter, "corpse_seen")
+    assert corpse_seen_records, "corpse_seen must remain retrievable before PR3 knowledge tables"
+    details = corpse_seen_records[-1]["details"]
+    assert details.get("target_id") == "target"
+    assert details.get("location_id") == "loc_b"
+
+
+def test_target_corpse_reported_still_creates_retrievable_lead_before_knowledge_tables() -> None:
+    hunter, _, _ = _build_hunter_and_target_state()
+    write_memory_event_to_v3(
+        agent_id="hunter",
+        agent=hunter,
+        legacy_entry={
+            "world_turn": 102,
+            "type": "observation",
+            "summary": "Свидетель сообщил о трупе цели в loc_b",
+            "effects": {
+                "action_kind": "target_corpse_reported",
+                "target_id": "target",
+                "corpse_id": "corpse_target",
+                "location_id": "loc_b",
+                "source_agent_id": "witness",
+            },
+        },
+        world_turn=102,
+    )
+
+    corpse_report_records = v3_action_records(hunter, "target_corpse_reported")
+    assert corpse_report_records, "target_corpse_reported lead must remain retrievable before PR3 knowledge tables"
+    details = corpse_report_records[-1]["details"]
+    assert details.get("target_id") == "target"
+    assert details.get("location_id") == "loc_b"
+    assert details.get("source_agent_id") == "witness"
+
+
+def test_target_corpse_reported_still_indexes_target_and_location() -> None:
+    hunter, _, _ = _build_hunter_and_target_state()
+    write_memory_event_to_v3(
+        agent_id="hunter",
+        agent=hunter,
+        legacy_entry={
+            "world_turn": 103,
+            "type": "observation",
+            "summary": "Есть след по трупу цели",
+            "effects": {
+                "action_kind": "target_corpse_reported",
+                "target_id": "target",
+                "location_id": "loc_b",
+                "source_agent_id": "witness",
+            },
+        },
+        world_turn=103,
+    )
+    memory_v3 = hunter.get("memory_v3", {})
+    records = memory_v3.get("records", {})
+    indexes = memory_v3.get("indexes", {})
+    assert records, "memory_v3 must contain target_corpse_reported record"
+    record_id = next(iter(records.keys()))
+    assert record_id in indexes.get("by_entity", {}).get("target", [])
+    assert record_id in indexes.get("by_location", {}).get("loc_b", [])
 
 
 def test_hunter_travels_to_corpse_and_confirms_kill() -> None:

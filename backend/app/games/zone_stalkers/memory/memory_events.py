@@ -34,6 +34,7 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "active_plan_step_started": "trace_only",
     "active_plan_step_completed": "trace_only",
     "active_plan_completed": "trace_only",
+    "active_plan_repaired": "trace_only",
     "sleep_interval_applied": "trace_only",
 
     # Aggregate into one record — repeated failures should not spam memory_v3.
@@ -46,7 +47,8 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "active_plan_aborted": "memory_aggregate",
     "plan_monitor_abort": "memory_aggregate",
 
-    # Knowledge upsert — update aggregate, no new episodic record each time.
+    # Knowledge upsert — knowledge-first routing; selected kinds still keep
+    # episodic writes for gameplay compatibility until PR3 knowledge tables.
     "stalkers_seen": "knowledge_upsert",
     "target_seen": "knowledge_upsert",
     "target_last_known_location": "knowledge_upsert",
@@ -215,6 +217,8 @@ _DEDUP_KINDS: frozenset[str] = frozenset({
     "no_tracks_found",
     "no_witnesses",
     "witness_source_exhausted",
+    "support_source_exhausted",
+    "anomaly_search_exhausted",
     "corpse_seen",
     "target_corpse_seen",
     "target_corpse_reported",
@@ -541,12 +545,20 @@ def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | No
             str(details.get("from_location_id") or details.get("from_loc") or ""),
             str(details.get("to_location_id") or details.get("to_loc") or location_id),
         )
-    if kind in {"trader_visited", "witness_source_exhausted", "no_witnesses", "no_tracks_found"}:
+    if kind in {
+        "trader_visited",
+        "witness_source_exhausted",
+        "support_source_exhausted",
+        "anomaly_search_exhausted",
+        "no_witnesses",
+        "no_tracks_found",
+    }:
         return (
             kind,
             location_id,
             str(details.get("target_id") or ""),
             str(details.get("trader_id") or ""),
+            str(details.get("objective_key") or ""),
         )
     if kind in {"corpse_seen", "target_corpse_seen", "target_corpse_reported"}:
         return (
@@ -939,8 +951,12 @@ def write_memory_event_to_v3(
         if existing is not None:
             # Update in-place instead of appending a new record.
             details = existing.setdefault("details", {})
+            incoming_details = record.details if isinstance(record.details, dict) else {}
             details["times_seen"] = int(details.get("times_seen", 1)) + 1
             details["last_seen_turn"] = world_turn
+            for key in ("cooldown_until_turn", "location_id", "target_id", "objective_key", "source_kind"):
+                if key in incoming_details:
+                    details[key] = incoming_details.get(key)
             existing["confidence"] = min(1.0, float(existing.get("confidence", 0.7)) + 0.02)
             _METRICS["memory_write_aggregated"] += 1
             return
