@@ -1744,24 +1744,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const, justifyContent: 'flex-end' }}>
-            <button
-              style={{
-                padding: '0.35rem 0.85rem',
-                background: exportingNpcLogs ? '#1e3a5f' : '#0f2d4a',
-                color: exportingNpcLogs ? '#64748b' : '#38bdf8',
-                border: '1px solid #1e3a5f',
-                borderRadius: 7,
-                cursor: exportingNpcLogs ? 'default' : 'pointer',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                opacity: exportingNpcLogs ? 0.7 : 1,
-              }}
-              onClick={handleExportNpcLogs}
-              disabled={exportingNpcLogs}
-              title="Скачать ZIP с дебаг-логами и историей всех НПЦ"
-            >
-              {exportingNpcLogs ? '⏳ Экспорт…' : '⬇ Экспорт логов НПЦ'}
-            </button>
             {myAgentId && (
               <button style={styles.rosterEnterBtn} onClick={enterGame}>
                 ▶ Enter Game as {zoneState.agents[myAgentId]?.name ?? 'Stalker'}
@@ -2529,6 +2511,24 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
             Управление агентами
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <button
+              style={{
+                padding: '0.35rem 0.85rem',
+                background: exportingNpcLogs ? '#1e3a5f' : '#0f2d4a',
+                color: exportingNpcLogs ? '#64748b' : '#38bdf8',
+                border: '1px solid #1e3a5f',
+                borderRadius: 7,
+                cursor: exportingNpcLogs ? 'default' : 'pointer',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                opacity: exportingNpcLogs ? 0.7 : 1,
+              }}
+              onClick={handleExportNpcLogs}
+              disabled={exportingNpcLogs}
+              title="Скачать ZIP с дебаг-логами и историей всех НПЦ"
+            >
+              {exportingNpcLogs ? '⏳ Экспорт…' : '⬇ Экспорт логов НПЦ'}
+            </button>
             <button
               style={styles.btnWarning}
               onClick={() => sendCommand('debug_delete_all_npcs', {})}
