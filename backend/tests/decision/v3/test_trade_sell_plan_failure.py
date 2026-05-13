@@ -918,6 +918,143 @@ class TestAdapterAndFallbackSuppression:
         assert intent.kind != "sell_artifacts"
         assert fallback_objective != "SELL_ARTIFACTS"
 
+    def test_metadata_objective_sell_artifacts_suppressed_by_trader_no_money_cooldown(self) -> None:
+        """metadata['objective_key'] == 'SELL_ARTIFACTS' must NOT bypass the cooldown check."""
+        from app.games.zone_stalkers.rules.tick_rules import _fallback_objective_key_for_intent
+        from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+
+        agent = _make_artifact_agent()
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry={
+                "world_turn": 100,
+                "type": "action",
+                "title": "tsf",
+                "effects": {
+                    "action_kind": "trade_sell_failed",
+                    "reason": "trader_no_money",
+                    "trader_id": "trader_1",
+                    "location_id": "loc_a",
+                    "item_types": ["soul"],
+                    "cooldown_until_turn": 160,
+                },
+            },
+            world_turn=100,
+        )
+
+        trader = {"id": "trader_1", "agent_id": "trader_1", "name": "Sidorovich", "location_id": "loc_a", "is_trader": True}
+        state = _make_minimal_state([agent])
+        state["world_turn"] = 120
+        state["traders"] = {"trader_1": trader}
+
+        # Construct an intent that carries metadata["objective_key"] == "SELL_ARTIFACTS"
+        # This is what adapter/current-context intents look like.
+        class _FakeIntent:
+            kind = "sell_artifacts"
+            metadata = {"objective_key": "SELL_ARTIFACTS"}
+
+        result = _fallback_objective_key_for_intent(
+            _FakeIntent(),
+            agent=agent,
+            state=state,
+            world_turn=120,
+        )
+        # Cooldown is active, only one (broke) trader exists — must redirect.
+        assert result == "FIND_ARTIFACTS", f"Expected FIND_ARTIFACTS, got {result!r}"
+
+    def test_metadata_objective_sell_artifacts_not_suppressed_when_other_trader_available(self) -> None:
+        """Selling is not suppressed when another known trader has no active cooldown."""
+        from app.games.zone_stalkers.rules.tick_rules import _fallback_objective_key_for_intent
+        from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+
+        agent = _make_artifact_agent()
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry={
+                "world_turn": 100,
+                "type": "action",
+                "title": "tsf",
+                "effects": {
+                    "action_kind": "trade_sell_failed",
+                    "reason": "trader_no_money",
+                    "trader_id": "trader_1",
+                    "location_id": "loc_a",
+                    "item_types": ["soul"],
+                    "cooldown_until_turn": 160,
+                },
+            },
+            world_turn=100,
+        )
+
+        # trader_1 is broke and under cooldown; trader_2 is in a different location and fine.
+        trader_1 = {"id": "trader_1", "agent_id": "trader_1", "name": "Sidorovich", "location_id": "loc_a", "is_trader": True}
+        trader_2 = {"id": "trader_2", "agent_id": "trader_2", "name": "Barkeep", "location_id": "loc_b", "is_trader": True}
+        state = _make_minimal_state([agent])
+        state["world_turn"] = 120
+        state["traders"] = {"trader_1": trader_1, "trader_2": trader_2}
+
+        class _FakeIntent:
+            kind = "sell_artifacts"
+            metadata = {"objective_key": "SELL_ARTIFACTS"}
+
+        result = _fallback_objective_key_for_intent(
+            _FakeIntent(),
+            agent=agent,
+            state=state,
+            world_turn=120,
+        )
+        # Alternative trader is available — must NOT redirect to FIND_ARTIFACTS.
+        assert result != "FIND_ARTIFACTS", f"Expected SELL_ARTIFACTS (or None), got {result!r}"
+
+    def test_adapter_current_context_sell_artifacts_does_not_bypass_trader_no_money_cooldown(self) -> None:
+        """Full adapter path: even when current-context source provides metadata objective key,
+        the trader_no_money cooldown must still suppress SELL_ARTIFACTS."""
+        from app.games.zone_stalkers.rules.tick_rules import _fallback_objective_key_for_intent
+        from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+
+        agent = _make_artifact_agent()
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry={
+                "world_turn": 50,
+                "type": "action",
+                "title": "tsf",
+                "effects": {
+                    "action_kind": "trade_sell_failed",
+                    "reason": "trader_no_money",
+                    "trader_id": "trader_1",
+                    "location_id": "loc_a",
+                    "item_types": ["soul"],
+                    "cooldown_until_turn": 120,
+                },
+            },
+            world_turn=50,
+        )
+
+        trader = {"id": "trader_1", "agent_id": "trader_1", "name": "Sidorovich", "location_id": "loc_a", "is_trader": True}
+        state = _make_minimal_state([agent])
+        state["world_turn"] = 70
+        state["traders"] = {"trader_1": trader}
+
+        # Simulate exactly what the adapter/current-context path produces:
+        # kind == "sell_artifacts" AND metadata["objective_key"] == "SELL_ARTIFACTS"
+        class _AdapterIntent:
+            kind = "sell_artifacts"
+            metadata = {"objective_key": "SELL_ARTIFACTS", "source": "current_context"}
+
+        result = _fallback_objective_key_for_intent(
+            _AdapterIntent(),
+            agent=agent,
+            state=state,
+            world_turn=70,
+        )
+        assert result == "FIND_ARTIFACTS", (
+            f"Adapter intent with metadata.objective_key='SELL_ARTIFACTS' bypassed cooldown: got {result!r}"
+        )
+
 
 class TestNoMoneyScenarioRegression:
     def test_npc_does_not_stay_in_bunker_after_trader_no_money(self) -> None:
