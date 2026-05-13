@@ -71,6 +71,7 @@ _SEARCH_EXHAUSTION_THRESHOLD = 3
 _SEARCH_LOCATION_COOLDOWN_TURNS = 300
 # Fix 6 — cooldown turns after exhausting a witness source at a location
 WITNESS_SOURCE_COOLDOWN_TURNS = 180
+TRADE_FAIL_TRADER_NO_MONEY = "trader_no_money"
 
 
 def execute_plan_step(
@@ -504,6 +505,40 @@ def _write_trade_sell_failed_memory(
     )
 
 
+def _artifact_sell_price(
+    item: dict[str, Any],
+    artifact_types: dict[str, dict[str, Any]],
+) -> int:
+    item_type = str(item.get("type") or "")
+    fallback_cfg = artifact_types.get(item_type) or {}
+    item_value_raw = item.get("value")
+    item_value = int(item_value_raw if item_value_raw is not None else (fallback_cfg.get("value") or 0))
+    if item_value <= 0:
+        return 0
+    return int(item_value * 0.6)
+
+
+def _any_sellable_item_price(
+    item: dict[str, Any],
+    item_types_cfg: dict[str, dict[str, Any]],
+    artifact_types: dict[str, dict[str, Any]],
+) -> int:
+    item_type = str(item.get("type") or "")
+    base_type = str((item_types_cfg.get(item_type) or {}).get("type") or item_type)
+    if base_type in {"medical", "consumable", "ammo", "secret_document"}:
+        return 0
+    item_value_raw = item.get("value")
+    fallback_value = (
+        (item_types_cfg.get(item_type) or {}).get("value")
+        or (artifact_types.get(item_type) or {}).get("value")
+        or 0
+    )
+    item_value = int(item_value_raw if item_value_raw is not None else fallback_value)
+    if item_value <= 0:
+        return 0
+    return int(item_value * 0.6)
+
+
 def _exec_trade_sell(
     agent_id: str,
     agent: dict[str, Any],
@@ -521,6 +556,7 @@ def _exec_trade_sell(
         _bot_sell_items_for_cash,
         _find_trader_at_location,
     )
+    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _ITEM_TYPES
     from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART_TYPES
 
     _art_set = frozenset(_ART_TYPES.keys())
@@ -572,6 +608,41 @@ def _exec_trade_sell(
         return _fail("no_sellable_items", item_types=[])
     if item_category == "any_sellable" and not inventory_before:
         return _fail("no_sellable_items", item_types=[])
+
+    trader_money = int((trader or {}).get("money") or 0)
+    if item_category == "artifact":
+        sellable_items_before = [
+            item
+            for item in inventory_before
+            if str(item.get("type") or "") in _art_set
+        ]
+        sellable_prices_before = [
+            _artifact_sell_price(item, _ART_TYPES)
+            for item in sellable_items_before
+        ]
+        sellable_item_types_before = sorted(
+            {
+                str(item.get("type") or "")
+                for item, sell_price in zip(sellable_items_before, sellable_prices_before)
+                if sell_price > 0
+            }
+        )
+    else:
+        sellable_items_before = list(inventory_before)
+        sellable_prices_before = [
+            _any_sellable_item_price(item, _ITEM_TYPES, _ART_TYPES)
+            for item in sellable_items_before
+        ]
+        sellable_item_types_before = sorted(
+            {
+                str(item.get("type") or "")
+                for item, sell_price in zip(sellable_items_before, sellable_prices_before)
+                if sell_price > 0
+            }
+        )
+    affordable_sell_exists = any(sell_price > 0 and trader_money >= sell_price for sell_price in sellable_prices_before)
+    if sellable_item_types_before and not affordable_sell_exists:
+        return _fail(TRADE_FAIL_TRADER_NO_MONEY, item_types=sellable_item_types_before)
 
     money_before = int(agent.get("money") or 0)
     inventory_before_len = len(inventory_before)

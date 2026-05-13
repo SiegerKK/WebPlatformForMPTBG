@@ -410,13 +410,54 @@ def _score_trade(agent: dict[str, Any], ctx: AgentContext) -> float:
     so trader_colocated correctly becomes True when a trader is co-located.
     """
     from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
+    from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
     artifact_types = frozenset(ARTIFACT_TYPES.keys())
     inventory = agent.get("inventory", [])
-    has_artifacts = any(i.get("type") in artifact_types for i in inventory)
+    artifact_item_types = {
+        str(i.get("type") or "")
+        for i in inventory
+        if i.get("type") in artifact_types
+    }
+    has_artifacts = bool(artifact_item_types)
 
     # Only relevant when a trader is co-located
     trader_colocated = any(e.get("is_trader") for e in ctx.visible_entities)
     if has_artifacts and trader_colocated:
+        world_turn = int((ctx.world_context or {}).get("world_turn") or 0)
+        current_location_id = str(agent.get("location_id") or "")
+        known_traders = tuple(ctx.known_traders or ())
+        current_location_traders = tuple(
+            trader for trader in known_traders
+            if str(trader.get("location_id") or "") == current_location_id
+        )
+        local_sell_blocked = has_recent_trade_sell_failure_for_agent(
+            agent,
+            trader_id=None,
+            location_id=current_location_id,
+            item_types=artifact_item_types,
+            world_turn=world_turn,
+        ) or any(
+            has_recent_trade_sell_failure_for_agent(
+                agent,
+                trader_id=str(trader.get("agent_id") or ""),
+                location_id=current_location_id,
+                item_types=artifact_item_types,
+                world_turn=world_turn,
+            )
+            for trader in current_location_traders
+        )
+        alternative_trader_available = any(
+            not has_recent_trade_sell_failure_for_agent(
+                agent,
+                trader_id=str(trader.get("agent_id") or ""),
+                location_id=str(trader.get("location_id") or ""),
+                item_types=artifact_item_types,
+                world_turn=world_turn,
+            )
+            for trader in known_traders
+        )
+        if local_sell_blocked and not alternative_trader_available:
+            return 0.0
         return 0.7
     return 0.0
 

@@ -323,6 +323,10 @@ def assess_active_plan_v3(
             if step.kind == STEP_TRADE_SELL_ITEM:
                 if failure_reason.endswith("no_trader_at_location"):
                     return ("repair", "trader_unavailable")
+                if failure_reason.endswith("trader_no_money"):
+                    return ("abort", failure_reason)
+                if failure_reason.endswith("no_items_sold"):
+                    return ("abort", failure_reason)
                 return ("abort", failure_reason)
             return ("repair", failure_reason)
 

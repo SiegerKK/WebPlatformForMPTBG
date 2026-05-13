@@ -240,7 +240,13 @@ _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY: Dict[str, str] = {
 }
 
 
-def _fallback_objective_key_for_intent(intent: Any) -> str | None:
+def _fallback_objective_key_for_intent(
+    intent: Any,
+    *,
+    agent: Dict[str, Any] | None = None,
+    state: Dict[str, Any] | None = None,
+    world_turn: int | None = None,
+) -> str | None:
     metadata = intent.metadata if hasattr(intent, "metadata") and isinstance(intent.metadata, dict) else {}
     if metadata.get("objective_key"):
         return str(metadata["objective_key"])
@@ -250,6 +256,53 @@ def _fallback_objective_key_for_intent(intent: Any) -> str | None:
         if forced_category:
             return _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY.get(forced_category)
         return None
+    if intent_kind == "sell_artifacts" and isinstance(agent, dict):
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES  # noqa: PLC0415
+        from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent  # noqa: PLC0415
+
+        artifact_types = frozenset(ARTIFACT_TYPES.keys())
+        artifact_item_types = {
+            str(item.get("type") or "")
+            for item in (agent.get("inventory") or [])
+            if item.get("type") in artifact_types
+        }
+        current_location_id = str(agent.get("location_id") or "")
+        _state = state or {}
+        traders = _state.get("traders")
+        known_traders = tuple(traders.values()) if isinstance(traders, dict) else tuple()
+        current_location_traders = tuple(
+            trader for trader in known_traders
+            if isinstance(trader, dict) and str(trader.get("location_id") or "") == current_location_id
+        )
+        local_sell_blocked = has_recent_trade_sell_failure_for_agent(
+            agent,
+            trader_id=None,
+            location_id=current_location_id,
+            item_types=artifact_item_types,
+            world_turn=int(world_turn or 0),
+        ) or any(
+            has_recent_trade_sell_failure_for_agent(
+                agent,
+                trader_id=str(trader.get("agent_id") or trader.get("id") or ""),
+                location_id=current_location_id,
+                item_types=artifact_item_types,
+                world_turn=int(world_turn or 0),
+            )
+            for trader in current_location_traders
+        )
+        alternative_trader_available = any(
+            not has_recent_trade_sell_failure_for_agent(
+                agent,
+                trader_id=str(trader.get("agent_id") or trader.get("id") or ""),
+                location_id=str(trader.get("location_id") or ""),
+                item_types=artifact_item_types,
+                world_turn=int(world_turn or 0),
+            )
+            for trader in known_traders
+            if isinstance(trader, dict)
+        )
+        if local_sell_blocked and not alternative_trader_available:
+            return "FIND_ARTIFACTS"
     return _INTENT_TO_OBJECTIVE_KEY_FALLBACK.get(intent_kind)
 
 
@@ -6119,7 +6172,12 @@ def _run_npc_brain_v3_decision_inner(
         selected_objective.key
         if selected_objective is not None
         else (
-            _fallback_objective_key_for_intent(intent)
+            _fallback_objective_key_for_intent(
+                intent,
+                agent=agent,
+                state=state,
+                world_turn=world_turn,
+            )
         )
     )
     _selected_objective_score = (
