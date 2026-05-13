@@ -418,7 +418,10 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
 def _is_trade_sell_success_event(event: dict[str, Any]) -> bool:
     event_type = _event_type(event)
     payload = _event_payload(event)
-    if event_type == "trade_sell":
+    # bot_sold_artifact / bot_sold_item are the raw events emitted by
+    # _bot_sell_to_trader and _bot_sell_items_for_cash respectively.
+    # They represent a successful sale and must advance the plan step.
+    if event_type in ("trade_sell", "bot_sold_artifact", "bot_sold_item"):
         return True
     if str(payload.get("action_kind") or "") == "trade_sell":
         return True
