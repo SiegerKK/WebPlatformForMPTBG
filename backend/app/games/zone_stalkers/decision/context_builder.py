@@ -92,18 +92,26 @@ def build_agent_context(
                 "is_alive": True,
             })
 
-    # ── Known entities (from memory) ─────────────────────────────────────────
-    known_entities: list[dict[str, Any]] = _entities_from_memory(agent, agents, agent_id)
+    # ── Known entities — prefer knowledge_v1 tables, fallback to memory_v3 ─────
+    world_turn: int = world_context["world_turn"]
+    target_id: str | None = agent.get("kill_target_id") or None
+    known_entities: list[dict[str, Any]] = _entities_from_knowledge_or_memory(
+        agent, agents, agent_id, world_turn, target_id
+    )
 
-    # ── Known locations (visited or mentioned in memory) ──────────────────────
-    known_locations: list[dict[str, Any]] = _locations_from_memory(agent, locations, traders)
+    # ── Known locations — prefer knowledge_v1, fallback to memory_v3 ─────────
+    known_locations: list[dict[str, Any]] = _locations_from_knowledge_or_memory(
+        agent, locations, traders, world_turn
+    )
 
-    # ── Known hazards (from memory) ───────────────────────────────────────────
-    known_hazards: list[dict[str, Any]] = _hazards_from_memory(agent)
+    # ── Known hazards — prefer knowledge_v1, fallback to memory_v3 ──────────
+    known_hazards: list[dict[str, Any]] = _hazards_from_knowledge_or_memory(
+        agent, world_turn
+    )
 
-    # ── Known traders (co-located or from memory) ─────────────────────────────
-    known_traders: list[dict[str, Any]] = _traders_from_visible_and_memory(
-        visible_entities, agent, locations, traders
+    # ── Known traders — co-located + knowledge_v1, fallback to memory_v3 ────
+    known_traders: list[dict[str, Any]] = _traders_from_knowledge_or_memory(
+        visible_entities, agent, locations, traders, world_turn
     )
 
     # ── Known targets ─────────────────────────────────────────────────────────
@@ -234,6 +242,98 @@ def _record_trader_id(record: dict[str, Any], traders: dict[str, Any]) -> str | 
         if entity_id.startswith("trader_"):
             return entity_id
     return None
+
+# ── Knowledge-first wrappers (PR3) ────────────────────────────────────────────
+# These try knowledge_v1 tables first, fall back to memory_v3 scan when
+# knowledge_v1 is absent or empty.  This allows gradual migration without
+# breaking any existing gameplay logic.
+
+
+def _entities_from_knowledge_or_memory(
+    agent: dict[str, Any],
+    agents: dict[str, Any],
+    own_id: str,
+    world_turn: int,
+    target_id: str | None,
+) -> list[dict[str, Any]]:
+    """Prefer knowledge_v1; fallback to memory_v3 scan."""
+    from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
+        build_known_entities_from_knowledge,
+    )
+    knowledge_entities = build_known_entities_from_knowledge(
+        agent, world_turn, agents=agents, own_id=own_id, target_id=target_id
+    )
+    if knowledge_entities:
+        return knowledge_entities
+    # Fallback: old memory_v3 scan.
+    return _entities_from_memory(agent, agents, own_id)
+
+
+def _locations_from_knowledge_or_memory(
+    agent: dict[str, Any],
+    locations: dict[str, Any],
+    traders: dict[str, Any] | None,
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    """Prefer knowledge_v1; fallback to memory_v3 scan."""
+    from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
+        build_known_locations_from_knowledge,
+    )
+    knowledge_locs = build_known_locations_from_knowledge(
+        agent, world_turn, locations=locations, traders=traders
+    )
+    if knowledge_locs:
+        return knowledge_locs
+    return _locations_from_memory(agent, locations, traders)
+
+
+def _hazards_from_knowledge_or_memory(
+    agent: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    """Prefer knowledge_v1; fallback to memory_v3 scan."""
+    from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
+        build_known_hazards_from_knowledge,
+    )
+    knowledge_hazards = build_known_hazards_from_knowledge(agent, world_turn)
+    if knowledge_hazards:
+        return knowledge_hazards
+    return _hazards_from_memory(agent)
+
+
+def _traders_from_knowledge_or_memory(
+    visible: list[dict[str, Any]],
+    agent: dict[str, Any],
+    locations: dict[str, Any],
+    traders_dict: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    """Co-located traders first, then knowledge_v1; fallback to memory_v3 scan."""
+    from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
+        build_known_traders_from_knowledge,
+    )
+    # Always include co-located traders (visible).
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entity in visible:
+        if entity.get("is_trader"):
+            aid = entity["agent_id"]
+            seen.add(aid)
+            result.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
+
+    # From knowledge_v1 tables.
+    knowledge_traders = build_known_traders_from_knowledge(agent, world_turn, traders_dict=traders_dict)
+    for t in knowledge_traders:
+        tid = t.get("agent_id", "")
+        if tid and tid not in seen:
+            seen.add(tid)
+            result.append(t)
+    if result:
+        return result
+    # Fallback: memory_v3 scan (excludes co-located already returned above).
+    return _traders_from_visible_and_memory(visible, agent, locations, traders_dict)
+
+
 
 def _entities_from_memory(
     agent: dict[str, Any],

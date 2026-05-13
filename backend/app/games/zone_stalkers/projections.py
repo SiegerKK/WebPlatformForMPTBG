@@ -254,6 +254,21 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
         "scale": "sleepiness_high_means_tired",
     }
     _project_terminal_agent(agent)
+    # PR3: Add knowledge_summary debug projection.
+    world_turn: int | None = None
+    _wt = agent.get("world_turn") or agent.get("_world_turn")
+    if isinstance(_wt, int):
+        world_turn = _wt
+    if world_turn is None:
+        # Try to read from parent state if stored on agent during projection.
+        world_turn = 0
+    try:
+        from app.games.zone_stalkers.knowledge.knowledge_store import (  # noqa: PLC0415
+            build_knowledge_summary,
+        )
+        agent["knowledge_summary"] = build_knowledge_summary(agent, world_turn)
+    except Exception:
+        pass
 
 
 # ── Explicit game projection helpers ─────────────────────────────────────────
@@ -576,11 +591,15 @@ def _project_zone_debug_map_lite(state: dict[str, Any]) -> dict[str, Any]:
 def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[str, Any]:
     if mode == "full":
         projected = copy.deepcopy(state)
+        _world_turn = int(projected.get("world_turn") or 0)
         agents = projected.get("agents")
         if isinstance(agents, dict):
             for agent in agents.values():
                 if isinstance(agent, dict):
+                    # PR3: Inject world_turn so knowledge_summary can compute decay.
+                    agent["_world_turn"] = _world_turn
                     _enrich_agent_full_projection(agent)
+                    agent.pop("_world_turn", None)
         return projected
 
     if mode in {"game", "zone-lite"}:
