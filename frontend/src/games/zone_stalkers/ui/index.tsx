@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../../api/client';
+import { commandsApi, contextsApi, eventsApi, matchesApi, zoneDebugApi } from '../../../api/client';
 import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../../types';
 import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
@@ -538,7 +538,6 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
     if (!context || exportingNpcLogs) return;
     setExportingNpcLogs(true);
     try {
-      const { zoneDebugApi } = await import('../../../api/client');
       const res = await zoneDebugApi.exportNpcLogs(context.id);
       const blob = new Blob([res.data as BlobPart], { type: 'application/zip' });
       const url = URL.createObjectURL(blob);
@@ -1744,11 +1743,31 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}{zoneState.max_turns ? `/${zoneState.max_turns}` : ''}
             </p>
           </div>
-          {myAgentId && (
-            <button style={styles.rosterEnterBtn} onClick={enterGame}>
-              ▶ Enter Game as {zoneState.agents[myAgentId]?.name ?? 'Stalker'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const, justifyContent: 'flex-end' }}>
+            <button
+              style={{
+                padding: '0.35rem 0.85rem',
+                background: exportingNpcLogs ? '#1e3a5f' : '#0f2d4a',
+                color: exportingNpcLogs ? '#64748b' : '#38bdf8',
+                border: '1px solid #1e3a5f',
+                borderRadius: 7,
+                cursor: exportingNpcLogs ? 'default' : 'pointer',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                opacity: exportingNpcLogs ? 0.7 : 1,
+              }}
+              onClick={handleExportNpcLogs}
+              disabled={exportingNpcLogs}
+              title="Скачать ZIP с дебаг-логами и историей всех НПЦ"
+            >
+              {exportingNpcLogs ? '⏳ Экспорт…' : '⬇ Экспорт логов НПЦ'}
             </button>
-          )}
+            {myAgentId && (
+              <button style={styles.rosterEnterBtn} onClick={enterGame}>
+                ▶ Enter Game as {zoneState.agents[myAgentId]?.name ?? 'Stalker'}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* ── Stalkers ── */}

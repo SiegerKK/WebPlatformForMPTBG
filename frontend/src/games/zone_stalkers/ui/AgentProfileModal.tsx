@@ -934,7 +934,8 @@ const s: Record<string, React.CSSProperties> = {
 
 export interface AgentCreateProps {
   onClose: () => void;
-  onSave: (name: string, faction: string, globalGoal: string, isTrader: boolean, killTargetId?: string) => Promise<void>;
+  /** count — how many agents to create (≥1). The caller handles the loop. */
+  onSave: (name: string, faction: string, globalGoal: string, isTrader: boolean, killTargetId?: string, count?: number) => Promise<void>;
   defaultIsTrader?: boolean;
   agents?: Record<string, { id: string; name: string; is_alive?: boolean }>;
 }
@@ -958,6 +959,7 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false, age
   const [globalGoal,   setGlobalGoal]   = useState('get_rich');
   const [isTrader,     setIsTrader]     = useState(defaultIsTrader);
   const [killTargetId, setKillTargetId] = useState('');
+  const [count,        setCount]        = useState(1);
   const [saving,       setSaving]       = useState(false);
   const [err,          setErr]          = useState<string | null>(null);
 
@@ -965,12 +967,21 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false, age
     setSaving(true);
     setErr(null);
     try {
-      await onSave(name.trim(), faction, globalGoal, isTrader, globalGoal === 'kill_stalker' ? killTargetId.trim() : undefined);
+      await onSave(
+        name.trim(),
+        faction,
+        globalGoal,
+        isTrader,
+        globalGoal === 'kill_stalker' ? killTargetId.trim() : undefined,
+        Math.max(1, Math.min(20, count)),
+      );
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Ошибка создания');
       setSaving(false);
     }
   };
+
+  const batchMode = !isTrader && count > 1;
 
   return (
     <div style={s.overlay} onMouseDown={onClose}>
@@ -992,9 +1003,36 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false, age
           </label>
         </div>
 
+        {!isTrader && (
+          <div style={s.section}>
+            <div style={s.sectionLabel}>Количество</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                style={{ ...cs.input, width: 72 }}
+                value={count}
+                onChange={(e) => setCount(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+              />
+              {batchMode && (
+                <span style={{ color: '#64748b', fontSize: '0.72rem' }}>
+                  будет создано {count} НПЦ с разными именами
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div style={s.section}>
           <div style={s.sectionLabel}>Имя персонажа</div>
-          <input style={cs.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Имя персонажа (пусто = случайное)" autoFocus />
+          <input
+            style={cs.input}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={batchMode ? 'Имя первого НПЦ (остальные — случайные)' : 'Имя персонажа (пусто = случайное)'}
+            autoFocus
+          />
         </div>
 
         {!isTrader && (
@@ -1035,7 +1073,9 @@ export function AgentCreateModal({ onClose, onSave, defaultIsTrader = false, age
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
           <button style={cs.cancelBtn} onClick={onClose} disabled={saving}>Отмена</button>
-          <button style={cs.saveBtn} onClick={handleSubmit} disabled={saving}>{saving ? '…' : isTrader ? 'Создать торговца' : 'Создать'}</button>
+          <button style={cs.saveBtn} onClick={handleSubmit} disabled={saving}>
+            {saving ? '…' : isTrader ? 'Создать торговца' : count > 1 ? `Создать ${count}` : 'Создать'}
+          </button>
         </div>
       </div>
     </div>
