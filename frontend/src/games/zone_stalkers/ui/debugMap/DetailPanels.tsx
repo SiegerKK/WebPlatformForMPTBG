@@ -601,11 +601,14 @@ export function LocationDetailPanel({
       {showSpawnModal === 'stalker' && (
         <AgentCreateModal
           onClose={() => setShowSpawnModal(null)}
-          onSave={async (name, faction, globalGoal, isTrader, killTargetId) => {
+          onSave={async (name, faction, globalGoal, isTrader, killTargetId, count = 1) => {
             if (isTrader) {
               await onSpawnTrader(name);
             } else {
-              await onSpawnStalker(name, faction, globalGoal, killTargetId);
+              for (let i = 0; i < count; i++) {
+                // First NPC gets the typed name (or empty → random), the rest always get random names.
+                await onSpawnStalker(i === 0 ? name : '', faction, globalGoal, killTargetId);
+              }
             }
             setShowSpawnModal(null);
           }}

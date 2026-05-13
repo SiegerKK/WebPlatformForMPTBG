@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+BLOCKING_TRADE_SELL_FAILURE_REASONS: frozenset[str] = frozenset(
+    {"no_trader_at_location", "no_items_sold", "trader_no_money"}
+)
+
 
 def has_recent_trade_sell_failure_for_agent(
     agent: dict[str, Any] | None,
@@ -30,6 +34,9 @@ def has_recent_trade_sell_failure_for_agent(
         details = record.get("details")
         if not isinstance(details, dict):
             details = {}
+        reason = str(details.get("reason") or "").strip()
+        if reason not in BLOCKING_TRADE_SELL_FAILURE_REASONS:
+            continue
         cooldown_until_turn = int(details.get("cooldown_until_turn") or 0)
         if cooldown_until_turn <= world_turn:
             continue
@@ -51,7 +58,9 @@ def has_recent_trade_sell_failure_for_agent(
                 if target_items.isdisjoint(rec_items):
                     continue
             else:
-                if str(details.get("reason") or "") != "no_trader_at_location":
+                # no_trader_at_location is location/trader scoped and may be emitted
+                # without explicit item_types, so keep the cooldown blocking locally.
+                if reason != "no_trader_at_location":
                     continue
 
         return True

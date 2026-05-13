@@ -32,6 +32,37 @@ AddMemoryFn = Callable[..., None]
 PlanMonitorDedupFn = Callable[..., bool]
 
 
+def _is_trade_sell_failure_reason(reason: str | None) -> bool:
+    if reason is None:
+        return False
+    value = str(reason)
+    return value.startswith("trade_sell_failed:") or value in {
+        "trader_no_money",
+        "no_items_sold",
+        "no_trader_at_location",
+        "no_sellable_items",
+    }
+
+
+def _invalidate_brain_on_trade_sell_failure_abort(
+    agent: dict[str, Any],
+    *,
+    reason: str | None,
+    world_turn: int,
+) -> None:
+    if not _is_trade_sell_failure_reason(reason):
+        return
+    from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain  # noqa: PLC0415
+
+    invalidate_brain(
+        agent,
+        None,
+        reason="trade_sell_failed",
+        priority="normal",
+        world_turn=world_turn,
+    )
+
+
 def active_plan_step_label(step: ActivePlanStep | None) -> str:
     return step.kind if step is not None else "none"
 
@@ -565,6 +596,11 @@ def process_active_plan_v3(
         )
         repaired = repair_active_plan(agent, active_plan, reason or "repair", world_turn, state=state)
         if repaired.status == ACTIVE_PLAN_STATUS_ABORTED:
+            _invalidate_brain_on_trade_sell_failure_abort(
+                agent,
+                reason=repaired.abort_reason,
+                world_turn=world_turn,
+            )
             save_active_plan(agent, repaired)
             finish_active_plan(
                 agent_id,
@@ -621,7 +657,13 @@ def process_active_plan_v3(
         return False, []
 
     if operation == "abort":
-        active_plan.abort(reason or "abort", world_turn)
+        _abort_reason = reason or "abort"
+        _invalidate_brain_on_trade_sell_failure_abort(
+            agent,
+            reason=_abort_reason,
+            world_turn=world_turn,
+        )
+        active_plan.abort(_abort_reason, world_turn)
         save_active_plan(agent, active_plan)
         finish_active_plan(
             agent_id,
@@ -631,7 +673,7 @@ def process_active_plan_v3(
             world_turn,
             add_memory=add_memory,
             terminal_event="active_plan_aborted",
-            reason=reason,
+            reason=_abort_reason,
         )
         return False, []
 

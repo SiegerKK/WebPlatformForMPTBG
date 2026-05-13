@@ -521,6 +521,66 @@ class TestAssessActivePlanV3:
         assert op == "abort"
         assert reason == "max_repairs_exceeded"
 
+    def test_abort_on_failed_trade_sell_step_no_items_sold(self) -> None:
+        agent = _base_agent()
+        plan = Plan(
+            intent_kind="trade",
+            steps=[PlanStep(kind=STEP_TRADE_SELL_ITEM, payload={"item_category": "artifact"})],
+        )
+        ap = create_active_plan(_decision("SELL_ARTIFACTS"), world_turn=1, plan=plan)
+        assert ap.current_step is not None
+        ap.current_step.status = STEP_STATUS_FAILED
+        ap.current_step.failure_reason = "trade_sell_failed:no_items_sold"
+        save_active_plan(agent, ap)
+
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=2)
+        assert op == "abort"
+        assert reason == "trade_sell_failed:no_items_sold"
+
+    def test_failed_trade_sell_no_trader_requests_repair(self) -> None:
+        agent = _base_agent()
+        plan = Plan(
+            intent_kind="trade",
+            steps=[PlanStep(kind=STEP_TRADE_SELL_ITEM, payload={"item_category": "artifact"})],
+        )
+        ap = create_active_plan(_decision("SELL_ARTIFACTS"), world_turn=1, plan=plan)
+        assert ap.current_step is not None
+        ap.current_step.status = STEP_STATUS_FAILED
+        ap.current_step.failure_reason = "trade_sell_failed:no_trader_at_location"
+        save_active_plan(agent, ap)
+
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=2)
+        assert op == "repair"
+        assert reason == "trader_unavailable"
+
+    def test_abort_on_failed_trade_sell_trader_no_money(self) -> None:
+        agent = _base_agent()
+        plan = Plan(
+            intent_kind="trade",
+            steps=[PlanStep(kind=STEP_TRADE_SELL_ITEM, payload={"item_category": "artifact"})],
+        )
+        ap = create_active_plan(_decision("SELL_ARTIFACTS"), world_turn=1, plan=plan)
+        assert ap.current_step is not None
+        ap.current_step.status = STEP_STATUS_FAILED
+        ap.current_step.failure_reason = "trade_sell_failed:trader_no_money"
+        save_active_plan(agent, ap)
+
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=2)
+        assert op == "abort"
+        assert reason == "trade_sell_failed:trader_no_money"
+
+    def test_repair_on_failed_non_trade_step(self) -> None:
+        agent = _base_agent()
+        ap = create_active_plan(_decision(), world_turn=1, plan=_plan(STEP_EXPLORE_LOCATION))
+        assert ap.current_step is not None
+        ap.current_step.status = STEP_STATUS_FAILED
+        ap.current_step.failure_reason = "path_blocked"
+        save_active_plan(agent, ap)
+
+        op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=2)
+        assert op == "repair"
+        assert reason == "path_blocked"
+
 
 class TestRepairActivePlan:
     def test_repair_increments_count_and_resets_step(self) -> None:

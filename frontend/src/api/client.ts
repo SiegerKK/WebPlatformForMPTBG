@@ -218,6 +218,11 @@ export const zoneDebugApi = {
   /** Trigger a rebuild of hunt debug payload for the context. */
   refreshHuntSearch: (contextId: string) =>
     apiClient.post(`/zone-stalkers/contexts/${contextId}/debug/hunt-search/refresh`),
+  /** Export debug logs and decision history for all NPC agents as a ZIP blob. */
+  exportNpcLogs: (contextId: string) =>
+    apiClient.get(`/zone-stalkers/contexts/${contextId}/debug/npc-logs-export`, {
+      responseType: 'blob',
+    }),
 };
 
 

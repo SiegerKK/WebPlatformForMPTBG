@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { commandsApi, contextsApi, eventsApi, matchesApi } from '../../../api/client';
+import { commandsApi, contextsApi, eventsApi, matchesApi, zoneDebugApi } from '../../../api/client';
 import type { GameContext, GameEvent, Match, MatchParticipant, User } from '../../../types';
 import DebugMapPage from './DebugMapPage';
 import AgentRow from './AgentRow';
@@ -532,6 +532,30 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // Agent whose profile modal is open (null = list view)
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  // NPC logs ZIP export state
+  const [exportingNpcLogs, setExportingNpcLogs] = useState(false);
+  const handleExportNpcLogs = useCallback(async () => {
+    if (!context || exportingNpcLogs) return;
+    setExportingNpcLogs(true);
+    try {
+      const res = await zoneDebugApi.exportNpcLogs(context.id);
+      const blob = new Blob([res.data as BlobPart], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = res.headers?.['content-disposition'] as string | undefined;
+      const fnMatch = cd?.match(/filename="([^"]+)"/);
+      a.download = fnMatch?.[1] ?? `npc_logs_${context.id}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      alert('Не удалось экспортировать логи НПЦ. Попробуйте снова.');
+    } finally {
+      setExportingNpcLogs(false);
+    }
+  }, [context, exportingNpcLogs]);
   // On-demand memory cache: agentId → MemoryEntry[].
   // Memory is no longer included in the getTree() state_blob to save bandwidth.
   // It is fetched lazily when the memory tab is opened or an agent profile is viewed.
@@ -1719,11 +1743,31 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
               Day {zoneState.world_day} · {TIME_LABEL(zoneState.world_hour, zoneState.world_minute ?? 0)} · Turn {zoneState.world_turn}{zoneState.max_turns ? `/${zoneState.max_turns}` : ''}
             </p>
           </div>
-          {myAgentId && (
-            <button style={styles.rosterEnterBtn} onClick={enterGame}>
-              ▶ Enter Game as {zoneState.agents[myAgentId]?.name ?? 'Stalker'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const, justifyContent: 'flex-end' }}>
+            <button
+              style={{
+                padding: '0.35rem 0.85rem',
+                background: exportingNpcLogs ? '#1e3a5f' : '#0f2d4a',
+                color: exportingNpcLogs ? '#64748b' : '#38bdf8',
+                border: '1px solid #1e3a5f',
+                borderRadius: 7,
+                cursor: exportingNpcLogs ? 'default' : 'pointer',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                opacity: exportingNpcLogs ? 0.7 : 1,
+              }}
+              onClick={handleExportNpcLogs}
+              disabled={exportingNpcLogs}
+              title="Скачать ZIP с дебаг-логами и историей всех НПЦ"
+            >
+              {exportingNpcLogs ? '⏳ Экспорт…' : '⬇ Экспорт логов НПЦ'}
             </button>
-          )}
+            {myAgentId && (
+              <button style={styles.rosterEnterBtn} onClick={enterGame}>
+                ▶ Enter Game as {zoneState.agents[myAgentId]?.name ?? 'Stalker'}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* ── Stalkers ── */}

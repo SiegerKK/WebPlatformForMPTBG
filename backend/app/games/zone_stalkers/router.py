@@ -5,11 +5,15 @@ These routes live here (not in app/core) because they contain game-specific
 domain knowledge (zone_map, zone_event context types, etc.) that must not
 pollute the generic platform core.
 """
+import io
+import json
 import os
 import uuid
+import zipfile
 from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -1032,3 +1036,99 @@ def refresh_debug_hunt_search(
         "status": "refreshed",
         "world_turn": state.get("world_turn", 0),
     }
+
+
+# ── NPC logs ZIP export ────────────────────────────────────────────────────────
+
+_NPC_LOG_AGENT_KEYS = (
+    "id",
+    "name",
+    "faction",
+    "location_id",
+    "is_alive",
+    "hp",
+    "money",
+    "global_goal",
+    "current_goal",
+    "memory",
+    "memory_v3",
+    "brain_v3_context",
+    "brain_runtime",
+    "active_plan_v3",
+    "knowledge_v1",
+    "_v2_context",
+    "controller",
+)
+
+
+def _extract_npc_log(agent: dict) -> dict:
+    """Return only the log-relevant fields for one agent."""
+    return {k: agent[k] for k in _NPC_LOG_AGENT_KEYS if k in agent}
+
+
+@router.get("/zone-stalkers/contexts/{context_id}/debug/npc-logs-export")
+def export_npc_logs(
+    context_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Export debug logs and decision history for all NPC agents as a ZIP archive.
+
+    Each agent with ``controller.kind == 'bot'`` (or any agent when no
+    controller is set) gets its own JSON file inside the archive named
+    ``<agent_id>_<agent_name>.json``.  A top-level ``_summary.json`` file
+    provides context metadata and an index of all included agents.
+
+    The response streams the ZIP directly so no temporary files are written to disk.
+    """
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+
+    ctx = db.query(GameContext).filter(
+        GameContext.id == context_id,
+        GameContext.context_type == "zone_map",
+    ).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="zone_map context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    agents_raw: dict = state.get("agents") or {}
+    world_turn: int = int(state.get("world_turn") or 0)
+    world_day: int = int(state.get("world_day") or 0)
+
+    # Build in-memory ZIP
+    buf = io.BytesIO()
+    agent_index: list[dict] = []
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for agent_id, agent in agents_raw.items():
+            if not isinstance(agent, dict):
+                continue
+            agent_name = str(agent.get("name") or agent_id)
+            safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_name)
+            filename = f"{agent_id}_{safe_name}.json"
+            log_data = _extract_npc_log(agent)
+            zf.writestr(filename, json.dumps(log_data, ensure_ascii=False, indent=2, default=str))
+            agent_index.append({
+                "agent_id": agent_id,
+                "name": agent_name,
+                "file": filename,
+                "is_alive": bool(agent.get("is_alive")),
+                "controller": (agent.get("controller") or {}).get("kind", "unknown"),
+            })
+
+        summary = {
+            "context_id": str(ctx.id),
+            "exported_at_turn": world_turn,
+            "world_day": world_day,
+            "agent_count": len(agent_index),
+            "agents": agent_index,
+        }
+        zf.writestr("_summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
+
+    buf.seek(0)
+    filename_header = f"npc_logs_context_{context_id}_turn_{world_turn}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename_header}"'},
+    )
