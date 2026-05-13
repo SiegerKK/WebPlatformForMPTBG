@@ -7,6 +7,13 @@ from app.games.zone_stalkers.decision.context_builder import (
     CONTEXT_CACHE_TURN_BUCKET_SIZE,
     build_agent_context,
 )
+from app.games.zone_stalkers.memory.cold_store import (
+    clear_in_memory_store,
+    flush_dirty_agent_memories,
+    get_cold_metrics,
+    migrate_agent_memory_to_cold_store,
+    reset_cold_metrics,
+)
 from app.games.zone_stalkers.knowledge.knowledge_store import upsert_known_npc
 from app.games.zone_stalkers.memory.store import ensure_memory_v3
 from app.games.zone_stalkers.rules.tick_constants import CRITICAL_THIRST_THRESHOLD
@@ -590,3 +597,62 @@ def test_target_leads_invalidate_on_memory_revision_change() -> None:
     build_agent_context("bot1", agent, state)
 
     assert _misses(agent) == misses_before + 1
+
+
+def test_context_builder_cache_hit_does_not_load_cold_memory() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    agent = make_agent()
+    state = make_minimal_state(agent=agent)
+    state["context_id"] = "ctx_cache_hit"
+
+    build_agent_context("bot1", agent, state)  # warm cache
+    reset_cold_metrics()
+    build_agent_context("bot1", agent, state)  # cache hit
+    metrics = get_cold_metrics()
+    assert int(metrics["cold_memory_loads"]) == 0
+
+
+def test_context_builder_cache_miss_loads_cold_memory_for_knowledge() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    agent = make_agent()
+    state = make_minimal_state(agent=agent)
+    state["context_id"] = "ctx_cache_miss"
+    migrate_agent_memory_to_cold_store(context_id="ctx_cache_miss", agent_id="bot1", agent=agent)
+    # strip hot memory/knowledge to force load from cold on miss
+    flush_dirty_agent_memories(context_id="ctx_cache_miss", state={"agents": {"bot1": agent}})
+
+    build_agent_context("bot1", agent, state)
+    metrics = get_cold_metrics()
+    assert int(metrics["cold_memory_loads"]) >= 1
+
+
+def test_context_builder_force_refresh_loads_cold_memory() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    agent = make_agent()
+    state = make_minimal_state(agent=agent)
+    state["context_id"] = "ctx_force_refresh"
+    migrate_agent_memory_to_cold_store(context_id="ctx_force_refresh", agent_id="bot1", agent=agent)
+    build_agent_context("bot1", agent, state)  # warm cache while loaded
+    flush_dirty_agent_memories(context_id="ctx_force_refresh", state={"agents": {"bot1": agent}})
+    reset_cold_metrics()
+
+    build_agent_context("bot1", agent, state, force_refresh=True)
+    metrics = get_cold_metrics()
+    assert int(metrics["cold_memory_loads"]) >= 1
+
+
+def test_context_builder_after_strip_can_rebuild_from_cold_memory() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    agent = make_agent()
+    state = make_minimal_state(agent=agent)
+    state["context_id"] = "ctx_strip_rebuild"
+    migrate_agent_memory_to_cold_store(context_id="ctx_strip_rebuild", agent_id="bot1", agent=agent)
+    flush_dirty_agent_memories(context_id="ctx_strip_rebuild", state={"agents": {"bot1": agent}})
+
+    ctx = build_agent_context("bot1", agent, state)
+    assert ctx is not None
+    assert isinstance(agent.get("knowledge_v1"), dict)

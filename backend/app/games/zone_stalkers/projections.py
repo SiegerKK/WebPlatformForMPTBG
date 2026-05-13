@@ -259,6 +259,9 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
     }
     agent["memory_v3_stats"] = stats
     agent["memory_health"] = health
+    _ms = agent.get("memory_summary")
+    if isinstance(_ms, dict) and _ms.get("cold_load_error"):
+        agent["memory_health"]["cold_load_error"] = _ms.get("cold_load_error")
     story_events, story_events_count, story_events_truncated = _agent_story_events(agent)
     agent["story_events"] = story_events
     agent["story_events_count"] = story_events_count

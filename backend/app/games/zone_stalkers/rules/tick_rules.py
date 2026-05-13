@@ -126,6 +126,23 @@ def _v3_turn(rec: Dict[str, Any]) -> int:
 PLAN_MONITOR_MEMORY_DEDUP_TURNS = 10
 MAX_DECISION_QUEUE_SIZE = 512
 
+
+def _is_routine_scheduled_action_continuation(agent: Dict[str, Any]) -> bool:
+    """True when agent is continuing a routine scheduled action this tick."""
+    sched = agent.get("scheduled_action")
+    if not isinstance(sched, dict):
+        return False
+    action_type = str(sched.get("type") or "")
+    if action_type not in {"sleep", "travel", "wait_in_shelter"}:
+        return False
+    turns_remaining = sched.get("turns_remaining")
+    if turns_remaining is None:
+        return True
+    try:
+        return int(turns_remaining) > 0
+    except (TypeError, ValueError):
+        return True
+
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
     "escape_danger":        "Бегство (крит. HP)",
@@ -1540,7 +1557,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             continue
 
         # PR5: Load cold memory on demand before brain decision.
-        if _agent.get("memory_ref"):
+        if _agent.get("memory_ref") and not _is_routine_scheduled_action_continuation(_agent):
             try:
                 from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
                     ensure_agent_memory_loaded as _ensure_cold_mem,
@@ -2704,20 +2721,7 @@ def _add_memory(
         except Exception:
             pass
 
-    # PR5: Ensure cold memory is loaded if the agent has a memory_ref.
     _add_mem_ctx_id: str = str(state.get("context_id") or state.get("_context_id") or "default")
-    if agent.get("memory_ref"):
-        try:
-            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
-                ensure_agent_memory_loaded as _ensure_cold_mem_write,
-            )
-            _ensure_cold_mem_write(
-                context_id=_add_mem_ctx_id,
-                agent_id=str(resolved_agent_id),
-                agent=agent,
-            )
-        except Exception:
-            pass
 
     # Write exclusively to memory_v3.
     write_memory_event_to_v3(
@@ -2725,17 +2729,9 @@ def _add_memory(
         agent=agent,
         legacy_entry=memory_entry,
         world_turn=world_turn,
+        context_id=_add_mem_ctx_id,
+        cold_store_enabled=bool(state.get("cpu_cold_memory_store_enabled", False)),
     )
-
-    # PR5: Mark cold memory dirty after write so it is saved at end of tick.
-    if agent.get("memory_ref"):
-        try:
-            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
-                mark_agent_memory_dirty as _mark_cold_dirty,
-            )
-            _mark_cold_dirty(agent)
-        except Exception:
-            pass
 
     _action_kind = str(effects.get("action_kind") or "")
     _observed_kind = str(effects.get("observed") or "")

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import time
+import zlib
 from typing import Any
 
 # ── Process-level in-memory fallback (no Redis required for tests/local) ─────
@@ -52,6 +53,14 @@ _COLD_METRICS: dict[str, int | float] = {
     "cold_memory_load_ms": 0.0,
     "cold_memory_save_ms": 0.0,
     "cold_memory_bytes": 0,
+    "cold_memory_bytes_raw": 0,
+    "cold_memory_bytes_stored": 0,
+    "redis_payload_bytes": 0,
+    "cold_memory_missing_keys": 0,
+    "cold_memory_load_errors": 0,
+    "cold_memory_dirty_marks": 0,
+    "cold_memory_dirty_saves_skipped": 0,
+    "cold_memory_stripped_agents": 0,
 }
 
 # Schema version stored in every cold blob.
@@ -66,7 +75,11 @@ _COLD_TTL_SECONDS = 60 * 60 * 24 * 30
 
 def get_cold_metrics() -> dict[str, int | float]:
     """Return a snapshot of cold-store operation counters."""
-    return dict(_COLD_METRICS)
+    snapshot = dict(_COLD_METRICS)
+    raw = float(snapshot.get("cold_memory_bytes_raw", 0) or 0)
+    stored = float(snapshot.get("cold_memory_bytes_stored", 0) or 0)
+    snapshot["cold_memory_compression_ratio"] = (stored / raw) if raw > 0 else 1.0
+    return snapshot
 
 
 def reset_cold_metrics() -> None:
@@ -85,6 +98,16 @@ def clear_in_memory_store() -> None:
 def get_agent_memory_ref(context_id: str, agent_id: str) -> str:
     """Return the canonical Redis/in-memory key for an agent's cold memory."""
     return f"ctx:agent_memory:{context_id}:{agent_id}"
+
+
+def resolve_agent_memory_ref(context_id: str, agent_id: str, agent: dict[str, Any]) -> str:
+    """Resolve cold memory key, preferring existing ``agent['memory_ref']``."""
+    existing = agent.get("memory_ref")
+    if isinstance(existing, str) and existing:
+        return existing
+    ref = get_agent_memory_ref(context_id, agent_id)
+    agent["memory_ref"] = ref
+    return ref
 
 
 # ── Blob construction ─────────────────────────────────────────────────────────
@@ -211,14 +234,20 @@ def build_memory_summary(
 # ── Storage helpers ───────────────────────────────────────────────────────────
 
 def _serialise_blob(blob: dict[str, Any]) -> bytes:
-    return json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw = json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return zlib.compress(raw, level=6)
 
 
 def _deserialise_blob(raw: bytes) -> dict[str, Any] | None:
     try:
-        return json.loads(raw.decode("utf-8"))
+        # Preferred path (PR5): zlib-compressed JSON.
+        return json.loads(zlib.decompress(raw).decode("utf-8"))
     except Exception:
-        return None
+        try:
+            # Backward-compatible path for legacy uncompressed blobs.
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            return None
 
 
 def _redis_get(redis_client: Any, key: str) -> bytes | None:
@@ -257,31 +286,35 @@ def mark_agent_memory_dirty(agent: dict[str, Any]) -> None:
     summary = agent.get("memory_summary")
     if isinstance(summary, dict):
         summary["dirty"] = True
+        _COLD_METRICS["cold_memory_dirty_marks"] = int(_COLD_METRICS["cold_memory_dirty_marks"]) + 1  # type: ignore[operator]
     else:
-        agent["memory_summary"] = {
-            "records_count": 0,
-            "memory_revision": 0,
-            "knowledge_revision": 0,
-            "last_memory_write_turn": None,
-            "last_compaction_turn": None,
-            "cold_store_version": _COLD_BLOB_VERSION,
-            "is_loaded": True,
-            "dirty": True,
-        }
+        refresh_agent_memory_summary(agent, dirty=True, is_loaded=True)
+        _COLD_METRICS["cold_memory_dirty_marks"] = int(_COLD_METRICS["cold_memory_dirty_marks"]) + 1  # type: ignore[operator]
 
 
 def _update_summary_from_loaded_data(agent: dict[str, Any]) -> None:
-    """Refresh counters in memory_summary from the currently-loaded memory."""
-    summary = agent.get("memory_summary")
-    if not isinstance(summary, dict):
-        return
+    """Refresh counters in memory_summary from currently-loaded memory."""
+    refresh_agent_memory_summary(agent, is_loaded=True)
 
+
+def refresh_agent_memory_summary(
+    agent: dict[str, Any],
+    *,
+    dirty: bool | None = None,
+    is_loaded: bool | None = None,
+) -> None:
+    """Refresh memory_summary fields from loaded memory/knowledge payloads."""
     memory_v3 = agent.get("memory_v3")
+    records_count = 0
+    memory_revision = 0
+    last_memory_write_turn = None
+    last_compaction_turn = None
+
     if isinstance(memory_v3, dict):
         stats = memory_v3.get("stats") or {}
-        summary["records_count"] = int(stats.get("records_count", 0) or 0)
-        summary["memory_revision"] = int(stats.get("memory_revision", 0) or 0)
-        summary["last_compaction_turn"] = stats.get("last_consolidation_turn")
+        records_count = int(stats.get("records_count", 0) or 0)
+        memory_revision = int(stats.get("memory_revision", 0) or 0)
+        last_compaction_turn = stats.get("last_consolidation_turn")
 
         records = memory_v3.get("records") or {}
         if isinstance(records, dict) and records:
@@ -291,13 +324,32 @@ def _update_summary_from_loaded_data(agent: dict[str, Any]) -> None:
                 if isinstance(r, dict)
             ]
             if turns:
-                summary["last_memory_write_turn"] = max(turns)
+                last_memory_write_turn = max(turns)
 
     knowledge_v1 = agent.get("knowledge_v1")
+    knowledge_revision = 0
     if isinstance(knowledge_v1, dict):
-        summary["knowledge_revision"] = int(knowledge_v1.get("revision", 0) or 0)
+        knowledge_revision = int(knowledge_v1.get("revision", 0) or 0)
 
-    summary["is_loaded"] = True
+    summary = agent.get("memory_summary")
+    if not isinstance(summary, dict):
+        summary = {}
+        agent["memory_summary"] = summary
+
+    summary["records_count"] = records_count
+    summary["memory_revision"] = memory_revision
+    summary["knowledge_revision"] = knowledge_revision
+    summary["last_memory_write_turn"] = last_memory_write_turn
+    summary["last_compaction_turn"] = last_compaction_turn
+    summary["cold_store_version"] = _COLD_BLOB_VERSION
+    if is_loaded is not None:
+        summary["is_loaded"] = is_loaded
+    else:
+        summary["is_loaded"] = bool(summary.get("is_loaded", False))
+    if dirty is not None:
+        summary["dirty"] = dirty
+    else:
+        summary["dirty"] = bool(summary.get("dirty", False))
 
 
 def load_agent_memory(
@@ -306,6 +358,7 @@ def load_agent_memory(
     agent_id: str,
     agent: dict[str, Any],
     redis_client: Any | None = None,
+    allow_missing_empty_blob: bool = False,
 ) -> dict[str, Any]:
     """Load cold memory from the store into the agent's hot state.
 
@@ -318,7 +371,7 @@ def load_agent_memory(
     """
     t0 = time.perf_counter()
 
-    ref = get_agent_memory_ref(context_id, agent_id)
+    ref = resolve_agent_memory_ref(context_id, agent_id, agent)
     raw = _store_get(ref, redis_client)
 
     if raw is not None:
@@ -328,14 +381,45 @@ def load_agent_memory(
     else:
         blob = None
 
-    if blob is None:
-        # No cold blob yet — build from current hot state (if any) or empty.
-        blob = _blob_from_agent(agent_id, agent)
-        encoded = _serialise_blob(blob)
-        _store_set(ref, encoded, redis_client)
-        _COLD_METRICS["cold_memory_bytes"] = int(
-            _COLD_METRICS["cold_memory_bytes"]  # type: ignore[operator]
-        ) + len(encoded)
+    if raw is None:
+        _COLD_METRICS["cold_memory_missing_keys"] = int(_COLD_METRICS["cold_memory_missing_keys"]) + 1  # type: ignore[operator]
+        has_hot_memory = isinstance(agent.get("memory_v3"), dict) or isinstance(agent.get("knowledge_v1"), dict)
+        if has_hot_memory:
+            blob = _blob_from_agent(agent_id, agent)
+            encoded = _serialise_blob(blob)
+            _store_set(ref, encoded, redis_client)
+            _COLD_METRICS["cold_memory_bytes"] = int(_COLD_METRICS["cold_memory_bytes"]) + len(encoded)  # type: ignore[operator]
+            _COLD_METRICS["cold_memory_bytes_stored"] = int(_COLD_METRICS["cold_memory_bytes_stored"]) + len(encoded)  # type: ignore[operator]
+            _COLD_METRICS["cold_memory_bytes_raw"] = int(_COLD_METRICS["cold_memory_bytes_raw"]) + len(json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))  # type: ignore[operator]
+            if redis_client is not None:
+                _COLD_METRICS["redis_payload_bytes"] = int(_COLD_METRICS["redis_payload_bytes"]) + len(encoded)  # type: ignore[operator]
+        elif allow_missing_empty_blob:
+            blob = _build_empty_memory_blob(agent_id)
+            encoded = _serialise_blob(blob)
+            _store_set(ref, encoded, redis_client)
+            _COLD_METRICS["cold_memory_bytes"] = int(_COLD_METRICS["cold_memory_bytes"]) + len(encoded)  # type: ignore[operator]
+            _COLD_METRICS["cold_memory_bytes_stored"] = int(_COLD_METRICS["cold_memory_bytes_stored"]) + len(encoded)  # type: ignore[operator]
+            _COLD_METRICS["cold_memory_bytes_raw"] = int(_COLD_METRICS["cold_memory_bytes_raw"]) + len(json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))  # type: ignore[operator]
+            if redis_client is not None:
+                _COLD_METRICS["redis_payload_bytes"] = int(_COLD_METRICS["redis_payload_bytes"]) + len(encoded)  # type: ignore[operator]
+        else:
+            _COLD_METRICS["cold_memory_load_errors"] = int(_COLD_METRICS["cold_memory_load_errors"]) + 1  # type: ignore[operator]
+            summary = agent.get("memory_summary")
+            if not isinstance(summary, dict):
+                summary = {}
+                agent["memory_summary"] = summary
+            summary["cold_load_error"] = "missing_cold_memory_key"
+            refresh_agent_memory_summary(agent, is_loaded=False)
+            return {}
+    elif blob is None:
+        _COLD_METRICS["cold_memory_load_errors"] = int(_COLD_METRICS["cold_memory_load_errors"]) + 1  # type: ignore[operator]
+        summary = agent.get("memory_summary")
+        if not isinstance(summary, dict):
+            summary = {}
+            agent["memory_summary"] = summary
+        summary["cold_load_error"] = "cold_blob_deserialize_failed"
+        refresh_agent_memory_summary(agent, is_loaded=False)
+        return {}
 
     # ── Restore hot state ─────────────────────────────────────────────────────
     memory_v3 = blob.get("memory_v3")
@@ -346,6 +430,9 @@ def load_agent_memory(
     if isinstance(knowledge_v1, dict):
         agent["knowledge_v1"] = knowledge_v1
 
+    summary = agent.get("memory_summary")
+    if isinstance(summary, dict):
+        summary.pop("cold_load_error", None)
     _update_summary_from_loaded_data(agent)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -368,24 +455,31 @@ def save_agent_memory_if_dirty(
     """
     summary = agent.get("memory_summary")
     if not isinstance(summary, dict):
+        _COLD_METRICS["cold_memory_dirty_saves_skipped"] = int(_COLD_METRICS["cold_memory_dirty_saves_skipped"]) + 1  # type: ignore[operator]
         return False
     if not summary.get("dirty"):
+        _COLD_METRICS["cold_memory_dirty_saves_skipped"] = int(_COLD_METRICS["cold_memory_dirty_saves_skipped"]) + 1  # type: ignore[operator]
         return False
 
     t0 = time.perf_counter()
 
     # Build the cold blob from current (loaded) hot state.
     blob = _blob_from_agent(agent_id, agent)
+    raw_json = json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     encoded = _serialise_blob(blob)
-    ref = get_agent_memory_ref(context_id, agent_id)
+    ref = resolve_agent_memory_ref(context_id, agent_id, agent)
     _store_set(ref, encoded, redis_client)
 
-    summary["dirty"] = False
+    refresh_agent_memory_summary(agent, dirty=False, is_loaded=True)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     _COLD_METRICS["cold_memory_saves"] = int(_COLD_METRICS["cold_memory_saves"]) + 1  # type: ignore[operator]
     _COLD_METRICS["cold_memory_save_ms"] = float(_COLD_METRICS["cold_memory_save_ms"]) + elapsed_ms  # type: ignore[operator]
     _COLD_METRICS["cold_memory_bytes"] = int(_COLD_METRICS["cold_memory_bytes"]) + len(encoded)  # type: ignore[operator]
+    _COLD_METRICS["cold_memory_bytes_raw"] = int(_COLD_METRICS["cold_memory_bytes_raw"]) + len(raw_json)  # type: ignore[operator]
+    _COLD_METRICS["cold_memory_bytes_stored"] = int(_COLD_METRICS["cold_memory_bytes_stored"]) + len(encoded)  # type: ignore[operator]
+    if redis_client is not None:
+        _COLD_METRICS["redis_payload_bytes"] = int(_COLD_METRICS["redis_payload_bytes"]) + len(encoded)  # type: ignore[operator]
 
     return True
 
@@ -396,6 +490,7 @@ def ensure_agent_memory_loaded(
     agent_id: str,
     agent: dict[str, Any],
     redis_client: Any | None = None,
+    allow_missing_empty_blob: bool = False,
 ) -> dict[str, Any]:
     """Ensure cold memory is loaded into the agent's hot state.
 
@@ -415,6 +510,7 @@ def ensure_agent_memory_loaded(
         agent_id=agent_id,
         agent=agent,
         redis_client=redis_client,
+        allow_missing_empty_blob=allow_missing_empty_blob,
     )
 
 
@@ -437,11 +533,14 @@ def migrate_agent_memory_to_cold_store(
     """
     if agent.get("memory_ref"):
         # Already migrated — nothing to do.
+        if not isinstance(agent.get("memory_summary"), dict):
+            agent["memory_summary"] = build_memory_summary(agent_id, agent, is_loaded=False, dirty=False)
         return
 
-    ref = get_agent_memory_ref(context_id, agent_id)
+    ref = resolve_agent_memory_ref(context_id, agent_id, agent)
 
     blob = _blob_from_agent(agent_id, agent)
+    raw_json = json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     encoded = _serialise_blob(blob)
     _store_set(ref, encoded, redis_client)
 
@@ -456,6 +555,10 @@ def migrate_agent_memory_to_cold_store(
 
     _COLD_METRICS["cold_memory_saves"] = int(_COLD_METRICS["cold_memory_saves"]) + 1  # type: ignore[operator]
     _COLD_METRICS["cold_memory_bytes"] = int(_COLD_METRICS["cold_memory_bytes"]) + len(encoded)  # type: ignore[operator]
+    _COLD_METRICS["cold_memory_bytes_raw"] = int(_COLD_METRICS["cold_memory_bytes_raw"]) + len(raw_json)  # type: ignore[operator]
+    _COLD_METRICS["cold_memory_bytes_stored"] = int(_COLD_METRICS["cold_memory_bytes_stored"]) + len(encoded)  # type: ignore[operator]
+    if redis_client is not None:
+        _COLD_METRICS["redis_payload_bytes"] = int(_COLD_METRICS["redis_payload_bytes"]) + len(encoded)  # type: ignore[operator]
 
 
 def strip_cold_memory_from_hot_state(agent: dict[str, Any]) -> None:
@@ -476,6 +579,7 @@ def strip_cold_memory_from_hot_state(agent: dict[str, Any]) -> None:
     summary = agent.get("memory_summary")
     if isinstance(summary, dict):
         summary["is_loaded"] = False
+    _COLD_METRICS["cold_memory_stripped_agents"] = int(_COLD_METRICS["cold_memory_stripped_agents"]) + 1  # type: ignore[operator]
 
 
 def flush_dirty_agent_memories(
@@ -495,14 +599,15 @@ def flush_dirty_agent_memories(
             continue
         if not agent.get("memory_ref"):
             continue
-        save_agent_memory_if_dirty(
+        did_save = save_agent_memory_if_dirty(
             context_id=context_id,
             agent_id=agent_id,
             agent=agent,
             redis_client=redis_client,
         )
         strip_cold_memory_from_hot_state(agent)
-        saved += 1
+        if did_save:
+            saved += 1
     return saved
 
 
