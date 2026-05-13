@@ -3637,6 +3637,7 @@ def _write_location_observations(
     # ── Stalkers + traders at this location (excluding self) ──────────────────
     # PR3: Track (agent_id, name) pairs so knowledge_v1 upserts have stable agent IDs.
     _stalker_id_name_pairs: List[tuple] = []
+    _observed_agents: Dict[str, Dict[str, Any]] = {}
     for aid, ag in state.get("agents", {}).items():
         if (aid != agent_id
                 and ag.get("location_id") == loc_id
@@ -3644,9 +3645,28 @@ def _write_location_observations(
                 and not ag.get("has_left_zone")
                 and ag.get("archetype") == "stalker_agent"):
             _stalker_id_name_pairs.append((aid, ag.get("name", aid)))
+            _observed_agents[aid] = {
+                "equipment": dict(ag.get("equipment") or {}),
+                "global_goal": ag.get("global_goal"),
+                "archetype": ag.get("archetype"),
+                "combat_strength_estimate": max(
+                    0.1,
+                    min(
+                        1.0,
+                        float(ag.get("hp", ag.get("max_hp", 100)) or 100)
+                        / max(1.0, float(ag.get("max_hp", 100) or 100)),
+                    ),
+                ),
+            }
     for tid, tr in state.get("traders", {}).items():
         if tr.get("location_id") == loc_id:
             _stalker_id_name_pairs.append((tid, tr.get("name", tid)))
+            _observed_agents[tid] = {
+                "equipment": dict(tr.get("equipment") or {}),
+                "global_goal": tr.get("global_goal"),
+                "archetype": "trader_agent",
+                "combat_strength_estimate": 0.0,
+            }
     _stalker_id_name_pairs.sort(key=lambda x: x[1])
     stalker_names: List[str] = [n for _, n in _stalker_id_name_pairs]
     _seen_agent_ids: List[str] = [aid for aid, _ in _stalker_id_name_pairs]
@@ -3660,6 +3680,7 @@ def _write_location_observations(
                 "location_id": loc_id,
                 "names": stalker_names,
                 "seen_agent_ids": _seen_agent_ids,  # PR3: stable IDs for knowledge upserts
+                "observed_agents": _observed_agents,
             },
             summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
         )
@@ -5241,6 +5262,79 @@ def _bot_ask_colocated_stalkers_about_agent(
 
         other_name = other.get("name", other_id)
         seen_locs_this_stalker: set = set()
+
+        other_knowledge = other.get("knowledge_v1") if isinstance(other.get("knowledge_v1"), dict) else {}
+        known_target = (other_knowledge.get("known_npcs") or {}).get(target_agent_id) if isinstance(other_knowledge, dict) else None
+        if isinstance(known_target, dict):
+            death_evidence = known_target.get("death_evidence") if isinstance(known_target.get("death_evidence"), dict) else {}
+            known_loc = str(
+                death_evidence.get("corpse_location_id")
+                or known_target.get("reported_corpse_location_id")
+                or known_target.get("last_seen_location_id")
+                or ""
+            )
+            death_status = str(death_evidence.get("status") or "alive")
+            is_target_corpse_report = death_status in {"reported_dead", "corpse_seen", "confirmed_dead"} and bool(known_loc)
+            is_target_location_intel = bool(known_loc and not is_target_corpse_report)
+            if known_loc and (is_target_location_intel or is_target_corpse_report):
+                if known_loc not in exhausted_locs or is_target_corpse_report:
+                    if known_loc not in seen_locs_this_stalker and (other_id, known_loc) not in already_known:
+                        obs_turn = int(
+                            death_evidence.get("reported_turn")
+                            or death_evidence.get("observed_turn")
+                            or known_target.get("last_seen_turn")
+                            or 0
+                        )
+                        _obs_time_label = _turn_to_time_label(obs_turn)
+                        obs_loc_name = state.get("locations", {}).get(known_loc, {}).get("name", known_loc)
+                        current_loc_name = state.get("locations", {}).get(loc_id, {}).get("name", loc_id)
+                        if is_target_corpse_report:
+                            _add_memory(
+                                agent, world_turn, state, "observation",
+                                f"💬 Свидетель сообщил о теле цели ({other_name})",
+                                {
+                                    "action_kind": "target_corpse_reported",
+                                    "target_id": target_agent_id,
+                                    "target_name": target_agent_name,
+                                    "reported_corpse_location_id": known_loc,
+                                    "location_id": known_loc,
+                                    "source_agent_id": other_id,
+                                    "source_agent_name": other_name,
+                                    "obs_world_turn": obs_turn,
+                                    "confidence": 0.75,
+                                    "directly_observed": False,
+                                },
+                                summary=(
+                                    f"{other_name} сообщил, что видел тело цели «{target_agent_name}» "
+                                    f"в «{obs_loc_name}» (в {current_loc_name}). "
+                                    f"Свидетельство {_obs_time_label}."
+                                ),
+                            )
+                        else:
+                            _add_memory(
+                                agent, world_turn, state, "observation",
+                                f"💬 Разведданные от {other_name}",
+                                {
+                                    "action_kind": "intel_from_stalker",
+                                    "observed": "agent_location",
+                                    "location_id": known_loc,
+                                    "target_agent_id": target_agent_id,
+                                    "target_agent_name": target_agent_name,
+                                    "source_agent_id": other_id,
+                                    "source_agent_name": other_name,
+                                    "obs_world_turn": obs_turn,
+                                    "confidence": 0.55,
+                                },
+                                summary=(
+                                    f"{other_name} рассказал, что видел «{target_agent_name}» "
+                                    f"в «{obs_loc_name}» (в {current_loc_name}). "
+                                    f"Видел {_obs_time_label}."
+                                ),
+                            )
+                        seen_locs_this_stalker.add(known_loc)
+                        already_known.add((other_id, known_loc))
+                        if first_loc is None:
+                            first_loc = known_loc
 
         for other_rec in _v3_records_desc(other):
             if _v3_memory_type(other_rec) != "observation":

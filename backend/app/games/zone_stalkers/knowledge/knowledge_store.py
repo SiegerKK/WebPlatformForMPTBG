@@ -697,8 +697,7 @@ def upsert_hunt_evidence_from_observation(
         last_seen = entry.get("last_seen") if isinstance(entry.get("last_seen"), dict) else {}
         old_sig = (
             last_seen.get("location_id"),
-            int(last_seen.get("turn", 0) or 0),
-            round(float(last_seen.get("confidence", 0.0)), 2),
+            last_seen.get("source"),
         )
         new_last_seen = {
             "location_id": location_id,
@@ -710,8 +709,7 @@ def upsert_hunt_evidence_from_observation(
         entry["recent_contact"] = {"turn": world_turn, "location_id": location_id}
         new_sig = (
             new_last_seen.get("location_id"),
-            int(new_last_seen.get("turn", 0) or 0),
-            round(float(new_last_seen.get("confidence", 0.0)), 2),
+            new_last_seen.get("source"),
         )
         changed_major = changed_major or (old_sig != new_sig)
         changed_minor = True
@@ -723,7 +721,6 @@ def upsert_hunt_evidence_from_observation(
             death.get("status"),
             death.get("corpse_id"),
             death.get("location_id"),
-            int(death.get("turn", 0) or 0),
         )
         new_death = {
             "status": status,
@@ -738,7 +735,6 @@ def upsert_hunt_evidence_from_observation(
             new_death.get("status"),
             new_death.get("corpse_id"),
             new_death.get("location_id"),
-            int(new_death.get("turn", 0) or 0),
         )
         changed_major = changed_major or (old_sig != new_sig)
         changed_minor = True

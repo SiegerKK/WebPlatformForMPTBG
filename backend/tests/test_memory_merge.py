@@ -434,7 +434,10 @@ class TestWriteLocationObservationsIntegration:
             if r.get("kind") in {"semantic_stalkers_seen", "stalkers_seen"}
         ]
 
-    # 8a — repeated observations create repeated memory_v3 entries
+    def _known_npcs(self, agent):
+        return ((agent.get("knowledge_v1") or {}).get("known_npcs") or {})
+
+    # 8a — repeated observations stay in knowledge, not memory_v3
     def test_within_window_merges_to_single_entry(self):
         bob = self._agent("bob", "L")
         state = self._state("L", agents={"bob": bob})
@@ -442,8 +445,8 @@ class TestWriteLocationObservationsIntegration:
         self._wlo("main", main, "L", state, 100)
         self._wlo("main", main, "L", state, 110)
         obs = self._stalker_obs(main)
-        assert len(obs) == 1
-        assert (obs[0].get("details") or {}).get("times_seen") >= 2
+        assert len(obs) == 0
+        assert "bob" in self._known_npcs(main)
 
     def test_merged_entry_fields(self):
         """On merge (same names, same location, within window):
@@ -454,12 +457,9 @@ class TestWriteLocationObservationsIntegration:
         main = self._agent("main", "L")
         self._wlo("main", main, "L", state, 100)
         self._wlo("main", main, "L", state, 105)
-        entry = self._stalker_obs(main)[-1]
-        fx = entry["details"]
-        assert fx["times_seen"] >= 2
-        assert fx["first_seen_turn"] == 100
-        assert fx["last_seen_turn"] == 105
-        assert entry["created_turn"] == 100
+        entry = self._known_npcs(main)["bob"]
+        assert entry["last_seen_turn"] == 105
+        assert entry["last_seen_location_id"] == "L"
 
     # 8b — different location → two entries
     def test_different_location_new_entry(self):
@@ -473,7 +473,9 @@ class TestWriteLocationObservationsIntegration:
         self._wlo("main", main, "L1", state_a, 100)
         main["location_id"] = "L2"
         self._wlo("main", main, "L2", state_b, 105)
-        assert len(self._stalker_obs(main)) == 2
+        assert len(self._stalker_obs(main)) == 0
+        known = self._known_npcs(main)
+        assert known["bob"]["last_seen_location_id"] == "L2"
 
     # 8c — same location, outside window → new entry
     def test_outside_window_new_entry(self):
@@ -482,7 +484,8 @@ class TestWriteLocationObservationsIntegration:
         main = self._agent("main", "L")
         self._wlo("main", main, "L", state, 100)
         self._wlo("main", main, "L", state, 100 + MERGE_WINDOW[TACTICAL] + 1)
-        assert len(self._stalker_obs(main)) == 1
+        assert len(self._stalker_obs(main)) == 0
+        assert self._known_npcs(main)["bob"]["last_seen_turn"] == 121
 
     # 8d — new entries carry aggregate fields
     def test_new_entry_has_fields(self):
@@ -490,10 +493,9 @@ class TestWriteLocationObservationsIntegration:
         state = self._state("L", agents={"bob": bob})
         main = self._agent("main", "L")
         self._wlo("main", main, "L", state, 100)
-        fx = self._stalker_obs(main)[0]["details"]
-        assert fx.get("times_seen") == 1
-        assert fx.get("first_seen_turn") == 100
-        assert fx.get("action_kind") == "stalkers_seen"
+        known = self._known_npcs(main)["bob"]
+        assert known["last_seen_turn"] == 100
+        assert known["last_seen_location_id"] == "L"
 
 
 # ---------------------------------------------------------------------------
@@ -525,12 +527,13 @@ class TestAddMemoryAutoInject:
     def test_stalker_gets_tactical_importance(self):
         a = {}
         self._add(a, _stalker_effects("L", ["Alice"]))
-        assert (self._last_v3_record(a).get("kind") or "") == "semantic_stalkers_seen"
+        assert ((a.get("memory_v3") or {}).get("records") or {}) == {}
+        assert len((a.get("knowledge_v1") or {}).get("known_npcs", {})) == 0
 
     def test_caller_confidence_preserved(self):
         a = {}
         self._add(a, {**_stalker_effects("L", []), "confidence": 0.99})
-        assert (self._last_v3_record(a).get("confidence") or 0.0) > 0
+        assert ((a.get("memory_v3") or {}).get("records") or {}) == {}
 
     def test_decision_entries_not_injected(self):
         a = {}

@@ -949,6 +949,7 @@ def _upsert_knowledge_from_event(
         loc_id = str(effects.get("location_id") or "")
         names: list[str] = [str(n) for n in (effects.get("names") or []) if n]
         seen_ids: list[str] = [str(i) for i in (effects.get("seen_agent_ids") or effects.get("entity_ids") or []) if i]
+        observed_agents = effects.get("observed_agents") if isinstance(effects.get("observed_agents"), dict) else {}
         # Build id→name mapping if both lists exist and have same length
         id_name_map: dict[str, str] = {}
         if seen_ids and len(seen_ids) == len(names):
@@ -960,8 +961,10 @@ def _upsert_knowledge_from_event(
                 name=id_name_map.get(npc_id),
                 location_id=loc_id or None,
                 world_turn=world_turn,
+                observed_agent=observed_agents.get(npc_id) if isinstance(observed_agents.get(npc_id), dict) else None,
                 source="direct_observation",
                 confidence=0.85,
+                death_status={"is_alive": True},
             ))
 
     elif kind == "target_seen":
@@ -978,6 +981,7 @@ def _upsert_knowledge_from_event(
             world_turn=world_turn,
             source="direct_observation",
             confidence=0.95,
+            death_status={"is_alive": True},
         ))
         _merge_update(_upsert_hunt_evidence(
             agent,
@@ -1018,7 +1022,7 @@ def _upsert_knowledge_from_event(
         _METRICS["hunt_evidence_upserts"] += 1
 
     elif kind == "corpse_seen":
-        dead_agent_id = str(effects.get("dead_agent_id") or "")
+        dead_agent_id = str(effects.get("dead_agent_id") or effects.get("target_id") or "")
         if not dead_agent_id:
             return result
         state_agents = effects.get("state_agents")
@@ -1034,7 +1038,7 @@ def _upsert_knowledge_from_event(
             _METRICS["corpse_seen_alive_agent_ignored"] += 1
             result["ignored"] = True
             return result
-        dead_name = str(effects.get("dead_agent_name") or "") or None
+        dead_name = str(effects.get("dead_agent_name") or effects.get("target_name") or "") or None
         loc_id = str(effects.get("location_id") or "")
         death_cause = str(effects.get("death_cause") or "") or None
         killer_id = str(effects.get("killer_id") or "") or None
@@ -1238,6 +1242,7 @@ def _should_write_observation_milestone(
 
     changed_major = bool(knowledge_update.get("changed_major", False))
     created = bool(knowledge_update.get("created", False))
+    reasons = {str(reason) for reason in (knowledge_update.get("reasons") or []) if reason}
     kill_target_id = str(agent.get("kill_target_id") or "")
     target_id = str(effects.get("target_id") or effects.get("dead_agent_id") or "")
     is_kill_target = bool(kill_target_id and target_id and kill_target_id == target_id)
@@ -1248,24 +1253,29 @@ def _should_write_observation_milestone(
     if kind == "target_seen":
         if OBSERVATION_MEMORY_COMPAT_MODE:
             return True
-        return bool(changed_major and is_kill_target)
+        return bool(changed_major and "death_status_changed" in reasons)
 
     if kind == "target_last_known_location":
         if OBSERVATION_MEMORY_COMPAT_MODE:
             return True
-        return bool(changed_major and is_kill_target)
+        return False
 
     if kind == "corpse_seen":
         if bool(knowledge_update.get("ignored", False)):
             return False
-        if is_kill_target:
-            return True
+        if not OBSERVATION_MEMORY_COMPAT_MODE:
+            return False
         return created
 
-    if kind in {"target_corpse_seen", "target_corpse_reported"}:
+    if kind == "target_corpse_seen":
         if OBSERVATION_MEMORY_COMPAT_MODE:
             return True
-        return bool(is_kill_target or changed_major)
+        return bool(is_kill_target)
+
+    if kind == "target_corpse_reported":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return False
 
     return True
 
@@ -1487,29 +1497,6 @@ def write_memory_event_to_v3(
                 effects=record.details if isinstance(record.details, dict) else {},
                 knowledge_update=knowledge_update,
             ):
-                if record.kind == "stalkers_seen":
-                    mem_v3 = ensure_memory_v3(agent)
-                    records: dict[str, Any] = mem_v3.get("records", {})
-                    location_id = str(record.location_id or "")
-                    entity_set = {str(entity_id) for entity_id in record.entity_ids if entity_id}
-                    seen_names = [str(name) for name in (record.details.get("names") or []) if name]
-                    _, semantic_match = _find_stalkers_seen_match(
-                        records=records,
-                        location_id=location_id,
-                        world_turn=world_turn,
-                        entity_set=entity_set,
-                    )
-                    _upsert_semantic_stalkers_seen(
-                        agent_id=agent_id,
-                        agent=agent,
-                        world_turn=world_turn,
-                        location_id=location_id,
-                        entity_ids=record.entity_ids,
-                        seen_names=seen_names,
-                        base_summary=record.summary,
-                        existing_semantic=semantic_match,
-                    )
-                    _sync_cold_after_mutation()
                 _METRICS["knowledge_only_events"] += 1
                 _record_suppressed_observation_metric(record.kind)
                 return

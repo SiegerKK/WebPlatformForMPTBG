@@ -80,7 +80,7 @@ def test_hunter_gets_corpse_report_but_goal_not_completed() -> None:
     assert hunter.get("global_goal_achieved") is not True
 
 
-def test_corpse_seen_still_creates_retrievable_memory_before_knowledge_tables() -> None:
+def test_corpse_seen_updates_knowledge_before_reader_migration() -> None:
     hunter, target, state = _build_hunter_and_target_state()
     _kill_target_by_emission(state, target, world_turn=100)
 
@@ -101,11 +101,10 @@ def test_corpse_seen_still_creates_retrievable_memory_before_knowledge_tables() 
         world_turn=101,
     )
 
-    corpse_seen_records = v3_action_records(hunter, "corpse_seen")
-    assert corpse_seen_records, "corpse_seen must remain retrievable before PR3 knowledge tables"
-    details = corpse_seen_records[-1]["details"]
-    assert details.get("target_id") == "target"
-    assert details.get("location_id") == "loc_b"
+    known = hunter.get("knowledge_v1", {}).get("known_npcs", {}).get("target", {})
+    assert known
+    assert known.get("death_evidence", {}).get("corpse_id") == "corpse_target"
+    assert known.get("last_seen_location_id") == "loc_b"
 
 
 def test_target_corpse_reported_still_creates_retrievable_lead_before_knowledge_tables() -> None:

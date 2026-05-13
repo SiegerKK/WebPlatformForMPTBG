@@ -81,8 +81,7 @@ def test_plan_failure_loop_does_not_dominate_memory() -> None:
 
 
 def test_repeated_stalkers_seen_keeps_episodic_under_budget() -> None:
-    """200 stalkers_seen events at the same location must not produce 200 episodic records."""
-    from app.games.zone_stalkers.memory.memory_events import STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
+    """200 stalkers_seen events at the same location must stay knowledge-only."""
 
     agent: dict = {"name": "bot1", "memory_v3": None}
     for turn in range(100, 300):
@@ -100,11 +99,9 @@ def test_repeated_stalkers_seen_keeps_episodic_under_budget() -> None:
         }
         write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
     records = list(ensure_memory_v3(agent)["records"].values())
-    stalkers_seen = [r for r in records if r.get("kind") == "stalkers_seen" and r.get("status", "active") != "archived"]
-    semantic = [r for r in records if r.get("kind") == "semantic_stalkers_seen"]
-    assert len(stalkers_seen) <= STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
-    assert len(semantic) >= 1
-    assert int(semantic[0]["details"].get("times_seen", 0)) > 1
+    assert not any(r.get("kind") == "stalkers_seen" for r in records)
+    assert not any(r.get("kind") == "semantic_stalkers_seen" for r in records)
+    assert len(agent.get("knowledge_v1", {}).get("known_npcs", {})) == 2
 
 
 def test_repeated_travel_hop_updates_route_aggregate() -> None:
@@ -129,4 +126,3 @@ def test_repeated_travel_hop_updates_route_aggregate() -> None:
     assert len(route_semantic) == 1
     assert route_semantic[0]["details"]["times_traveled"] >= 30
     assert route_semantic[0]["details"]["last_traveled_turn"] == 229
-

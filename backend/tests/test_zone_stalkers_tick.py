@@ -1173,7 +1173,7 @@ class TestPerTurnObservations:
         return tick_zone_map(state)
 
     def test_observation_written_when_other_agent_present(self):
-        """An agent ticking in the same location as another agent writes a stalkers observation."""
+        """An agent ticking in the same location as another agent updates knowledge about them."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
         state = generate_zone(seed=42, num_players=2, num_ai_stalkers=0, num_mutants=0, num_traders=0)
         # Force both agents to the same location
@@ -1182,10 +1182,9 @@ class TestPerTurnObservations:
         shared_loc = state["agents"][a0]["location_id"]
         state["agents"][a1]["location_id"] = shared_loc
         new_state, _ = self._tick(state)
-        obs = [m for m in _v3r(new_state["agents"][a0])
-               if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "stalkers"]
-        assert len(obs) >= 1
-        assert state["agents"][a1]["name"] in _v3_fx(obs[0])["names"]
+        known = new_state["agents"][a0].get("knowledge_v1", {}).get("known_npcs", {})
+        assert a1 in known
+        assert known[a1]["name"] == state["agents"][a1]["name"]
 
     def test_no_artifact_observation_on_tick_arrival(self):
         """Artifacts at a location do NOT generate an 'artifacts' observation on arrival/tick.
@@ -1244,7 +1243,7 @@ class TestPerTurnObservations:
         assert len(obs) == 0
 
     def test_trader_visible_in_stalker_observations(self):
-        """Traders at the same location appear in the 'stalkers' observation entry."""
+        """Traders at the same location are added to stalker knowledge."""
         from app.games.zone_stalkers.generators.zone_generator import generate_zone
         state = generate_zone(seed=42, num_players=1, num_ai_stalkers=0,
                               num_mutants=0, num_traders=1)
@@ -1256,10 +1255,10 @@ class TestPerTurnObservations:
         trader_id = list(state["traders"].keys())[0]
         state["traders"][trader_id]["location_id"] = loc_id
         new_state, _ = self._tick(state)
-        obs = [m for m in _v3r(new_state["agents"][agent_id])
-               if _v3_mt(m) == "observation" and _v3_fx(m).get("observed") == "stalkers"]
-        trader_name = state["traders"][trader_id]["name"]
-        assert any(trader_name in _v3_fx(o)["names"] for o in obs)
+        known = new_state["agents"][agent_id].get("knowledge_v1", {}).get("known_npcs", {})
+        assert trader_id in known
+        assert known[trader_id]["name"] == state["traders"][trader_id]["name"]
+        assert known[trader_id]["detail_level"] == "detailed"
 
     def test_no_observation_when_location_empty(self):
         """No observation entries are written when the location is completely empty."""
@@ -5379,7 +5378,12 @@ class TestKillStalkerGoal:
             "world_turn": 8,
             "type": "observation",
             "title": "Вижу сталкеров",
-            "effects": {"observed": "stalkers", "location_id": "B", "names": ["Цель"]},
+            "effects": {
+                "observed": "stalkers",
+                "location_id": "B",
+                "names": ["Цель"],
+                "seen_agent_ids": ["agent_target"],
+            },
             "summary": "Видел Цель в Промзоне",
         }])
         state["agents"]["agent_hunter"] = hunter
@@ -5751,7 +5755,7 @@ class TestDepartedStalkerNotObserved:
         )
 
     def test_alive_stalker_still_visible(self):
-        """A normal alive (non-departed) stalker still shows up in observations."""
+        """A normal alive (non-departed) stalker still shows up in observer knowledge."""
         from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
         state = self._state()
         observer = self._make_agent("observer", "A")
@@ -5761,12 +5765,9 @@ class TestDepartedStalkerNotObserved:
 
         _write_location_observations("observer", observer, "A", state, 5)
 
-        stalker_obs = [
-            m for m in _v3r(observer)
-            if _v3_fx(m).get("observed") == "stalkers"
-        ]
-        assert stalker_obs, "A normal alive stalker should appear in observations"
-        assert "Сталкер_present" in _v3_fx(stalker_obs[0])["names"]
+        known = observer.get("knowledge_v1", {}).get("known_npcs", {})
+        assert "present" in known, "A normal alive stalker should appear in knowledge"
+        assert known["present"]["name"] == "Сталкер_present"
 
 
 class TestDijkstraReachableLocations:
