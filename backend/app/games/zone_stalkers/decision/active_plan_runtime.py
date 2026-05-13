@@ -35,7 +35,13 @@ PlanMonitorDedupFn = Callable[..., bool]
 def _is_trade_sell_failure_reason(reason: str | None) -> bool:
     if reason is None:
         return False
-    return str(reason).startswith("trade_sell_failed:")
+    value = str(reason)
+    return value.startswith("trade_sell_failed:") or value in {
+        "trader_no_money",
+        "no_items_sold",
+        "no_trader_at_location",
+        "no_sellable_items",
+    }
 
 
 def _invalidate_brain_on_trade_sell_failure_abort(

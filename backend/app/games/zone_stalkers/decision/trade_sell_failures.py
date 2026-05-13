@@ -58,6 +58,8 @@ def has_recent_trade_sell_failure_for_agent(
                 if target_items.isdisjoint(rec_items):
                     continue
             else:
+                # no_trader_at_location is location/trader scoped and may be emitted
+                # without explicit item_types, so keep the cooldown blocking locally.
                 if reason != "no_trader_at_location":
                     continue
 

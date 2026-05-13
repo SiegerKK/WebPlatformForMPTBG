@@ -257,6 +257,7 @@ def _fallback_objective_key_for_intent(
             return _RESUPPLY_INTENT_CATEGORY_TO_OBJECTIVE_KEY.get(forced_category)
         return None
     if intent_kind == "sell_artifacts" and isinstance(agent, dict):
+        # Lazy import to avoid decision<->tick_rules import cycles on module load.
         from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES  # noqa: PLC0415
         from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent  # noqa: PLC0415
 

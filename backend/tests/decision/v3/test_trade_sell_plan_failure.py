@@ -368,7 +368,7 @@ class TestExecTradeSellFailure:
         """P1: removing an item without money gain must not be treated as successful sale."""
         from app.games.zone_stalkers.decision.executors import _exec_trade_sell
         import app.games.zone_stalkers.rules.tick_rules as _tick
-        trader_agent = {"id": "trader_1", "name": "Sidorovich", "location_id": "loc_a"}
+        trader_agent = {"id": "trader_1", "name": "Sidorovich", "location_id": "loc_a", "money": 50000}
         orig_find = getattr(_tick, "_find_trader_at_location", None)
         orig_sell = getattr(_tick, "_bot_sell_to_trader", None)
         _tick._find_trader_at_location = lambda loc_id, state: trader_agent
@@ -394,7 +394,7 @@ class TestExecTradeSellFailure:
                 _tick._bot_sell_to_trader = orig_sell
 
         assert any((e.get("event_type") or "") == "trade_sell_failed" for e in events), events
-        assert step.payload.get("_failure_reason") in {"no_items_sold", "no_sellable_items", "trader_no_money"}
+        assert step.payload.get("_failure_reason") in {"no_items_sold", "no_sellable_items"}
 
     def test_artifact_without_inline_value_uses_balance_price_and_sells(self) -> None:
         """Artifacts lacking `value` in inventory should still be sellable via artifact balance data."""

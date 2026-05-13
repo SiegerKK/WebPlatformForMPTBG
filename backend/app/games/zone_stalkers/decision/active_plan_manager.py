@@ -327,6 +327,7 @@ def assess_active_plan_v3(
                     return ("abort", failure_reason)
                 if failure_reason.endswith("no_items_sold"):
                     return ("abort", failure_reason)
+                # Default for any other trade_sell failure reason remains abort.
                 return ("abort", failure_reason)
             return ("repair", failure_reason)
 

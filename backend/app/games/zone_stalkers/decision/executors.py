@@ -509,6 +509,7 @@ def _artifact_sell_price(
     item: dict[str, Any],
     artifact_types: dict[str, dict[str, Any]],
 ) -> int:
+    """Return artifact sell price (60% of value) with balance fallback by type."""
     item_type = str(item.get("type") or "")
     fallback_cfg = artifact_types.get(item_type) or {}
     item_value_raw = item.get("value")
@@ -523,6 +524,7 @@ def _any_sellable_item_price(
     item_types_cfg: dict[str, dict[str, Any]],
     artifact_types: dict[str, dict[str, Any]],
 ) -> int:
+    """Return sell price (60%) for sellable inventory items, skipping protected categories."""
     item_type = str(item.get("type") or "")
     base_type = str((item_types_cfg.get(item_type) or {}).get("type") or item_type)
     if base_type in {"medical", "consumable", "ammo", "secret_document"}:
@@ -640,8 +642,11 @@ def _exec_trade_sell(
                 if sell_price > 0
             }
         )
-    affordable_sell_exists = any(sell_price > 0 and trader_money >= sell_price for sell_price in sellable_prices_before)
-    if sellable_item_types_before and not affordable_sell_exists:
+    trader_can_afford_any_item = any(
+        sell_price > 0 and trader_money >= sell_price
+        for sell_price in sellable_prices_before
+    )
+    if sellable_item_types_before and not trader_can_afford_any_item:
         return _fail(TRADE_FAIL_TRADER_NO_MONEY, item_types=sellable_item_types_before)
 
     money_before = int(agent.get("money") or 0)
