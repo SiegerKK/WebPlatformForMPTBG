@@ -149,7 +149,13 @@ def ensure_memory_v3(agent: dict[str, Any]) -> dict[str, Any]:
         mem_v3 = _empty_memory_v3()
         agent["memory_v3"] = mem_v3
     _ensure_memory_indexes(mem_v3)
-    _ensure_memory_stats(mem_v3)
+    stats = mem_v3.setdefault("stats", {})
+    if not isinstance(stats, dict):
+        stats = {}
+        mem_v3["stats"] = stats
+    stats.setdefault("records_count", 0)
+    stats.setdefault("last_decay_turn", None)
+    stats.setdefault("last_consolidation_turn", None)
     return mem_v3
 
 
