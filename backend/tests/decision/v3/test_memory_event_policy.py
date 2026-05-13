@@ -161,7 +161,9 @@ def test_memory_metrics_aggregated_counted() -> None:
     reset_memory_metrics()
     agent = _make_agent()
     for _ in range(5):
-        _write(agent, "active_plan_step_failed",
-               objective_key="FIND_ARTIFACTS", step_kind="travel_to_location", reason="no_path")
+        _write(
+            agent, "active_plan_step_failed",
+            objective_key="FIND_ARTIFACTS", step_kind="travel_to_location", reason="no_path",
+        )
     m = get_memory_metrics()
     assert m["memory_write_aggregated"] >= 5
