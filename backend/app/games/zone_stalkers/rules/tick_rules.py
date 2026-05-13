@@ -892,28 +892,30 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     # stripped from hot state and saved to the cold blob.  Agents that already
     # have memory_ref are skipped.
     _pr5_context_id: str = str(state.get("context_id") or state.get("_context_id") or "default")
-    try:
-        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
-            migrate_agent_memory_to_cold_store as _migrate_to_cold,
-        )
-        for _pr5_agent_id, _pr5_raw_agent in list(state.get("agents", {}).items()):
-            if not isinstance(_pr5_raw_agent, dict):
-                continue
-            # Skip agents that are already migrated.
-            if _pr5_raw_agent.get("memory_ref"):
-                continue
-            # Only migrate agents that have memory_v3 records (non-trivial blobs).
-            _pr5_mem_v3 = _pr5_raw_agent.get("memory_v3")
-            if not isinstance(_pr5_mem_v3, dict):
-                continue
-            _pr5_agent = _runtime_agent(_pr5_agent_id, _pr5_raw_agent)
-            _migrate_to_cold(
-                context_id=_pr5_context_id,
-                agent_id=_pr5_agent_id,
-                agent=_pr5_agent,
+    _pr5_cold_store_enabled = bool(state.get("cpu_cold_memory_store_enabled", False))
+    if _pr5_cold_store_enabled:
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                migrate_agent_memory_to_cold_store as _migrate_to_cold,
             )
-    except Exception:
-        pass
+            for _pr5_agent_id, _pr5_raw_agent in list(state.get("agents", {}).items()):
+                if not isinstance(_pr5_raw_agent, dict):
+                    continue
+                # Skip agents that are already migrated.
+                if _pr5_raw_agent.get("memory_ref"):
+                    continue
+                # Only migrate agents that have memory_v3 records (non-trivial blobs).
+                _pr5_mem_v3 = _pr5_raw_agent.get("memory_v3")
+                if not isinstance(_pr5_mem_v3, dict):
+                    continue
+                _pr5_agent = _runtime_agent(_pr5_agent_id, _pr5_raw_agent)
+                _migrate_to_cold(
+                    context_id=_pr5_context_id,
+                    agent_id=_pr5_agent_id,
+                    agent=_pr5_agent,
+                )
+        except Exception:
+            pass
 
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
@@ -1693,13 +1695,14 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     # Runs after all tick processing so that memory writes during the tick
     # (observations, brain decisions, plan events) are saved to the cold store
     # before the state is persisted.
-    try:
-        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
-            flush_dirty_agent_memories as _flush_cold_memories,
-        )
-        _flush_cold_memories(context_id=_pr5_context_id, state=state)
-    except Exception:
-        pass
+    if _pr5_cold_store_enabled:
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                flush_dirty_agent_memories as _flush_cold_memories,
+            )
+            _flush_cold_memories(context_id=_pr5_context_id, state=state)
+        except Exception:
+            pass
 
     return state, events
 

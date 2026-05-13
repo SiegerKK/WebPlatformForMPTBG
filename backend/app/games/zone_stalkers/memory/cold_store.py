@@ -447,7 +447,7 @@ def migrate_agent_memory_to_cold_store(
 
     agent["memory_ref"] = ref
     summary = build_memory_summary(
-        agent_id, agent, is_loaded=True, dirty=False
+        agent_id, agent, is_loaded=False, dirty=False
     )
     agent["memory_summary"] = summary
 

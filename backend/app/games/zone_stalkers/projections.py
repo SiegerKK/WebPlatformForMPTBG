@@ -230,7 +230,6 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
         try:
             from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
                 ensure_agent_memory_loaded as _load_cold_for_proj,
-                get_context_id_from_state as _ctx_from_state,
             )
             _proj_context_id = str(agent.get("_context_id") or "default")
             _load_cold_for_proj(
@@ -386,6 +385,7 @@ def _project_agent_needs(agent: dict[str, Any], world_turn: int | None, lazy_ena
 def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) -> dict[str, Any]:
     _lazy_enabled = isinstance(agent.get("needs_state"), dict)
     _needs = _project_agent_needs(agent, world_turn, _lazy_enabled)
+    _memory_summary = agent.get("memory_summary")
     return {
         "id": agent.get("id"),
         "name": agent.get("name"),
@@ -411,6 +411,7 @@ def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) ->
         "action_used": agent.get("action_used"),
         "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action"), world_turn),
         "active_plan_summary": _compact_active_plan(agent.get("active_plan_v3")),
+        "memory_summary": dict(_memory_summary) if isinstance(_memory_summary, dict) else None,
         "equipment_summary": _compact_equipment(agent.get("equipment")),
         "inventory_summary": _compact_inventory(agent.get("inventory")),
         # Keep full equipment/inventory for player agent use in UI
@@ -636,14 +637,17 @@ def project_zone_state(*, state: dict[str, Any], mode: ProjectionMode) -> dict[s
     if mode == "full":
         projected = copy.deepcopy(state)
         _world_turn = int(projected.get("world_turn") or 0)
+        _context_id = str(projected.get("context_id") or projected.get("_context_id") or "default")
         agents = projected.get("agents")
         if isinstance(agents, dict):
             for agent in agents.values():
                 if isinstance(agent, dict):
                     # PR3: Inject world_turn so knowledge_summary can compute decay.
                     agent["_world_turn"] = _world_turn
+                    agent["_context_id"] = _context_id
                     _enrich_agent_full_projection(agent)
                     agent.pop("_world_turn", None)
+                    agent.pop("_context_id", None)
         return projected
 
     if mode in {"game", "zone-lite"}:
