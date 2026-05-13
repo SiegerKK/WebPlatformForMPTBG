@@ -307,37 +307,15 @@ def has_recent_trade_sell_failure(
     world_turn: int,
 ) -> bool:
     """Return True if active trade_sell_failed cooldown matches trader/location/item overlap."""
-    personality = getattr(ctx, "personality", None)
-    if personality is None:
-        return False
-    memory_v3 = personality.get("memory_v3") or {}
-    records = memory_v3.get("records") or {}
-    target_items = {str(item) for item in item_types if item}
-    for record in records.values():
-        if not isinstance(record, dict):
-            continue
-        if str(record.get("kind") or "") != "trade_sell_failed":
-            continue
-        details = record.get("details") if isinstance(record.get("details"), dict) else {}
-        cooldown_until_turn = int(details.get("cooldown_until_turn") or 0)
-        if cooldown_until_turn <= world_turn:
-            continue
+    from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
 
-        rec_trader_id = str(details.get("trader_id") or "")
-        rec_location_id = str(details.get("location_id") or record.get("location_id") or "")
-        same_trader = bool(trader_id) and bool(rec_trader_id) and rec_trader_id == str(trader_id)
-        same_location = bool(location_id) and bool(rec_location_id) and rec_location_id == str(location_id)
-        if not (same_trader or same_location):
-            continue
-
-        rec_items_raw = details.get("item_types")
-        if not isinstance(rec_items_raw, list):
-            rec_items_raw = record.get("item_types") or []
-        rec_items = {str(item) for item in rec_items_raw if item}
-        if target_items and rec_items and target_items.isdisjoint(rec_items):
-            continue
-        return True
-    return False
+    return has_recent_trade_sell_failure_for_agent(
+        getattr(ctx, "personality", None),
+        trader_id=trader_id,
+        location_id=location_id,
+        item_types=item_types,
+        world_turn=world_turn,
+    )
 
 
 def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:

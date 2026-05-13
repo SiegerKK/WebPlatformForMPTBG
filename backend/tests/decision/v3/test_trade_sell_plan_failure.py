@@ -365,6 +365,7 @@ class TestGeneratorTradeSellCooldown:
         cooldown_trader_id: str = "trader_1",
         cooldown_location_id: str = "loc_a",
         cooldown_item_types: list[str] | None = None,
+        cooldown_reason: str = "no_items_sold",
         known_traders: list[dict[str, Any]] | None = None,
     ) -> Any:
         import uuid
@@ -380,6 +381,7 @@ class TestGeneratorTradeSellCooldown:
         agent["global_goal"] = "get_rich"
 
         if cooldown_until_turn is not None:
+            _cooldown_item_types = ["soul"] if cooldown_item_types is None else list(cooldown_item_types)
             mem_v3 = ensure_memory_v3(agent)
             rec_id = str(uuid.uuid4())
             mem_v3["records"][rec_id] = {
@@ -391,9 +393,10 @@ class TestGeneratorTradeSellCooldown:
                     "cooldown_until_turn": cooldown_until_turn,
                     "trader_id": cooldown_trader_id,
                     "location_id": cooldown_location_id,
-                    "item_types": cooldown_item_types or ["soul"],
+                    "item_types": _cooldown_item_types,
+                    "reason": cooldown_reason,
                 },
-                "location_id": cooldown_location_id, "entity_ids": [], "item_types": cooldown_item_types or ["soul"],
+                "location_id": cooldown_location_id, "entity_ids": [], "item_types": _cooldown_item_types,
                 "tags": ["trade", "failure", "cooldown"], "importance": 0.9,
                 "confidence": 1.0, "status": "active",
             }
@@ -501,6 +504,34 @@ class TestGeneratorTradeSellCooldown:
             item_types={"soul"},
             world_turn=450,
         ) is False
+
+    def test_empty_item_types_without_no_trader_reason_does_not_block_artifact_sale(self) -> None:
+        from app.games.zone_stalkers.decision.objectives.generator import generate_objectives, OBJECTIVE_SELL_ARTIFACTS
+        ctx = self._make_gen_ctx(
+            world_turn=450,
+            has_artifact=True,
+            cooldown_until_turn=700,
+            cooldown_trader_id="trader_1",
+            cooldown_location_id="loc_a",
+            cooldown_item_types=[],
+            cooldown_reason="no_items_sold",
+        )
+        keys = [o.key for o in generate_objectives(ctx)]
+        assert OBJECTIVE_SELL_ARTIFACTS in keys, f"Expected SELL_ARTIFACTS, got: {keys}"
+
+    def test_empty_item_types_for_no_trader_reason_blocks_local_retry(self) -> None:
+        from app.games.zone_stalkers.decision.objectives.generator import generate_objectives, OBJECTIVE_SELL_ARTIFACTS
+        ctx = self._make_gen_ctx(
+            world_turn=450,
+            has_artifact=True,
+            cooldown_until_turn=700,
+            cooldown_trader_id="trader_1",
+            cooldown_location_id="loc_a",
+            cooldown_item_types=[],
+            cooldown_reason="no_trader_at_location",
+        )
+        keys = [o.key for o in generate_objectives(ctx)]
+        assert OBJECTIVE_SELL_ARTIFACTS not in keys, f"Expected SELL_ARTIFACTS suppression, got: {keys}"
 
 
 class TestActivePlanFailureSummary:

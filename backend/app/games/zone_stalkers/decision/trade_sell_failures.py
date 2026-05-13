@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+def has_recent_trade_sell_failure_for_agent(
+    agent: dict[str, Any] | None,
+    *,
+    trader_id: str | None,
+    location_id: str | None,
+    item_types: set[str],
+    world_turn: int,
+) -> bool:
+    """Return True when an active trade-sell cooldown matches trader/location/items."""
+    if not isinstance(agent, dict):
+        return False
+    memory_v3 = agent.get("memory_v3") or {}
+    records = memory_v3.get("records") or {}
+
+    target_trader_id = str(trader_id or "")
+    target_location_id = str(location_id or "")
+    target_items = {str(item) for item in item_types if item}
+
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("kind") or "") != "trade_sell_failed":
+            continue
+
+        details = record.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        cooldown_until_turn = int(details.get("cooldown_until_turn") or 0)
+        if cooldown_until_turn <= world_turn:
+            continue
+
+        rec_trader_id = str(details.get("trader_id") or "")
+        rec_location_id = str(details.get("location_id") or record.get("location_id") or "")
+        same_trader = bool(target_trader_id) and bool(rec_trader_id) and rec_trader_id == target_trader_id
+        same_location = bool(target_location_id) and bool(rec_location_id) and rec_location_id == target_location_id
+        if not (same_trader or same_location):
+            continue
+
+        rec_items_raw = details.get("item_types")
+        if not isinstance(rec_items_raw, list):
+            rec_items_raw = record.get("item_types") or []
+        rec_items = {str(item) for item in rec_items_raw if item}
+
+        if target_items:
+            if rec_items:
+                if target_items.isdisjoint(rec_items):
+                    continue
+            else:
+                if str(details.get("reason") or "") != "no_trader_at_location":
+                    continue
+
+        return True
+    return False
