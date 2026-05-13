@@ -334,6 +334,8 @@ def _enforce_npc_caps(agent: dict[str, Any], knowledge: dict[str, Any]) -> None:
         drop_count = len(known_npcs) - MAX_KNOWN_NPCS_PER_AGENT
         for aid, _ in candidates[:drop_count]:
             del known_npcs[aid]
+        # TODO(PR5/cold-store): define an emergency overflow policy when known_npcs
+        # exceed MAX_KNOWN_NPCS_PER_AGENT but all entries are protected.
 
 
 def _update_knowledge_stats(knowledge: dict[str, Any], world_turn: int) -> None:

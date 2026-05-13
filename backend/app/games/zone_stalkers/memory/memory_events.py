@@ -68,6 +68,8 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "trader_seen": "knowledge_upsert",
     "location_visited": "knowledge_upsert",
     "travel_hop": "knowledge_upsert",
+    # TODO(PR follow-up): route hazard events (anomaly/emission) into
+    # known_hazards knowledge upserts when hazard knowledge tables are expanded.
 
     # Regular gameplay memory — deduped within cooldown window.
     "trade_sell_failed": "memory",

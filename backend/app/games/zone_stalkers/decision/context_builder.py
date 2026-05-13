@@ -243,10 +243,10 @@ def _record_trader_id(record: dict[str, Any], traders: dict[str, Any]) -> str | 
             return entity_id
     return None
 
-# ── Knowledge-first wrappers (PR3) ────────────────────────────────────────────
-# These try knowledge_v1 tables first, fall back to memory_v3 scan when
-# knowledge_v1 is absent or empty.  This allows gradual migration without
-# breaking any existing gameplay logic.
+# ── Knowledge + memory merge wrappers (PR3) ───────────────────────────────────
+# These merge knowledge_v1 tables with memory_v3 fallback scan results.
+# On duplicate ids/keys, knowledge_v1 entries win.
+# This allows gradual migration without breaking existing gameplay logic.
 
 
 def _entities_from_knowledge_or_memory(
