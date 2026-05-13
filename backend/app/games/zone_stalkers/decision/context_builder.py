@@ -312,7 +312,7 @@ def _build_context_cache_key(
 ) -> dict[str, Any]:
     # memory_revision is always included for correctness (MVP).
     # When knowledge_v1 fully covers derived context, memory_revision can be
-    # excluded to improve hit-rate.  Left as future optimisation once
+    # excluded to improve hit-rate.  Left as a future optimization once
     # knowledge-first coverage is confirmed complete.
     return {
         "knowledge_revision": _resolve_knowledge_revision(agent),

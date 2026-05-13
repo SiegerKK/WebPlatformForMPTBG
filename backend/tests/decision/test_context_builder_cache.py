@@ -453,7 +453,8 @@ def test_context_builder_cache_uses_knowledge_before_memory_fallback() -> None:
         confidence=0.95,
     )
 
-    # Memory says other_1 was at loc_a in a record
+    # Memory says other_1 was at loc_a in a conflicting record.
+    # The context builder must prefer knowledge_v1 over this memory entry.
     _add_target_seen_record(agent, "other_1", "loc_a", turn=50)
 
     ctx = build_agent_context("bot1", agent, state)
