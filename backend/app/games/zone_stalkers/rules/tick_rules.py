@@ -3896,7 +3896,12 @@ def _bot_sell_to_trader(
     for art in artifacts:
         art_type = str(art.get("type") or "")
         artifact_cfg = ARTIFACT_TYPES.get(art_type, {})
-        artifact_value = int(art.get("value") or artifact_cfg.get("value") or 0)
+        art_value_raw = art.get("value")
+        artifact_value = int(
+            art_value_raw if art_value_raw is not None else (artifact_cfg.get("value") or 0)
+        )
+        if artifact_value <= 0:
+            continue
         sell_price = int(artifact_value * 0.6)  # 60% of base value
         if sell_price <= 0:
             continue

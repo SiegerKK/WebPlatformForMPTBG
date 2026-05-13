@@ -317,6 +317,7 @@ class TestExecTradeSellFailure:
     def test_artifact_without_inline_value_uses_balance_price_and_sells(self) -> None:
         """Artifacts lacking `value` in inventory should still be sellable via artifact balance data."""
         from app.games.zone_stalkers.decision.executors import _exec_trade_sell
+        from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
         import app.games.zone_stalkers.rules.tick_rules as _tick
 
         trader_agent = {
@@ -340,8 +341,18 @@ class TestExecTradeSellFailure:
                 _tick._find_trader_at_location = orig_find
 
         event_types = {(e.get("event_type") or "") for e in events if isinstance(e, dict)}
+        sold_event = next(
+            (
+                e for e in events
+                if isinstance(e, dict) and (e.get("event_type") or "") == "bot_sold_artifact"
+            ),
+            None,
+        )
+        assert sold_event is not None
+        expected_price = int(int(ARTIFACT_TYPES["soul"].get("value") or 0) * 0.6)
         assert "trade_sell_failed" not in event_types, f"Unexpected failure events: {events}"
         assert "bot_sold_artifact" in event_types, f"Expected successful sale event, got: {events}"
+        assert int((sold_event.get("payload") or {}).get("price") or 0) == expected_price
         assert int(agent.get("money") or 0) > 100
         assert not any(i.get("type") == "soul" for i in agent.get("inventory", []))
 

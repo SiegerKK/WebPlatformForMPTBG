@@ -521,7 +521,7 @@ class TestAssessActivePlanV3:
         assert op == "abort"
         assert reason == "max_repairs_exceeded"
 
-    def test_abort_on_failed_trade_sell_step(self) -> None:
+    def test_abort_on_failed_trade_sell_step_no_items_sold(self) -> None:
         agent = _base_agent()
         plan = Plan(
             intent_kind="trade",
