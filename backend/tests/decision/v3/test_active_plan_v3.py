@@ -992,7 +992,7 @@ class TestAssessActivePlanStepTimeout:
     def test_no_current_step_returns_false(self) -> None:
         from app.games.zone_stalkers.decision.models.active_plan import ActivePlanV3
         ap = ActivePlanV3(
-            id="plan-x", created_turn=1, decision=None, steps=[],
+            id="plan-x", created_turn=1, steps=[],
             current_step_index=0, status=ACTIVE_PLAN_STATUS_ACTIVE,
         )
         timed_out, reason = self._call(_base_agent(), ap, world_turn=100)

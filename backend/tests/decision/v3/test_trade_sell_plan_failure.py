@@ -1207,7 +1207,7 @@ class TestPlanDoesNotCreateTradeSellWithoutSellableItems:
             location_state=state["locations"]["loc_a"],
             world_context={"world_turn": 10},
         )
-        intent = Intent(kind=INTENT_SEEK_WATER, source="test", urgency=1.0, reason="thirsty")
+        intent = Intent(kind=INTENT_SEEK_WATER, score=1.0, reason="thirsty")
         plan = build_plan(ctx, intent, state, world_turn=10)
         if plan is None:
             return  # no plan is also acceptable (no trader reachable)
@@ -1240,7 +1240,7 @@ class TestPlanDoesNotCreateTradeSellWithoutSellableItems:
             location_state=state["locations"]["loc_a"],
             world_context={"world_turn": 10},
         )
-        intent = Intent(kind=INTENT_SEEK_FOOD, source="test", urgency=1.0, reason="hungry")
+        intent = Intent(kind=INTENT_SEEK_FOOD, score=1.0, reason="hungry")
         plan = build_plan(ctx, intent, state, world_turn=10)
         if plan is None:
             return
@@ -1273,7 +1273,7 @@ class TestPlanDoesNotCreateTradeSellWithoutSellableItems:
             location_state=state["locations"]["loc_a"],
             world_context={"world_turn": 10},
         )
-        intent = Intent(kind=INTENT_SELL_ARTIFACTS, source="test", urgency=0.8, reason="want_money")
+        intent = Intent(kind=INTENT_SELL_ARTIFACTS, score=0.8, reason="want_money")
         plan = build_plan(ctx, intent, state, world_turn=10)
         # Either no plan, or plan without sell step.
         if plan is not None:
@@ -1343,7 +1343,6 @@ class TestExecTradeSellWithoutSellableItems:
         ap = ActivePlanV3(
             id="plan-nsi",
             created_turn=5,
-            decision=None,
             steps=[step],
             current_step_index=0,
             status=ACTIVE_PLAN_STATUS_ACTIVE,

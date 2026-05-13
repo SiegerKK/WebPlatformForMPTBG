@@ -559,11 +559,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("sources", nargs="*", metavar="EXPORT.ZIP",
                    help="ZIP or JSON export files to analyze.")
+    p.add_argument("--input", nargs="+", metavar="EXPORT.ZIP",
+                   help="ZIP or JSON export files to analyze (alternative to positional args).")
     p.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"),
                    help="Compare two exports and report deltas.")
     p.add_argument("--thresholds", metavar="THRESHOLDS.JSON",
                    help="JSON file with pass/fail threshold definitions.")
-    p.add_argument("--out", metavar="REPORT.MD",
+    p.add_argument("--fail-on-threshold", action="store_true",
+                   help="Exit with code 1 if any threshold is violated.")
+    p.add_argument("--out", "--markdown-out", dest="out", metavar="REPORT.MD",
                    help="Write Markdown report to this file.")
     p.add_argument("--json-out", metavar="METRICS.JSON",
                    help="Write raw metrics JSON to this file.")
@@ -599,10 +603,12 @@ def main(argv: list[str] | None = None) -> int:
         result = after_res
         sources = [before_path, after_path]
     else:
-        if not args.sources:
+        # Merge positional sources and --input flag
+        all_sources = list(args.sources or []) + list(args.input or [])
+        if not all_sources:
             parser.print_help()
             return 0
-        sources = [Path(s) for s in args.sources]
+        sources = [Path(s) for s in all_sources]
         result = analyze_sources(sources, world_turn=args.world_turn, thresholds=thresholds)
 
     report_md = render_markdown_report(
@@ -631,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
 
-    return 1 if result["violations"] else 0
+    return 1 if (result["violations"] and args.fail_on_threshold) else 0
 
 
 if __name__ == "__main__":
