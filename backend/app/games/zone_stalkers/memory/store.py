@@ -536,7 +536,12 @@ def trim_memory_v3_to_cap(
     *,
     max_records: int = MEMORY_V3_MAX_RECORDS,
 ) -> int:
-    """Evict records until hard cap is respected, then rebuild indexes."""
+    """Repair/normalization helper.
+
+    This may rebuild indexes after trimming old/corrupt/oversized states.
+    It must not be called from the normal add_memory_record hot write path.
+    Normal saturated writes use incremental deindex/index instead.
+    """
     mem_v3 = ensure_memory_v3(agent)
     stats = _ensure_memory_stats(mem_v3)
     records = mem_v3.get("records", {})

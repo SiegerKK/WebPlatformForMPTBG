@@ -350,3 +350,97 @@ def test_explicit_repair_rebuild_increments_stat() -> None:
     assert counters["indexes_rebuilt"] == 1
     assert mem_v3["stats"]["memory_index_rebuilds"] == 1
     assert not validate_memory_indexes(mem_v3)
+
+
+# ---------------------------------------------------------------------------
+# A3: trim_memory_v3_to_cap is the repair path, NOT the normal write path
+# ---------------------------------------------------------------------------
+
+def test_normal_add_path_does_not_call_trim_memory_v3_to_cap_or_rebuild(monkeypatch) -> None:
+    """A3: add_memory_record must NOT call trim_memory_v3_to_cap or
+    rebuild_memory_indexes on the normal hot-write path.  Those are
+    repair/normalization helpers and would be catastrophically slow if
+    called on every single memory write."""
+    from app.games.zone_stalkers.memory.store import trim_memory_v3_to_cap as _real_trim
+    agent: dict = {}
+    _fill_memory(agent, layer=LAYER_EPISODIC, kind="routine_event", importance=0.2, confidence=0.3)
+
+    def _fail_trim(mem: dict) -> None:
+        raise AssertionError("trim_memory_v3_to_cap must not be called from normal add path")
+
+    def _fail_rebuild(mem: dict) -> None:
+        raise AssertionError("rebuild_memory_indexes must not be called from normal add path")
+
+    monkeypatch.setattr(memory_store, "trim_memory_v3_to_cap", _fail_trim)
+    monkeypatch.setattr(memory_store, "rebuild_memory_indexes", _fail_rebuild)
+    monkeypatch.setattr(memory_store, "_rebuild_indexes_from_records", _fail_rebuild)
+
+    # Should succeed without calling trim or rebuild
+    result = add_memory_record(
+        agent,
+        _make_record(
+            "normal_write",
+            layer=LAYER_THREAT,
+            kind="combat_kill",
+            created_turn=9999,
+            importance=1.0,
+            confidence=1.0,
+        ),
+    )
+    assert isinstance(result, bool)
+
+
+# ---------------------------------------------------------------------------
+# A4: fresh (empty) add never triggers eviction
+# ---------------------------------------------------------------------------
+
+def test_fresh_add_never_triggers_eviction(monkeypatch) -> None:
+    """A4: When memory is below cap, add_memory_record must always return True
+    without needing to evict anything."""
+    agent: dict = {}
+
+    def _fail_evict(mem: dict, record=None) -> None:
+        raise AssertionError("_evict_record must not be called below cap")
+
+    monkeypatch.setattr(memory_store, "_evict_record", _fail_evict, raising=False)
+
+    for i in range(10):
+        result = add_memory_record(
+            agent,
+            _make_record(f"fresh_{i:04d}", created_turn=i, importance=0.5, confidence=0.5),
+        )
+        assert result is True, f"Expected True at index {i}, got {result}"
+
+    mem_v3 = ensure_memory_v3(agent)
+    assert len(mem_v3["records"]) == 10
+
+
+# ---------------------------------------------------------------------------
+# A5: incremental index stays consistent after eviction under cap
+# ---------------------------------------------------------------------------
+
+def test_incremental_index_consistent_after_eviction_at_cap() -> None:
+    """A5: After eviction at cap, all memory indexes must pass validate_memory_indexes."""
+    agent: dict = {}
+    _fill_memory(agent, layer=LAYER_EPISODIC, kind="routine_event", importance=0.2, confidence=0.2)
+
+    # Write 50 more records; each write should trigger an eviction
+    for i in range(50):
+        add_memory_record(
+            agent,
+            _make_record(
+                f"over_cap_{i:04d}",
+                layer=LAYER_THREAT,
+                kind="combat_kill",
+                created_turn=MEMORY_V3_MAX_RECORDS + i,
+                importance=0.8,
+                confidence=0.8,
+            ),
+        )
+
+    mem_v3 = ensure_memory_v3(agent)
+    assert not validate_memory_indexes(mem_v3), (
+        "validate_memory_indexes returned errors after incremental eviction"
+    )
+    assert len(mem_v3["records"]) <= MEMORY_V3_MAX_RECORDS
+    assert mem_v3["stats"]["records_count"] == len(mem_v3["records"])

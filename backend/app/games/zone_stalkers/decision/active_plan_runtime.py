@@ -25,7 +25,7 @@ from app.games.zone_stalkers.decision.models.active_plan import (
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
 )
-from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_SEARCH_TARGET
+from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_SEARCH_TARGET, STEP_TRADE_SELL_ITEM
 from app.games.zone_stalkers.decision.plan_monitor import is_v3_monitored_bot
 
 AddMemoryFn = Callable[..., None]
@@ -412,10 +412,10 @@ def start_or_continue_active_plan_step(
 
     # Fix 2: If search_target found the target, complete the plan early for hunt objectives
     _HUNT_COMPLETE_ON_FIND: frozenset[str] = frozenset({"VERIFY_LEAD", "TRACK_TARGET", "PURSUE_TARGET"})
-    _executed_payload = step_plan.steps[0].payload if step_plan.steps else {}
+    _executed_payload_hunt = step_plan.steps[0].payload if step_plan.steps else {}
     if (
         current_step.kind == STEP_SEARCH_TARGET
-        and _executed_payload.get("_hunt_step_outcome") == "target_found"
+        and _executed_payload_hunt.get("_hunt_step_outcome") == "target_found"
         and refreshed_plan.objective_key in _HUNT_COMPLETE_ON_FIND
         and step_plan.current_step_index > 0
     ):
@@ -434,6 +434,28 @@ def start_or_continue_active_plan_step(
             terminal_event="active_plan_completed",
             reason="target_found",
         )
+        return events
+
+    _executed_payload = step_plan.steps[0].payload if step_plan.steps else {}
+
+    # B6: trade_sell_item must mark step failed if no actual sale happened
+    if (
+        current_step.kind == STEP_TRADE_SELL_ITEM
+        and _executed_payload.get("_trade_sell_failed")
+        and step_plan.current_step_index == 0
+    ):
+        failure_reason = str(
+            _executed_payload.get("_failure_reason") or "no_items_sold"
+        )
+        mark_active_plan_step_failed(
+            agent,
+            refreshed_plan,
+            world_turn=world_turn,
+            state=state,
+            add_memory=add_memory,
+            reason=f"trade_sell_failed:{failure_reason}",
+        )
+        save_active_plan(agent, refreshed_plan)
         return events
 
     if step_plan.current_step_index > 0:

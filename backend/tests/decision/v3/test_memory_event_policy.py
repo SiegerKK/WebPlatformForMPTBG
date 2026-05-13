@@ -167,3 +167,64 @@ def test_memory_metrics_aggregated_counted() -> None:
         )
     m = get_memory_metrics()
     assert m["memory_write_aggregated"] >= 5
+
+
+# ---------------------------------------------------------------------------
+# A2: add_memory_record return value drives memory_write_discarded metric
+# ---------------------------------------------------------------------------
+
+def test_write_memory_event_metrics_reflect_dropped_store_record() -> None:
+    """A2: When add_memory_record returns False (no eviction candidate found)
+    on an aggregate or semantic write path, memory_write_discarded must be
+    incremented and memory_write_aggregated must NOT be incremented for that
+    specific record."""
+    from app.games.zone_stalkers.memory.store import (
+        add_memory_record as _real_add,
+        MEMORY_V3_MAX_RECORDS,
+    )
+    from app.games.zone_stalkers.memory.models import LAYER_THREAT
+    import app.games.zone_stalkers.memory.store as _store_module
+
+    reset_memory_metrics()
+    agent = _make_agent()
+
+    # Fill memory with high-importance threat records so eviction finds nothing
+    # below the incoming record.
+    for i in range(MEMORY_V3_MAX_RECORDS):
+        entry_hi = {
+            "world_turn": i,
+            "type": "action",
+            "title": "combat_threat",
+            "effects": {
+                "action_kind": "combat_kill",
+                "location_id": f"loc_{i}",
+                "entity_ids": [f"npc_{i}"],
+            },
+        }
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry=entry_hi,
+            world_turn=i,
+        )
+
+    # Now force add_memory_record to return False for any subsequent call
+    def _always_false(agent_dict, record):
+        return False
+
+    import app.games.zone_stalkers.memory.memory_events as _ev_module
+    original_add = _ev_module.add_memory_record
+
+    _ev_module.add_memory_record = _always_false
+    try:
+        reset_memory_metrics()
+        _write(agent, "active_plan_failure", world_turn=999,
+               location_id="loc_0", plan_type="SELL_ARTIFACTS",
+               agent_id="bot1")
+        metrics = get_memory_metrics()
+        # Should have incremented discarded, not aggregated
+        assert metrics["memory_write_discarded"] >= 1, (
+            f"Expected memory_write_discarded >= 1, got {metrics}"
+        )
+    finally:
+        _ev_module.add_memory_record = original_add

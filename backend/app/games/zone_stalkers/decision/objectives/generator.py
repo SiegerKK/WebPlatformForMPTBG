@@ -298,6 +298,28 @@ def evaluate_kill_target_combat_readiness(
     }
 
 
+def has_recent_trade_sell_failure(
+    ctx: "ObjectiveGenerationContext",
+    cooldown_turns: int = 180,
+) -> bool:
+    """Return True if the agent has a recent trade_sell_failed memory within cooldown_turns."""
+    from app.games.zone_stalkers.memory.memory_events import LAYER_GOAL
+    personality = getattr(ctx, "personality", None)
+    if personality is None:
+        return False
+    memory_v3 = personality.get("memory_v3") or {}
+    records = memory_v3.get("records") or {}
+    current_turn = getattr(ctx, "world_turn", 0) or 0
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("kind") == "trade_sell_failed" and record.get("layer") == LAYER_GOAL:
+            created = int(record.get("created_turn") or 0)
+            if current_turn - created < cooldown_turns:
+                return True
+    return False
+
+
 def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     """Generate objective candidates from need_result, environment, goals and active plan."""
     result: list[Objective] = []
@@ -687,14 +709,15 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
         artifact_types = frozenset(ARTIFACT_TYPES.keys())
         has_artifact = any(i.get("type") in artifact_types for i in agent.get("inventory", []))
-        if has_artifact:
+        if has_artifact and not has_recent_trade_sell_failure(ctx):
             sell_refs, sell_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_SELL_ARTIFACTS)
+            _sell_urgency = max(0.2, float(need_result.scores.trade))
             _append_unique(
                 result,
                 Objective(
                     key=OBJECTIVE_SELL_ARTIFACTS,
                     source="global_goal",
-                    urgency=max(0.2, float(need_result.scores.trade)),
+                    urgency=_sell_urgency,
                     expected_value=0.9,
                     risk=0.15,
                     time_cost=0.25,
