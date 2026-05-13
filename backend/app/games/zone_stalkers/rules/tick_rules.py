@@ -3439,24 +3439,32 @@ def _write_location_observations(
     loc_name = loc.get("name", loc_id)
 
     # ── Stalkers + traders at this location (excluding self) ──────────────────
-    stalker_names: List[str] = []
+    # PR3: Track (agent_id, name) pairs so knowledge_v1 upserts have stable agent IDs.
+    _stalker_id_name_pairs: List[tuple] = []
     for aid, ag in state.get("agents", {}).items():
         if (aid != agent_id
                 and ag.get("location_id") == loc_id
                 and ag.get("is_alive", True)
                 and not ag.get("has_left_zone")
                 and ag.get("archetype") == "stalker_agent"):
-            stalker_names.append(ag.get("name", aid))
+            _stalker_id_name_pairs.append((aid, ag.get("name", aid)))
     for tid, tr in state.get("traders", {}).items():
         if tr.get("location_id") == loc_id:
-            stalker_names.append(tr.get("name", tid))
-    stalker_names.sort()
+            _stalker_id_name_pairs.append((tid, tr.get("name", tid)))
+    _stalker_id_name_pairs.sort(key=lambda x: x[1])
+    stalker_names: List[str] = [n for _, n in _stalker_id_name_pairs]
+    _seen_agent_ids: List[str] = [aid for aid, _ in _stalker_id_name_pairs]
 
     if stalker_names:
         _add_memory(
             agent, world_turn, state, "observation",
             f"Вижу персонажей в «{loc_name}»",
-            {"observed": "stalkers", "location_id": loc_id, "names": stalker_names},
+            {
+                "observed": "stalkers",
+                "location_id": loc_id,
+                "names": stalker_names,
+                "seen_agent_ids": _seen_agent_ids,  # PR3: stable IDs for knowledge upserts
+            },
             summary=f"В локации «{loc_name}» замечены: {', '.join(stalker_names)}",
         )
 

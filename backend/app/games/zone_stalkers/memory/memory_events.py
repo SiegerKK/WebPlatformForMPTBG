@@ -20,6 +20,16 @@ from .models import (
 )
 from .store import ensure_memory_v3, add_memory_record
 
+# PR3: Knowledge tables import — lazy to avoid circular imports at module load.
+# Called inside write_memory_event_to_v3 only.
+def _get_knowledge_upserts():
+    from app.games.zone_stalkers.knowledge.knowledge_store import (  # noqa: PLC0415
+        upsert_known_npc,
+        upsert_known_location,
+        upsert_known_trader,
+    )
+    return upsert_known_npc, upsert_known_location, upsert_known_trader
+
 # Explicit memory event policy.
 # Routing:
 #   trace_only        → debug trace only, never written to memory_v3
@@ -49,6 +59,7 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
 
     # Knowledge upsert — knowledge-first routing; selected kinds still keep
     # episodic writes for gameplay compatibility until PR3 knowledge tables.
+    "stalkers": "knowledge_upsert",  # obs_type alias for stalkers_seen
     "stalkers_seen": "knowledge_upsert",
     "target_seen": "knowledge_upsert",
     "target_last_known_location": "knowledge_upsert",
@@ -57,6 +68,8 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "trader_seen": "knowledge_upsert",
     "location_visited": "knowledge_upsert",
     "travel_hop": "knowledge_upsert",
+    # TODO(PR follow-up): route hazard events (anomaly/emission) into
+    # known_hazards knowledge upserts when hazard knowledge tables are expanded.
 
     # Regular gameplay memory — deduped within cooldown window.
     "trade_sell_failed": "memory",
@@ -865,6 +878,214 @@ def _upsert_semantic_route_traveled(
     return True
 
 
+def _upsert_knowledge_from_event(
+    *,
+    agent: dict[str, Any],
+    kind: str,
+    effects: dict[str, Any],
+    world_turn: int,
+) -> None:
+    """PR3: Upsert knowledge_v1 tables from memory event effects.
+
+    Called in the knowledge_upsert policy block for events that carry NPC data.
+    Does NOT write any episodic records — that is handled by the caller.
+    """
+    _upsert_npc, _upsert_location, _upsert_trader = _get_knowledge_upserts()
+
+    if kind == "stalkers_seen":
+        # Effects: observed="stalkers", location_id, names, seen_agent_ids (if PR3 enhanced)
+        loc_id = str(effects.get("location_id") or "")
+        names: list[str] = [str(n) for n in (effects.get("names") or []) if n]
+        seen_ids: list[str] = [str(i) for i in (effects.get("seen_agent_ids") or []) if i]
+        # Build id→name mapping if both lists exist and have same length
+        id_name_map: dict[str, str] = {}
+        if seen_ids and len(seen_ids) == len(names):
+            id_name_map = dict(zip(seen_ids, names))
+        for npc_id in seen_ids:
+            _upsert_npc(
+                agent,
+                other_agent_id=npc_id,
+                name=id_name_map.get(npc_id),
+                location_id=loc_id or None,
+                world_turn=world_turn,
+                source="direct_observation",
+                confidence=0.85,
+            )
+
+    elif kind == "target_seen":
+        target_id = str(effects.get("target_id") or effects.get("target_agent_id") or "")
+        if not target_id:
+            return
+        target_name = str(effects.get("target_name") or effects.get("target_agent_name") or "")
+        loc_id = str(effects.get("location_id") or "")
+        _upsert_npc(
+            agent,
+            other_agent_id=target_id,
+            name=target_name or None,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            source="direct_observation",
+            confidence=0.95,
+        )
+
+    elif kind == "target_last_known_location":
+        target_id = str(effects.get("target_id") or "")
+        if not target_id:
+            return
+        loc_id = str(effects.get("location_id") or "")
+        _upsert_npc(
+            agent,
+            other_agent_id=target_id,
+            name=str(effects.get("target_name") or "") or None,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            source="target_intel",
+            confidence=0.85,
+        )
+
+    elif kind == "corpse_seen":
+        dead_agent_id = str(effects.get("dead_agent_id") or "")
+        if not dead_agent_id:
+            return
+        dead_name = str(effects.get("dead_agent_name") or "") or None
+        loc_id = str(effects.get("location_id") or "")
+        death_cause = str(effects.get("death_cause") or "") or None
+        killer_id = str(effects.get("killer_id") or "") or None
+        death_status: dict[str, Any] = {"is_alive": False}
+        if death_cause:
+            death_status["death_cause"] = death_cause
+        if killer_id:
+            death_status["killer_id"] = killer_id
+        _upsert_npc(
+            agent,
+            other_agent_id=dead_agent_id,
+            name=dead_name,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            source="corpse_seen",
+            confidence=0.95,
+            death_status=death_status,
+        )
+
+    elif kind in {"target_corpse_seen", "target_corpse_reported"}:
+        target_id = str(effects.get("target_id") or "")
+        if not target_id:
+            return
+        target_name = str(effects.get("target_name") or "") or None
+        # target_corpse_seen: direct observation; target_corpse_reported: witness
+        if kind == "target_corpse_seen":
+            loc_id = str(effects.get("corpse_location_id") or effects.get("location_id") or "")
+            src = "corpse_seen"
+            conf = 0.95
+            death_status = {
+                "is_alive": False,
+                "death_reported": True,
+                "death_directly_confirmed": True,
+                "reported_corpse_location_id": loc_id or None,
+            }
+        else:
+            loc_id = str(effects.get("reported_corpse_location_id") or effects.get("location_id") or "")
+            src = "witness_report"
+            conf = float(effects.get("confidence", 0.75))
+            death_status = {
+                "is_alive": False,
+                "death_reported": True,
+                "death_directly_confirmed": False,
+                "reported_corpse_location_id": loc_id or None,
+            }
+        if str(effects.get("death_cause") or ""):
+            death_status["death_cause"] = effects.get("death_cause")
+        if str(effects.get("killer_id") or ""):
+            death_status["killer_id"] = effects.get("killer_id")
+        _upsert_npc(
+            agent,
+            other_agent_id=target_id,
+            name=target_name,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            source=src,
+            confidence=conf,
+            death_status=death_status,
+        )
+
+    elif kind == "location_visited":
+        location_id = str(
+            effects.get("location_id")
+            or effects.get("to_location")
+            or effects.get("destination")
+            or ""
+        )
+        if not location_id:
+            return
+        _upsert_location(
+            agent,
+            location_id=location_id,
+            name=str(effects.get("location_name") or effects.get("name") or "") or None,
+            world_turn=world_turn,
+            safe_shelter=bool(effects.get("safe_shelter") or effects.get("is_shelter")),
+            confidence=float(effects.get("confidence", 1.0)),
+        )
+
+    elif kind == "trader_seen":
+        trader_id = str(
+            effects.get("trader_id")
+            or effects.get("agent_id")
+            or effects.get("other_agent_id")
+            or ""
+        )
+        if not trader_id:
+            return
+        _upsert_trader(
+            agent,
+            trader_id=trader_id,
+            location_id=str(
+                effects.get("location_id")
+                or effects.get("to_location")
+                or effects.get("destination")
+                or ""
+            ) or None,
+            world_turn=world_turn,
+            name=str(effects.get("trader_name") or effects.get("name") or "") or None,
+            buys_artifacts=bool(effects.get("buys_artifacts")),
+            sells_food=bool(effects.get("sells_food")),
+            sells_drink=bool(effects.get("sells_drink")),
+            confidence=float(effects.get("confidence", 1.0)),
+        )
+
+    elif kind == "travel_hop":
+        from_location_id = str(
+            effects.get("from_location_id")
+            or effects.get("from_location")
+            or effects.get("from_loc")
+            or ""
+        )
+        to_location_id = str(
+            effects.get("to_location_id")
+            or effects.get("to_location")
+            or effects.get("to_loc")
+            or effects.get("destination")
+            or effects.get("location_id")
+            or ""
+        )
+        if from_location_id:
+            _upsert_location(
+                agent,
+                location_id=from_location_id,
+                name=None,
+                world_turn=world_turn,
+                confidence=float(effects.get("confidence", 0.8)),
+            )
+        if to_location_id:
+            _upsert_location(
+                agent,
+                location_id=to_location_id,
+                name=None,
+                world_turn=world_turn,
+                confidence=float(effects.get("confidence", 0.85)),
+            )
+
+
+
 def write_memory_event_to_v3(
     *,
     agent_id: str,
@@ -969,8 +1190,16 @@ def write_memory_event_to_v3(
     # knowledge_upsert — stalkers_seen handled by dedicated path.
     # travel_hop: update the semantic aggregate AND still write the episodic record
     # so that existing gameplay code (TestTravelHopActionMemory) can find it.
+    # PR3: Also call knowledge upsert for NPC-tracking events.
     if policy == "knowledge_upsert":
         _METRICS["memory_write_knowledge_upserts"] += 1
+        # PR3: Upsert knowledge tables for NPC-tracking events.
+        _upsert_knowledge_from_event(
+            agent=agent,
+            kind=record.kind,
+            effects=record.details if isinstance(record.details, dict) else {},
+            world_turn=world_turn,
+        )
         if record.kind == "stalkers_seen":
             if _handle_stalkers_seen_event(
                 agent_id=agent_id,
