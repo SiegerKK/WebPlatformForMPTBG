@@ -14,15 +14,28 @@ Visibility model (Phase 1 MVP):
 """
 from __future__ import annotations
 
+import copy
+import time
 from typing import Any
 
+from app.games.zone_stalkers.decision.constants import CRITICAL_REST_THRESHOLD
+from app.games.zone_stalkers.rules.tick_constants import (
+    CRITICAL_HP_THRESHOLD,
+    CRITICAL_HUNGER_THRESHOLD,
+    CRITICAL_THIRST_THRESHOLD,
+)
+
 from .models.agent_context import AgentContext
+
+CONTEXT_CACHE_TURN_BUCKET_SIZE = 10
 
 
 def build_agent_context(
     agent_id: str,
     agent: dict[str, Any],
     state: dict[str, Any],
+    *,
+    force_refresh: bool = False,
 ) -> AgentContext:
     """Return a normalised ``AgentContext`` for the given agent.
 
@@ -40,6 +53,10 @@ def build_agent_context(
     AgentContext
         Populated snapshot; never ``None``.
     """
+    started = time.perf_counter()
+    metrics = _ensure_context_builder_metrics(agent)
+    metrics["context_builder_calls"] = int(metrics.get("context_builder_calls", 0)) + 1
+
     locations: dict[str, Any] = state.get("locations", {})
     agents: dict[str, Any] = state.get("agents", {})
     traders: dict[str, Any] = state.get("traders", {})
@@ -92,27 +109,65 @@ def build_agent_context(
                 "is_alive": True,
             })
 
-    # ── Known entities — prefer knowledge_v1 tables, fallback to memory_v3 ─────
+    # ── Combat context ────────────────────────────────────────────────────────
+    combat_context: dict[str, Any] | None = _combat_context_for(agent_id, state)
+
     world_turn: int = world_context["world_turn"]
-    target_id: str | None = agent.get("kill_target_id") or None
-    known_entities: list[dict[str, Any]] = _entities_from_knowledge_or_memory(
-        agent, agents, agent_id, world_turn, target_id
+    target_id: str | None = str(agent.get("kill_target_id") or "") or None
+    objective_key = _resolve_objective_key(agent)
+    cache_key = _build_context_cache_key(
+        agent=agent,
+        state=state,
+        world_turn=world_turn,
+        location_id=loc_id,
+        objective_key=objective_key,
+        target_id=target_id,
+    )
+    bypass_cache = _should_bypass_context_cache(
+        agent=agent,
+        state=state,
+        combat_context=combat_context,
+        force_refresh=force_refresh,
     )
 
-    # ── Known locations — prefer knowledge_v1, fallback to memory_v3 ─────────
-    known_locations: list[dict[str, Any]] = _locations_from_knowledge_or_memory(
-        agent, locations, traders, world_turn
-    )
+    scan_metrics: dict[str, int] = {
+        "memory_scan_records": 0,
+        "knowledge_entries_scanned": 0,
+    }
+    if not bypass_cache:
+        cached_parts = _get_context_cache(agent, cache_key, world_turn=world_turn)
+    else:
+        cached_parts = None
 
-    # ── Known hazards — prefer knowledge_v1, fallback to memory_v3 ──────────
-    known_hazards: list[dict[str, Any]] = _hazards_from_knowledge_or_memory(
-        agent, world_turn
-    )
+    if cached_parts is not None:
+        metrics["context_builder_cache_hits"] = int(metrics.get("context_builder_cache_hits", 0)) + 1
+        derived_parts = cached_parts
+    else:
+        metrics["context_builder_cache_misses"] = int(metrics.get("context_builder_cache_misses", 0)) + 1
+        derived_parts, scan_metrics = _build_derived_context_parts(
+            agent=agent,
+            agents=agents,
+            own_id=agent_id,
+            locations=locations,
+            traders=traders,
+            world_turn=world_turn,
+            target_id=target_id,
+            visible_entities=visible_entities,
+        )
+        if not bypass_cache:
+            _store_context_cache(
+                agent,
+                cache_key=cache_key,
+                derived=derived_parts,
+                world_turn=world_turn,
+            )
 
-    # ── Known traders — co-located + knowledge_v1, fallback to memory_v3 ────
-    known_traders: list[dict[str, Any]] = _traders_from_knowledge_or_memory(
-        visible_entities, agent, locations, traders, world_turn
-    )
+    metrics["context_builder_memory_scan_records"] = int(
+        metrics.get("context_builder_memory_scan_records", 0)
+    ) + int(scan_metrics.get("memory_scan_records", 0))
+    metrics["context_builder_knowledge_entries_scanned"] = int(
+        metrics.get("context_builder_knowledge_entries_scanned", 0)
+    ) + int(scan_metrics.get("knowledge_entries_scanned", 0))
 
     # ── Known targets ─────────────────────────────────────────────────────────
     known_targets: list[dict[str, Any]] = _targets_from_agent(agent, agents)
@@ -120,31 +175,34 @@ def build_agent_context(
     # ── Current commitment (active scheduled_action) ──────────────────────────
     current_commitment: dict[str, Any] | None = agent.get("scheduled_action")
 
-    # ── Combat context ────────────────────────────────────────────────────────
-    combat_context: dict[str, Any] | None = _combat_context_for(agent_id, state)
-
     # ── Social context (lazy — from state["relations"] if present) ───────────
     social_context: dict[str, Any] | None = _social_context_for(agent_id, state)
 
     # ── Group context (lazy — from state["groups"] if present) ───────────────
     group_context: dict[str, Any] | None = _group_context_for(agent_id, state)
 
-    return AgentContext(
+    context = AgentContext(
         agent_id=agent_id,
         self_state=agent,
         location_state=loc,
         world_context=world_context,
         visible_entities=visible_entities,
-        known_entities=known_entities,
-        known_locations=known_locations,
-        known_hazards=known_hazards,
-        known_traders=known_traders,
+        known_entities=list(derived_parts.get("known_entities", [])),
+        known_locations=list(derived_parts.get("known_locations", [])),
+        known_hazards=list(derived_parts.get("known_hazards", [])),
+        known_traders=list(derived_parts.get("known_traders", [])),
         known_targets=known_targets,
         current_commitment=current_commitment,
         combat_context=combat_context,
         social_context=social_context,
         group_context=group_context,
     )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    metrics["context_builder_ms"] = float(metrics.get("context_builder_ms", 0.0)) + elapsed_ms
+    calls = int(metrics.get("context_builder_calls", 0))
+    hits = int(metrics.get("context_builder_cache_hits", 0))
+    metrics["context_builder_cache_hit_rate"] = (hits / calls) if calls > 0 else 0.0
+    return context
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
@@ -171,6 +229,248 @@ _HAZARD_KINDS: frozenset[str] = frozenset({
     "emission_ended",
     "anomaly_detected",
 })
+
+
+def _ensure_context_builder_metrics(agent: dict[str, Any]) -> dict[str, Any]:
+    metrics = agent.setdefault("brain_context_metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+        agent["brain_context_metrics"] = metrics
+    metrics.setdefault("context_builder_calls", 0)
+    metrics.setdefault("context_builder_cache_hits", 0)
+    metrics.setdefault("context_builder_cache_misses", 0)
+    metrics.setdefault("context_builder_cache_hit_rate", 0.0)
+    metrics.setdefault("context_builder_memory_scan_records", 0)
+    metrics.setdefault("context_builder_knowledge_entries_scanned", 0)
+    metrics.setdefault("context_builder_ms", 0.0)
+    return metrics
+
+
+def _resolve_objective_key(agent: dict[str, Any]) -> str:
+    active_objective = agent.get("active_objective")
+    if isinstance(active_objective, dict):
+        key = str(active_objective.get("key") or "")
+        if key:
+            return key
+    brain_ctx = agent.get("brain_v3_context")
+    if isinstance(brain_ctx, dict):
+        key = str(brain_ctx.get("objective_key") or "")
+        if key:
+            return key
+    return str(agent.get("current_goal") or "")
+
+
+def _resolve_memory_revision(agent: dict[str, Any]) -> int:
+    memory_v3 = agent.get("memory_v3")
+    if not isinstance(memory_v3, dict):
+        return 0
+    stats = memory_v3.get("stats")
+    if not isinstance(stats, dict):
+        return 0
+    return int(stats.get("memory_revision", 0) or 0)
+
+
+def _resolve_knowledge_revision(agent: dict[str, Any]) -> int:
+    knowledge = agent.get("knowledge_v1")
+    if not isinstance(knowledge, dict):
+        return 0
+    return int(knowledge.get("revision", 0) or 0)
+
+
+def _resolve_emission_phase(state: dict[str, Any]) -> str:
+    if state.get("emission_active"):
+        return "active"
+    if state.get("emission_scheduled_turn") is not None:
+        return "scheduled"
+    return "none"
+
+
+def _build_context_cache_key(
+    *,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    world_turn: int,
+    location_id: str,
+    objective_key: str,
+    target_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "knowledge_revision": _resolve_knowledge_revision(agent),
+        "memory_revision": _resolve_memory_revision(agent),
+        "world_turn_bucket": world_turn // CONTEXT_CACHE_TURN_BUCKET_SIZE,
+        "location_id": location_id,
+        "objective_key": objective_key,
+        "target_id": target_id,
+        "global_goal": str(agent.get("global_goal") or ""),
+        "emission_phase": _resolve_emission_phase(state),
+    }
+
+
+def _is_critical_survival_state(agent: dict[str, Any]) -> bool:
+    hp = int(agent.get("hp", 100) or 100)
+    hunger = int(agent.get("hunger", 0) or 0)
+    thirst = int(agent.get("thirst", 0) or 0)
+    sleepiness = int(agent.get("sleepiness", 0) or 0)
+    return (
+        hp <= CRITICAL_HP_THRESHOLD
+        or hunger >= CRITICAL_HUNGER_THRESHOLD
+        or thirst >= CRITICAL_THIRST_THRESHOLD
+        or sleepiness >= CRITICAL_REST_THRESHOLD
+    )
+
+
+def _should_bypass_context_cache(
+    *,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    combat_context: dict[str, Any] | None,
+    force_refresh: bool,
+) -> bool:
+    if force_refresh:
+        return True
+    if combat_context is not None:
+        return True
+    if _is_critical_survival_state(agent):
+        return True
+    if not agent.get("is_alive", True):
+        return True
+    if agent.get("has_left_zone"):
+        return True
+    if state.get("debug", {}).get("deep_context_builder", False):
+        return True
+    return False
+
+
+def _cache_key_matches(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return left == right
+
+
+def _get_context_cache(
+    agent: dict[str, Any],
+    cache_key: dict[str, Any],
+    *,
+    world_turn: int,
+) -> dict[str, list[dict[str, Any]]] | None:
+    cache = agent.get("brain_context_cache")
+    if not isinstance(cache, dict):
+        return None
+    cached_key = cache.get("cache_key")
+    if not isinstance(cached_key, dict) or not _cache_key_matches(cached_key, cache_key):
+        return None
+    derived = cache.get("derived")
+    if not isinstance(derived, dict):
+        return None
+    cache["hits"] = int(cache.get("hits", 0)) + 1
+    cache["last_used_turn"] = world_turn
+    return {
+        "known_entities": copy.deepcopy(derived.get("known_entities", [])),
+        "known_locations": copy.deepcopy(derived.get("known_locations", [])),
+        "known_traders": copy.deepcopy(derived.get("known_traders", [])),
+        "known_hazards": copy.deepcopy(derived.get("known_hazards", [])),
+        "target_leads": copy.deepcopy(derived.get("target_leads", [])),
+        "corpse_leads": copy.deepcopy(derived.get("corpse_leads", [])),
+    }
+
+
+def _store_context_cache(
+    agent: dict[str, Any],
+    *,
+    cache_key: dict[str, Any],
+    derived: dict[str, list[dict[str, Any]]],
+    world_turn: int,
+) -> None:
+    agent["brain_context_cache"] = {
+        "cache_key": dict(cache_key),
+        "derived": {
+            "known_entities": copy.deepcopy(derived.get("known_entities", [])),
+            "known_locations": copy.deepcopy(derived.get("known_locations", [])),
+            "known_traders": copy.deepcopy(derived.get("known_traders", [])),
+            "known_hazards": copy.deepcopy(derived.get("known_hazards", [])),
+            "target_leads": copy.deepcopy(derived.get("target_leads", [])),
+            "corpse_leads": copy.deepcopy(derived.get("corpse_leads", [])),
+        },
+        "created_turn": world_turn,
+        "last_used_turn": world_turn,
+        "hits": 0,
+    }
+
+
+def _build_derived_context_parts(
+    *,
+    agent: dict[str, Any],
+    agents: dict[str, Any],
+    own_id: str,
+    locations: dict[str, Any],
+    traders: dict[str, Any],
+    world_turn: int,
+    target_id: str | None,
+    visible_entities: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
+    from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
+        build_known_entities_from_knowledge,
+        build_known_hazards_from_knowledge,
+        build_known_locations_from_knowledge,
+        build_known_traders_from_knowledge,
+    )
+
+    knowledge = agent.get("knowledge_v1")
+    knowledge_entries_scanned = 0
+    if isinstance(knowledge, dict):
+        knowledge_entries_scanned += len(knowledge.get("known_npcs", {}) or {})
+        knowledge_entries_scanned += len(knowledge.get("known_locations", {}) or {})
+        knowledge_entries_scanned += len(knowledge.get("known_traders", {}) or {})
+        knowledge_entries_scanned += len(knowledge.get("known_hazards", {}) or {})
+
+    memory_records = _memory_v3_records(agent)
+    memory_scan_records = len(memory_records)
+
+    knowledge_entities = build_known_entities_from_knowledge(
+        agent, world_turn, agents=agents, own_id=own_id, target_id=target_id
+    )
+    memory_entities = _entities_from_memory(
+        agent, agents, own_id, memory_records=memory_records
+    )
+    known_entities = _merge_entities_by_id(knowledge_entities, memory_entities)
+
+    knowledge_locations = build_known_locations_from_knowledge(
+        agent, world_turn, locations=locations, traders=traders
+    )
+    memory_locations = _locations_from_memory(
+        agent, locations, traders, memory_records=memory_records
+    )
+    known_locations = _merge_locations_by_id(knowledge_locations, memory_locations)
+
+    knowledge_hazards = build_known_hazards_from_knowledge(agent, world_turn)
+    memory_hazards = _hazards_from_memory(agent, memory_records=memory_records)
+    known_hazards = _merge_hazards(knowledge_hazards, memory_hazards)
+
+    visible_traders: list[dict[str, Any]] = []
+    for entity in visible_entities:
+        if entity.get("is_trader"):
+            aid = entity["agent_id"]
+            visible_traders.append({
+                "agent_id": aid,
+                "name": entity.get("name", aid),
+                "source": "visible",
+            })
+    knowledge_traders = build_known_traders_from_knowledge(agent, world_turn, traders_dict=traders)
+    memory_traders = _traders_from_memory(agent, traders, memory_records=memory_records)
+    known_traders = _merge_traders_by_id(visible_traders, knowledge_traders, memory_traders)
+
+    return (
+        {
+            "known_entities": known_entities,
+            "known_locations": known_locations,
+            "known_hazards": known_hazards,
+            "known_traders": known_traders,
+            "target_leads": [],
+            "corpse_leads": [],
+        },
+        {
+            "memory_scan_records": memory_scan_records,
+            "knowledge_entries_scanned": knowledge_entries_scanned,
+        },
+    )
 
 
 def _memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
@@ -430,6 +730,8 @@ def _entities_from_memory(
     agent: dict[str, Any],
     agents: dict[str, Any],
     own_id: str,
+    *,
+    memory_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a deduplicated list of agents mentioned in the NPC's memory.
 
@@ -439,7 +741,8 @@ def _entities_from_memory(
     """
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
-    for record in _memory_v3_records(agent):
+    records = memory_records if memory_records is not None else _memory_v3_records(agent)
+    for record in records:
         if not _record_is_active(record):
             continue
         last_known_location = None
@@ -471,6 +774,8 @@ def _locations_from_memory(
     agent: dict[str, Any],
     locations: dict[str, Any],
     traders: dict[str, Any] | None = None,
+    *,
+    memory_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a deduplicated list of locations the NPC has in memory.
 
@@ -485,7 +790,8 @@ def _locations_from_memory(
         traders = {}
     seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
-    for record in _memory_v3_records(agent):
+    records = memory_records if memory_records is not None else _memory_v3_records(agent)
+    for record in records:
         if not _record_is_active(record):
             continue
         for loc_id in _record_location_ids(record):
@@ -508,10 +814,15 @@ def _locations_from_memory(
     return result
 
 
-def _hazards_from_memory(agent: dict[str, Any]) -> list[dict[str, Any]]:
+def _hazards_from_memory(
+    agent: dict[str, Any],
+    *,
+    memory_records: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Return hazard observations recorded in the NPC's memory."""
     hazards: list[dict[str, Any]] = []
-    for record in _memory_v3_records(agent):
+    records = memory_records if memory_records is not None else _memory_v3_records(agent)
+    for record in records:
         if not _record_is_active(record):
             continue
         if str(record.get("kind", "")) not in _HAZARD_KINDS:
@@ -529,6 +840,8 @@ def _traders_from_visible_and_memory(
     agent: dict[str, Any],
     locations: dict[str, Any],
     traders_dict: dict[str, Any],
+    *,
+    memory_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Collect known trader info from co-located agents and memory."""
     result: list[dict[str, Any]] = []
@@ -541,7 +854,8 @@ def _traders_from_visible_and_memory(
             seen.add(aid)
             result.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
 
-    for record in _memory_v3_records(agent):
+    records = memory_records if memory_records is not None else _memory_v3_records(agent)
+    for record in records:
         if not _record_is_active(record):
             continue
         trader_id = _record_trader_id(record, traders_dict)
@@ -565,10 +879,13 @@ def _traders_from_visible_and_memory(
 def _traders_from_memory(
     agent: dict[str, Any],
     traders_dict: dict[str, Any],
+    *,
+    memory_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for record in _memory_v3_records(agent):
+    records = memory_records if memory_records is not None else _memory_v3_records(agent)
+    for record in records:
         if not _record_is_active(record):
             continue
         trader_id = _record_trader_id(record, traders_dict)
