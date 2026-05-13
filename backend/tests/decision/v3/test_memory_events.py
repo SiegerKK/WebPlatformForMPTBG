@@ -322,7 +322,7 @@ def test_write_event_stores_action_kind_in_details() -> None:
     assert rec["details"].get("action_kind") == "emission_imminent"  # original preserved
 
 
-def test_repeated_stalkers_seen_merges_into_semantic_record() -> None:
+def test_repeated_stalkers_seen_updates_knowledge_without_memory_records() -> None:
     agent: dict = {"name": "bot1", "memory_v3": None}
     for turn in range(100, 112):
         entry = _make_entry(
@@ -336,19 +336,11 @@ def test_repeated_stalkers_seen_merges_into_semantic_record() -> None:
         write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
 
     records = list(ensure_memory_v3(agent)["records"].values())
-    semantic = [record for record in records if record.get("kind") == "semantic_stalkers_seen"]
-    episodic = [
-        record for record in records
-        if record.get("kind") == "stalkers_seen" and record.get("location_id") == "loc_bunker"
-    ]
-    active_episodic = [record for record in episodic if record.get("status", "active") != "archived"]
-    assert len(semantic) == 1
-    assert len(active_episodic) <= 5
-    sem = semantic[0]
-    assert sem["layer"] == "semantic"
-    assert sem["details"]["times_seen"] >= 11
-    assert sem["details"]["last_seen_turn"] == 111
-    assert sem["details"]["unique_entity_count"] == 3
+    assert not any(record.get("kind") == "semantic_stalkers_seen" for record in records)
+    assert not any(record.get("kind") == "stalkers_seen" for record in records)
+    known_npcs = agent.get("knowledge_v1", {}).get("known_npcs", {})
+    assert len(known_npcs) == 3
+    assert known_npcs["agent_debug_0"]["last_seen_location_id"] == "loc_bunker"
 
 
 def test_repeated_travel_hop_updates_route_semantic_memory() -> None:
@@ -388,17 +380,12 @@ def test_repeated_stalkers_seen_keeps_episodic_under_budget() -> None:
         )
         write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
     records = list(ensure_memory_v3(agent)["records"].values())
-    stalkers_seen = [
-        rec for rec in records
-        if rec.get("kind") == "stalkers_seen" and rec.get("status", "active") != "archived"
-    ]
-    semantic = [rec for rec in records if rec.get("kind") == "semantic_stalkers_seen"]
-    assert len(stalkers_seen) <= STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION
-    assert len(semantic) >= 1
-    assert int(semantic[0]["details"].get("times_seen", 0)) > 1
+    assert not any(rec.get("kind") == "stalkers_seen" for rec in records)
+    assert not any(rec.get("kind") == "semantic_stalkers_seen" for rec in records)
+    assert len(agent.get("knowledge_v1", {}).get("known_npcs", {})) == 2
 
 
-def test_repeated_stalkers_seen_updates_semantic_last_seen_turn() -> None:
+def test_repeated_stalkers_seen_updates_known_npc_last_seen_turn() -> None:
     agent: dict = {"name": "bot1", "memory_v3": None}
     for turn in (4010, 4020, 4030):
         write_memory_event_to_v3(
@@ -414,13 +401,11 @@ def test_repeated_stalkers_seen_updates_semantic_last_seen_turn() -> None:
             ),
             world_turn=turn,
         )
-    semantic = [
-        rec for rec in ensure_memory_v3(agent)["records"].values()
-        if rec.get("kind") == "semantic_stalkers_seen"
-    ]
-    assert len(semantic) == 1
-    details = semantic[0]["details"]
-    assert details["times_seen"] >= 3
+    assert not any(
+        rec.get("kind") == "semantic_stalkers_seen"
+        for rec in ensure_memory_v3(agent)["records"].values()
+    )
+    details = agent.get("knowledge_v1", {}).get("known_npcs", {}).get("agent_a", {})
     assert details["last_seen_turn"] == 4030
 
 
@@ -449,8 +434,8 @@ def test_active_plan_failures_are_aggregated() -> None:
     assert d["last_turn"] == 140
 
 
-def test_crowd_seen_summary_is_bounded() -> None:
-    """Repeated stalkers_seen events must produce bounded semantic aggregate."""
+def test_crowd_seen_updates_bounded_known_npcs() -> None:
+    """Repeated stalkers_seen events stay in bounded knowledge, not semantic memory."""
     agent: dict = {"name": "bot1", "memory_v3": None}
     for turn in range(100, 220):
         entry = _make_entry(
@@ -463,9 +448,8 @@ def test_crowd_seen_summary_is_bounded() -> None:
         )
         write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
     records = list(ensure_memory_v3(agent)["records"].values())
-    semantic = [r for r in records if r.get("kind") == "semantic_stalkers_seen"]
-    assert len(semantic) == 1
-    assert semantic[0]["details"]["times_seen"] >= 120
+    assert not any(r.get("kind") == "semantic_stalkers_seen" for r in records)
+    assert len(agent.get("knowledge_v1", {}).get("known_npcs", {})) == 17
 
 
 def test_objective_decision_writes_episodic_record() -> None:

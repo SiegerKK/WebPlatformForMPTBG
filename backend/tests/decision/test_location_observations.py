@@ -28,6 +28,10 @@ def _obs_entries(agent: dict, obs_type: str, loc_id: str) -> list[dict]:
     ]
 
 
+def _known_npcs(agent: dict) -> dict[str, Any]:
+    return ((agent.get("knowledge_v1") or {}).get("known_npcs") or {})
+
+
 def _make_state_with_stalkers(
     observer_id: str,
     loc_id: str,
@@ -62,19 +66,19 @@ def _make_state_with_stalkers(
 
 class TestStalkerObservationMerge:
     def test_first_call_creates_one_entry(self):
-        """First observation creates exactly one memory entry."""
+        """First observation updates knowledge for visible stalkers and writes no routine memory."""
         state, observer = _make_state_with_stalkers(
             "bot1", "loc_a", ["Alice", "Bob"]
         )
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=1)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 1
-        assert sorted((entries[0].get("details") or {}).get("names", [])) == ["Alice", "Bob"]
-        assert entries[0]["created_turn"] == 1
+        assert len(entries) == 0
+        known_npcs = _known_npcs(observer)
+        assert sorted(v.get("name") for v in known_npcs.values()) == ["Alice", "Bob"]
 
     def test_second_call_same_stalkers_no_new_entry(self):
-        """Repeated call with identical stalkers does not add a new entry."""
+        """Repeated call with identical stalkers stays knowledge-only."""
         state, observer = _make_state_with_stalkers(
             "bot1", "loc_a", ["Alice", "Bob"]
         )
@@ -82,11 +86,11 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=2)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 2, "Should write a new memory_v3 record per repeated observation"
-        assert entries[-1]["created_turn"] == 2
+        assert len(entries) == 0
+        assert len(_known_npcs(observer)) == 2
 
     def test_second_call_new_stalker_merges_and_bumps_turn(self):
-        """When a new stalker appears, their name is merged in and world_turn updates."""
+        """When a new stalker appears, knowledge gains the new NPC and updates location facts."""
         state, observer = _make_state_with_stalkers(
             "bot1", "loc_a", ["Alice"]
         )
@@ -103,13 +107,12 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=5)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 2, "Must create a new memory_v3 record"
-        names = (entries[-1].get("details") or {}).get("names", [])
-        assert "Alice" in names and "Bob" in names
-        assert entries[-1]["created_turn"] == 5
+        assert len(entries) == 0
+        names = sorted(v.get("name") for v in _known_npcs(observer).values())
+        assert names == ["Alice", "Bob"]
 
     def test_union_preserves_previously_seen_stalker_who_left(self):
-        """A stalker that previously appeared stays in the merged list even after leaving."""
+        """A stalker that previously appeared stays in knowledge even after leaving."""
         state, observer = _make_state_with_stalkers(
             "bot1", "loc_a", ["Alice", "Bob"]
         )
@@ -121,14 +124,13 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=2)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 2
-        first_names = (entries[0].get("details") or {}).get("names", [])
-        latest_names = (entries[-1].get("details") or {}).get("names", [])
-        assert "Bob" in first_names
-        assert "Alice" in latest_names
+        assert len(entries) == 0
+        known_npcs = _known_npcs(observer)
+        assert known_npcs["stalker_Bob"]["last_seen_location_id"] == "loc_a"
+        assert known_npcs["stalker_Alice"]["last_seen_location_id"] == "loc_a"
 
     def test_different_location_creates_separate_entry(self):
-        """Observations at different locations create separate independent entries."""
+        """Observations at different locations keep per-NPC last known locations in knowledge."""
         state, observer = _make_state_with_stalkers(
             "bot1", "loc_a", ["Alice"]
         )
@@ -145,10 +147,11 @@ class TestStalkerObservationMerge:
 
         entries_a = _obs_entries(observer, "stalkers", "loc_a")
         entries_b = _obs_entries(observer, "stalkers", "loc_b")
-        assert len(entries_a) == 1
-        assert len(entries_b) == 1
-        assert (entries_a[0].get("details") or {}).get("names") == ["Alice"]
-        assert (entries_b[0].get("details") or {}).get("names") == ["Carol"]
+        assert len(entries_a) == 0
+        assert len(entries_b) == 0
+        known_npcs = _known_npcs(observer)
+        assert known_npcs["stalker_Alice"]["last_seen_location_id"] == "loc_a"
+        assert known_npcs["stalker_Carol"]["last_seen_location_id"] == "loc_b"
 
     def test_no_entry_when_no_stalkers_present(self):
         """When no other stalkers are present, no observation entry is written."""
