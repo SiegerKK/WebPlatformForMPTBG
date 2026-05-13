@@ -3694,6 +3694,8 @@ def _write_location_observations(
         corpse_id = str(corpse.get("corpse_id") or f"corpse_{dead_agent_id}_{corpse.get('created_turn')}")
         death_cause = str(corpse.get("death_cause") or "")
         killer_id = corpse.get("killer_id")
+        _dead_agent_raw = state.get("agents", {}).get(dead_agent_id)
+        _dead_agent_live = bool(isinstance(_dead_agent_raw, dict) and _dead_agent_raw.get("is_alive", True))
         _add_memory(
             agent,
             world_turn,
@@ -3710,6 +3712,7 @@ def _write_location_observations(
                 "killer_id": killer_id,
                 "directly_observed": True,
                 "confidence": 0.95,
+                "dead_agent_is_alive": _dead_agent_live,
             },
             summary=f"Обнаружено тело «{dead_agent_name}» в «{loc_name}».",
         )
@@ -3731,6 +3734,7 @@ def _write_location_observations(
                     "killer_id": killer_id,
                     "directly_observed": True,
                     "confidence": 0.95,
+                    "dead_agent_is_alive": _dead_agent_live,
                 },
                 summary=f"Лично подтвердил тело цели «{dead_agent_name}» в «{loc_name}».",
             )

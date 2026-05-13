@@ -21,6 +21,12 @@ from tests.decision.conftest import make_agent, make_minimal_state
 
 def _obs_entries(agent: dict, obs_type: str, loc_id: str) -> list[dict]:
     """Return all memory_v3 observation records of a given type for a location."""
+    if obs_type == "stalkers":
+        return [
+            r for r in ((agent.get("memory_v3") or {}).get("records") or {}).values()
+            if r.get("kind") in {"semantic_stalkers_seen", "stalkers_seen"}
+            and (r.get("location_id") or (r.get("details") or {}).get("location_id")) == loc_id
+        ]
     return [
         r for r in ((agent.get("memory_v3") or {}).get("records") or {}).values()
         if (r.get("details") or {}).get("observed") == obs_type
@@ -82,8 +88,8 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=2)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 2, "Should write a new memory_v3 record per repeated observation"
-        assert entries[-1]["created_turn"] == 2
+        assert len(entries) == 1
+        assert int((entries[-1].get("details") or {}).get("times_seen", 0)) >= 2
 
     def test_second_call_new_stalker_merges_and_bumps_turn(self):
         """When a new stalker appears, their name is merged in and world_turn updates."""
@@ -103,10 +109,10 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=5)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 2, "Must create a new memory_v3 record"
-        names = (entries[-1].get("details") or {}).get("names", [])
+        assert len(entries) == 1
+        names = (entries[-1].get("details") or {}).get("seen_names", [])
         assert "Alice" in names and "Bob" in names
-        assert entries[-1]["created_turn"] == 5
+        assert (entries[-1].get("details") or {}).get("last_seen_turn") == 5
 
     def test_union_preserves_previously_seen_stalker_who_left(self):
         """A stalker that previously appeared stays in the merged list even after leaving."""
@@ -121,10 +127,9 @@ class TestStalkerObservationMerge:
         _write_location_observations("bot1", observer, "loc_a", state, world_turn=2)
 
         entries = _obs_entries(observer, "stalkers", "loc_a")
-        assert len(entries) == 2
-        first_names = (entries[0].get("details") or {}).get("names", [])
-        latest_names = (entries[-1].get("details") or {}).get("names", [])
-        assert "Bob" in first_names
+        assert len(entries) == 1
+        latest_names = (entries[-1].get("details") or {}).get("seen_names", [])
+        assert "Bob" in latest_names
         assert "Alice" in latest_names
 
     def test_different_location_creates_separate_entry(self):
@@ -147,8 +152,8 @@ class TestStalkerObservationMerge:
         entries_b = _obs_entries(observer, "stalkers", "loc_b")
         assert len(entries_a) == 1
         assert len(entries_b) == 1
-        assert (entries_a[0].get("details") or {}).get("names") == ["Alice"]
-        assert (entries_b[0].get("details") or {}).get("names") == ["Carol"]
+        assert (entries_a[0].get("details") or {}).get("seen_names") == ["Alice"]
+        assert (entries_b[0].get("details") or {}).get("seen_names") == ["Carol"]
 
     def test_no_entry_when_no_stalkers_present(self):
         """When no other stalkers are present, no observation entry is written."""

@@ -24,11 +24,23 @@ from .store import ensure_memory_v3, add_memory_record
 # Called inside write_memory_event_to_v3 only.
 def _get_knowledge_upserts():
     from app.games.zone_stalkers.knowledge.knowledge_store import (  # noqa: PLC0415
-        upsert_known_npc,
+        upsert_hunt_evidence_from_observation,
+        upsert_known_corpse,
+        upsert_known_npc_observation,
         upsert_known_location,
         upsert_known_trader,
     )
-    return upsert_known_npc, upsert_known_location, upsert_known_trader
+    return (
+        upsert_known_npc_observation,
+        upsert_known_corpse,
+        upsert_hunt_evidence_from_observation,
+        upsert_known_location,
+        upsert_known_trader,
+    )
+
+
+KNOWLEDGE_FIRST_OBSERVATIONS_ENABLED = True
+OBSERVATION_MEMORY_COMPAT_MODE = True
 
 # Explicit memory event policy.
 # Routing:
@@ -63,6 +75,7 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "stalkers_seen": "knowledge_upsert",
     "target_seen": "knowledge_upsert",
     "target_last_known_location": "knowledge_upsert",
+    "target_corpse_seen": "knowledge_upsert",
     "target_corpse_reported": "knowledge_upsert",
     "corpse_seen": "knowledge_upsert",
     "trader_seen": "knowledge_upsert",
@@ -271,6 +284,16 @@ _METRICS: dict[str, int] = {
     "memory_evictions": 0,
     "memory_summary_truncations": 0,
     "memory_details_truncations": 0,
+    "knowledge_upsert_attempts": 0,
+    "knowledge_upsert_major_updates": 0,
+    "knowledge_upsert_minor_refreshes": 0,
+    "knowledge_only_events": 0,
+    "observation_memory_milestones_written": 0,
+    "stalkers_seen_memory_suppressed": 0,
+    "corpse_seen_memory_suppressed": 0,
+    "stale_corpse_seen_ignored": 0,
+    "corpse_seen_alive_agent_ignored": 0,
+    "hunt_evidence_upserts": 0,
 }
 
 
@@ -693,7 +716,10 @@ def _update_stalkers_seen_record(
     details["unique_entity_count"] = len(entity_ids)
     if seen_names:
         prev_names = [str(name) for name in (details.get("seen_names") or []) if name]
-        details["seen_names"] = list(dict.fromkeys(prev_names + seen_names))
+        merged_names = list(dict.fromkeys(prev_names + seen_names))
+        details["seen_names"] = merged_names
+        details["names"] = merged_names
+    details["observed"] = "stalkers"
     raw["entity_ids"] = list(entity_ids)
     raw["confidence"] = min(1.0, float(raw.get("confidence", 0.7)) + 0.01)
 
@@ -735,8 +761,10 @@ def _upsert_semantic_stalkers_seen(
             "last_seen_turn": world_turn,
             "times_seen": 1,
             "seen_names": list(dict.fromkeys(seen_names)),
+            "names": list(dict.fromkeys(seen_names)),
             "unique_entity_count": len(entity_ids),
             "last_observed_group_size": len(entity_ids),
+            "observed": "stalkers",
             "memory_type": "observation",
             "action_kind": "stalkers_seen",
         },
@@ -884,25 +912,49 @@ def _upsert_knowledge_from_event(
     kind: str,
     effects: dict[str, Any],
     world_turn: int,
-) -> None:
+) -> dict[str, Any]:
     """PR3: Upsert knowledge_v1 tables from memory event effects.
 
     Called in the knowledge_upsert policy block for events that carry NPC data.
     Does NOT write any episodic records — that is handled by the caller.
     """
-    _upsert_npc, _upsert_location, _upsert_trader = _get_knowledge_upserts()
+    (
+        _upsert_npc,
+        _upsert_corpse,
+        _upsert_hunt_evidence,
+        _upsert_location,
+        _upsert_trader,
+    ) = _get_knowledge_upserts()
+
+    result: dict[str, Any] = {
+        "changed_major": False,
+        "changed_minor": False,
+        "created": False,
+        "reasons": [],
+        "ignored": False,
+    }
+
+    def _merge_update(update: dict[str, Any] | None) -> None:
+        if not isinstance(update, dict):
+            return
+        result["changed_major"] = bool(result["changed_major"] or update.get("changed_major", False))
+        result["changed_minor"] = bool(result["changed_minor"] or update.get("changed_minor", False))
+        result["created"] = bool(result["created"] or update.get("created", False))
+        reason = str(update.get("reason") or "")
+        if reason:
+            result["reasons"].append(reason)
 
     if kind == "stalkers_seen":
         # Effects: observed="stalkers", location_id, names, seen_agent_ids (if PR3 enhanced)
         loc_id = str(effects.get("location_id") or "")
         names: list[str] = [str(n) for n in (effects.get("names") or []) if n]
-        seen_ids: list[str] = [str(i) for i in (effects.get("seen_agent_ids") or []) if i]
+        seen_ids: list[str] = [str(i) for i in (effects.get("seen_agent_ids") or effects.get("entity_ids") or []) if i]
         # Build id→name mapping if both lists exist and have same length
         id_name_map: dict[str, str] = {}
         if seen_ids and len(seen_ids) == len(names):
             id_name_map = dict(zip(seen_ids, names))
         for npc_id in seen_ids:
-            _upsert_npc(
+            _merge_update(_upsert_npc(
                 agent,
                 other_agent_id=npc_id,
                 name=id_name_map.get(npc_id),
@@ -910,15 +962,15 @@ def _upsert_knowledge_from_event(
                 world_turn=world_turn,
                 source="direct_observation",
                 confidence=0.85,
-            )
+            ))
 
     elif kind == "target_seen":
         target_id = str(effects.get("target_id") or effects.get("target_agent_id") or "")
         if not target_id:
-            return
+            return result
         target_name = str(effects.get("target_name") or effects.get("target_agent_name") or "")
         loc_id = str(effects.get("location_id") or "")
-        _upsert_npc(
+        _merge_update(_upsert_npc(
             agent,
             other_agent_id=target_id,
             name=target_name or None,
@@ -926,14 +978,25 @@ def _upsert_knowledge_from_event(
             world_turn=world_turn,
             source="direct_observation",
             confidence=0.95,
-        )
+        ))
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=target_id,
+            kind="target_seen",
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            confidence=float(effects.get("confidence", 0.95)),
+            source="direct_observation",
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
 
     elif kind == "target_last_known_location":
         target_id = str(effects.get("target_id") or "")
         if not target_id:
-            return
+            return result
         loc_id = str(effects.get("location_id") or "")
-        _upsert_npc(
+        _merge_update(_upsert_npc(
             agent,
             other_agent_id=target_id,
             name=str(effects.get("target_name") or "") or None,
@@ -941,22 +1004,62 @@ def _upsert_knowledge_from_event(
             world_turn=world_turn,
             source="target_intel",
             confidence=0.85,
-        )
+        ))
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=target_id,
+            kind="target_last_known_location",
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            confidence=float(effects.get("confidence", 0.85)),
+            source="target_intel",
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
 
     elif kind == "corpse_seen":
         dead_agent_id = str(effects.get("dead_agent_id") or "")
         if not dead_agent_id:
-            return
+            return result
+        state_agents = effects.get("state_agents")
+        dead_agent_alive = bool(effects.get("dead_agent_is_alive", False))
+        if isinstance(state_agents, dict):
+            raw_alive = state_agents.get(dead_agent_id)
+            if isinstance(raw_alive, dict):
+                dead_agent_alive = bool(raw_alive.get("is_alive", True))
+            elif isinstance(raw_alive, bool):
+                dead_agent_alive = raw_alive
+        if dead_agent_alive:
+            _METRICS["stale_corpse_seen_ignored"] += 1
+            _METRICS["corpse_seen_alive_agent_ignored"] += 1
+            result["ignored"] = True
+            return result
         dead_name = str(effects.get("dead_agent_name") or "") or None
         loc_id = str(effects.get("location_id") or "")
         death_cause = str(effects.get("death_cause") or "") or None
         killer_id = str(effects.get("killer_id") or "") or None
+        corpse_id = str(effects.get("corpse_id") or f"corpse_{dead_agent_id}_{world_turn}")
+        _merge_update(_upsert_corpse(
+            agent,
+            corpse_id=corpse_id,
+            dead_agent_id=dead_agent_id,
+            dead_agent_name=dead_name,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            death_cause=death_cause,
+            killer_id=killer_id,
+            source_agent_id=str(effects.get("source_agent_id") or "") or None,
+            confidence=float(effects.get("confidence", 0.95)),
+            directly_observed=bool(effects.get("directly_observed", True)),
+        ))
         death_status: dict[str, Any] = {"is_alive": False}
         if death_cause:
             death_status["death_cause"] = death_cause
         if killer_id:
             death_status["killer_id"] = killer_id
-        _upsert_npc(
+        death_status["corpse_id"] = corpse_id
+        death_status["reported_corpse_location_id"] = loc_id or None
+        _merge_update(_upsert_npc(
             agent,
             other_agent_id=dead_agent_id,
             name=dead_name,
@@ -965,12 +1068,23 @@ def _upsert_knowledge_from_event(
             source="corpse_seen",
             confidence=0.95,
             death_status=death_status,
-        )
+        ))
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=dead_agent_id,
+            kind="corpse_seen",
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            confidence=float(effects.get("confidence", 0.95)),
+            source="corpse_seen",
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
 
     elif kind in {"target_corpse_seen", "target_corpse_reported"}:
         target_id = str(effects.get("target_id") or "")
         if not target_id:
-            return
+            return result
         target_name = str(effects.get("target_name") or "") or None
         # target_corpse_seen: direct observation; target_corpse_reported: witness
         if kind == "target_corpse_seen":
@@ -997,7 +1111,22 @@ def _upsert_knowledge_from_event(
             death_status["death_cause"] = effects.get("death_cause")
         if str(effects.get("killer_id") or ""):
             death_status["killer_id"] = effects.get("killer_id")
-        _upsert_npc(
+        corpse_id = str(effects.get("corpse_id") or f"corpse_{target_id}_{world_turn}")
+        death_status["corpse_id"] = corpse_id
+        _merge_update(_upsert_corpse(
+            agent,
+            corpse_id=corpse_id,
+            dead_agent_id=target_id,
+            dead_agent_name=target_name,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            death_cause=str(effects.get("death_cause") or "") or None,
+            killer_id=str(effects.get("killer_id") or "") or None,
+            source_agent_id=str(effects.get("source_agent_id") or "") or None,
+            confidence=conf,
+            directly_observed=bool(kind == "target_corpse_seen"),
+        ))
+        _merge_update(_upsert_npc(
             agent,
             other_agent_id=target_id,
             name=target_name,
@@ -1006,7 +1135,18 @@ def _upsert_knowledge_from_event(
             source=src,
             confidence=conf,
             death_status=death_status,
-        )
+        ))
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=target_id,
+            kind=kind,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            confidence=conf,
+            source=src,
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
 
     elif kind == "location_visited":
         location_id = str(
@@ -1016,7 +1156,7 @@ def _upsert_knowledge_from_event(
             or ""
         )
         if not location_id:
-            return
+            return result
         _upsert_location(
             agent,
             location_id=location_id,
@@ -1034,7 +1174,7 @@ def _upsert_knowledge_from_event(
             or ""
         )
         if not trader_id:
-            return
+            return result
         _upsert_trader(
             agent,
             trader_id=trader_id,
@@ -1083,7 +1223,58 @@ def _upsert_knowledge_from_event(
                 world_turn=world_turn,
                 confidence=float(effects.get("confidence", 0.85)),
             )
+    return result
 
+
+def _should_write_observation_milestone(
+    *,
+    agent: dict[str, Any],
+    kind: str,
+    effects: dict[str, Any],
+    knowledge_update: dict[str, Any],
+) -> bool:
+    if bool(agent.get("force_observation_memory_records", False)):
+        return True
+
+    changed_major = bool(knowledge_update.get("changed_major", False))
+    created = bool(knowledge_update.get("created", False))
+    kill_target_id = str(agent.get("kill_target_id") or "")
+    target_id = str(effects.get("target_id") or effects.get("dead_agent_id") or "")
+    is_kill_target = bool(kill_target_id and target_id and kill_target_id == target_id)
+
+    if kind in {"stalkers_seen", "trader_seen"}:
+        return False
+
+    if kind == "target_seen":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return bool(changed_major and is_kill_target)
+
+    if kind == "target_last_known_location":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return bool(changed_major and is_kill_target)
+
+    if kind == "corpse_seen":
+        if bool(knowledge_update.get("ignored", False)):
+            return False
+        if is_kill_target:
+            return True
+        return created
+
+    if kind in {"target_corpse_seen", "target_corpse_reported"}:
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return bool(is_kill_target or changed_major)
+
+    return True
+
+
+def _record_suppressed_observation_metric(kind: str) -> None:
+    if kind == "stalkers_seen":
+        _METRICS["stalkers_seen_memory_suppressed"] += 1
+    elif kind in {"corpse_seen", "target_corpse_seen", "target_corpse_reported"}:
+        _METRICS["corpse_seen_memory_suppressed"] += 1
 
 
 def write_memory_event_to_v3(
@@ -1257,30 +1448,22 @@ def write_memory_event_to_v3(
             return
         # Urgent decision falls through to normal episodic write below.
 
-    # knowledge_upsert — stalkers_seen handled by dedicated path.
-    # travel_hop: update the semantic aggregate AND still write the episodic record
-    # so that existing gameplay code (TestTravelHopActionMemory) can find it.
-    # PR3: Also call knowledge upsert for NPC-tracking events.
+    # knowledge_upsert: PR8 knowledge-first observations.
     if policy == "knowledge_upsert":
         _METRICS["memory_write_knowledge_upserts"] += 1
-        # PR3: Upsert knowledge tables for NPC-tracking events.
-        _upsert_knowledge_from_event(
+        _METRICS["knowledge_upsert_attempts"] += 1
+        knowledge_update = _upsert_knowledge_from_event(
             agent=agent,
             kind=record.kind,
             effects=record.details if isinstance(record.details, dict) else {},
             world_turn=world_turn,
         )
+        if knowledge_update.get("changed_major", False):
+            _METRICS["knowledge_upsert_major_updates"] += 1
+        elif knowledge_update.get("changed_minor", False):
+            _METRICS["knowledge_upsert_minor_refreshes"] += 1
         _sync_cold_after_mutation()
-        if record.kind == "stalkers_seen":
-            if _handle_stalkers_seen_event(
-                agent_id=agent_id,
-                agent=agent,
-                record=record,
-                world_turn=world_turn,
-            ):
-                _METRICS["memory_write_written"] += 1
-                _sync_cold_after_mutation()
-                return
+
         if record.kind == "travel_hop":
             _upsert_semantic_route_traveled(
                 agent_id=agent_id,
@@ -1289,6 +1472,48 @@ def write_memory_event_to_v3(
                 world_turn=world_turn,
             )
             # Fall through to write episodic record so gameplay queries still work.
+        elif KNOWLEDGE_FIRST_OBSERVATIONS_ENABLED and record.kind in {
+            "stalkers_seen",
+            "target_seen",
+            "target_last_known_location",
+            "corpse_seen",
+            "target_corpse_seen",
+            "target_corpse_reported",
+            "trader_seen",
+        }:
+            if not _should_write_observation_milestone(
+                agent=agent,
+                kind=record.kind,
+                effects=record.details if isinstance(record.details, dict) else {},
+                knowledge_update=knowledge_update,
+            ):
+                if record.kind == "stalkers_seen":
+                    mem_v3 = ensure_memory_v3(agent)
+                    records: dict[str, Any] = mem_v3.get("records", {})
+                    location_id = str(record.location_id or "")
+                    entity_set = {str(entity_id) for entity_id in record.entity_ids if entity_id}
+                    seen_names = [str(name) for name in (record.details.get("names") or []) if name]
+                    _, semantic_match = _find_stalkers_seen_match(
+                        records=records,
+                        location_id=location_id,
+                        world_turn=world_turn,
+                        entity_set=entity_set,
+                    )
+                    _upsert_semantic_stalkers_seen(
+                        agent_id=agent_id,
+                        agent=agent,
+                        world_turn=world_turn,
+                        location_id=location_id,
+                        entity_ids=record.entity_ids,
+                        seen_names=seen_names,
+                        base_summary=record.summary,
+                        existing_semantic=semantic_match,
+                    )
+                    _sync_cold_after_mutation()
+                _METRICS["knowledge_only_events"] += 1
+                _record_suppressed_observation_metric(record.kind)
+                return
+            _METRICS["observation_memory_milestones_written"] += 1
 
     # Stalkers_seen from obs_type="stalkers" path also handled here.
     if record.kind == "stalkers_seen" and policy != "knowledge_upsert":
