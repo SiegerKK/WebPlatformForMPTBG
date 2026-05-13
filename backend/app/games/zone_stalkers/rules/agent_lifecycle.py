@@ -221,3 +221,81 @@ def kill_agent(
             runtime.mark_agent_dirty(agent_id)
         except Exception:
             pass
+
+
+# ── Corpse lifecycle helpers (Part 3) ─────────────────────────────────────────
+
+def is_valid_corpse_object(
+    corpse: "dict[str, Any]",
+    state: "dict[str, Any]",
+) -> bool:
+    """Return True when *corpse* references a genuinely dead agent.
+
+    A corpse is *invalid* (stale) when:
+    - It has no ``dead_agent_id`` / ``agent_id`` field.
+    - The referenced agent exists in ``state["agents"]`` and is still alive.
+
+    A corpse is *valid* when the referenced agent is confirmed dead (or
+    the agent is absent from state, which counts as dead-or-removed).
+
+    Parameters
+    ----------
+    corpse:
+        A corpse dict from a location's ``corpses`` list.
+    state:
+        The full world state dict (reads ``state["agents"]``).
+    """
+    dead_agent_id = str(
+        corpse.get("dead_agent_id") or corpse.get("agent_id") or ""
+    )
+    if not dead_agent_id:
+        return False
+    agent = state.get("agents", {}).get(dead_agent_id)
+    if isinstance(agent, dict) and agent.get("is_alive", True):
+        # Agent is still alive — this corpse is invalid / stale.
+        return False
+    return True
+
+
+def cleanup_stale_corpses(
+    state: "dict[str, Any]",
+) -> "dict[str, int]":
+    """Remove stale corpse objects from all location corpse lists.
+
+    A *stale* corpse is one whose ``agent_id`` / ``dead_agent_id`` points to
+    an agent that is still alive in ``state["agents"]``.  This catches bugs
+    where a corpse was created prematurely or the agent was revived without
+    clearing the corpse entry.
+
+    Parameters
+    ----------
+    state:
+        The full world state dict (mutated in-place).
+
+    Returns
+    -------
+    dict with keys:
+        ``"stale_corpses_removed"`` — number of invalid corpse objects removed.
+        ``"stale_corpses_ignored"`` — always 0 (reserved for future use).
+    """
+    stale_removed = 0
+    for loc in state.get("locations", {}).values():
+        if not isinstance(loc, dict):
+            continue
+        corpses = loc.get("corpses")
+        if not isinstance(corpses, list) or not corpses:
+            continue
+        valid: list[dict[str, Any]] = []
+        for corpse in corpses:
+            if not isinstance(corpse, dict):
+                continue
+            if is_valid_corpse_object(corpse, state):
+                valid.append(corpse)
+            else:
+                stale_removed += 1
+        if stale_removed:
+            loc["corpses"] = valid
+    return {
+        "stale_corpses_removed": stale_removed,
+        "stale_corpses_ignored": 0,
+    }

@@ -1,0 +1,14 @@
+{
+  "_comment": "PR10 readiness thresholds for analyze_npc_log_export.py --fail-on-threshold.",
+  "_format": "Each key maps to a threshold spec {op, limit} or a plain limit (informational).",
+
+  "max_stuck_states_total": 2,
+  "max_trade_sell_failed_empty_item_types_per_1000_turns": 1,
+  "max_corpse_seen_alive_agent_count": 0,
+  "max_memory_write_dropped_per_1000_turns": 50,
+  "max_observation_memory_records_per_1000_turns": 100,
+  "max_context_builder_memory_scan_records_per_agent_decision": 50,
+
+  "stuck_plan_count": {"op": "max", "limit": 2},
+  "zombie_count": {"op": "max", "limit": 0}
+}

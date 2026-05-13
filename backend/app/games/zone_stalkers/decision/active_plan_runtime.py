@@ -25,7 +25,11 @@ from app.games.zone_stalkers.decision.models.active_plan import (
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
 )
-from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_SEARCH_TARGET, STEP_TRADE_SELL_ITEM
+from app.games.zone_stalkers.decision.models.plan import (
+    Plan, PlanStep, STEP_SEARCH_TARGET, STEP_TRADE_SELL_ITEM,
+    STEP_TRADE_BUY_ITEM, STEP_EXPLORE_LOCATION, STEP_TRAVEL_TO_LOCATION,
+    STEP_SLEEP_FOR_HOURS,
+)
 from app.games.zone_stalkers.decision.plan_monitor import is_v3_monitored_bot
 
 AddMemoryFn = Callable[..., None]
@@ -61,6 +65,55 @@ def _invalidate_brain_on_trade_sell_failure_abort(
         priority="normal",
         world_turn=world_turn,
     )
+
+
+def _invalidate_brain_on_active_plan_timeout(
+    agent: dict[str, Any],
+    *,
+    reason: str,
+    world_turn: int,
+) -> None:
+    from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain  # noqa: PLC0415
+
+    invalidate_brain(
+        agent,
+        None,
+        reason=f"active_plan_timeout:{reason}",
+        priority="normal",
+        world_turn=world_turn,
+    )
+
+
+def _clear_scheduled_action_if_matches_active_step(
+    agent: dict[str, Any],
+    active_plan: ActivePlanV3,
+) -> None:
+    scheduled_action = agent.get("scheduled_action")
+    if not isinstance(scheduled_action, dict):
+        return
+
+    step = active_plan.current_step
+    if step is None:
+        return
+
+    tagged_plan_id = str(scheduled_action.get("active_plan_id") or "")
+    if tagged_plan_id and tagged_plan_id != active_plan.id:
+        return
+
+    tagged_step_index = scheduled_action.get("active_plan_step_index")
+    if tagged_step_index is not None:
+        try:
+            if int(tagged_step_index) != active_plan.current_step_index:
+                return
+        except (TypeError, ValueError):
+            return
+
+    if (
+        tagged_plan_id == active_plan.id
+        or tagged_step_index is not None
+        or scheduled_action_matches_active_step(scheduled_action, step)
+    ):
+        agent["scheduled_action"] = None
 
 
 def active_plan_step_label(step: ActivePlanStep | None) -> str:
@@ -562,6 +615,40 @@ def process_active_plan_v3(
     if active_plan is None:
         return False, []
 
+    timed_out, timeout_reason = assess_active_plan_step_timeout(
+        agent=agent,
+        active_plan=active_plan,
+        world_turn=world_turn,
+    )
+    if timed_out and timeout_reason:
+        mark_active_plan_step_failed(
+            agent,
+            active_plan,
+            world_turn=world_turn,
+            state=state,
+            add_memory=add_memory,
+            reason=timeout_reason,
+        )
+        _clear_scheduled_action_if_matches_active_step(agent, active_plan)
+        active_plan.abort(timeout_reason, world_turn)
+        _invalidate_brain_on_active_plan_timeout(
+            agent,
+            reason=timeout_reason,
+            world_turn=world_turn,
+        )
+        save_active_plan(agent, active_plan)
+        finish_active_plan(
+            agent_id,
+            agent,
+            active_plan,
+            state,
+            world_turn,
+            add_memory=add_memory,
+            terminal_event="active_plan_aborted",
+            reason=timeout_reason,
+        )
+        return False, []
+
     operation, reason = assess_active_plan_v3(agent, state, world_turn)
     if operation == "continue":
         if not agent.get("scheduled_action"):
@@ -931,3 +1018,95 @@ def handle_v3_monitor_abort(
             )
         )
     return events
+
+
+# ── Step timeout assessment (Part 2b) ─────────────────────────────────────────
+
+def assess_active_plan_step_timeout(
+    *,
+    agent: "dict[str, Any]",
+    active_plan: "ActivePlanV3",
+    world_turn: int,
+) -> "tuple[bool, str | None]":
+    """Assess whether the current active-plan step has exceeded its timeout budget.
+
+    Parameters
+    ----------
+    agent:
+        Agent dict (read-only; used to check ``scheduled_action``).
+    active_plan:
+        The ``ActivePlanV3`` whose current step is inspected.
+    world_turn:
+        Current world turn.
+
+    Returns
+    -------
+    ``(timed_out, reason)`` where *timed_out* is ``True`` and *reason* is a
+    non-empty string when the step should be aborted due to timeout.
+    ``(False, None)`` if the step is progressing normally.
+    """
+    from app.games.zone_stalkers.decision.constants import (  # noqa: PLC0415
+        ACTIVE_PLAN_PENDING_TIMEOUT_TURNS,
+        ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS,
+        ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS,
+        ACTIVE_PLAN_RUNNING_GRACE_TURNS,
+    )
+
+    step = active_plan.current_step
+    if step is None:
+        return (False, None)
+
+    # Reference turn: when did this step start (or when was the plan created)?
+    plan_created = int(active_plan.created_turn or world_turn)
+    step_started = int(step.started_turn or plan_created)
+
+    if step.status == STEP_STATUS_PENDING:
+        age = world_turn - step_started
+
+        if step.kind == STEP_TRADE_SELL_ITEM:
+            timeout = ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
+            reason_key = "trade_sell_pending_timeout"
+        elif step.kind == STEP_TRADE_BUY_ITEM:
+            timeout = ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
+            reason_key = "trade_buy_pending_timeout"
+        elif step.kind == STEP_EXPLORE_LOCATION:
+            timeout = ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS
+            # If no scheduled_action exists, it's stuck.  If one exists,
+            # it should have already been marked running — still time out.
+            reason_key = "explore_pending_timeout"
+        elif step.kind == STEP_TRAVEL_TO_LOCATION:
+            timeout = ACTIVE_PLAN_PENDING_TIMEOUT_TURNS
+            reason_key = "travel_pending_timeout"
+        else:
+            timeout = ACTIVE_PLAN_PENDING_TIMEOUT_TURNS
+            reason_key = f"{step.kind}_pending_timeout"
+
+        if age > timeout:
+            return (True, reason_key)
+
+    elif step.status == STEP_STATUS_RUNNING:
+        step_started_run = int(step.started_turn or plan_created)
+        if step.kind == STEP_EXPLORE_LOCATION:
+            try:
+                from app.games.zone_stalkers.rules.tick_rules import (  # noqa: PLC0415
+                    EXPLORE_DURATION_TURNS,
+                )
+            except ImportError:
+                EXPLORE_DURATION_TURNS = 30
+            max_running = EXPLORE_DURATION_TURNS + ACTIVE_PLAN_RUNNING_GRACE_TURNS
+            if world_turn > step_started_run + max_running:
+                scheduled = agent.get("scheduled_action")
+                if scheduled is None:
+                    return (True, "explore_running_timeout")
+                # Scheduled action still present — let it complete normally.
+        elif step.kind == STEP_SLEEP_FOR_HOURS:
+            scheduled = agent.get("scheduled_action")
+            if scheduled is None:
+                # Sleep completed or cancelled — not a timeout but safe to complete.
+                pass  # handled by executor; not a stuck state
+            elif int(scheduled.get("turns_remaining", 0)) <= 0:
+                pass  # about to complete next tick
+        # travel_to_location running: only emit metric (no abort)
+        # (future: add metric counter here)
+
+    return (False, None)

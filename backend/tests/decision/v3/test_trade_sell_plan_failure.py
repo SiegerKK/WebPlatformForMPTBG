@@ -1161,3 +1161,350 @@ class TestNoMoneyScenarioRegression:
         decision_after_fail = choose_objective(objectives, personality=agent)
 
         assert decision_after_fail.selected.key != OBJECTIVE_SELL_ARTIFACTS
+
+
+# ---------------------------------------------------------------------------
+# PR7 Part 1: No sellable items — planner guards + executor + cooldown
+# ---------------------------------------------------------------------------
+
+class TestPlanDoesNotCreateTradeSellWithoutSellableItems:
+    """The planner must not emit trade_sell_item steps when the agent has
+    no sellable inventory items."""
+
+    def _agent_no_items(self, money: int = 0) -> dict:
+        agent = _make_agent(money=money)
+        agent["inventory"] = []          # no sellable items
+        return agent
+
+    def _agent_with_food_only(self, money: int = 0) -> dict:
+        """Food items are not sellable — should behave the same as empty."""
+        agent = _make_agent(money=money)
+        agent["inventory"] = [{"id": "food_1", "type": "bread", "quantity": 1}]
+        return agent
+
+    def test_plan_does_not_create_trade_sell_step_without_sellable_items_for_restore_water(self) -> None:
+        """seek_water plan without sellable items must not include trade_sell_item."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_SEEK_WATER
+
+        agent = self._agent_no_items(money=0)
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        # Add a trader at the same location so the seek-consumable path can exercise the sell guard.
+        trader = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [],
+            "archetype": "trader_agent",
+        }
+        state["agents"]["trader_1"] = trader
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(kind=INTENT_SEEK_WATER, score=1.0, reason="thirsty")
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return  # no plan is also acceptable (no trader reachable)
+        step_kinds = [s.kind for s in plan.steps]
+        assert STEP_TRADE_SELL_ITEM not in step_kinds, (
+            f"trade_sell_item must not be in plan when agent has no sellable items; steps={step_kinds}"
+        )
+
+    def test_plan_does_not_create_trade_sell_step_without_sellable_items_for_restore_food(self) -> None:
+        """seek_food plan without sellable items must not include trade_sell_item."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_SEEK_FOOD
+
+        agent = self._agent_with_food_only(money=0)
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        trader = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [],
+            "archetype": "trader_agent",
+        }
+        state["agents"]["trader_1"] = trader
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(kind=INTENT_SEEK_FOOD, score=1.0, reason="hungry")
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return
+        step_kinds = [s.kind for s in plan.steps]
+        assert STEP_TRADE_SELL_ITEM not in step_kinds, (
+            f"trade_sell_item must not be in plan when agent has only food; steps={step_kinds}"
+        )
+
+    def test_sell_artifacts_without_artifacts_does_not_create_trade_sell_step(self) -> None:
+        """_plan_sell_artifacts with no artifacts in inventory must not include trade_sell_item."""
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_SELL_ARTIFACTS
+
+        agent = self._agent_no_items(money=100)
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        trader = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [],
+            "archetype": "trader_agent",
+        }
+        state["agents"]["trader_1"] = trader
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(kind=INTENT_SELL_ARTIFACTS, score=0.8, reason="want_money")
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return
+        step_kinds = [s.kind for s in plan.steps]
+        assert STEP_TRADE_SELL_ITEM not in step_kinds, (
+            f"trade_sell_item must not be in plan without artifacts; steps={step_kinds}"
+        )
+
+    def test_get_money_for_resupply_without_sellable_items_has_no_trade_sell_step(self) -> None:
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_GET_RICH
+
+        agent = self._agent_no_items(money=0)
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        state["agents"]["trader_1"] = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [], "archetype": "trader_agent",
+        }
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(
+            kind=INTENT_GET_RICH,
+            score=0.8,
+            reason="fallback_get_money",
+            metadata={"objective_key": "GET_MONEY_FOR_RESUPPLY"},
+        )
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return
+        assert STEP_TRADE_SELL_ITEM not in [s.kind for s in plan.steps]
+
+    def test_emergency_heal_funding_without_sellable_items_has_no_trade_sell_step(self) -> None:
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_HEAL_SELF
+
+        agent = self._agent_no_items(money=0)
+        agent["hp"] = 10
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        state["agents"]["trader_1"] = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [], "archetype": "trader_agent",
+        }
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(kind=INTENT_HEAL_SELF, score=1.0, reason="critical")
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return
+        assert STEP_TRADE_SELL_ITEM not in [s.kind for s in plan.steps]
+
+
+class TestExecTradeSellWithoutSellableItems:
+    """_exec_trade_sell must emit no_sellable_items failure when inventory is empty."""
+
+    def test_exec_trade_sell_without_sellable_items_emits_no_sellable_items(self) -> None:
+        from app.games.zone_stalkers.decision.executors import _exec_trade_sell
+        import app.games.zone_stalkers.rules.tick_rules as _tick
+
+        trader_agent = {
+            "id": "trader_1", "name": "Sidorovich",
+            "location_id": "loc_a", "money": 5000, "inventory": [],
+        }
+        orig_find = getattr(_tick, "_find_trader_at_location", None)
+        _tick._find_trader_at_location = lambda loc_id, state: trader_agent
+        try:
+            agent = _make_agent()
+            agent["inventory"] = []   # no artifacts
+            step = _make_trade_sell_step(item_category="artifact")
+            state = _make_minimal_state([agent, trader_agent])
+            ctx = _make_ctx("bot1", agent, state)
+            events = _exec_trade_sell(
+                agent_id="bot1", agent=agent, step=step, ctx=ctx, state=state, world_turn=20
+            )
+        finally:
+            if orig_find is not None:
+                _tick._find_trader_at_location = orig_find
+
+        fail_event = next((e for e in events if (e.get("event_type") or "") == "trade_sell_failed"), None)
+        assert fail_event is not None, f"Expected trade_sell_failed event, got: {events}"
+        payload = fail_event.get("payload") or {}
+        assert payload.get("reason") == "no_sellable_items"
+
+    def test_no_sellable_items_failure_is_in_blocking_set(self) -> None:
+        """no_sellable_items must be in BLOCKING_TRADE_SELL_FAILURE_REASONS (PR7 requirement)."""
+        from app.games.zone_stalkers.decision.trade_sell_failures import BLOCKING_TRADE_SELL_FAILURE_REASONS
+        assert "no_sellable_items" in BLOCKING_TRADE_SELL_FAILURE_REASONS
+
+    def test_no_sellable_items_failure_aborts_active_plan(self) -> None:
+        """assess_active_plan_v3 should abort on no_sellable_items failure recorded in step payload."""
+        from app.games.zone_stalkers.decision.models.active_plan import (
+            ActivePlanStep, ActivePlanV3, ACTIVE_PLAN_STATUS_ACTIVE,
+            STEP_STATUS_FAILED,
+        )
+        from app.games.zone_stalkers.decision.active_plan_manager import (
+            assess_active_plan_v3, save_active_plan,
+        )
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+
+        agent = _make_agent()
+        step = ActivePlanStep(
+            kind=STEP_TRADE_SELL_ITEM,
+            payload={"item_category": "artifact", "_failure_reason": "no_sellable_items"},
+        )
+        step.status = STEP_STATUS_FAILED
+        step.failure_reason = "no_sellable_items"
+
+        ap = ActivePlanV3(
+            id="plan-nsi",
+            created_turn=5,
+            steps=[step],
+            current_step_index=0,
+            status=ACTIVE_PLAN_STATUS_ACTIVE,
+        )
+        save_active_plan(agent, ap)
+
+        state = _make_minimal_state([agent])
+        op, reason = assess_active_plan_v3(agent, state, world_turn=6)
+        assert op == "abort", f"Expected abort, got: ({op}, {reason})"
+
+    def test_no_sellable_items_cooldown_blocks_while_inventory_still_empty(self) -> None:
+        from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
+        from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
+
+        agent = _make_agent()
+        ensure_memory_v3(agent)
+        world_turn = 50
+        # Write a no_sellable_items failure record at the same turn (cooldown is future)
+        effects = {
+            "action_kind": "trade_sell_failed",
+            "reason": "no_sellable_items",
+            "trader_id": "trader_999",
+            "location_id": "loc_zzz",
+            "item_types": [],
+            "cooldown_until_turn": world_turn + 60,
+        }
+        write_memory_event_to_v3(
+            agent_id="bot1", agent=agent,
+            legacy_entry={
+                "world_turn": world_turn, "type": "action", "title": "tsf_nsi",
+                "effects": effects,
+            },
+            world_turn=world_turn,
+        )
+        # Should block even with completely different trader/location/items
+        result = has_recent_trade_sell_failure_for_agent(
+            agent,
+            trader_id="trader_x",
+            location_id="loc_b",
+            item_types={"soul"},
+            world_turn=world_turn + 1,
+        )
+        assert result is True
+
+    def test_no_sellable_items_cooldown_unblocks_after_artifact_pickup(self) -> None:
+        from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
+        from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
+
+        agent = _make_agent()
+        ensure_memory_v3(agent)
+        world_turn = 50
+        effects = {
+            "action_kind": "trade_sell_failed",
+            "reason": "no_sellable_items",
+            "trader_id": "trader_1",
+            "location_id": "loc_a",
+            "item_types": [],
+            "cooldown_until_turn": world_turn + 60,
+        }
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry={"world_turn": world_turn, "type": "action", "title": "tsf_nsi", "effects": effects},
+            world_turn=world_turn,
+        )
+        agent["inventory"] = [{"id": "art_1", "type": "soul", "value": 1000}]
+
+        result = has_recent_trade_sell_failure_for_agent(
+            agent,
+            trader_id="trader_1",
+            location_id="loc_a",
+            item_types={"soul"},
+            world_turn=world_turn + 1,
+        )
+        assert result is False
+
+    def test_get_sellable_inventory_items_returns_artifacts(self) -> None:
+        """Public helper returns artifact-category sellable items."""
+        from app.games.zone_stalkers.decision.executors import get_sellable_inventory_items
+
+        agent = _make_artifact_agent(artifact_type="soul")
+        items = get_sellable_inventory_items(agent, item_category="artifact")
+        assert len(items) >= 1, "Expected at least one artifact returned"
+        assert items[0]["type"] == "soul"
+
+    def test_get_sellable_inventory_items_empty_for_no_artifacts(self) -> None:
+        """Public helper returns empty list when inventory has no artifacts."""
+        from app.games.zone_stalkers.decision.executors import get_sellable_inventory_items
+
+        agent = _make_agent()
+        agent["inventory"] = [{"id": "bread_1", "type": "bread", "quantity": 1}]
+        items = get_sellable_inventory_items(agent, item_category="artifact")
+        assert items == []
+
+    def test_has_sellable_inventory_true_when_artifact_present(self) -> None:
+        from app.games.zone_stalkers.decision.executors import has_sellable_inventory
+
+        agent = _make_artifact_agent(artifact_type="soul")
+        assert has_sellable_inventory(agent, item_category="artifact") is True
+
+    def test_has_sellable_inventory_false_when_no_artifacts(self) -> None:
+        from app.games.zone_stalkers.decision.executors import has_sellable_inventory
+
+        agent = _make_agent()
+        assert has_sellable_inventory(agent, item_category="artifact") is False

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+# no_sellable_items is included so that an agent with an empty sellable
+# inventory applies a cooldown rather than re-queueing the step every tick.
 BLOCKING_TRADE_SELL_FAILURE_REASONS: frozenset[str] = frozenset(
-    {"no_trader_at_location", "no_items_sold", "trader_no_money"}
+    {"no_trader_at_location", "no_items_sold", "trader_no_money", "no_sellable_items"}
 )
 
 
@@ -45,6 +47,15 @@ def has_recent_trade_sell_failure_for_agent(
         rec_location_id = str(details.get("location_id") or record.get("location_id") or "")
         same_trader = bool(target_trader_id) and bool(rec_trader_id) and rec_trader_id == target_trader_id
         same_location = bool(target_location_id) and bool(rec_location_id) and rec_location_id == target_location_id
+
+        # no_sellable_items is inventory-scoped; block regardless of trader/location.
+        if reason == "no_sellable_items":
+            from app.games.zone_stalkers.decision.executors import has_sellable_inventory  # noqa: PLC0415
+
+            if has_sellable_inventory(agent, item_category="any_sellable"):
+                continue
+            return True
+
         if not (same_trader or same_location):
             continue
 

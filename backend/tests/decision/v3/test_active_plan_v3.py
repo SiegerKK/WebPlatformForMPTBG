@@ -945,3 +945,246 @@ class TestConfirmedEmptyMemoryIntegration:
         op, reason = assess_active_plan_v3(agent, _base_state(), world_turn=8)
         assert op == "repair"
         assert reason == "target_moved"
+
+
+# ---------------------------------------------------------------------------
+# PR7 Part 2: assess_active_plan_step_timeout tests
+# ---------------------------------------------------------------------------
+
+def _make_pending_step(kind: str, started_turn: int | None = None) -> "ActivePlanStep":
+    step = ActivePlanStep(kind=kind, payload={"location_id": "loc-0"})
+    step.status = STEP_STATUS_PENDING
+    step.started_turn = started_turn
+    return step
+
+
+def _make_running_step(kind: str, started_turn: int) -> "ActivePlanStep":
+    step = ActivePlanStep(kind=kind, payload={"location_id": "loc-0"})
+    step.status = STEP_STATUS_RUNNING
+    step.started_turn = started_turn
+    return step
+
+
+def _make_active_plan_for_timeout(step: "ActivePlanStep", created_turn: int = 1) -> "ActivePlanV3":
+    from app.games.zone_stalkers.decision.active_plan_manager import create_active_plan
+    from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep
+
+    plan_step = PlanStep(kind=step.kind, payload=dict(step.payload or {}))
+    plan = Plan(intent_kind="test", steps=[plan_step])
+    ap = create_active_plan(_decision(), world_turn=created_turn, plan=plan)
+    # Replace the internal step with our preconfigured one.
+    ap.steps[0] = step
+    ap.current_step_index = 0
+    return ap
+
+
+class TestAssessActivePlanStepTimeout:
+    """PR7 Part 2 — step timeout detection via assess_active_plan_step_timeout."""
+
+    def _call(self, agent: dict, active_plan: "ActivePlanV3", world_turn: int) -> "tuple[bool, str | None]":
+        from app.games.zone_stalkers.decision.active_plan_runtime import assess_active_plan_step_timeout
+        return assess_active_plan_step_timeout(
+            agent=agent, active_plan=active_plan, world_turn=world_turn
+        )
+
+    # ── No-step edge case ───────────────────────────────────────────────────
+
+    def test_no_current_step_returns_false(self) -> None:
+        from app.games.zone_stalkers.decision.models.active_plan import ActivePlanV3
+        ap = ActivePlanV3(
+            id="plan-x", created_turn=1, steps=[],
+            current_step_index=0, status=ACTIVE_PLAN_STATUS_ACTIVE,
+        )
+        timed_out, reason = self._call(_base_agent(), ap, world_turn=100)
+        assert timed_out is False
+        assert reason is None
+
+    # ── trade_sell_item pending timeout ────────────────────────────────────
+
+    def test_trade_sell_pending_within_timeout_returns_false(self) -> None:
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=10)
+        ap = _make_active_plan_for_timeout(step, created_turn=10)
+        # Exactly at the timeout threshold (not yet exceeded)
+        timed_out, reason = self._call(_base_agent(), ap, world_turn=15)
+        assert timed_out is False
+
+    def test_trade_sell_pending_exceeded_returns_true(self) -> None:
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=10)
+        ap = _make_active_plan_for_timeout(step, created_turn=10)
+        # Exceed by 1.
+        timed_out, reason = self._call(_base_agent(), ap, world_turn=10 + ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS + 1)
+        assert timed_out is True
+        assert reason == "trade_sell_pending_timeout"
+
+
+class TestProcessActivePlanTimeoutIntegration:
+    def _call(self, agent: dict, active_plan: "ActivePlanV3", world_turn: int) -> "tuple[bool, str | None]":
+        from app.games.zone_stalkers.decision.active_plan_runtime import assess_active_plan_step_timeout
+        return assess_active_plan_step_timeout(
+            agent=agent, active_plan=active_plan, world_turn=world_turn
+        )
+
+    def _run_process(self, agent: dict[str, Any], world_turn: int) -> tuple[bool, list[dict[str, Any]]]:
+        from app.games.zone_stalkers.decision.active_plan_runtime import process_active_plan_v3
+
+        return process_active_plan_v3(
+            "bot1",
+            agent,
+            _base_state(),
+            world_turn,
+            add_memory=lambda *args, **kwargs: None,
+        )
+
+    def test_process_aborts_trade_sell_pending_timeout(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=10)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=10)
+        save_active_plan(agent, active_plan)
+
+        processed, events = self._run_process(agent, world_turn=16)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+
+    def test_process_aborts_trade_buy_pending_timeout(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        step = _make_pending_step(STEP_TRADE_BUY_ITEM, started_turn=10)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=10)
+        save_active_plan(agent, active_plan)
+
+        processed, events = self._run_process(agent, world_turn=16)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+
+    def test_process_aborts_explore_pending_timeout_without_scheduled_action(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        agent["scheduled_action"] = None
+        step = _make_pending_step(STEP_EXPLORE_LOCATION, started_turn=1)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=1)
+        save_active_plan(agent, active_plan)
+
+        processed, events = self._run_process(agent, world_turn=7)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+
+    def test_process_clears_matching_scheduled_action_on_timeout_abort(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=10)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=10)
+        save_active_plan(agent, active_plan)
+        agent["scheduled_action"] = {
+            "type": "event",
+            "active_plan_id": active_plan.id,
+            "active_plan_step_index": 0,
+        }
+
+        processed, events = self._run_process(agent, world_turn=16)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+        assert agent.get("scheduled_action") is None
+
+    # ── trade_buy_item pending timeout ─────────────────────────────────────
+
+    def test_trade_buy_pending_exceeded_returns_true(self) -> None:
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
+        step = _make_pending_step(STEP_TRADE_BUY_ITEM, started_turn=5)
+        ap = _make_active_plan_for_timeout(step, created_turn=5)
+        timed_out, reason = self._call(_base_agent(), ap, world_turn=5 + ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS + 1)
+        assert timed_out is True
+        assert reason == "trade_buy_pending_timeout"
+
+    # ── explore_location pending timeout ───────────────────────────────────
+
+    def test_explore_pending_exceeded_returns_true(self) -> None:
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS
+        step = _make_pending_step(STEP_EXPLORE_LOCATION, started_turn=1)
+        ap = _make_active_plan_for_timeout(step, created_turn=1)
+        agent = _base_agent()
+        agent["scheduled_action"] = None
+        timed_out, reason = self._call(agent, ap, world_turn=1 + ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS + 1)
+        assert timed_out is True
+        assert reason == "explore_pending_timeout"
+
+    # ── explore_location running timeout ───────────────────────────────────
+
+    def test_explore_running_within_grace_returns_false(self) -> None:
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_RUNNING_GRACE_TURNS
+        try:
+            from app.games.zone_stalkers.rules.tick_rules import EXPLORE_DURATION_TURNS
+        except ImportError:
+            EXPLORE_DURATION_TURNS = 30
+        step = _make_running_step(STEP_EXPLORE_LOCATION, started_turn=1)
+        ap = _make_active_plan_for_timeout(step, created_turn=1)
+        agent = _base_agent()
+        agent["scheduled_action"] = None
+        # Not yet at max (1 turn before timeout)
+        threshold = 1 + EXPLORE_DURATION_TURNS + ACTIVE_PLAN_RUNNING_GRACE_TURNS
+        timed_out, reason = self._call(agent, ap, world_turn=threshold)
+        # At exactly threshold it's NOT exceeded (world_turn > threshold required)
+        assert timed_out is False
+
+    def test_explore_running_exceeded_no_scheduled_action_returns_true(self) -> None:
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_RUNNING_GRACE_TURNS
+        try:
+            from app.games.zone_stalkers.rules.tick_rules import EXPLORE_DURATION_TURNS
+        except ImportError:
+            EXPLORE_DURATION_TURNS = 30
+        step = _make_running_step(STEP_EXPLORE_LOCATION, started_turn=1)
+        ap = _make_active_plan_for_timeout(step, created_turn=1)
+        agent = _base_agent()
+        agent["scheduled_action"] = None  # no active exploration scheduled action
+        # Past the grace period
+        past_threshold = 1 + EXPLORE_DURATION_TURNS + ACTIVE_PLAN_RUNNING_GRACE_TURNS + 1
+        timed_out, reason = self._call(agent, ap, world_turn=past_threshold)
+        assert timed_out is True
+        assert reason == "explore_running_timeout"
+
+    def test_explore_running_exceeded_but_scheduled_action_present_returns_false(self) -> None:
+        """If agent still has a scheduled_action, exploration is still in progress — no timeout."""
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_RUNNING_GRACE_TURNS
+        try:
+            from app.games.zone_stalkers.rules.tick_rules import EXPLORE_DURATION_TURNS
+        except ImportError:
+            EXPLORE_DURATION_TURNS = 30
+        step = _make_running_step(STEP_EXPLORE_LOCATION, started_turn=1)
+        ap = _make_active_plan_for_timeout(step, created_turn=1)
+        agent = _base_agent()
+        agent["scheduled_action"] = {"kind": "explore", "turns_remaining": 2}
+        past_threshold = 1 + EXPLORE_DURATION_TURNS + ACTIVE_PLAN_RUNNING_GRACE_TURNS + 1
+        timed_out, reason = self._call(agent, ap, world_turn=past_threshold)
+        assert timed_out is False
+
+    # ── travel_to_location pending timeout ─────────────────────────────────
+
+    def test_travel_pending_exceeded_returns_true(self) -> None:
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_PENDING_TIMEOUT_TURNS
+        step = _make_pending_step(STEP_TRAVEL_TO_LOCATION, started_turn=3)
+        ap = _make_active_plan_for_timeout(step, created_turn=3)
+        timed_out, reason = self._call(_base_agent(), ap, world_turn=3 + ACTIVE_PLAN_PENDING_TIMEOUT_TURNS + 1)
+        assert timed_out is True
+        assert reason == "travel_pending_timeout"
+
+    # ── created_turn fallback when started_turn is None ───────────────────
+
+    def test_pending_fallback_to_plan_created_turn_when_step_started_turn_none(self) -> None:
+        """When step.started_turn is None, plan.created_turn is used as reference."""
+        from app.games.zone_stalkers.decision.constants import ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS
+
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=None)
+        ap = _make_active_plan_for_timeout(step, created_turn=10)
+        # Exceed based on created_turn=10
+        timed_out, reason = self._call(_base_agent(), ap, world_turn=10 + ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS + 1)
+        assert timed_out is True
+        assert reason == "trade_sell_pending_timeout"
