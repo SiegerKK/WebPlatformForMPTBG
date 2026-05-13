@@ -1250,7 +1250,7 @@ class TestPlanDoesNotCreateTradeSellWithoutSellableItems:
         )
 
     def test_sell_artifacts_without_artifacts_does_not_create_trade_sell_step(self) -> None:
-        """_plan_sell_artifacts with no artifacts in inventory must return None or plan without sell step."""
+        """_plan_sell_artifacts with no artifacts in inventory must not include trade_sell_item."""
         from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
         from app.games.zone_stalkers.decision.planner import build_plan
         from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_SELL_ARTIFACTS
@@ -1275,14 +1275,72 @@ class TestPlanDoesNotCreateTradeSellWithoutSellableItems:
         )
         intent = Intent(kind=INTENT_SELL_ARTIFACTS, score=0.8, reason="want_money")
         plan = build_plan(ctx, intent, state, world_turn=10)
-        # Either no plan, or plan without sell step.
-        if plan is not None:
-            step_kinds = [s.kind for s in plan.steps]
-            # A sell-artifact plan without any artifacts is vacuous — we allow
-            # the planner to return it (trader-nav step), but validate the unit
-            # via the executor path separately (see test below).
-            # This test primarily documents the expectation; both outcomes are
-            # acceptable at the planner level.
+        if plan is None:
+            return
+        step_kinds = [s.kind for s in plan.steps]
+        assert STEP_TRADE_SELL_ITEM not in step_kinds, (
+            f"trade_sell_item must not be in plan without artifacts; steps={step_kinds}"
+        )
+
+    def test_get_money_for_resupply_without_sellable_items_has_no_trade_sell_step(self) -> None:
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_GET_RICH
+
+        agent = self._agent_no_items(money=0)
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        state["agents"]["trader_1"] = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [], "archetype": "trader_agent",
+        }
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(
+            kind=INTENT_GET_RICH,
+            score=0.8,
+            reason="fallback_get_money",
+            metadata={"objective_key": "GET_MONEY_FOR_RESUPPLY"},
+        )
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return
+        assert STEP_TRADE_SELL_ITEM not in [s.kind for s in plan.steps]
+
+    def test_emergency_heal_funding_without_sellable_items_has_no_trade_sell_step(self) -> None:
+        from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_SELL_ITEM
+        from app.games.zone_stalkers.decision.planner import build_plan
+        from app.games.zone_stalkers.decision.models.intent import Intent, INTENT_HEAL_SELF
+
+        agent = self._agent_no_items(money=0)
+        agent["hp"] = 10
+        agent["location_id"] = "loc_a"
+        state = _make_minimal_state([agent])
+        state["agents"]["trader_1"] = {
+            "id": "trader_1", "name": "Sidorovich", "location_id": "loc_a",
+            "money": 1000, "inventory": [], "archetype": "trader_agent",
+        }
+        state["locations"]["loc_a"]["agents"].append("trader_1")
+
+        from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+        ctx = AgentContext(
+            agent_id="bot1",
+            self_state=agent,
+            location_state=state["locations"]["loc_a"],
+            world_context={"world_turn": 10},
+        )
+        intent = Intent(kind=INTENT_HEAL_SELF, score=1.0, reason="critical")
+        plan = build_plan(ctx, intent, state, world_turn=10)
+        if plan is None:
+            return
+        assert STEP_TRADE_SELL_ITEM not in [s.kind for s in plan.steps]
 
 
 class TestExecTradeSellWithoutSellableItems:
@@ -1353,9 +1411,7 @@ class TestExecTradeSellWithoutSellableItems:
         op, reason = assess_active_plan_v3(agent, state, world_turn=6)
         assert op == "abort", f"Expected abort, got: ({op}, {reason})"
 
-    def test_no_sellable_items_cooldown_is_inventory_scoped(self) -> None:
-        """has_recent_trade_sell_failure_for_agent returns True for no_sellable_items
-        regardless of trader/location match (it's inventory-scoped)."""
+    def test_no_sellable_items_cooldown_blocks_while_inventory_still_empty(self) -> None:
         from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
         from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
         from app.games.zone_stalkers.memory.store import ensure_memory_v3
@@ -1388,7 +1444,40 @@ class TestExecTradeSellWithoutSellableItems:
             item_types={"soul"},
             world_turn=world_turn + 1,
         )
-        assert result is True, "no_sellable_items cooldown must block regardless of trader/location"
+        assert result is True
+
+    def test_no_sellable_items_cooldown_unblocks_after_artifact_pickup(self) -> None:
+        from app.games.zone_stalkers.decision.trade_sell_failures import has_recent_trade_sell_failure_for_agent
+        from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3
+        from app.games.zone_stalkers.memory.store import ensure_memory_v3
+
+        agent = _make_agent()
+        ensure_memory_v3(agent)
+        world_turn = 50
+        effects = {
+            "action_kind": "trade_sell_failed",
+            "reason": "no_sellable_items",
+            "trader_id": "trader_1",
+            "location_id": "loc_a",
+            "item_types": [],
+            "cooldown_until_turn": world_turn + 60,
+        }
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            legacy_entry={"world_turn": world_turn, "type": "action", "title": "tsf_nsi", "effects": effects},
+            world_turn=world_turn,
+        )
+        agent["inventory"] = [{"id": "art_1", "type": "soul", "value": 1000}]
+
+        result = has_recent_trade_sell_failure_for_agent(
+            agent,
+            trader_id="trader_1",
+            location_id="loc_a",
+            item_types={"soul"},
+            world_turn=world_turn + 1,
+        )
+        assert result is False
 
     def test_get_sellable_inventory_items_returns_artifacts(self) -> None:
         """Public helper returns artifact-category sellable items."""

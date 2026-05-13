@@ -179,6 +179,17 @@ class TestTradeSellFailureDetection:
         kinds = [a["kind"] for a in result["anomalies"]]
         assert "no_sellable_items_cooldown" in kinds
 
+    def test_counts_trade_sell_failed_empty_item_types_metric(self, tmp_path: Path) -> None:
+        recs = {
+            "r1": {"kind": "trade_sell_failed", "details": {"reason": "no_items_sold", "item_types": []}},
+            "r2": {"kind": "trade_sell_failed", "details": {"reason": "trader_no_money", "item_types": ["soul"]}},
+            "r3": {"kind": "trade_sell_failed", "details": {"reason": "no_sellable_items"}},
+        }
+        agents = [_make_agent("a1", memory_records=recs)]
+        zp = _write_zip(tmp_path, agents)
+        result = ana.analyze_sources([zp])
+        assert result["fleet"]["trade_sell_failed_empty_item_types"] == 2
+
 
 # ---------------------------------------------------------------------------
 # test_analyzer_detects_corpse_seen_alive_agent (zombie detection)
@@ -330,6 +341,15 @@ class TestComparisonMode:
         rc = ana.main(["--compare", str(zip_before), str(zip_after), "--quiet"])
         assert rc == 0  # no violations
 
+    def test_multiple_sources_include_window_deltas(self, tmp_path: Path) -> None:
+        before = [_make_agent("a1", memory_records={"r1": {"kind": "trade_sell_failed", "details": {"item_types": []}}})]
+        after = [_make_agent("a1", memory_records={})]
+        z1 = _write_zip(tmp_path, before, "s1.zip")
+        z2 = _write_zip(tmp_path, after, "s2.zip")
+        result = ana.analyze_sources([z1, z2])
+        assert "window_deltas" in result["fleet"]
+        assert isinstance(result["fleet"]["window_deltas"], list)
+
 
 # ---------------------------------------------------------------------------
 # test_analyzer_threshold_failure
@@ -387,6 +407,48 @@ class TestThresholdValidation:
         zp = _write_zip(tmp_path, agents)
         rc = ana.main(["--input", str(zp), "--quiet"])
         assert rc == 0
+
+    def test_plain_numeric_threshold_is_validated(self) -> None:
+        fleet = {"max_stuck_states_total": 3}
+        thresholds = {"max_stuck_states_total": 2}
+        violations = ana.validate_thresholds(fleet, [], thresholds)
+        assert violations
+        assert "max_stuck_states_total" in violations[0]
+
+
+class TestAdditionalPr10Metrics:
+    def test_corpse_seen_alive_agent_count_metric(self, tmp_path: Path) -> None:
+        observer_recs = {
+            "r1": {"kind": "corpse_seen", "details": {"action_kind": "corpse_seen", "dead_agent_id": "alive_1"}}
+        }
+        agents = [
+            _make_agent("observer", memory_records=observer_recs),
+            _make_agent("alive_1", is_alive=True, hp=100.0),
+        ]
+        zp = _write_zip(tmp_path, agents)
+        result = ana.analyze_sources([zp])
+        assert result["fleet"]["corpse_seen_alive_agent_count"] == 1
+
+    def test_memory_write_dropped_and_evictions_totals(self, tmp_path: Path) -> None:
+        agent = _make_agent("a1")
+        agent["memory_v3"] = {
+            "records": {},
+            "stats": {"memory_write_dropped": 4, "memory_evictions": 7},
+        }
+        zp = _write_zip(tmp_path, [agent])
+        result = ana.analyze_sources([zp])
+        assert result["fleet"]["memory_write_dropped_total"] == 4
+        assert result["fleet"]["memory_evictions_total"] == 7
+
+    def test_context_builder_scan_ratio_metric(self, tmp_path: Path) -> None:
+        agent = _make_agent("a1")
+        agent["brain_context_metrics"] = {
+            "context_builder_memory_scan_records": 50,
+            "context_builder_calls": 10,
+        }
+        zp = _write_zip(tmp_path, [agent])
+        result = ana.analyze_sources([zp])
+        assert result["fleet"]["max_context_builder_memory_scan_records_per_agent_decision"] == 5.0
 
 
 # ---------------------------------------------------------------------------

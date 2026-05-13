@@ -85,8 +85,18 @@ def _load_json_bytes(data: bytes) -> Any:
         return None
 
 
-def _iter_zip_agents(zip_path: Path) -> Iterator[dict[str, Any]]:
-    """Yield agent dicts from all JSON files inside a ZIP archive."""
+def _extract_agents_from_payload(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    if "agents" in payload and isinstance(payload["agents"], dict):
+        return [agent for agent in payload["agents"].values() if isinstance(agent, dict)]
+    if FIELD_AGENT_ID in payload or "name" in payload:
+        return [payload]
+    return []
+
+
+def _iter_zip_payloads(zip_path: Path) -> Iterator[dict[str, Any]]:
+    """Yield JSON payload dicts from a ZIP archive."""
     if not zip_path.exists():
         raise FileNotFoundError(f"ZIP not found: {zip_path}")
     with zipfile.ZipFile(zip_path, "r") as zf:
@@ -97,42 +107,44 @@ def _iter_zip_agents(zip_path: Path) -> Iterator[dict[str, Any]]:
             payload = _load_json_bytes(raw)
             if not isinstance(payload, dict):
                 continue
-            # Payload may be a single agent dict or {"agents": {...}} wrapper
-            if "agents" in payload and isinstance(payload["agents"], dict):
-                for agent in payload["agents"].values():
-                    if isinstance(agent, dict):
-                        yield agent
-            elif FIELD_AGENT_ID in payload or "name" in payload:
-                yield payload
+            yield payload
 
 
-def _iter_json_file_agents(json_path: Path) -> Iterator[dict[str, Any]]:
-    """Yield agent dicts from a plain JSON file (for testing convenience)."""
+def _iter_json_file_payloads(json_path: Path) -> Iterator[dict[str, Any]]:
+    """Yield payload dicts from a plain JSON file (for testing convenience)."""
     if not json_path.exists():
         raise FileNotFoundError(f"JSON not found: {json_path}")
     payload = _load_json_bytes(json_path.read_bytes())
     if isinstance(payload, dict):
-        if "agents" in payload and isinstance(payload["agents"], dict):
-            for agent in payload["agents"].values():
-                if isinstance(agent, dict):
-                    yield agent
-        elif FIELD_AGENT_ID in payload or "name" in payload:
-            yield payload
+        yield payload
     elif isinstance(payload, list):
         for item in payload:
             if isinstance(item, dict):
                 yield item
 
 
-def iter_agents_from_source(source: Path) -> Iterator[dict[str, Any]]:
-    """Yield agents from a ZIP or JSON file."""
+def iter_snapshots_from_source(source: Path) -> Iterator[dict[str, Any]]:
+    """Yield normalized snapshots (payload + extracted agents) for a source."""
     suffix = source.suffix.lower()
+    payload_iter: Iterator[dict[str, Any]]
     if suffix == ".zip":
-        yield from _iter_zip_agents(source)
+        payload_iter = _iter_zip_payloads(source)
     elif suffix == ".json":
-        yield from _iter_json_file_agents(source)
+        payload_iter = _iter_json_file_payloads(source)
     else:
         raise ValueError(f"Unsupported source format: {source}")
+    for payload in payload_iter:
+        yield {
+            "payload": payload,
+            "agents": _extract_agents_from_payload(payload),
+        }
+
+
+def iter_agents_from_source(source: Path) -> Iterator[dict[str, Any]]:
+    """Yield agents from a ZIP or JSON file."""
+    for snapshot in iter_snapshots_from_source(source):
+        for agent in snapshot["agents"]:
+            yield agent
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +222,38 @@ def _trade_sell_failure_reasons(agent: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def _memory_records_iter(agent: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    mem = agent.get(FIELD_MEMORY_V3)
+    if not isinstance(mem, dict):
+        return iter(())
+    records = mem.get("records")
+    if isinstance(records, dict):
+        return (rec for rec in records.values() if isinstance(rec, dict))
+    if isinstance(records, list):
+        return (rec for rec in records if isinstance(rec, dict))
+    return iter(())
+
+
+def _memory_record_turn(rec: dict[str, Any]) -> int:
+    return int(rec.get("created_turn") or rec.get("world_turn") or 0)
+
+
+def _memory_record_kind(rec: dict[str, Any]) -> str:
+    return str(rec.get("kind") or "")
+
+
+def _memory_record_details(rec: dict[str, Any]) -> dict[str, Any]:
+    details = rec.get("details")
+    if isinstance(details, dict):
+        return details
+    return {}
+
+
+def _memory_action_kind(rec: dict[str, Any]) -> str:
+    details = _memory_record_details(rec)
+    return str(details.get("action_kind") or _memory_record_kind(rec))
+
+
 def compute_agent_metrics(agent: dict[str, Any], world_turn: int) -> dict[str, Any]:
     """Compute all metrics for a single agent."""
     agent_id = str(agent.get(FIELD_AGENT_ID) or agent.get("name") or "?")
@@ -230,6 +274,35 @@ def compute_agent_metrics(agent: dict[str, Any], world_turn: int) -> dict[str, A
     )
 
     zombie = is_alive and hp <= 0
+    stats = (agent.get(FIELD_MEMORY_V3) or {}).get("stats") or {}
+    context_metrics = agent.get("brain_context_metrics") or {}
+
+    trade_sell_failed_empty_item_types = 0
+    corpse_seen_records = 0
+    stalkers_seen_records = 0
+    semantic_stalkers_seen_records = 0
+    observation_memory_records = 0
+    trade_sell_failed_records = 0
+    for rec in _memory_records_iter(agent):
+        ak = _memory_action_kind(rec)
+        kind = _memory_record_kind(rec)
+        details = _memory_record_details(rec)
+        mem_type = str(details.get("memory_type") or "")
+        if mem_type == "observation":
+            observation_memory_records += 1
+        if ak == "trade_sell_failed":
+            trade_sell_failed_records += 1
+            item_types = details.get("item_types")
+            if not isinstance(item_types, list):
+                item_types = []
+            if len(item_types) == 0:
+                trade_sell_failed_empty_item_types += 1
+        if kind == "stalkers_seen" or ak == "stalkers_seen":
+            stalkers_seen_records += 1
+        if kind == "semantic_stalkers_seen":
+            semantic_stalkers_seen_records += 1
+        if ak == "corpse_seen" or kind == "corpse_seen":
+            corpse_seen_records += 1
 
     return {
         "agent_id": agent_id,
@@ -249,6 +322,16 @@ def compute_agent_metrics(agent: dict[str, Any], world_turn: int) -> dict[str, A
         "active_plan": ap,
         "plan_stuck": plan_stuck,
         "trade_sell_failure_reasons": tsf_reasons,
+        "trade_sell_failed_records": trade_sell_failed_records,
+        "trade_sell_failed_empty_item_types": trade_sell_failed_empty_item_types,
+        "corpse_seen_records": corpse_seen_records,
+        "stalkers_seen_records": stalkers_seen_records,
+        "semantic_stalkers_seen_records": semantic_stalkers_seen_records,
+        "observation_memory_records": observation_memory_records,
+        "memory_write_dropped": int(stats.get("memory_write_dropped") or 0),
+        "memory_evictions": int(stats.get("memory_evictions") or 0),
+        "context_builder_memory_scan_records": int(context_metrics.get("context_builder_memory_scan_records") or 0),
+        "context_builder_calls": int(context_metrics.get("context_builder_calls") or 0),
         "zombie": zombie,
         "global_goal": str(agent.get(FIELD_GLOBAL_GOAL) or ""),
         "current_goal": str(agent.get(FIELD_CURRENT_GOAL) or ""),
@@ -261,6 +344,8 @@ def compute_agent_metrics(agent: dict[str, Any], world_turn: int) -> dict[str, A
 
 def aggregate_fleet_metrics(
     agent_metrics: list[dict[str, Any]],
+    *,
+    turn_span: int = 1000,
 ) -> dict[str, Any]:
     """Compute fleet-wide statistics from a list of per-agent metrics."""
     if not agent_metrics:
@@ -302,6 +387,23 @@ def aggregate_fleet_metrics(
     ]
     avg_repairs = round(sum(repair_counts) / len(repair_counts), 3) if repair_counts else 0.0
     max_repairs = max(repair_counts, default=0)
+    span = max(1, int(turn_span))
+    trade_sell_failed_empty_item_types = sum(
+        int(m.get("trade_sell_failed_empty_item_types") or 0) for m in agent_metrics
+    )
+    memory_write_dropped_total = sum(int(m.get("memory_write_dropped") or 0) for m in agent_metrics)
+    memory_evictions_total = sum(int(m.get("memory_evictions") or 0) for m in agent_metrics)
+    corpse_seen_records = sum(int(m.get("corpse_seen_records") or 0) for m in agent_metrics)
+    stalkers_seen_records = sum(int(m.get("stalkers_seen_records") or 0) for m in agent_metrics)
+    semantic_stalkers_seen_records = sum(int(m.get("semantic_stalkers_seen_records") or 0) for m in agent_metrics)
+    observation_memory_records = sum(int(m.get("observation_memory_records") or 0) for m in agent_metrics)
+    context_builder_memory_scan_records = sum(
+        int(m.get("context_builder_memory_scan_records") or 0) for m in agent_metrics
+    )
+    context_builder_calls = sum(int(m.get("context_builder_calls") or 0) for m in agent_metrics)
+    max_context_builder_memory_scan_records_per_agent_decision = (
+        round(context_builder_memory_scan_records / max(1, context_builder_calls), 3)
+    )
 
     return {
         "agent_count": len(agent_metrics),
@@ -322,6 +424,25 @@ def aggregate_fleet_metrics(
         "plan_status_distribution": dict(plan_status_counts),
         "trade_sell_failure_distribution": dict(tsf_counter),
         "faction_distribution": dict(faction_counter),
+        "trade_sell_failed_empty_item_types": trade_sell_failed_empty_item_types,
+        "memory_write_dropped_total": memory_write_dropped_total,
+        "memory_evictions_total": memory_evictions_total,
+        "corpse_seen_records": corpse_seen_records,
+        "stalkers_seen_records": stalkers_seen_records,
+        "semantic_stalkers_seen_records": semantic_stalkers_seen_records,
+        "observation_memory_records": observation_memory_records,
+        "context_builder_memory_scan_records": context_builder_memory_scan_records,
+        "context_builder_calls": context_builder_calls,
+        "max_context_builder_memory_scan_records_per_agent_decision": max_context_builder_memory_scan_records_per_agent_decision,
+        "max_trade_sell_failed_empty_item_types_per_1000_turns": round(
+            (trade_sell_failed_empty_item_types * 1000.0) / span, 3
+        ),
+        "max_memory_write_dropped_per_1000_turns": round(
+            (memory_write_dropped_total * 1000.0) / span, 3
+        ),
+        "max_observation_memory_records_per_1000_turns": round(
+            (observation_memory_records * 1000.0) / span, 3
+        ),
     }
 
 
@@ -401,11 +522,14 @@ def validate_thresholds(
             violations.append(f"{metric} {op}={limit} violated: actual={value}")
 
     for key, spec in thresholds.items():
-        if not isinstance(spec, dict):
+        if isinstance(spec, dict):
+            op = str(spec.get("op") or "max")
+            limit = float(spec.get("limit") or 0)
+            _check(key, op, limit)
             continue
-        op = str(spec.get("op") or "max")
-        limit = float(spec.get("limit") or 0)
-        _check(key, op, limit)
+        if isinstance(spec, (int, float)):
+            _check(key, "max", float(spec))
+            continue
 
     threshold_violations = [a for a in anomalies if a.get("threshold_violated")]
     for a in threshold_violations:
@@ -438,7 +562,7 @@ def render_markdown_report(
     lines.append("| Metric | Value |")
     lines.append("|---|---|")
     for k, v in fleet.items():
-        if isinstance(v, dict):
+        if isinstance(v, (dict, list)):
             continue
         lines.append(f"| {k} | {v} |")
     lines.append("")
@@ -533,11 +657,90 @@ def analyze_sources(
         ``"violations"`` — threshold violations list (empty = pass)
     """
     all_agent_metrics: list[dict[str, Any]] = []
+    source_fleets: list[dict[str, Any]] = []
+    source_turn_spans: list[int] = []
+
+    for source in sources:
+        source_agents: list[dict[str, Any]] = []
+        source_turn_min: int | None = None
+        source_turn_max: int | None = None
+        source_world_turn: int | None = None
+        for snapshot in iter_snapshots_from_source(source):
+            payload = snapshot["payload"]
+            if source_world_turn is None and isinstance(payload, dict):
+                source_world_turn = int(payload.get("world_turn") or payload.get("turn") or 0) or None
+            for agent in snapshot["agents"]:
+                source_agents.append(agent)
+                for rec in _memory_records_iter(agent):
+                    rec_turn = _memory_record_turn(rec)
+                    if rec_turn <= 0:
+                        continue
+                    source_turn_min = rec_turn if source_turn_min is None else min(source_turn_min, rec_turn)
+                    source_turn_max = rec_turn if source_turn_max is None else max(source_turn_max, rec_turn)
+
+        if source_world_turn is not None and source_turn_max is not None:
+            source_turn_max = max(source_turn_max, source_world_turn)
+        turn_span = (
+            (source_turn_max - source_turn_min + 1)
+            if source_turn_min is not None and source_turn_max is not None and source_turn_max >= source_turn_min
+            else 1000
+        )
+        source_turn_spans.append(int(turn_span))
+        source_metrics = [compute_agent_metrics(agent, world_turn) for agent in source_agents]
+        all_agent_metrics.extend(source_metrics)
+        source_fleets.append(aggregate_fleet_metrics(source_metrics, turn_span=int(turn_span)))
+
+    total_turn_span = sum(source_turn_spans) if source_turn_spans else 1000
+    fleet = aggregate_fleet_metrics(all_agent_metrics, turn_span=total_turn_span)
+
+    alive_agents = {
+        str(m.get("agent_id") or "")
+        for m in all_agent_metrics
+        if bool(m.get("is_alive"))
+    }
+    corpse_seen_alive_agent_count = 0
     for source in sources:
         for agent in iter_agents_from_source(source):
-            all_agent_metrics.append(compute_agent_metrics(agent, world_turn))
+            for rec in _memory_records_iter(agent):
+                if _memory_action_kind(rec) != "corpse_seen":
+                    continue
+                details = _memory_record_details(rec)
+                dead_agent_id = str(details.get("dead_agent_id") or details.get("target_id") or "")
+                if dead_agent_id and dead_agent_id in alive_agents:
+                    corpse_seen_alive_agent_count += 1
 
-    fleet = aggregate_fleet_metrics(all_agent_metrics)
+    stuck_states = [
+        {
+            "agent_id": m.get("agent_id"),
+            "step_kind": (m.get("active_plan") or {}).get("current_step_kind"),
+            "step_status": (m.get("active_plan") or {}).get("current_step_status"),
+            "pending_age": (m.get("active_plan") or {}).get("pending_age"),
+        }
+        for m in all_agent_metrics
+        if m.get("plan_stuck")
+    ]
+    fleet["stuck_states_total"] = len(stuck_states)
+    fleet["max_stuck_states_total"] = len(stuck_states)
+    fleet["stuck_states"] = stuck_states
+    fleet["corpse_seen_alive_agent_count"] = corpse_seen_alive_agent_count
+    fleet["max_corpse_seen_alive_agent_count"] = corpse_seen_alive_agent_count
+
+    if source_fleets:
+        if len(source_fleets) == 1:
+            for key, value in source_fleets[0].items():
+                if key not in fleet and isinstance(value, (int, float)):
+                    fleet[key] = value
+        else:
+            window_deltas: list[dict[str, Any]] = []
+            for idx in range(1, len(source_fleets)):
+                before = source_fleets[idx - 1]
+                after = source_fleets[idx]
+                window_deltas.append({
+                    "window_index": idx,
+                    "delta": compute_delta(before, after),
+                })
+            fleet["window_deltas"] = window_deltas
+
     anomalies = detect_anomalies(all_agent_metrics, thresholds)
     violations = validate_thresholds(fleet, anomalies, thresholds or {})
     return {

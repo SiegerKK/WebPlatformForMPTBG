@@ -198,3 +198,82 @@ class TestCleanupStaleCorpses:
         state["locations"]["loc_a"]["corpses"] = [_make_corpse("dead_4", use_old_field=True)]
         result = self._call(state)
         assert result["stale_corpses_removed"] == 0
+
+
+class TestCorpseLifecycleIntegration:
+    def _v3_action_records(self, agent: dict[str, Any], action_kind: str) -> list[dict[str, Any]]:
+        records = ((agent.get("memory_v3") or {}).get("records") or {}).values()
+        return [
+            r for r in records
+            if isinstance(r, dict)
+            and str((r.get("details") or {}).get("action_kind") or r.get("kind") or "") == action_kind
+        ]
+
+    def test_alive_agent_stale_corpse_does_not_emit_corpse_seen(self) -> None:
+        from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
+        from tests.decision.conftest import make_agent, make_minimal_state
+
+        observer = make_agent(agent_id="observer", location_id="loc_a")
+        alive_victim = make_agent(agent_id="victim", location_id="loc_a")
+        state = make_minimal_state(agent_id="observer", agent=observer)
+        state["agents"]["victim"] = alive_victim
+        state["locations"]["loc_a"]["agents"].append("victim")
+        state["locations"]["loc_a"]["corpses"] = [
+            {"corpse_id": "corpse_victim", "agent_id": "victim", "visible": True, "location_id": "loc_a"}
+        ]
+
+        _write_location_observations("observer", observer, "loc_a", state, world_turn=101)
+        assert self._v3_action_records(observer, "corpse_seen") == []
+
+    def test_alive_agent_stale_corpse_does_not_mark_known_npc_dead(self) -> None:
+        from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
+        from tests.decision.conftest import make_agent, make_minimal_state
+
+        observer = make_agent(agent_id="observer", location_id="loc_a")
+        alive_victim = make_agent(agent_id="victim", location_id="loc_a")
+        state = make_minimal_state(agent_id="observer", agent=observer)
+        state["agents"]["victim"] = alive_victim
+        state["locations"]["loc_a"]["agents"].append("victim")
+        state["locations"]["loc_a"]["corpses"] = [
+            {"corpse_id": "corpse_victim", "agent_id": "victim", "visible": True, "location_id": "loc_a"}
+        ]
+
+        _write_location_observations("observer", observer, "loc_a", state, world_turn=101)
+        known = (observer.get("knowledge_v1") or {}).get("known_npcs", {})
+        victim_entry = known.get("victim")
+        assert not victim_entry or victim_entry.get("is_alive") is not False
+
+    def test_cleanup_runs_once_per_tick(self, monkeypatch) -> None:
+        from app.games.zone_stalkers.rules import tick_rules
+        from tests.decision.conftest import make_agent, make_minimal_state
+
+        observer = make_agent(agent_id="observer", location_id="loc_a")
+        state = make_minimal_state(agent_id="observer", agent=observer)
+        calls = {"count": 0}
+        original = tick_rules.cleanup_stale_corpses
+
+        def _wrapped_cleanup(local_state: dict[str, Any]) -> dict[str, int]:
+            calls["count"] += 1
+            return original(local_state)
+
+        monkeypatch.setattr(tick_rules, "cleanup_stale_corpses", _wrapped_cleanup)
+        tick_rules.tick_zone_map(state)
+        assert calls["count"] == 1
+
+    def test_valid_dead_agent_corpse_seen_still_works(self) -> None:
+        from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
+        from tests.decision.conftest import make_agent, make_minimal_state
+
+        observer = make_agent(agent_id="observer", location_id="loc_a")
+        dead_victim = make_agent(agent_id="victim", location_id="loc_a")
+        dead_victim["is_alive"] = False
+        dead_victim["hp"] = 0
+        state = make_minimal_state(agent_id="observer", agent=observer)
+        state["agents"]["victim"] = dead_victim
+        state["locations"]["loc_a"]["corpses"] = [
+            {"corpse_id": "corpse_victim", "agent_id": "victim", "visible": True, "location_id": "loc_a"}
+        ]
+
+        _write_location_observations("observer", observer, "loc_a", state, world_turn=101)
+        corpse_seen = self._v3_action_records(observer, "corpse_seen")
+        assert corpse_seen, "Expected corpse_seen memory for valid corpse"

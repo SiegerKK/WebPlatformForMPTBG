@@ -67,6 +67,55 @@ def _invalidate_brain_on_trade_sell_failure_abort(
     )
 
 
+def _invalidate_brain_on_active_plan_timeout(
+    agent: dict[str, Any],
+    *,
+    reason: str,
+    world_turn: int,
+) -> None:
+    from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain  # noqa: PLC0415
+
+    invalidate_brain(
+        agent,
+        None,
+        reason=f"active_plan_timeout:{reason}",
+        priority="normal",
+        world_turn=world_turn,
+    )
+
+
+def _clear_scheduled_action_if_matches_active_step(
+    agent: dict[str, Any],
+    active_plan: ActivePlanV3,
+) -> None:
+    scheduled_action = agent.get("scheduled_action")
+    if not isinstance(scheduled_action, dict):
+        return
+
+    step = active_plan.current_step
+    if step is None:
+        return
+
+    tagged_plan_id = str(scheduled_action.get("active_plan_id") or "")
+    if tagged_plan_id and tagged_plan_id != active_plan.id:
+        return
+
+    tagged_step_index = scheduled_action.get("active_plan_step_index")
+    if tagged_step_index is not None:
+        try:
+            if int(tagged_step_index) != active_plan.current_step_index:
+                return
+        except (TypeError, ValueError):
+            return
+
+    if (
+        tagged_plan_id == active_plan.id
+        or tagged_step_index is not None
+        or scheduled_action_matches_active_step(scheduled_action, step)
+    ):
+        agent["scheduled_action"] = None
+
+
 def active_plan_step_label(step: ActivePlanStep | None) -> str:
     return step.kind if step is not None else "none"
 
@@ -564,6 +613,40 @@ def process_active_plan_v3(
 ) -> tuple[bool, list[dict[str, Any]]]:
     active_plan = get_active_plan(agent)
     if active_plan is None:
+        return False, []
+
+    timed_out, timeout_reason = assess_active_plan_step_timeout(
+        agent=agent,
+        active_plan=active_plan,
+        world_turn=world_turn,
+    )
+    if timed_out and timeout_reason:
+        mark_active_plan_step_failed(
+            agent,
+            active_plan,
+            world_turn=world_turn,
+            state=state,
+            add_memory=add_memory,
+            reason=timeout_reason,
+        )
+        _clear_scheduled_action_if_matches_active_step(agent, active_plan)
+        active_plan.abort(timeout_reason, world_turn)
+        _invalidate_brain_on_active_plan_timeout(
+            agent,
+            reason=timeout_reason,
+            world_turn=world_turn,
+        )
+        save_active_plan(agent, active_plan)
+        finish_active_plan(
+            agent_id,
+            agent,
+            active_plan,
+            state,
+            world_turn,
+            add_memory=add_memory,
+            terminal_event="active_plan_aborted",
+            reason=timeout_reason,
+        )
         return False, []
 
     operation, reason = assess_active_plan_v3(agent, state, world_turn)

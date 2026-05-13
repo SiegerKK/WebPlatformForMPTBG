@@ -50,6 +50,10 @@ def has_recent_trade_sell_failure_for_agent(
 
         # no_sellable_items is inventory-scoped; block regardless of trader/location.
         if reason == "no_sellable_items":
+            from app.games.zone_stalkers.decision.executors import has_sellable_inventory  # noqa: PLC0415
+
+            if has_sellable_inventory(agent, item_category="any_sellable"):
+                continue
             return True
 
         if not (same_trader or same_location):

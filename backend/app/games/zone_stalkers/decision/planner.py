@@ -1456,6 +1456,8 @@ def _plan_sell_artifacts(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
+    if not _has_sellable_inventory(ctx.self_state, item_category="artifact"):
+        return None
     trader_loc = _nearest_unblocked_trader_location_for_artifacts(
         ctx,
         state,
@@ -1497,16 +1499,13 @@ def _plan_get_rich(
     3. Travel to the best reachable anomaly location.
     4. Wait (no candidates).
     """
-    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES
     from app.games.zone_stalkers.rules.tick_rules import (
         _confirmed_empty_locations,
         _dijkstra_reachable_locations,
         _score_location,
     )
-    artifact_types = frozenset(ARTIFACT_TYPES.keys())
     agent = ctx.self_state
-    inventory = agent.get("inventory", [])
-    has_artifacts = any(i.get("type") in artifact_types for i in inventory)
+    has_artifacts = _has_sellable_inventory(agent, item_category="artifact")
     trader_loc = _nearest_unblocked_trader_location_for_artifacts(
         ctx,
         state,
@@ -2320,36 +2319,14 @@ def _agent_wealth_from_ctx(ctx: AgentContext) -> int:
 
 
 def _has_sellable_items(agent: dict) -> bool:
-    """Return True if the agent has any non-critical inventory item that can be sold.
+    """Compatibility wrapper for planner sell checks."""
+    return _has_sellable_inventory(agent, item_category="any_sellable")
 
-    Sellable categories (in order of sell priority):
-      - Artifacts
-      - Detectors
-      - Spare weapons (in inventory; equipped weapon is in agent["equipment"])
-      - Spare armor   (in inventory; equipped armor  is in agent["equipment"])
 
-    Not sellable:
-      - Consumables (food / drink / medical items)
-      - Ammo (low value, needed for combat)
-      - Secret documents (needed for ``unravel_zone_mystery`` goal)
-    """
-    from app.games.zone_stalkers.balance.items import ITEM_TYPES as _IT
-    from app.games.zone_stalkers.balance.artifacts import ARTIFACT_TYPES as _ART
+def _has_sellable_inventory(agent: dict[str, Any], *, item_category: str) -> bool:
+    from app.games.zone_stalkers.decision.executors import has_sellable_inventory  # noqa: PLC0415
 
-    _art_set = frozenset(_ART.keys())
-    _non_sellable_base = frozenset(["medical", "consumable", "ammo", "secret_document"])
-    _sellable_base = frozenset(["weapon", "armor", "detector"])
-
-    for item in agent.get("inventory", []):
-        t = item.get("type", "")
-        if t in _art_set:
-            return True
-        base = _IT.get(t, {}).get("type", t)
-        if base in _non_sellable_base:
-            continue
-        if base in _sellable_base and item.get("value", _IT.get(t, {}).get("value", 0)) > 0:
-            return True
-    return False
+    return has_sellable_inventory(agent, item_category=item_category)
     # Basic sleep duration policy:
     # linearly map sleepiness 0..100 -> 1..DEFAULT_SLEEP_HOURS.
     sleepiness = max(0, int(agent.get("sleepiness", 0)))

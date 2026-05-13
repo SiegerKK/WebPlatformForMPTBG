@@ -58,7 +58,11 @@ from app.games.zone_stalkers.decision.plan_monitor import (
     assess_scheduled_action_v3,
     is_v3_monitored_bot,
 )
-from app.games.zone_stalkers.rules.agent_lifecycle import kill_agent
+from app.games.zone_stalkers.rules.agent_lifecycle import (
+    cleanup_stale_corpses,
+    is_valid_corpse_object,
+    kill_agent,
+)
 from app.games.zone_stalkers.rules.tick_constants import (
     CRITICAL_HUNGER_THRESHOLD,
     CRITICAL_THIRST_THRESHOLD,
@@ -1695,6 +1699,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         # When disabled: brain_trace is not grown; only latest_decision_summary
         # (written inside _run_npc_brain_v3_decision) is kept.
 
+    cleanup_stale_corpses(state)
     _update_corpse_visibility(state=state, world_turn=world_turn)
 
     # 3b. Per-turn location observations for every alive stalker agent.
@@ -3677,7 +3682,11 @@ def _write_location_observations(
         corpse for corpse in (loc.get("corpses") or [])
         if isinstance(corpse, dict) and bool(corpse.get("visible", True))
     ]
+    stale_corpse_seen = False
     for corpse in visible_corpses:
+        if not is_valid_corpse_object(corpse, state):
+            stale_corpse_seen = True
+            continue
         dead_agent_id = str(corpse.get("agent_id") or "")
         if not dead_agent_id:
             continue
@@ -3725,6 +3734,13 @@ def _write_location_observations(
                 },
                 summary=f"Лично подтвердил тело цели «{dead_agent_name}» в «{loc_name}».",
             )
+
+    if stale_corpse_seen:
+        loc["corpses"] = [
+            corpse
+            for corpse in (loc.get("corpses") or [])
+            if isinstance(corpse, dict) and is_valid_corpse_object(corpse, state)
+        ]
 
     # NOTE: Artifacts are NOT recorded as a location observation on arrival.
     # They can only be discovered and recorded through the explore action.

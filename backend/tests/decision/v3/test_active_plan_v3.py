@@ -1017,6 +1017,84 @@ class TestAssessActivePlanStepTimeout:
         assert timed_out is True
         assert reason == "trade_sell_pending_timeout"
 
+
+class TestProcessActivePlanTimeoutIntegration:
+    def _call(self, agent: dict, active_plan: "ActivePlanV3", world_turn: int) -> "tuple[bool, str | None]":
+        from app.games.zone_stalkers.decision.active_plan_runtime import assess_active_plan_step_timeout
+        return assess_active_plan_step_timeout(
+            agent=agent, active_plan=active_plan, world_turn=world_turn
+        )
+
+    def _run_process(self, agent: dict[str, Any], world_turn: int) -> tuple[bool, list[dict[str, Any]]]:
+        from app.games.zone_stalkers.decision.active_plan_runtime import process_active_plan_v3
+
+        return process_active_plan_v3(
+            "bot1",
+            agent,
+            _base_state(),
+            world_turn,
+            add_memory=lambda *args, **kwargs: None,
+        )
+
+    def test_process_aborts_trade_sell_pending_timeout(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=10)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=10)
+        save_active_plan(agent, active_plan)
+
+        processed, events = self._run_process(agent, world_turn=16)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+
+    def test_process_aborts_trade_buy_pending_timeout(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        step = _make_pending_step(STEP_TRADE_BUY_ITEM, started_turn=10)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=10)
+        save_active_plan(agent, active_plan)
+
+        processed, events = self._run_process(agent, world_turn=16)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+
+    def test_process_aborts_explore_pending_timeout_without_scheduled_action(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        agent["scheduled_action"] = None
+        step = _make_pending_step(STEP_EXPLORE_LOCATION, started_turn=1)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=1)
+        save_active_plan(agent, active_plan)
+
+        processed, events = self._run_process(agent, world_turn=7)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+
+    def test_process_clears_matching_scheduled_action_on_timeout_abort(self) -> None:
+        from app.games.zone_stalkers.decision.active_plan_manager import save_active_plan, get_active_plan
+
+        agent = _base_agent()
+        step = _make_pending_step(STEP_TRADE_SELL_ITEM, started_turn=10)
+        active_plan = _make_active_plan_for_timeout(step, created_turn=10)
+        save_active_plan(agent, active_plan)
+        agent["scheduled_action"] = {
+            "type": "event",
+            "active_plan_id": active_plan.id,
+            "active_plan_step_index": 0,
+        }
+
+        processed, events = self._run_process(agent, world_turn=16)
+        assert processed is False
+        assert events == []
+        assert get_active_plan(agent) is None
+        assert agent.get("scheduled_action") is None
+
     # ── trade_buy_item pending timeout ─────────────────────────────────────
 
     def test_trade_buy_pending_exceeded_returns_true(self) -> None:
