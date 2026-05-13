@@ -10,6 +10,15 @@ from app.games.zone_stalkers.decision.models.target_belief import (
     RouteHypothesis,
     TargetBelief,
 )
+from app.games.zone_stalkers.knowledge.knowledge_hunt_builder import (
+    build_equipment_belief_from_knowledge,
+    build_hunt_leads_from_knowledge,
+    build_recent_target_contact_from_knowledge,
+)
+from app.games.zone_stalkers.knowledge.knowledge_store import (
+    effective_known_npc_confidence,
+    upsert_known_npc,
+)
 
 _LEAD_CONFIDENCE_DEFAULTS: dict[str, float] = {
     "target_seen": 0.95,
@@ -74,6 +83,77 @@ def _iter_memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(records, dict):
         return []
     return [rec for rec in records.values() if isinstance(rec, dict)]
+
+
+def _ensure_target_belief_metrics(agent: dict[str, Any]) -> dict[str, Any]:
+    metrics = agent.setdefault("brain_context_metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+        agent["brain_context_metrics"] = metrics
+    metrics.setdefault("target_belief_knowledge_leads", 0)
+    metrics.setdefault("target_belief_memory_leads", 0)
+    metrics.setdefault("target_belief_memory_fallbacks", 0)
+    metrics.setdefault("target_belief_memory_records_scanned", 0)
+    metrics.setdefault("target_belief_known_npc_hits", 0)
+    metrics.setdefault("target_belief_known_corpse_hits", 0)
+    metrics.setdefault("target_belief_hunt_evidence_hits", 0)
+    return metrics
+
+
+def _count_known_target_corpses(agent: dict[str, Any], target_id: str) -> int:
+    knowledge = agent.get("knowledge_v1")
+    if not isinstance(knowledge, dict):
+        return 0
+    known_corpses = knowledge.get("known_corpses")
+    if not isinstance(known_corpses, dict):
+        return 0
+    return sum(
+        1
+        for corpse in known_corpses.values()
+        if isinstance(corpse, dict)
+        and str(corpse.get("dead_agent_id") or "") == target_id
+        and not bool(corpse.get("is_stale"))
+    )
+
+
+def _knowledge_has_sufficient_target_signal(
+    agent: dict[str, Any],
+    *,
+    target_id: str,
+    world_turn: int,
+) -> bool:
+    knowledge = agent.get("knowledge_v1")
+    if not isinstance(knowledge, dict):
+        return False
+
+    known_npcs = knowledge.get("known_npcs")
+    npc_entry = known_npcs.get(target_id) if isinstance(known_npcs, dict) else None
+    if isinstance(npc_entry, dict) and effective_known_npc_confidence(npc_entry, world_turn) >= 0.05:
+        return True
+
+    hunt_evidence = knowledge.get("hunt_evidence")
+    if isinstance(hunt_evidence, dict) and isinstance(hunt_evidence.get(target_id), dict):
+        return True
+
+    return _count_known_target_corpses(agent, target_id) > 0
+
+
+def _store_target_knowledge_debug(
+    agent: dict[str, Any],
+    *,
+    target_id: str,
+    memory_fallback_used: bool,
+    lead_sources: dict[str, int],
+) -> None:
+    brain_ctx = agent.get("brain_v3_context")
+    if not isinstance(brain_ctx, dict):
+        brain_ctx = {}
+        agent["brain_v3_context"] = brain_ctx
+    brain_ctx["_target_knowledge_debug"] = {
+        "target_id": target_id,
+        "legacy_memory_fallback_used": memory_fallback_used,
+        "lead_sources": dict(lead_sources),
+    }
 
 
 def _clamp01(value: float) -> float:
@@ -409,70 +489,23 @@ def _aggregate_location_hypotheses(
     return tuple(hypotheses), tuple(route_hypotheses), exhausted_locations
 
 
-def build_target_belief(
+def build_hunt_leads_from_memory_v3_legacy(
     *,
-    agent_id: str,
     agent: dict[str, Any],
-    state: dict[str, Any],
+    target_id: str,
     world_turn: int,
-    belief_state: BeliefState,
-) -> TargetBelief:
-    target_id = str(agent.get("kill_target_id") or "")
-    if not target_id:
-        return TargetBelief(
-            target_id="",
-            is_known=False,
-            is_alive=None,
-            last_known_location_id=None,
-            location_confidence=0.0,
-            best_location_id=None,
-            best_location_confidence=0.0,
-            last_seen_turn=None,
-            visible_now=False,
-            co_located=False,
-            equipment_known=False,
-            combat_strength=None,
-            combat_strength_confidence=0.0,
-            possible_locations=(),
-            likely_routes=(),
-            exhausted_locations=(),
-            lead_count=0,
-            route_hints=(),
-            source_refs=(),
-        )
-
+) -> dict[str, Any]:
+    leads: list[HuntLead] = []
     source_refs: list[str] = []
     equipment_known = False
     combat_strength: float | None = None
     combat_strength_confidence = 0.0
     last_seen_turn: int | None = None
+    target_alive_from_knowledge: bool | None = None
     target_alive_from_memory: bool | None = None
-    leads: list[HuntLead] = []
+    records = _iter_memory_v3_records(agent)
 
-    visible_entity = next(
-        (
-            entity for entity in belief_state.visible_entities
-            if str(entity.get("agent_id") or "") == target_id and not bool(entity.get("is_trader"))
-        ),
-        None,
-    )
-    visible_now = visible_entity is not None
-    co_located = visible_now
-    current_loc = str(agent.get("location_id") or belief_state.location_id or "")
-    if visible_now:
-        visible_lead = _build_visible_hunt_lead(target_id=target_id, location_id=current_loc or None, world_turn=world_turn)
-        if visible_lead is not None:
-            leads.append(visible_lead)
-            source_refs.append(visible_lead.source_ref or visible_lead.id)
-        last_seen_turn = world_turn
-        if visible_entity and visible_entity.get("hp") is not None:
-            try:
-                combat_strength = max(0.1, min(1.0, float(visible_entity.get("hp", 100)) / 100.0))
-                combat_strength_confidence = 0.8
-            except (TypeError, ValueError):
-                pass
-
-    for record in _iter_memory_v3_records(agent):
+    for record in records:
         details = _coerce_details(record)
         raw_kind = str(record.get("kind") or "")
         kind = _canonical_kind(raw_kind)
@@ -507,6 +540,218 @@ def build_target_belief(
         if lead.kind == "target_seen":
             last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
 
+    return {
+        "records_scanned": len(records),
+        "leads": leads,
+        "source_refs": source_refs,
+        "equipment_known": equipment_known,
+        "combat_strength": combat_strength,
+        "combat_strength_confidence": combat_strength_confidence,
+        "last_seen_turn": last_seen_turn,
+        "target_alive_from_memory": target_alive_from_memory,
+    }
+
+
+def _build_recent_target_contact_from_memory_v3_legacy(
+    *,
+    agent: dict[str, Any],
+    target_id: str,
+    world_turn: int,
+) -> dict[str, Any] | None:
+    recent_contact_turn: int | None = None
+    recent_contact_location_id: str | None = None
+    for record in _iter_memory_v3_records(agent):
+        record_kind = _canonical_kind(str(record.get("kind") or ""))
+        if record_kind != "target_seen":
+            continue
+        details = _coerce_details(record)
+        record_target_id = str(details.get("target_id") or details.get("target_agent_id") or "")
+        if record_target_id != target_id and target_id not in {str(v) for v in record.get("entity_ids", [])}:
+            continue
+        created_turn = _coerce_int(record.get("created_turn")) or 0
+        if created_turn < world_turn - RECENT_TARGET_CONTACT_TURNS:
+            continue
+        if recent_contact_turn is None or created_turn > recent_contact_turn:
+            recent_contact_turn = created_turn
+            recent_contact_location_id = str(
+                record.get("location_id")
+                or details.get("location_id")
+                or ""
+            ) or None
+    if recent_contact_turn is None:
+        return None
+    return {
+        "turn": recent_contact_turn,
+        "location_id": recent_contact_location_id,
+        "age": max(0, world_turn - recent_contact_turn),
+        "source": "memory_v3",
+    }
+
+
+def build_target_belief(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    state: dict[str, Any],
+    world_turn: int,
+    belief_state: BeliefState,
+) -> TargetBelief:
+    target_id = str(agent.get("kill_target_id") or "")
+    if not target_id:
+        _store_target_knowledge_debug(
+            agent,
+            target_id="",
+            memory_fallback_used=False,
+            lead_sources={"visible": 0, "knowledge": 0, "memory_v3": 0, "debug_state": 0},
+        )
+        return TargetBelief(
+            target_id="",
+            is_known=False,
+            is_alive=None,
+            last_known_location_id=None,
+            location_confidence=0.0,
+            best_location_id=None,
+            best_location_confidence=0.0,
+            last_seen_turn=None,
+            visible_now=False,
+            co_located=False,
+            equipment_known=False,
+            combat_strength=None,
+            combat_strength_confidence=0.0,
+            possible_locations=(),
+            likely_routes=(),
+            exhausted_locations=(),
+            lead_count=0,
+            route_hints=(),
+            source_refs=(),
+            recently_seen=False,
+            recent_contact_turn=None,
+            recent_contact_location_id=None,
+            recent_contact_age=None,
+        )
+
+    metrics = _ensure_target_belief_metrics(agent)
+    source_refs: list[str] = []
+    equipment_known = False
+    combat_strength: float | None = None
+    combat_strength_confidence = 0.0
+    last_seen_turn: int | None = None
+    target_alive_from_memory: bool | None = None
+    leads: list[HuntLead] = []
+    lead_sources = {"visible": 0, "knowledge": 0, "memory_v3": 0, "debug_state": 0}
+    memory_fallback_used = False
+
+    visible_entity = next(
+        (
+            entity for entity in belief_state.visible_entities
+            if str(entity.get("agent_id") or "") == target_id and not bool(entity.get("is_trader"))
+        ),
+        None,
+    )
+    visible_now = visible_entity is not None
+    co_located = visible_now
+    current_loc = str(agent.get("location_id") or belief_state.location_id or "")
+    if visible_now:
+        knowledge = agent.get("knowledge_v1")
+        known_npcs = knowledge.get("known_npcs") if isinstance(knowledge, dict) else None
+        known_target = known_npcs.get(target_id) if isinstance(known_npcs, dict) else None
+        death_evidence = known_target.get("death_evidence") if isinstance(known_target, dict) else None
+        if isinstance(death_evidence, dict) and str(death_evidence.get("status") or "") in {
+            "reported_dead",
+            "corpse_seen",
+            "confirmed_dead",
+        }:
+            target = state.get("agents", {}).get(target_id)
+            upsert_known_npc(
+                agent,
+                other_agent_id=target_id,
+                name=str((target or {}).get("name") or target_id),
+                location_id=current_loc or None,
+                world_turn=world_turn,
+                source="direct_observation",
+                confidence=1.0,
+                observed_agent=target if isinstance(target, dict) else None,
+            )
+        visible_lead = _build_visible_hunt_lead(target_id=target_id, location_id=current_loc or None, world_turn=world_turn)
+        if visible_lead is not None:
+            leads.append(visible_lead)
+            source_refs.append(visible_lead.source_ref or visible_lead.id)
+            lead_sources["visible"] += 1
+        last_seen_turn = world_turn
+        if visible_entity and visible_entity.get("hp") is not None:
+            try:
+                combat_strength = max(0.1, min(1.0, float(visible_entity.get("hp", 100)) / 100.0))
+                combat_strength_confidence = 0.8
+            except (TypeError, ValueError):
+                pass
+
+    knowledge_leads = build_hunt_leads_from_knowledge(agent=agent, target_id=target_id, world_turn=world_turn)
+    if knowledge_leads:
+        metrics["target_belief_knowledge_leads"] = int(metrics.get("target_belief_knowledge_leads", 0)) + len(knowledge_leads)
+        leads.extend(knowledge_leads)
+        lead_sources["knowledge"] += len(knowledge_leads)
+        for lead in knowledge_leads:
+            if lead.source_ref:
+                source_refs.append(lead.source_ref)
+            if lead.kind == "target_seen":
+                last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
+
+    knowledge = agent.get("knowledge_v1")
+    known_npcs = knowledge.get("known_npcs") if isinstance(knowledge, dict) else None
+    if isinstance(known_npcs, dict) and isinstance(known_npcs.get(target_id), dict):
+        target_alive_from_knowledge = bool(known_npcs[target_id].get("is_alive", True))
+        metrics["target_belief_known_npc_hits"] = int(metrics.get("target_belief_known_npc_hits", 0)) + 1
+    hunt_evidence = knowledge.get("hunt_evidence") if isinstance(knowledge, dict) else None
+    if isinstance(hunt_evidence, dict) and isinstance(hunt_evidence.get(target_id), dict):
+        metrics["target_belief_hunt_evidence_hits"] = int(metrics.get("target_belief_hunt_evidence_hits", 0)) + 1
+    corpse_hits = _count_known_target_corpses(agent, target_id)
+    if corpse_hits:
+        metrics["target_belief_known_corpse_hits"] = int(metrics.get("target_belief_known_corpse_hits", 0)) + corpse_hits
+
+    equipment_belief = build_equipment_belief_from_knowledge(agent=agent, target_id=target_id, world_turn=world_turn)
+    equipment_known = bool(equipment_belief.get("equipment_known"))
+    combat_strength = equipment_belief.get("combat_strength")
+    combat_strength_confidence = _clamp01(equipment_belief.get("combat_strength_confidence") or 0.0)
+    source_refs.extend(str(ref) for ref in equipment_belief.get("source_refs", ()) if ref)
+
+    recent_contact = build_recent_target_contact_from_knowledge(agent=agent, target_id=target_id, world_turn=world_turn)
+    needs_memory_fallback = not _knowledge_has_sufficient_target_signal(agent, target_id=target_id, world_turn=world_turn)
+    if recent_contact is None:
+        needs_memory_fallback = True
+    if not equipment_known and combat_strength is None:
+        needs_memory_fallback = True
+
+    if needs_memory_fallback:
+        memory_fallback_used = True
+        metrics["target_belief_memory_fallbacks"] = int(metrics.get("target_belief_memory_fallbacks", 0)) + 1
+        legacy = build_hunt_leads_from_memory_v3_legacy(agent=agent, target_id=target_id, world_turn=world_turn)
+        metrics["target_belief_memory_records_scanned"] = int(
+            metrics.get("target_belief_memory_records_scanned", 0)
+        ) + int(legacy.get("records_scanned", 0))
+        legacy_leads = list(legacy.get("leads", []))
+        metrics["target_belief_memory_leads"] = int(metrics.get("target_belief_memory_leads", 0)) + len(legacy_leads)
+        leads.extend(legacy_leads)
+        lead_sources["memory_v3"] += len(legacy_leads)
+        source_refs.extend(str(ref) for ref in legacy.get("source_refs", []) if ref)
+        if legacy.get("last_seen_turn") is not None:
+            last_seen_turn = max(last_seen_turn or -1, int(legacy["last_seen_turn"]))
+        if not equipment_known:
+            equipment_known = bool(legacy.get("equipment_known"))
+        if combat_strength is None and legacy.get("combat_strength") is not None:
+            combat_strength = float(legacy["combat_strength"])
+            combat_strength_confidence = max(
+                combat_strength_confidence,
+                _clamp01(legacy.get("combat_strength_confidence") or 0.0),
+            )
+        if legacy.get("target_alive_from_memory") is not None:
+            target_alive_from_memory = bool(legacy["target_alive_from_memory"])
+        if recent_contact is None:
+            recent_contact = _build_recent_target_contact_from_memory_v3_legacy(
+                agent=agent,
+                target_id=target_id,
+                world_turn=world_turn,
+            )
+
     target = state.get("agents", {}).get(target_id)
     target_alive_from_state: bool | None = None
     omniscient_targets = bool(state.get("debug_omniscient_targets"))
@@ -521,6 +766,7 @@ def build_target_belief(
             if debug_lead is not None:
                 leads.append(debug_lead)
                 source_refs.append(debug_lead.source_ref or debug_lead.id)
+                lead_sources["debug_state"] += 1
         if omniscient_targets and combat_strength is None and target.get("hp") is not None:
             try:
                 combat_strength = max(0.1, min(1.0, float(target.get("hp", 100)) / 100.0))
@@ -533,9 +779,8 @@ def build_target_belief(
         leads=leads,
         world_turn=world_turn,
     )
-    # Fix 8: Exclude zero-confidence possible_locations
     possible_locations = tuple(
-        h for h in possible_locations if h.confidence > POSSIBLE_LOCATION_MIN_CONFIDENCE
+        hypothesis for hypothesis in possible_locations if hypothesis.confidence > POSSIBLE_LOCATION_MIN_CONFIDENCE
     )
     best_hypothesis = next(
         (item for item in possible_locations if item.location_id not in exhausted_locations and item.confidence > 0),
@@ -543,17 +788,20 @@ def build_target_belief(
     )
     best_location_id = best_hypothesis.location_id if best_hypothesis is not None else None
     best_location_confidence = best_hypothesis.confidence if best_hypothesis is not None else 0.0
-    # Fix 9: Exclude exhausted and zero-confidence destinations from route_hints
-    _exhausted_set = set(exhausted_locations)
+    exhausted_set = set(exhausted_locations)
     route_hints = tuple(
         dict.fromkeys(
             route.to_location_id
             for route in likely_routes
-            if route.to_location_id and route.to_location_id not in _exhausted_set
+            if route.to_location_id and route.to_location_id not in exhausted_set
         )
     )
 
-    is_alive = target_alive_from_memory if target_alive_from_memory is not None else target_alive_from_state
+    is_alive = target_alive_from_memory
+    if is_alive is None:
+        is_alive = target_alive_from_knowledge
+    if is_alive is None:
+        is_alive = target_alive_from_state
     combat_strength_confidence = _clamp01(combat_strength_confidence)
 
     if target_id == agent_id:
@@ -561,49 +809,31 @@ def build_target_belief(
         co_located = True
         visible_now = True
 
-    # Fix 4: Compute recently_seen fields from memory_v3 target_seen records
     recently_seen = False
     recent_contact_turn: int | None = None
     recent_contact_location_id: str | None = None
     recent_contact_age: int | None = None
     if visible_now:
-        # If target is currently visible, that counts as recently_seen
         recently_seen = True
         recent_contact_turn = world_turn
         recent_contact_location_id = current_loc or None
         recent_contact_age = 0
-    else:
-        for _rs_record in _iter_memory_v3_records(agent):
-            _rs_kind = _canonical_kind(str(_rs_record.get("kind") or ""))
-            if _rs_kind != "target_seen":
-                continue
-            _rs_details = _coerce_details(_rs_record)
-            _rs_target_id = str(
-                _rs_details.get("target_id") or _rs_details.get("target_agent_id") or ""
-            )
-            if _rs_target_id != target_id and target_id not in {
-                str(v) for v in _rs_record.get("entity_ids", [])
-            }:
-                continue
-            _rs_created = _coerce_int(_rs_record.get("created_turn")) or 0
-            if _rs_created >= world_turn - RECENT_TARGET_CONTACT_TURNS:
-                if recent_contact_turn is None or _rs_created > recent_contact_turn:
-                    recently_seen = True
-                    recent_contact_turn = _rs_created
-                    recent_contact_location_id = str(
-                        _rs_record.get("location_id")
-                        or _rs_details.get("location_id")
-                        or ""
-                    ) or None
-                    recent_contact_age = max(0, world_turn - _rs_created)
+    elif isinstance(recent_contact, dict):
+        recent_contact_turn = _coerce_int(recent_contact.get("turn"))
+        recent_contact_location_id = str(recent_contact.get("location_id") or "") or None
+        recent_contact_age = _coerce_int(recent_contact.get("age"))
+        recently_seen = recent_contact_turn is not None
 
+    _store_target_knowledge_debug(
+        agent,
+        target_id=target_id,
+        memory_fallback_used=memory_fallback_used,
+        lead_sources=lead_sources,
+    )
     return TargetBelief(
         target_id=target_id,
         is_known=bool(target_id),
         is_alive=is_alive,
-        # Backwards-compatible alias: last_known_location_id is set to the
-        # confidence-ranked best hypothesis rather than a strict temporal "last seen"
-        # location.  Consumers should prefer best_location_id going forward.
         last_known_location_id=best_location_id,
         location_confidence=_clamp01(best_location_confidence),
         best_location_id=best_location_id,
@@ -620,7 +850,6 @@ def build_target_belief(
         lead_count=len(leads),
         route_hints=route_hints,
         source_refs=tuple(dict.fromkeys(source_refs)),
-        # Fix 4 — recently_seen fields
         recently_seen=recently_seen,
         recent_contact_turn=recent_contact_turn,
         recent_contact_location_id=recent_contact_location_id,

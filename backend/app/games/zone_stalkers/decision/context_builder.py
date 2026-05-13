@@ -186,6 +186,7 @@ def build_agent_context(
             world_turn=world_turn,
             target_id=target_id,
             visible_entities=visible_entities,
+            deep_debug=deep_debug,
         )
         if not bypass_cache:
             _store_context_cache(
@@ -201,6 +202,15 @@ def build_agent_context(
     metrics["context_builder_knowledge_entries_scanned"] = int(
         metrics.get("context_builder_knowledge_entries_scanned", 0)
     ) + int(scan_metrics.get("knowledge_entries_scanned", 0))
+    metrics["context_builder_memory_fallbacks"] = int(
+        metrics.get("context_builder_memory_fallbacks", 0)
+    ) + int(scan_metrics.get("memory_fallbacks", 0))
+    metrics["context_builder_memory_fallback_records_scanned"] = int(
+        metrics.get("context_builder_memory_fallback_records_scanned", 0)
+    ) + int(scan_metrics.get("memory_fallback_records_scanned", 0))
+    metrics["context_builder_knowledge_primary_hits"] = int(
+        metrics.get("context_builder_knowledge_primary_hits", 0)
+    ) + int(scan_metrics.get("knowledge_primary_hits", 0))
 
     # ── Known targets ─────────────────────────────────────────────────────────
     known_targets: list[dict[str, Any]] = _targets_from_agent(agent, agents)
@@ -275,6 +285,9 @@ def _ensure_context_builder_metrics(agent: dict[str, Any]) -> dict[str, Any]:
     metrics.setdefault("context_builder_cache_hit_rate", 0.0)
     metrics.setdefault("context_builder_memory_scan_records", 0)
     metrics.setdefault("context_builder_knowledge_entries_scanned", 0)
+    metrics.setdefault("context_builder_memory_fallbacks", 0)
+    metrics.setdefault("context_builder_memory_fallback_records_scanned", 0)
+    metrics.setdefault("context_builder_knowledge_primary_hits", 0)
     metrics.setdefault("context_builder_ms", 0.0)
     return metrics
 
@@ -303,11 +316,11 @@ def _resolve_memory_revision(agent: dict[str, Any]) -> int:
     return int(stats.get("memory_revision", 0) or 0)
 
 
-def _resolve_knowledge_revision(agent: dict[str, Any]) -> int:
+def _resolve_knowledge_major_revision(agent: dict[str, Any]) -> int:
     knowledge = agent.get("knowledge_v1")
     if not isinstance(knowledge, dict):
         return 0
-    return int(knowledge.get("revision", 0) or 0)
+    return int(knowledge.get("major_revision", knowledge.get("revision", 0)) or 0)
 
 
 def _resolve_emission_phase(state: dict[str, Any]) -> str:
@@ -332,7 +345,7 @@ def _build_context_cache_key(
     # excluded to improve hit-rate.  Left as a future optimization once
     # knowledge-first coverage is confirmed complete.
     return {
-        "knowledge_revision": _resolve_knowledge_revision(agent),
+        "knowledge_major_revision": _resolve_knowledge_major_revision(agent),
         "memory_revision": _resolve_memory_revision(agent),
         "world_turn_bucket": world_turn // CONTEXT_CACHE_TURN_BUCKET_SIZE,
         "location_id": location_id,
@@ -341,6 +354,50 @@ def _build_context_cache_key(
         "global_goal": str(agent.get("global_goal") or ""),
         "emission_phase": _resolve_emission_phase(state),
     }
+
+
+def _should_scan_memory_for_context(
+    agent: dict[str, Any],
+    *,
+    target_id: str | None,
+    deep_debug: bool = False,
+) -> bool:
+    if deep_debug:
+        return True
+    knowledge = agent.get("knowledge_v1")
+    if not isinstance(knowledge, dict):
+        return True
+
+    known_npcs = knowledge.get("known_npcs")
+    known_locations = knowledge.get("known_locations")
+    known_traders = knowledge.get("known_traders")
+    known_hazards = knowledge.get("known_hazards")
+    known_corpses = knowledge.get("known_corpses")
+    hunt_evidence = knowledge.get("hunt_evidence")
+
+    has_routine_knowledge = any(
+        isinstance(table, dict) and bool(table)
+        for table in (known_npcs, known_locations, known_traders, known_hazards, known_corpses)
+    )
+    if not has_routine_knowledge:
+        return True
+
+    if target_id:
+        has_known_target = isinstance(known_npcs, dict) and isinstance(known_npcs.get(target_id), dict)
+        has_hunt_target = isinstance(hunt_evidence, dict) and isinstance(hunt_evidence.get(target_id), dict)
+        has_target_corpse = (
+            isinstance(known_corpses, dict)
+            and any(
+                isinstance(entry, dict)
+                and str(entry.get("dead_agent_id") or "") == target_id
+                and not bool(entry.get("is_stale"))
+                for entry in known_corpses.values()
+            )
+        )
+        if not (has_known_target or has_hunt_target or has_target_corpse):
+            return True
+
+    return False
 
 
 def _is_critical_survival_state(agent: dict[str, Any]) -> bool:
@@ -446,6 +503,7 @@ def _build_derived_context_parts(
     world_turn: int,
     target_id: str | None,
     visible_entities: list[dict[str, Any]],
+    deep_debug: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
         build_known_entities_from_knowledge,
@@ -462,7 +520,12 @@ def _build_derived_context_parts(
         knowledge_entries_scanned += len(knowledge.get("known_traders", {}) or {})
         knowledge_entries_scanned += len(knowledge.get("known_hazards", {}) or {})
 
-    memory_records = _memory_v3_records(agent)
+    should_scan_memory = _should_scan_memory_for_context(
+        agent,
+        target_id=target_id,
+        deep_debug=deep_debug,
+    )
+    memory_records = _memory_v3_records(agent) if should_scan_memory else []
     memory_scan_records = len(memory_records)
 
     knowledge_entities = build_known_entities_from_knowledge(
@@ -513,6 +576,9 @@ def _build_derived_context_parts(
         {
             "memory_scan_records": memory_scan_records,
             "knowledge_entries_scanned": knowledge_entries_scanned,
+            "memory_fallbacks": 1 if should_scan_memory else 0,
+            "memory_fallback_records_scanned": memory_scan_records,
+            "knowledge_primary_hits": 0 if should_scan_memory else 1,
         },
     )
 
@@ -902,7 +968,6 @@ def _build_target_leads(
     if not target_id:
         return leads
 
-    # From knowledge_v1 known_npcs — highest priority source
     knowledge = agent.get("knowledge_v1")
     if isinstance(knowledge, dict):
         npc_entry = knowledge.get("known_npcs", {}).get(target_id)
@@ -915,8 +980,38 @@ def _build_target_leads(
                 "confidence": npc_entry.get("confidence"),
                 "is_alive": npc_entry.get("is_alive", True),
             })
+        hunt_entry = knowledge.get("hunt_evidence", {}).get(target_id)
+        if isinstance(hunt_entry, dict):
+            last_seen = hunt_entry.get("last_seen")
+            if isinstance(last_seen, dict):
+                leads.append({
+                    "source": "knowledge_v1",
+                    "agent_id": target_id,
+                    "last_seen_location_id": last_seen.get("location_id"),
+                    "last_seen_turn": last_seen.get("turn"),
+                    "confidence": last_seen.get("confidence"),
+                    "is_alive": True,
+                })
+            death = hunt_entry.get("death")
+            if isinstance(death, dict):
+                leads.append({
+                    "source": "knowledge_v1",
+                    "kind": death.get("status"),
+                    "location_id": death.get("location_id"),
+                    "world_turn": death.get("turn"),
+                })
+        for corpse in knowledge.get("known_corpses", {}).values():
+            if not isinstance(corpse, dict):
+                continue
+            if str(corpse.get("dead_agent_id") or "") != target_id or bool(corpse.get("is_stale")):
+                continue
+            leads.append({
+                "source": "knowledge_v1",
+                "kind": "target_corpse_seen",
+                "location_id": corpse.get("location_id"),
+                "world_turn": corpse.get("last_seen_turn") or corpse.get("first_seen_turn"),
+            })
 
-    # From memory_v3 target-related records
     for record in memory_records:
         if not _record_is_active(record):
             continue
@@ -944,8 +1039,23 @@ def _build_corpse_leads(
     *,
     memory_records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return corpse-location leads for a target from memory_v3."""
+    """Return corpse-location leads for a target from knowledge_v1 and memory_v3."""
     leads: list[dict[str, Any]] = []
+    knowledge = agent.get("knowledge_v1")
+    if isinstance(knowledge, dict):
+        for corpse in knowledge.get("known_corpses", {}).values():
+            if not isinstance(corpse, dict):
+                continue
+            if bool(corpse.get("is_stale")):
+                continue
+            if target_id and str(corpse.get("dead_agent_id") or "") != target_id:
+                continue
+            leads.append({
+                "source": "knowledge_v1",
+                "kind": "target_corpse_seen",
+                "location_id": corpse.get("location_id"),
+                "world_turn": corpse.get("last_seen_turn") or corpse.get("first_seen_turn"),
+            })
     for record in memory_records:
         if not _record_is_active(record):
             continue
