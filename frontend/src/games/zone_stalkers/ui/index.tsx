@@ -2524,7 +2524,7 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
                 opacity: exportingNpcLogs ? 0.7 : 1,
               }}
               onClick={handleExportNpcLogs}
-              disabled={exportingNpcLogs || !context}
+              disabled={exportingNpcLogs}
               title="Скачать ZIP с дебаг-логами и историей всех НПЦ"
             >
               {exportingNpcLogs ? '⏳ Экспорт…' : '⬇ Экспорт логов НПЦ'}
