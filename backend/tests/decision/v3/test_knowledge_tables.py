@@ -229,11 +229,81 @@ def test_target_corpse_reported_is_lead_not_goal_completion():
     assert entry is not None
     assert entry["is_alive"] is False
     assert entry["source"] == "witness_report"
+    assert entry["death_reported"] is True
+    assert entry["death_directly_confirmed"] is False
+    assert entry["reported_corpse_location_id"] == "loc_D"
 
     records = ensure_memory_v3(agent).get("records", {})
     death_confirmed = [r for r in records.values()
                        if isinstance(r, dict) and r.get("kind") == "target_death_confirmed"]
     assert len(death_confirmed) == 0, "target_corpse_reported must not confirm death"
+
+
+def test_location_visited_upserts_known_location_from_memory_event():
+    agent = _bare_agent()
+    entry = _ku_entry(
+        100,
+        "location_visited",
+        location_id="loc_A",
+        location_name="Bunker",
+        safe_shelter=True,
+        confidence=0.9,
+    )
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
+    known_locations = agent.get("knowledge_v1", {}).get("known_locations", {})
+    assert "loc_A" in known_locations
+    assert known_locations["loc_A"]["safe_shelter"] is True
+
+
+def test_trader_seen_upserts_known_trader_from_memory_event():
+    agent = _bare_agent()
+    entry = _ku_entry(
+        120,
+        "trader_seen",
+        trader_id="trader_sidor",
+        trader_name="Сидорович",
+        location_id="loc_Bar",
+        buys_artifacts=True,
+        sells_food=True,
+        sells_drink=True,
+    )
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=120)
+    known_traders = agent.get("knowledge_v1", {}).get("known_traders", {})
+    assert "trader_sidor" in known_traders
+    trader = known_traders["trader_sidor"]
+    assert trader["location_id"] == "loc_Bar"
+    assert trader["buys_artifacts"] is True
+    assert trader["sells_food"] is True
+    assert trader["sells_drink"] is True
+
+
+def test_target_last_known_location_upserts_known_npc_location():
+    agent = _bare_agent()
+    entry = _ku_entry(
+        130,
+        "target_last_known_location",
+        target_id="target_1",
+        target_name="Цель",
+        location_id="loc_X",
+    )
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=130)
+    known_npcs = agent.get("knowledge_v1", {}).get("known_npcs", {})
+    assert "target_1" in known_npcs
+    assert known_npcs["target_1"]["last_seen_location_id"] == "loc_X"
+
+
+def test_travel_hop_updates_known_locations_or_route_context():
+    agent = _bare_agent()
+    entry = _ku_entry(
+        140,
+        "travel_hop",
+        from_location_id="loc_A",
+        to_location_id="loc_B",
+    )
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=140)
+    known_locations = agent.get("knowledge_v1", {}).get("known_locations", {})
+    assert "loc_A" in known_locations
+    assert "loc_B" in known_locations
 
 
 def test_known_npcs_cap_keeps_target_and_recent_enemies():
@@ -273,6 +343,49 @@ def test_detailed_known_npcs_cap_demotes_neutral_old_entries():
     assert detailed_count <= MAX_DETAILED_KNOWN_NPCS_PER_AGENT
 
 
+def test_known_npc_stats_are_updated_after_cap_enforcement():
+    agent = _bare_agent()
+    for i in range(MAX_KNOWN_NPCS_PER_AGENT + 8):
+        upsert_known_npc(
+            agent,
+            other_agent_id=f"npc_{i}",
+            name=f"NPC {i}",
+            location_id="loc_A",
+            world_turn=100 + i,
+            source="direct_observation",
+            confidence=0.5,
+        )
+    knowledge = agent["knowledge_v1"]
+    stats = knowledge["stats"]
+    assert stats["known_npcs_count"] == len(knowledge["known_npcs"])
+    assert stats["known_npcs_count"] <= MAX_KNOWN_NPCS_PER_AGENT
+
+
+def test_detailed_known_npc_stats_updated_after_demotion():
+    agent = _bare_agent()
+    observed = {"equipment": {"weapon": {"type": "pistol"}, "armor": {"type": "leather_jacket"}}}
+    for i in range(MAX_DETAILED_KNOWN_NPCS_PER_AGENT + 5):
+        upsert_known_npc(
+            agent,
+            other_agent_id=f"npc_{i}",
+            name=f"NPC {i}",
+            location_id="loc_A",
+            world_turn=100 + i,
+            source="direct_observation",
+            confidence=0.8,
+            observed_agent=observed,
+        )
+    knowledge = agent["knowledge_v1"]
+    stats = knowledge["stats"]
+    detailed_count = sum(
+        1
+        for e in knowledge["known_npcs"].values()
+        if isinstance(e, dict) and e.get("detail_level") == "detailed"
+    )
+    assert stats["detailed_known_npcs_count"] == detailed_count
+    assert detailed_count <= MAX_DETAILED_KNOWN_NPCS_PER_AGENT
+
+
 def test_upsert_known_location():
     agent = _bare_agent()
     upsert_known_location(agent, location_id="loc_A", name="Bunker",
@@ -304,6 +417,17 @@ def test_upsert_known_hazard():
     upsert_known_hazard(agent, location_id="loc_D6", kind="emission_death",
                         world_turn=4020, confidence=0.95)
     assert agent["knowledge_v1"]["known_hazards"]["loc_D6:emission_death"]["last_seen_turn"] == 4020
+
+
+def test_non_npc_upserts_touch_last_update_turn():
+    agent = _bare_agent()
+    ensure_knowledge_v1(agent)
+    upsert_known_location(agent, location_id="loc_A", name="A", world_turn=111)
+    assert agent["knowledge_v1"]["stats"]["last_update_turn"] == 111
+    upsert_known_trader(agent, trader_id="trader_1", location_id="loc_A", world_turn=222)
+    assert agent["knowledge_v1"]["stats"]["last_update_turn"] == 222
+    upsert_known_hazard(agent, location_id="loc_A", kind="anomaly", world_turn=333)
+    assert agent["knowledge_v1"]["stats"]["last_update_turn"] == 333
 
 
 def test_debug_projection_includes_knowledge_summary():

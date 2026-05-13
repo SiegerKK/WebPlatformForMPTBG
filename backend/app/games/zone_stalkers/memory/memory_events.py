@@ -25,8 +25,10 @@ from .store import ensure_memory_v3, add_memory_record
 def _get_knowledge_upserts():
     from app.games.zone_stalkers.knowledge.knowledge_store import (  # noqa: PLC0415
         upsert_known_npc,
+        upsert_known_location,
+        upsert_known_trader,
     )
-    return upsert_known_npc
+    return upsert_known_npc, upsert_known_location, upsert_known_trader
 
 # Explicit memory event policy.
 # Routing:
@@ -886,7 +888,7 @@ def _upsert_knowledge_from_event(
     Called in the knowledge_upsert policy block for events that carry NPC data.
     Does NOT write any episodic records — that is handled by the caller.
     """
-    _upsert_npc = _get_knowledge_upserts()
+    _upsert_npc, _upsert_location, _upsert_trader = _get_knowledge_upserts()
 
     if kind == "stalkers_seen":
         # Effects: observed="stalkers", location_id, names, seen_agent_ids (if PR3 enhanced)
@@ -973,11 +975,22 @@ def _upsert_knowledge_from_event(
             loc_id = str(effects.get("corpse_location_id") or effects.get("location_id") or "")
             src = "corpse_seen"
             conf = 0.95
+            death_status = {
+                "is_alive": False,
+                "death_reported": True,
+                "death_directly_confirmed": True,
+                "reported_corpse_location_id": loc_id or None,
+            }
         else:
             loc_id = str(effects.get("reported_corpse_location_id") or effects.get("location_id") or "")
             src = "witness_report"
             conf = float(effects.get("confidence", 0.75))
-        death_status = {"is_alive": False}
+            death_status = {
+                "is_alive": False,
+                "death_reported": True,
+                "death_directly_confirmed": False,
+                "reported_corpse_location_id": loc_id or None,
+            }
         if str(effects.get("death_cause") or ""):
             death_status["death_cause"] = effects.get("death_cause")
         if str(effects.get("killer_id") or ""):
@@ -992,6 +1005,82 @@ def _upsert_knowledge_from_event(
             confidence=conf,
             death_status=death_status,
         )
+
+    elif kind == "location_visited":
+        location_id = str(
+            effects.get("location_id")
+            or effects.get("to_location")
+            or effects.get("destination")
+            or ""
+        )
+        if not location_id:
+            return
+        _upsert_location(
+            agent,
+            location_id=location_id,
+            name=str(effects.get("location_name") or effects.get("name") or "") or None,
+            world_turn=world_turn,
+            safe_shelter=bool(effects.get("safe_shelter") or effects.get("is_shelter")),
+            confidence=float(effects.get("confidence", 1.0)),
+        )
+
+    elif kind == "trader_seen":
+        trader_id = str(
+            effects.get("trader_id")
+            or effects.get("agent_id")
+            or effects.get("other_agent_id")
+            or ""
+        )
+        if not trader_id:
+            return
+        _upsert_trader(
+            agent,
+            trader_id=trader_id,
+            location_id=str(
+                effects.get("location_id")
+                or effects.get("to_location")
+                or effects.get("destination")
+                or ""
+            ) or None,
+            world_turn=world_turn,
+            name=str(effects.get("trader_name") or effects.get("name") or "") or None,
+            buys_artifacts=bool(effects.get("buys_artifacts")),
+            sells_food=bool(effects.get("sells_food")),
+            sells_drink=bool(effects.get("sells_drink")),
+            confidence=float(effects.get("confidence", 1.0)),
+        )
+
+    elif kind == "travel_hop":
+        from_location_id = str(
+            effects.get("from_location_id")
+            or effects.get("from_location")
+            or effects.get("from_loc")
+            or ""
+        )
+        to_location_id = str(
+            effects.get("to_location_id")
+            or effects.get("to_location")
+            or effects.get("to_loc")
+            or effects.get("destination")
+            or effects.get("location_id")
+            or ""
+        )
+        if from_location_id:
+            _upsert_location(
+                agent,
+                location_id=from_location_id,
+                name=None,
+                world_turn=world_turn,
+                confidence=float(effects.get("confidence", 0.8)),
+            )
+        if to_location_id:
+            _upsert_location(
+                agent,
+                location_id=to_location_id,
+                name=None,
+                world_turn=world_turn,
+                confidence=float(effects.get("confidence", 0.85)),
+            )
 
 
 

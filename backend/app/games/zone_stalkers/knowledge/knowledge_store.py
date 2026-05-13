@@ -197,8 +197,8 @@ def upsert_known_npc(
             _apply_observed_agent_detail(existing, observed_agent)
             existing["detail_level"] = "detailed"
 
-    _update_knowledge_stats(knowledge, world_turn)
     _enforce_npc_caps(agent, knowledge)
+    _update_knowledge_stats(knowledge, world_turn)
 
 
 def _apply_death_status(
@@ -212,6 +212,12 @@ def _apply_death_status(
         existing_conf = float(entry.get("alive_confidence", 1.0))
         new_alive_conf = max(0.0, 1.0 - confidence)
         entry["alive_confidence"] = min(new_alive_conf, existing_conf)
+        if "death_reported" in death_status:
+            entry["death_reported"] = bool(death_status["death_reported"])
+        if "death_directly_confirmed" in death_status:
+            entry["death_directly_confirmed"] = bool(death_status["death_directly_confirmed"])
+        if "reported_corpse_location_id" in death_status:
+            entry["reported_corpse_location_id"] = death_status["reported_corpse_location_id"]
         if "death_cause" in death_status:
             entry["death_cause"] = death_status["death_cause"]
         if "killer_id" in death_status:
@@ -342,6 +348,12 @@ def _update_knowledge_stats(knowledge: dict[str, Any], world_turn: int) -> None:
     knowledge["revision"] = int(knowledge.get("revision", 0)) + 1
 
 
+def _touch_knowledge(knowledge: dict[str, Any], world_turn: int) -> None:
+    stats = knowledge.setdefault("stats", {})
+    stats["last_update_turn"] = world_turn
+    knowledge["revision"] = int(knowledge.get("revision", 0)) + 1
+
+
 def upsert_known_location(
     agent: dict[str, Any],
     *,
@@ -378,7 +390,7 @@ def upsert_known_location(
         if extra:
             existing.update(extra)
 
-    knowledge["revision"] = int(knowledge.get("revision", 0)) + 1
+    _touch_knowledge(knowledge, world_turn)
 
 
 def upsert_known_trader(
@@ -424,7 +436,7 @@ def upsert_known_trader(
         if sells_drink:
             existing["sells_drink"] = True
 
-    knowledge["revision"] = int(knowledge.get("revision", 0)) + 1
+    _touch_knowledge(knowledge, world_turn)
 
 
 def upsert_known_hazard(
@@ -452,7 +464,7 @@ def upsert_known_hazard(
             existing["last_seen_turn"] = world_turn
         existing["confidence"] = max(float(existing.get("confidence", 0.5)), confidence)
 
-    knowledge["revision"] = int(knowledge.get("revision", 0)) + 1
+    _touch_knowledge(knowledge, world_turn)
 
 
 def build_knowledge_summary(agent: dict[str, Any], world_turn: int) -> dict[str, Any]:

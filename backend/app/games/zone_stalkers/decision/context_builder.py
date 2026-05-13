@@ -256,17 +256,15 @@ def _entities_from_knowledge_or_memory(
     world_turn: int,
     target_id: str | None,
 ) -> list[dict[str, Any]]:
-    """Prefer knowledge_v1; fallback to memory_v3 scan."""
+    """Merge knowledge_v1 with memory_v3 fallback; knowledge has priority."""
     from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
         build_known_entities_from_knowledge,
     )
     knowledge_entities = build_known_entities_from_knowledge(
         agent, world_turn, agents=agents, own_id=own_id, target_id=target_id
     )
-    if knowledge_entities:
-        return knowledge_entities
-    # Fallback: old memory_v3 scan.
-    return _entities_from_memory(agent, agents, own_id)
+    memory_entities = _entities_from_memory(agent, agents, own_id)
+    return _merge_entities_by_id(knowledge_entities, memory_entities)
 
 
 def _locations_from_knowledge_or_memory(
@@ -275,30 +273,28 @@ def _locations_from_knowledge_or_memory(
     traders: dict[str, Any] | None,
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    """Prefer knowledge_v1; fallback to memory_v3 scan."""
+    """Merge knowledge_v1 with memory_v3 fallback; knowledge has priority."""
     from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
         build_known_locations_from_knowledge,
     )
     knowledge_locs = build_known_locations_from_knowledge(
         agent, world_turn, locations=locations, traders=traders
     )
-    if knowledge_locs:
-        return knowledge_locs
-    return _locations_from_memory(agent, locations, traders)
+    memory_locs = _locations_from_memory(agent, locations, traders)
+    return _merge_locations_by_id(knowledge_locs, memory_locs)
 
 
 def _hazards_from_knowledge_or_memory(
     agent: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    """Prefer knowledge_v1; fallback to memory_v3 scan."""
+    """Merge knowledge_v1 with memory_v3 fallback; knowledge has priority."""
     from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
         build_known_hazards_from_knowledge,
     )
     knowledge_hazards = build_known_hazards_from_knowledge(agent, world_turn)
-    if knowledge_hazards:
-        return knowledge_hazards
-    return _hazards_from_memory(agent)
+    memory_hazards = _hazards_from_memory(agent)
+    return _merge_hazards(knowledge_hazards, memory_hazards)
 
 
 def _traders_from_knowledge_or_memory(
@@ -308,30 +304,125 @@ def _traders_from_knowledge_or_memory(
     traders_dict: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    """Co-located traders first, then knowledge_v1; fallback to memory_v3 scan."""
+    """Merge visible + knowledge_v1 + memory_v3 traders with dedupe by agent_id."""
     from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
         build_known_traders_from_knowledge,
     )
-    # Always include co-located traders (visible).
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    visible_traders: list[dict[str, Any]] = []
     for entity in visible:
         if entity.get("is_trader"):
             aid = entity["agent_id"]
-            seen.add(aid)
-            result.append({"agent_id": aid, "name": entity.get("name", aid), "source": "visible"})
+            visible_traders.append({
+                "agent_id": aid,
+                "name": entity.get("name", aid),
+                "source": "visible",
+            })
 
     # From knowledge_v1 tables.
     knowledge_traders = build_known_traders_from_knowledge(agent, world_turn, traders_dict=traders_dict)
-    for t in knowledge_traders:
-        tid = t.get("agent_id", "")
-        if tid and tid not in seen:
-            seen.add(tid)
-            result.append(t)
-    if result:
-        return result
-    # Fallback: memory_v3 scan (excludes co-located already returned above).
-    return _traders_from_visible_and_memory(visible, agent, locations, traders_dict)
+    memory_traders = _traders_from_memory(agent, traders_dict)
+    return _merge_traders_by_id(visible_traders, knowledge_traders, memory_traders)
+
+
+def _merge_entities_by_id(
+    knowledge_entities: list[dict[str, Any]],
+    memory_entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entity in knowledge_entities:
+        aid = str(entity.get("agent_id") or "")
+        if not aid or aid in seen:
+            continue
+        merged.append(entity)
+        seen.add(aid)
+    for entity in memory_entities:
+        aid = str(entity.get("agent_id") or "")
+        if not aid or aid in seen:
+            continue
+        merged.append(entity)
+        seen.add(aid)
+    return merged
+
+
+def _merge_locations_by_id(
+    knowledge_locations: list[dict[str, Any]],
+    memory_locations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for loc in knowledge_locations:
+        lid = str(loc.get("location_id") or "")
+        if not lid or lid in seen:
+            continue
+        merged.append(loc)
+        seen.add(lid)
+    for loc in memory_locations:
+        lid = str(loc.get("location_id") or "")
+        if not lid or lid in seen:
+            continue
+        merged.append(loc)
+        seen.add(lid)
+    return merged
+
+
+def _merge_traders_by_id(
+    visible_traders: list[dict[str, Any]],
+    knowledge_traders: list[dict[str, Any]],
+    memory_traders: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for trader in visible_traders:
+        tid = str(trader.get("agent_id") or "")
+        if not tid or tid in seen:
+            continue
+        merged.append(trader)
+        seen.add(tid)
+    for trader in knowledge_traders:
+        tid = str(trader.get("agent_id") or "")
+        if not tid or tid in seen:
+            continue
+        merged.append(trader)
+        seen.add(tid)
+    for trader in memory_traders:
+        tid = str(trader.get("agent_id") or "")
+        if not tid or tid in seen:
+            continue
+        merged.append(trader)
+        seen.add(tid)
+    return merged
+
+
+def _hazard_key(hazard: dict[str, Any]) -> str:
+    kind = str(hazard.get("kind") or "")
+    location_id = str(
+        hazard.get("location_id")
+        or hazard.get("effects", {}).get("location_id")
+        or ""
+    )
+    return f"{location_id}:{kind}"
+
+
+def _merge_hazards(
+    knowledge_hazards: list[dict[str, Any]],
+    memory_hazards: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for hazard in knowledge_hazards:
+        key = _hazard_key(hazard)
+        if not key or key in seen:
+            continue
+        merged.append(hazard)
+        seen.add(key)
+    for hazard in memory_hazards:
+        key = _hazard_key(hazard)
+        if not key or key in seen:
+            continue
+        merged.append(hazard)
+        seen.add(key)
+    return merged
 
 
 
@@ -468,6 +559,34 @@ def _traders_from_visible_and_memory(
                 "source": "memory_v3",
                 "memory_turn": _record_memory_turn(record),
             })
+    return result
+
+
+def _traders_from_memory(
+    agent: dict[str, Any],
+    traders_dict: dict[str, Any],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in _memory_v3_records(agent):
+        if not _record_is_active(record):
+            continue
+        trader_id = _record_trader_id(record, traders_dict)
+        if not trader_id or trader_id in seen:
+            continue
+        seen.add(trader_id)
+        details = _record_details(record)
+        result.append({
+            "agent_id": trader_id,
+            "name": details.get("trader_name")
+            or traders_dict.get(trader_id, {}).get("name")
+            or trader_id,
+            "location_id": record.get("location_id")
+            or details.get("location_id")
+            or traders_dict.get(trader_id, {}).get("location_id"),
+            "source": "memory_v3",
+            "memory_turn": _record_memory_turn(record),
+        })
     return result
 
 
