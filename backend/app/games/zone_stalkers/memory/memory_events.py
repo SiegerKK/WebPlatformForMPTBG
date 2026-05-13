@@ -20,29 +20,107 @@ from .models import (
 )
 from .store import ensure_memory_v3, add_memory_record
 
-# Events classified as trace-only: never written to memory_v3.
-# These belong in brain_trace / debug timeline only.
+# Explicit memory event policy.
+# Routing:
+#   trace_only        → debug trace only, never written to memory_v3
+#   memory_aggregate  → update one aggregate record, never append new episodic record
+#   knowledge_upsert  → update knowledge/aggregate, no episodic record
+#   memory_critical   → always write a memory_v3 record (never deduplicated/discarded)
+#   discard           → write nothing
+#   (missing key)     → default write path with dedup where applicable
 MEMORY_EVENT_POLICY: dict[str, str] = {
+    # Debug/trace only — never written to memory_v3.
     "active_plan_created": "trace_only",
     "active_plan_step_started": "trace_only",
     "active_plan_step_completed": "trace_only",
     "active_plan_completed": "trace_only",
+    "active_plan_repaired": "trace_only",
     "sleep_interval_applied": "trace_only",
 
-    # Still written to memory — semantically meaningful outcomes.
-    "active_plan_step_failed": "memory",
-    "active_plan_repair_requested": "memory_dedup",
-    "active_plan_repaired": "memory_dedup",
-    "active_plan_aborted": "memory",
-    "plan_monitor_abort": "memory",
-    "objective_decision": "memory_dedup",
-    "global_goal_completed": "memory",
-    "target_death_confirmed": "memory",
+    # Aggregate into one record — repeated failures should not spam memory_v3.
+    # Only pure plan-lifecycle failure signals are aggregated here. Events that
+    # carry gameplay-critical data (target_id, location_id, cooldown_until_turn)
+    # queried by planner.py / plan_monitor.py MUST remain as regular records
+    # and are deduplicated via _DEDUP_KINDS instead.
+    "active_plan_step_failed": "memory_aggregate",
+    "active_plan_repair_requested": "memory_aggregate",
+    "active_plan_aborted": "memory_aggregate",
+    "plan_monitor_abort": "memory_aggregate",
+
+    # Knowledge upsert — knowledge-first routing; selected kinds still keep
+    # episodic writes for gameplay compatibility until PR3 knowledge tables.
+    "stalkers_seen": "knowledge_upsert",
+    "target_seen": "knowledge_upsert",
+    "target_last_known_location": "knowledge_upsert",
+    "target_corpse_reported": "knowledge_upsert",
+    "corpse_seen": "knowledge_upsert",
+    "trader_seen": "knowledge_upsert",
+    "location_visited": "knowledge_upsert",
+    "travel_hop": "knowledge_upsert",
+
+    # Important episodic memory — always written and never discarded.
+    "death": "memory_critical",
+    "combat_kill": "memory_critical",
+    "combat_killed": "memory_critical",
+    "target_death_confirmed": "memory_critical",
+    "global_goal_completed": "memory_critical",
+    "left_zone": "memory_critical",
+    "emission_started": "memory_critical",
+    "emission_warning": "memory_critical",
+    "emission_ended": "memory_critical",
+    "rare_artifact_found": "memory_critical",
 }
 
 _SKIP_ACTION_KINDS: frozenset[str] = frozenset(
     k for k, v in MEMORY_EVENT_POLICY.items() if v == "trace_only"
 )
+
+_AGGREGATE_ACTION_KINDS: frozenset[str] = frozenset(
+    k for k, v in MEMORY_EVENT_POLICY.items() if v == "memory_aggregate"
+)
+
+_KNOWLEDGE_UPSERT_KINDS: frozenset[str] = frozenset(
+    k for k, v in MEMORY_EVENT_POLICY.items() if v == "knowledge_upsert"
+)
+
+_CRITICAL_ACTION_KINDS: frozenset[str] = frozenset(
+    k for k, v in MEMORY_EVENT_POLICY.items() if v == "memory_critical"
+)
+
+
+def resolve_memory_event_policy(action_kind: str, effects: dict[str, Any]) -> str:
+    """Return the policy class for a given action_kind (or observed kind from effects)."""
+    if action_kind in MEMORY_EVENT_POLICY:
+        return MEMORY_EVENT_POLICY[action_kind]
+    obs_type = str(effects.get("observed", ""))
+    if obs_type in MEMORY_EVENT_POLICY:
+        return MEMORY_EVENT_POLICY[obs_type]
+    return "memory"
+
+
+# Aggregation caps.
+MAX_ACTIVE_PLAN_FAILURE_AGGREGATES = 20
+OBJECTIVE_DECISION_DEDUP_WINDOW_TURNS = 30
+
+# Summary / details length limits.
+MEMORY_SUMMARY_MAX_CHARS = 240
+MEMORY_DETAILS_STRING_MAX_CHARS = 160
+MEMORY_DETAILS_LIST_MAX_ITEMS = 5
+MEMORY_DETAILS_CRITICAL_LIST_MAX_ITEMS = 20
+
+# Fields that must never be truncated even if they are strings in details.
+_CRITICAL_DETAIL_KEYS: frozenset[str] = frozenset({
+    "target_id",
+    "corpse_id",
+    "location_id",
+    "killer_id",
+    "combat_id",
+    "objective_key",
+    "dead_agent_id",
+    "source_agent_id",
+    "plan_id",
+    "active_plan_id",
+})
 
 _TYPE_TO_LAYER: dict[str, str] = {
     "observation": LAYER_EPISODIC,
@@ -131,14 +209,17 @@ _OBS_TYPE_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
 
 
 # Low-value repeated observation kinds eligible for deduplication within a window.
-# NOTE: stalkers_seen/items_seen are intentionally excluded — they have their own
-# merge logic in memory_merge.py and tests rely on that path creating new records.
+# NOTE: stalkers_seen is excluded here — it is handled via dedicated semantic aggregation
+# (_handle_stalkers_seen_event) that creates/updates a semantic_stalkers_seen aggregate.
+# items_seen is also excluded as it writes individual spatial records without dedup.
 _DEDUP_KINDS: frozenset[str] = frozenset({
     "travel_hop",
     "trader_visited",
     "no_tracks_found",
     "no_witnesses",
     "witness_source_exhausted",
+    "support_source_exhausted",
+    "anomaly_search_exhausted",
     "corpse_seen",
     "target_corpse_seen",
     "target_corpse_reported",
@@ -154,6 +235,299 @@ _NO_DEDUP_KINDS: frozenset[str] = frozenset({
 MEMORY_EVENT_DEDUP_WINDOW_TURNS = 30
 STALKERS_SEEN_DEDUP_WINDOW_TURNS = 60
 STALKERS_SEEN_MAX_EPISODIC_PER_LOCATION = 5
+
+
+# ── Metrics counters ─────────────────────────────────────────────────────────
+# Updated inline during write_memory_event_to_v3; read externally for monitoring.
+_METRICS: dict[str, int] = {
+    "memory_write_attempts": 0,
+    "memory_write_written": 0,
+    "memory_write_discarded": 0,
+    "memory_write_trace_only": 0,
+    "memory_write_aggregated": 0,
+    "memory_write_knowledge_upserts": 0,
+    "memory_write_critical": 0,
+    "memory_evictions": 0,
+    "memory_summary_truncations": 0,
+    "memory_details_truncations": 0,
+}
+
+
+def get_memory_metrics() -> dict[str, int]:
+    """Return a snapshot of current memory write metrics."""
+    return dict(_METRICS)
+
+
+def reset_memory_metrics() -> None:
+    """Reset all memory metrics to zero (useful in tests)."""
+    for key in _METRICS:
+        _METRICS[key] = 0
+
+
+# ── Summary / details sanitization ──────────────────────────────────────────
+
+
+def _sanitize_record_payload(record: MemoryRecord, is_critical: bool = False) -> MemoryRecord:
+    """Enforce length limits on summary and details fields.
+
+    Critical records may have larger list limits.  Critical IDs (target_id etc.)
+    are never truncated.  Returns a new MemoryRecord with capped fields.
+    """
+    list_limit = MEMORY_DETAILS_CRITICAL_LIST_MAX_ITEMS if is_critical else MEMORY_DETAILS_LIST_MAX_ITEMS
+    summary = record.summary
+    details = dict(record.details) if isinstance(record.details, dict) else {}
+    changed = False
+
+    if len(summary) > MEMORY_SUMMARY_MAX_CHARS:
+        summary = summary[: MEMORY_SUMMARY_MAX_CHARS]
+        _METRICS["memory_summary_truncations"] += 1
+        changed = True
+
+    for key, value in list(details.items()):
+        if key in _CRITICAL_DETAIL_KEYS:
+            continue
+        if isinstance(value, str) and len(value) > MEMORY_DETAILS_STRING_MAX_CHARS:
+            details[key] = value[: MEMORY_DETAILS_STRING_MAX_CHARS]
+            _METRICS["memory_details_truncations"] += 1
+            changed = True
+        elif isinstance(value, list) and len(value) > list_limit:
+            details[key] = value[:list_limit]
+            _METRICS["memory_details_truncations"] += 1
+            changed = True
+
+    if not changed:
+        return record
+    return MemoryRecord(
+        id=record.id,
+        agent_id=record.agent_id,
+        layer=record.layer,
+        kind=record.kind,
+        created_turn=record.created_turn,
+        last_accessed_turn=record.last_accessed_turn,
+        summary=summary,
+        details=details,
+        location_id=record.location_id,
+        entity_ids=record.entity_ids,
+        item_types=record.item_types,
+        tags=record.tags,
+        importance=record.importance,
+        confidence=record.confidence,
+        status=record.status,
+        source=record.source,
+    )
+
+
+# ── Active-plan failure aggregation ─────────────────────────────────────────
+
+
+def _make_failure_aggregate_key(effects: dict[str, Any]) -> tuple[str, str, str]:
+    """Return (objective_key, step_kind, reason) as an aggregate signature."""
+    return (
+        str(effects.get("objective_key") or ""),
+        str(effects.get("step_kind") or effects.get("step_kind_label") or ""),
+        str(effects.get("reason") or ""),
+    )
+
+
+def _find_failure_aggregate(
+    records: dict[str, Any],
+    agg_key: tuple[str, str, str],
+) -> dict[str, Any] | None:
+    objective_key, step_kind, reason = agg_key
+    for raw in records.values():
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("kind") or "") != "active_plan_failure_summary":
+            continue
+        d = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        if (
+            str(d.get("objective_key") or "") == objective_key
+            and str(d.get("step_kind") or "") == step_kind
+            and str(d.get("reason") or "") == reason
+        ):
+            return raw
+    return None
+
+
+def _upsert_active_plan_failure_aggregate(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    effects: dict[str, Any],
+    action_kind: str,
+    world_turn: int,
+    summary: str,
+) -> None:
+    mem_v3 = ensure_memory_v3(agent)
+    records: dict[str, Any] = mem_v3.get("records", {})
+
+    agg_key = _make_failure_aggregate_key(effects)
+
+    # Enforce cap on failure aggregates.
+    existing_agg_ids = [
+        rid for rid, raw in records.items()
+        if isinstance(raw, dict) and str(raw.get("kind") or "") == "active_plan_failure_summary"
+    ]
+
+    existing = _find_failure_aggregate(records, agg_key)
+    if existing is not None:
+        d = existing.setdefault("details", {})
+        if action_kind == "active_plan_step_failed":
+            d["failed_count"] = int(d.get("failed_count", 0)) + 1
+        elif action_kind == "active_plan_repair_requested":
+            d["repair_requested_count"] = int(d.get("repair_requested_count", 0)) + 1
+        elif action_kind == "active_plan_aborted":
+            d["aborted_count"] = int(d.get("aborted_count", 0)) + 1
+        elif action_kind == "plan_monitor_abort":
+            d["aborted_count"] = int(d.get("aborted_count", 0)) + 1
+        elif action_kind in ("support_source_exhausted", "anomaly_search_exhausted",
+                             "witness_source_exhausted", "no_tracks_found", "no_witnesses"):
+            d["misc_count"] = int(d.get("misc_count", 0)) + 1
+        d["last_turn"] = world_turn
+        plan_id = effects.get("active_plan_id") or effects.get("plan_id") or ""
+        if plan_id:
+            d["last_plan_id"] = str(plan_id)
+        existing["summary"] = summary
+        _METRICS["memory_write_aggregated"] += 1
+        return
+
+    if len(existing_agg_ids) >= MAX_ACTIVE_PLAN_FAILURE_AGGREGATES:
+        # Drop the aggregate and do nothing (budget exhausted).
+        _METRICS["memory_write_discarded"] += 1
+        return
+
+    objective_key, step_kind, reason = agg_key
+    init_counts: dict[str, Any] = {
+        "objective_key": objective_key,
+        "step_kind": step_kind,
+        "reason": reason,
+        "failed_count": 1 if action_kind == "active_plan_step_failed" else 0,
+        "repair_requested_count": 1 if action_kind == "active_plan_repair_requested" else 0,
+        "aborted_count": 1 if action_kind in ("active_plan_aborted", "plan_monitor_abort") else 0,
+        "misc_count": 1 if action_kind not in (
+            "active_plan_step_failed", "active_plan_repair_requested",
+            "active_plan_aborted", "plan_monitor_abort",
+        ) else 0,
+        "first_turn": world_turn,
+        "last_turn": world_turn,
+        "memory_type": "decision",
+        "action_kind": action_kind,
+    }
+    plan_id = effects.get("active_plan_id") or effects.get("plan_id") or ""
+    if plan_id:
+        init_counts["last_plan_id"] = str(plan_id)
+
+    agg_record = MemoryRecord(
+        id="mem_pf_" + uuid.uuid4().hex[:10],
+        agent_id=agent_id,
+        layer=LAYER_GOAL,
+        kind="active_plan_failure_summary",
+        created_turn=world_turn,
+        last_accessed_turn=None,
+        summary=summary,
+        details=init_counts,
+        location_id=None,
+        entity_ids=(),
+        tags=("active_plan", "failure", "aggregate"),
+        importance=0.45,
+        confidence=0.9,
+        source="inferred",
+    )
+    add_memory_record(agent, agg_record)
+    _METRICS["memory_write_aggregated"] += 1
+
+
+# ── Objective-decision dedup ─────────────────────────────────────────────────
+
+
+def _is_urgent_objective_decision(effects: dict[str, Any]) -> bool:
+    """Return True if this objective_decision is too important to aggregate."""
+    changed_from = effects.get("changed_from") or effects.get("previous_objective_key")
+    changed_to = effects.get("changed_to") or effects.get("new_objective_key")
+    if changed_from and changed_to and changed_from != changed_to:
+        return True
+    priority = str(effects.get("priority") or "").lower()
+    if priority in ("urgent", "critical", "emergency"):
+        return True
+    reason_class = str(effects.get("reason_class") or effects.get("intent_kind") or "").lower()
+    if any(tag in reason_class for tag in ("survival", "emission", "combat", "death", "target")):
+        return True
+    return False
+
+
+def _find_objective_decision_aggregate(
+    records: dict[str, Any],
+    objective_key: str,
+    intent_kind: str,
+    world_turn: int,
+) -> dict[str, Any] | None:
+    cutoff = world_turn - OBJECTIVE_DECISION_DEDUP_WINDOW_TURNS
+    for raw in records.values():
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("kind") or "") != "objective_decision_summary":
+            continue
+        d = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        if (
+            str(d.get("objective_key") or "") != objective_key
+            or str(d.get("intent_kind") or "") != intent_kind
+        ):
+            continue
+        last = int(d.get("last_turn", 0))
+        if last < cutoff:
+            continue
+        return raw
+    return None
+
+
+def _upsert_objective_decision_aggregate(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    effects: dict[str, Any],
+    world_turn: int,
+    summary: str,
+) -> None:
+    mem_v3 = ensure_memory_v3(agent)
+    records: dict[str, Any] = mem_v3.get("records", {})
+    objective_key = str(effects.get("objective_key") or "")
+    intent_kind = str(effects.get("intent_kind") or effects.get("reason_class") or "routine")
+
+    existing = _find_objective_decision_aggregate(records, objective_key, intent_kind, world_turn)
+    if existing is not None:
+        d = existing.setdefault("details", {})
+        d["decision_count"] = int(d.get("decision_count", 1)) + 1
+        d["last_turn"] = world_turn
+        existing["summary"] = summary
+        _METRICS["memory_write_aggregated"] += 1
+        return
+
+    agg_record = MemoryRecord(
+        id="mem_od_" + uuid.uuid4().hex[:10],
+        agent_id=agent_id,
+        layer=LAYER_GOAL,
+        kind="objective_decision_summary",
+        created_turn=world_turn,
+        last_accessed_turn=None,
+        summary=summary,
+        details={
+            "objective_key": objective_key,
+            "intent_kind": intent_kind,
+            "decision_count": 1,
+            "first_turn": world_turn,
+            "last_turn": world_turn,
+            "memory_type": "decision",
+            "action_kind": "objective_decision",
+        },
+        location_id=None,
+        entity_ids=(),
+        tags=("objective", "decision", "aggregate"),
+        importance=0.4,
+        confidence=0.85,
+        source="inferred",
+    )
+    add_memory_record(agent, agg_record)
+    _METRICS["memory_write_aggregated"] += 1
 
 
 def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | None:
@@ -172,12 +546,20 @@ def _dedup_signature(raw: MemoryRecord | dict[str, Any]) -> tuple[Any, ...] | No
             str(details.get("from_location_id") or details.get("from_loc") or ""),
             str(details.get("to_location_id") or details.get("to_loc") or location_id),
         )
-    if kind in {"trader_visited", "witness_source_exhausted", "no_witnesses", "no_tracks_found"}:
+    if kind in {
+        "trader_visited",
+        "witness_source_exhausted",
+        "support_source_exhausted",
+        "anomaly_search_exhausted",
+        "no_witnesses",
+        "no_tracks_found",
+    }:
         return (
             kind,
             location_id,
             str(details.get("target_id") or ""),
             str(details.get("trader_id") or ""),
+            str(details.get("objective_key") or ""),
         )
     if kind in {"corpse_seen", "target_corpse_seen", "target_corpse_reported"}:
         return (
@@ -467,17 +849,44 @@ def write_memory_event_to_v3(
     legacy_entry: dict[str, Any],
     world_turn: int,
 ) -> None:
-    """Convert a single memory event entry into a MemoryRecord and store it in memory_v3."""
+    """Convert a single memory event entry into a MemoryRecord and store it in memory_v3.
+
+    Routing is determined by MEMORY_EVENT_POLICY:
+      trace_only        → skipped entirely (debug trace only)
+      memory_aggregate  → update one aggregate record (active_plan failures, noisy obs)
+      knowledge_upsert  → update knowledge/semantic aggregate; stalkers_seen/travel_hop have own paths
+      memory_critical   → always write a full episodic record; never deduplicated
+      memory / missing  → default write with dedup where applicable
+    """
+    _METRICS["memory_write_attempts"] += 1
+
     effects: dict[str, Any] = legacy_entry.get("effects", {})
     action_kind = str(effects.get("action_kind", ""))
+    obs_type = str(effects.get("observed", ""))
 
-    # Policy check — skip trace-only events entirely.
-    if action_kind in _SKIP_ACTION_KINDS:
+    effective_kind = action_kind or obs_type
+    policy = resolve_memory_event_policy(effective_kind, effects)
+
+    # trace_only → skip entirely.
+    if policy == "trace_only" or action_kind in _SKIP_ACTION_KINDS:
+        _METRICS["memory_write_trace_only"] += 1
         return
 
-    # Also skip by observed kind if action_kind absent.
-    obs_type = str(effects.get("observed", ""))
-    if not action_kind and obs_type in _SKIP_ACTION_KINDS:
+    # memory_aggregate → route to failure/noisy aggregate, never episodic.
+    # Exception: plan_monitor_abort for sleep produces a meaningful sleep_interrupted record.
+    if policy == "memory_aggregate" and not (
+        action_kind == "plan_monitor_abort"
+        and str(effects.get("scheduled_action_type", "")) == "sleep"
+    ):
+        summary = str(legacy_entry.get("summary") or legacy_entry.get("title") or effective_kind)
+        _upsert_active_plan_failure_aggregate(
+            agent_id=agent_id,
+            agent=agent,
+            effects=effects,
+            action_kind=effective_kind,
+            world_turn=world_turn,
+            summary=summary,
+        )
         return
 
     record = _map_event_to_record(
@@ -487,18 +896,61 @@ def write_memory_event_to_v3(
         world_turn=world_turn,
     )
     if record is None:
+        _METRICS["memory_write_discarded"] += 1
         return
 
-    if record.kind == "stalkers_seen":
+    # objective_decision — routine (non-urgent) decisions are aggregated into a
+    # summary record so repeated same-objective turns don't spam memory_v3.
+    # Urgent decisions (objective changed, survival priority) fall through to the
+    # normal episodic write so that gameplay code can always retrieve them.
+    if record.kind == "objective_decision":
+        summary = str(legacy_entry.get("summary") or legacy_entry.get("title") or "objective_decision")
+        if not _is_urgent_objective_decision(effects):
+            _upsert_objective_decision_aggregate(
+                agent_id=agent_id,
+                agent=agent,
+                effects=effects,
+                world_turn=world_turn,
+                summary=summary,
+            )
+            return
+        # Urgent decision falls through to normal episodic write below.
+
+    # knowledge_upsert — stalkers_seen handled by dedicated path.
+    # travel_hop: update the semantic aggregate AND still write the episodic record
+    # so that existing gameplay code (TestTravelHopActionMemory) can find it.
+    if policy == "knowledge_upsert":
+        _METRICS["memory_write_knowledge_upserts"] += 1
+        if record.kind == "stalkers_seen":
+            if _handle_stalkers_seen_event(
+                agent_id=agent_id,
+                agent=agent,
+                record=record,
+                world_turn=world_turn,
+            ):
+                _METRICS["memory_write_written"] += 1
+                return
+        if record.kind == "travel_hop":
+            _upsert_semantic_route_traveled(
+                agent_id=agent_id,
+                agent=agent,
+                record=record,
+                world_turn=world_turn,
+            )
+            # Fall through to write episodic record so gameplay queries still work.
+
+    # Stalkers_seen from obs_type="stalkers" path also handled here.
+    if record.kind == "stalkers_seen" and policy != "knowledge_upsert":
         if _handle_stalkers_seen_event(
             agent_id=agent_id,
             agent=agent,
             record=record,
             world_turn=world_turn,
         ):
+            _METRICS["memory_write_written"] += 1
             return
 
-    if record.kind == "travel_hop":
+    if record.kind == "travel_hop" and policy != "knowledge_upsert":
         _upsert_semantic_route_traveled(
             agent_id=agent_id,
             agent=agent,
@@ -513,12 +965,25 @@ def write_memory_event_to_v3(
         if existing is not None:
             # Update in-place instead of appending a new record.
             details = existing.setdefault("details", {})
+            incoming_details = record.details if isinstance(record.details, dict) else {}
             details["times_seen"] = int(details.get("times_seen", 1)) + 1
             details["last_seen_turn"] = world_turn
+            for key in ("cooldown_until_turn", "location_id", "target_id", "objective_key", "source_kind"):
+                if key in incoming_details:
+                    details[key] = incoming_details.get(key)
             existing["confidence"] = min(1.0, float(existing.get("confidence", 0.7)) + 0.02)
+            _METRICS["memory_write_aggregated"] += 1
             return
 
+    # Apply sanitization — truncate summary and details fields.
+    is_critical = policy == "memory_critical" or record.kind in _NO_DEDUP_KINDS
+    record = _sanitize_record_payload(record, is_critical=is_critical)
+
+    if is_critical:
+        _METRICS["memory_write_critical"] += 1
+
     add_memory_record(agent, record)
+    _METRICS["memory_write_written"] += 1
 
 
 def _map_event_to_record(

@@ -378,7 +378,7 @@ def test_tick_active_plan_continue_skips_new_objective_decision() -> None:
         m
         for m in _v3r(new_bot)
         if _v3_mt(m) == "decision"
-        and _v3_ak(m) == "objective_decision"
+        and _v3_ak(m) in ("objective_decision", "objective_decision_summary")
     ]
     assert len(decision_memories) >= 1
     assert new_bot["active_plan_v3"]["id"] == active_plan.id
@@ -668,12 +668,13 @@ def test_tick_decision_memory_is_objective_first_and_updates_current_goal() -> N
         m
         for m in _v3r(new_bot)
         if _v3_mt(m) == "decision"
-        and _v3_ak(m) == "objective_decision"
+        and _v3_ak(m) in ("objective_decision", "objective_decision_summary")
     ]
     assert decision_memories
     effects = _v3_fx(decision_memories[0])
     assert effects.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
-    assert effects.get("adapter_intent_kind")
+    # Routine decisions produce an aggregate (intent_kind preserved); urgent ones keep adapter_intent_kind.
+    assert effects.get("intent_kind") or effects.get("adapter_intent_kind")
     assert new_bot.get("current_goal") == "get_money_for_resupply"
 
 

@@ -300,6 +300,13 @@ def test_full_projection_includes_memory_stats_story_and_terminal_state():
     projected = project_zone_state(state=state, mode="full")
     agent = projected["agents"]["a1"]
     assert "memory_v3_stats" in agent
+    rgm = agent["memory_v3_stats"].get("runtime_global_metrics", {})
+    assert "memory_write_attempts" in rgm
+    assert "memory_write_written" in rgm
+    assert "memory_write_aggregated" in rgm
+    assert "memory_write_trace_only" in rgm
+    assert "memory_by_tag_refs" in rgm
+    assert "memory_by_tag_skipped_refs" in rgm
     assert "memory_health" in agent
     assert "story_events" in agent
     assert "sleep_need" in agent

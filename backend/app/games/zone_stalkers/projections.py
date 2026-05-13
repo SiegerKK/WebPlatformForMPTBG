@@ -5,6 +5,9 @@ import json
 from collections import Counter
 from typing import Any, Literal
 
+from app.games.zone_stalkers.memory.memory_events import get_memory_metrics
+from app.games.zone_stalkers.memory.store import get_tag_metrics
+
 ProjectionMode = Literal["zone-lite", "game", "debug-map", "debug-map-lite", "full"]
 
 INVENTORY_PREVIEW_LIMIT = 20
@@ -228,6 +231,16 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
         if isinstance(raw, dict)
     ]
     stats, health = _memory_stats(record_rows)
+    write_metrics = get_memory_metrics()
+    tag_metrics = get_tag_metrics()
+    stats["runtime_global_metrics"] = {
+        "memory_write_attempts": write_metrics.get("memory_write_attempts", 0),
+        "memory_write_written": write_metrics.get("memory_write_written", 0),
+        "memory_write_aggregated": write_metrics.get("memory_write_aggregated", 0),
+        "memory_write_trace_only": write_metrics.get("memory_write_trace_only", 0),
+        "memory_by_tag_refs": tag_metrics.get("memory_by_tag_refs", 0),
+        "memory_by_tag_skipped_refs": tag_metrics.get("memory_by_tag_skipped_refs", 0),
+    }
     agent["memory_v3_stats"] = stats
     agent["memory_health"] = health
     story_events, story_events_count, story_events_truncated = _agent_story_events(agent)

@@ -50,7 +50,8 @@ def test_emission_imminent_creates_threat_record() -> None:
     assert "danger" in rec["tags"]
 
 
-def test_plan_monitor_abort_creates_record_with_tags() -> None:
+def test_plan_monitor_abort_creates_aggregate_record() -> None:
+    """plan_monitor_abort for a non-sleep action (travel) is aggregated into active_plan_failure_summary."""
     agent: dict = {"name": "bot1", "memory_v3": None}
     entry = _make_entry(
         action_kind="plan_monitor_abort",
@@ -61,8 +62,9 @@ def test_plan_monitor_abort_creates_record_with_tags() -> None:
     records = ensure_memory_v3(agent)["records"]
     assert len(records) == 1
     rec = list(records.values())[0]
-    assert "plan_monitor" in rec["tags"]
-    assert "thirst" in rec["tags"]
+    # plan_monitor_abort for travel is aggregated as active_plan_failure_summary.
+    assert rec["kind"] == "active_plan_failure_summary"
+    assert "aggregate" in rec["tags"]
 
 
 def test_sleep_completed_maps_to_episodic_sleep_completed() -> None:
@@ -420,3 +422,232 @@ def test_repeated_stalkers_seen_updates_semantic_last_seen_turn() -> None:
     details = semantic[0]["details"]
     assert details["times_seen"] >= 3
     assert details["last_seen_turn"] == 4030
+
+
+# ── PR1: new required tests ──────────────────────────────────────────────────
+
+def test_active_plan_failures_are_aggregated() -> None:
+    """Repeated active_plan_step_failed events must produce exactly one aggregate record."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(100, 141):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="active_plan_step_failed",
+            objective_key="FIND_ARTIFACTS",
+            step_kind="travel_to_location",
+            reason="support_source_exhausted",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    agg = [r for r in records if r.get("kind") == "active_plan_failure_summary"]
+    assert len(agg) == 1
+    d = agg[0]["details"]
+    assert d["failed_count"] == 41  # range(100, 141) = 41 events
+    assert d["objective_key"] == "FIND_ARTIFACTS"
+    assert d["step_kind"] == "travel_to_location"
+    assert d["reason"] == "support_source_exhausted"
+    assert d["last_turn"] == 140
+
+
+def test_crowd_seen_summary_is_bounded() -> None:
+    """Repeated stalkers_seen events must produce bounded semantic aggregate."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(100, 220):
+        entry = _make_entry(
+            world_turn=turn,
+            memory_type="observation",
+            observed="stalkers",
+            location_id="loc_crowd",
+            entity_ids=[f"agent_{i}" for i in range(17)],
+            names=[f"Сталкер #{i}" for i in range(17)],
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    semantic = [r for r in records if r.get("kind") == "semantic_stalkers_seen"]
+    assert len(semantic) == 1
+    assert semantic[0]["details"]["times_seen"] >= 120
+
+
+def test_objective_decision_writes_episodic_record() -> None:
+    """Urgent objective_decision (changed objective) writes a plain episodic record."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    entry = _make_entry(
+        world_turn=200,
+        action_kind="objective_decision",
+        objective_key="LEAVE_ZONE",
+        changed_from="FIND_ARTIFACTS",
+        changed_to="LEAVE_ZONE",
+        adapter_intent_kind="leave_zone",
+    )
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=200)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    episodic = [r for r in records if r.get("kind") == "objective_decision"]
+    assert len(episodic) == 1
+    assert episodic[0]["details"]["adapter_intent_kind"] == "leave_zone"
+
+
+def test_repeated_routine_objective_decision_is_aggregated() -> None:
+    """50 routine objective_decision events with the same objective must produce
+    a single objective_decision_summary aggregate, not 50 separate episodic records."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(200, 250):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="objective_decision",
+            objective_key="FIND_ARTIFACTS",
+            adapter_intent_kind="seek_artifacts",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    # No plain episodic objective_decision records.
+    raw_episodic = [r for r in records if r.get("kind") == "objective_decision"]
+    assert len(raw_episodic) == 0, "routine decisions must NOT create individual episodic records"
+    # Exactly one aggregate summary.
+    summary_recs = [r for r in records if r.get("kind") == "objective_decision_summary"]
+    assert len(summary_recs) == 1
+    d = summary_recs[0]["details"]
+    assert d["objective_key"] == "FIND_ARTIFACTS"
+    assert d["decision_count"] == 50
+    assert d["last_turn"] == 249
+
+
+def test_urgent_objective_decision_remains_episodic() -> None:
+    """Objective decisions that change the objective must remain individual episodic records."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(300, 310):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="objective_decision",
+            objective_key="LEAVE_ZONE",
+            changed_from="FIND_ARTIFACTS",
+            changed_to="LEAVE_ZONE",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    episodic = [r for r in records if r.get("kind") == "objective_decision"]
+    assert len(episodic) == 10, "each urgent decision must remain a separate episodic record"
+    # No aggregate for urgent decisions.
+    assert not [r for r in records if r.get("kind") == "objective_decision_summary"]
+
+
+def test_critical_target_death_confirmed_is_never_discarded() -> None:
+    """target_death_confirmed must always produce an episodic memory record."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(100, 110):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="target_death_confirmed",
+            target_id="agent_target_1",
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    death_recs = [r for r in records if r.get("kind") == "target_death_confirmed"]
+    assert len(death_recs) >= 1
+    assert all(r["importance"] >= 0.85 for r in death_recs)
+
+
+def test_memory_summary_and_details_are_truncated_safely() -> None:
+    """Long summaries and detail strings must be truncated at the correct limits."""
+    from app.games.zone_stalkers.memory.memory_events import (
+        MEMORY_SUMMARY_MAX_CHARS,
+        MEMORY_DETAILS_STRING_MAX_CHARS,
+        _sanitize_record_payload,
+    )
+    from app.games.zone_stalkers.memory.models import MemoryRecord, LAYER_EPISODIC
+
+    long_summary = "А" * 500
+    long_detail = "Б" * 400
+    rec = MemoryRecord(
+        id="mem_test_01",
+        agent_id="bot1",
+        layer=LAYER_EPISODIC,
+        kind="test_event",
+        created_turn=100,
+        last_accessed_turn=None,
+        summary=long_summary,
+        details={"narrative": long_detail, "target_id": "must_not_truncate_this"},
+        location_id=None,
+        entity_ids=(),
+        tags=(),
+        importance=0.5,
+        confidence=1.0,
+    )
+    sanitized = _sanitize_record_payload(rec, is_critical=False)
+    assert len(sanitized.summary) == MEMORY_SUMMARY_MAX_CHARS
+    assert len(sanitized.details["narrative"]) == MEMORY_DETAILS_STRING_MAX_CHARS
+    # Critical IDs must never be truncated.
+    assert sanitized.details["target_id"] == "must_not_truncate_this"
+
+
+def test_memory_details_list_truncated_to_limit() -> None:
+    """Lists in details must be capped at MEMORY_DETAILS_LIST_MAX_ITEMS."""
+    from app.games.zone_stalkers.memory.memory_events import (
+        MEMORY_DETAILS_LIST_MAX_ITEMS,
+        _sanitize_record_payload,
+    )
+    from app.games.zone_stalkers.memory.models import MemoryRecord, LAYER_EPISODIC
+
+    big_list = list(range(100))
+    rec = MemoryRecord(
+        id="mem_test_02",
+        agent_id="bot1",
+        layer=LAYER_EPISODIC,
+        kind="test_event",
+        created_turn=100,
+        last_accessed_turn=None,
+        summary="ok",
+        details={"items": big_list},
+        location_id=None,
+        entity_ids=(),
+        tags=(),
+        importance=0.5,
+        confidence=1.0,
+    )
+    sanitized = _sanitize_record_payload(rec, is_critical=False)
+    assert len(sanitized.details["items"]) == MEMORY_DETAILS_LIST_MAX_ITEMS
+
+
+def test_repeated_support_source_exhausted_is_deduped_or_bounded() -> None:
+    """support_source_exhausted should keep planner fields while deduplicating repeated spam."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(500, 620):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="support_source_exhausted",
+            target_id="agent_target_1",
+            location_id="loc_support",
+            objective_key="GET_MONEY_FOR_RESUPPLY",
+            cooldown_until_turn=turn + 50,
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    support_recs = [r for r in records if r.get("kind") == "support_source_exhausted"]
+    assert support_recs, "support_source_exhausted should remain retrievable for planner/monitor"
+    assert len(support_recs) <= 5, f"expected dedup/bounded records, got {len(support_recs)}"
+    details = support_recs[-1]["details"]
+    assert details.get("location_id") == "loc_support"
+    assert details.get("target_id") == "agent_target_1"
+    assert details.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
+    assert isinstance(details.get("cooldown_until_turn"), int)
+
+
+def test_anomaly_search_exhausted_preserves_cooldown_until_turn_for_planner() -> None:
+    """anomaly_search_exhausted must keep cooldown_until_turn in retrievable memory."""
+    agent: dict = {"name": "bot1", "memory_v3": None}
+    for turn in range(700, 730):
+        entry = _make_entry(
+            world_turn=turn,
+            action_kind="anomaly_search_exhausted",
+            location_id="loc_anomaly",
+            objective_key="GET_MONEY_FOR_RESUPPLY",
+            cooldown_until_turn=turn + 120,
+        )
+        write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=turn)
+    records = list(ensure_memory_v3(agent)["records"].values())
+    exhausted = [r for r in records if r.get("kind") == "anomaly_search_exhausted"]
+    assert exhausted
+    assert len(exhausted) <= 3
+    details = exhausted[-1]["details"]
+    assert details.get("location_id") == "loc_anomaly"
+    assert details.get("objective_key") == "GET_MONEY_FOR_RESUPPLY"
+    assert isinstance(details.get("cooldown_until_turn"), int)
