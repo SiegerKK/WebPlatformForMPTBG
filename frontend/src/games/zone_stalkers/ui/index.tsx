@@ -532,6 +532,31 @@ export default function ZoneStalkerGame({ match, user, onMatchUpdated, onMatchDe
 
   // Agent whose profile modal is open (null = list view)
   const [profileAgentId, setProfileAgentId] = useState<string | null>(null);
+  // NPC logs ZIP export state
+  const [exportingNpcLogs, setExportingNpcLogs] = useState(false);
+  const handleExportNpcLogs = useCallback(async () => {
+    if (!context || exportingNpcLogs) return;
+    setExportingNpcLogs(true);
+    try {
+      const { zoneDebugApi } = await import('../../../api/client');
+      const res = await zoneDebugApi.exportNpcLogs(context.id);
+      const blob = new Blob([res.data as BlobPart], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = res.headers?.['content-disposition'] as string | undefined;
+      const fnMatch = cd?.match(/filename="([^"]+)"/);
+      a.download = fnMatch?.[1] ?? `npc_logs_${context.id}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      alert('Не удалось экспортировать логи НПЦ. Попробуйте снова.');
+    } finally {
+      setExportingNpcLogs(false);
+    }
+  }, [context, exportingNpcLogs]);
   // On-demand memory cache: agentId → MemoryEntry[].
   // Memory is no longer included in the getTree() state_blob to save bandwidth.
   // It is fetched lazily when the memory tab is opened or an agent profile is viewed.
