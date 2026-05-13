@@ -5,11 +5,14 @@ from typing import Any
 import pytest
 
 from app.games.zone_stalkers.memory.cold_store import (
+    agent_memory_load_failed,
     clear_in_memory_store,
     ensure_agent_memory_loaded,
     flush_dirty_agent_memories,
+    get_context_id_from_state,
     get_cold_metrics,
     get_agent_memory_ref,
+    get_zone_cold_memory_redis_client,
     load_agent_memory,
     mark_agent_memory_dirty,
     migrate_agent_memory_to_cold_store,
@@ -205,6 +208,16 @@ class FakeRedis:
         self.set_calls.append((key, value, ex))
 
 
+class FailingRedisSet(FakeRedis):
+    def set(self, key: str, value: bytes, ex: int | None = None) -> None:
+        raise RuntimeError("redis-set-failed")
+
+
+class FailingRedisGet(FakeRedis):
+    def get(self, key: str) -> bytes | None:
+        raise RuntimeError("redis-get-failed")
+
+
 def test_redis_backed_cold_store_get_set_with_ttl_and_compression_metrics() -> None:
     agent = _agent()
     _seed_memory(agent, turn=777)
@@ -229,6 +242,81 @@ def test_redis_backed_cold_store_get_set_with_ttl_and_compression_metrics() -> N
     metrics = get_cold_metrics()
     assert int(metrics["cold_memory_bytes_raw"]) >= int(metrics["cold_memory_bytes_stored"])
     assert float(metrics["cold_memory_compression_ratio"]) <= 1.0
+
+
+def test_cold_memory_survives_process_local_store_clear_when_redis_has_blob() -> None:
+    agent = _agent()
+    _seed_memory(agent, turn=500)
+    redis = FakeRedis()
+    migrate_agent_memory_to_cold_store(
+        context_id="ctx_survive",
+        agent_id="bot1",
+        agent=agent,
+        redis_client=redis,
+    )
+    clear_in_memory_store()
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"]["is_loaded"] = False
+
+    ensure_agent_memory_loaded(
+        context_id="ctx_survive",
+        agent_id="bot1",
+        agent=agent,
+        redis_client=redis,
+    )
+    assert ((agent.get("memory_v3") or {}).get("records") or {}).get("mem_seed_1")
+
+
+def test_redis_get_failure_records_error_metric() -> None:
+    agent = _agent()
+    agent["memory_ref"] = get_agent_memory_ref("ctx_err", "bot1")
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"] = {"is_loaded": False, "dirty": False}
+
+    blob = load_agent_memory(
+        context_id="ctx_err",
+        agent_id="bot1",
+        agent=agent,
+        redis_client=FailingRedisGet(),
+    )
+    assert blob == {}
+    summary = agent.get("memory_summary") or {}
+    assert summary.get("cold_store_error") == "load_failed"
+    assert summary.get("cold_store_error_type") == "RuntimeError"
+    assert int(get_cold_metrics()["cold_memory_load_errors"]) >= 1
+    assert agent_memory_load_failed(agent) is True
+
+
+def test_flush_does_not_strip_dirty_memory_when_save_fails() -> None:
+    agent = _agent()
+    _seed_memory(agent)
+    migrate_agent_memory_to_cold_store(context_id="ctx_fail", agent_id="bot1", agent=agent)
+    ensure_agent_memory_loaded(context_id="ctx_fail", agent_id="bot1", agent=agent)
+    mark_agent_memory_dirty(agent)
+
+    saved = flush_dirty_agent_memories(
+        context_id="ctx_fail",
+        state={"agents": {"bot1": agent}},
+        redis_client=FailingRedisSet(),
+    )
+    assert saved == 0
+    assert agent.get("memory_summary", {}).get("dirty") is True
+    assert agent.get("memory_summary", {}).get("is_loaded") is True
+    assert "memory_v3" in agent
+    assert "knowledge_v1" in agent
+    assert int(get_cold_metrics()["cold_memory_save_errors"]) >= 1
+
+
+def test_resolver_prefers_injected_state_redis_client() -> None:
+    fake = FakeRedis()
+    resolved = get_zone_cold_memory_redis_client({"_zone_cold_memory_redis_client": fake})
+    assert resolved is fake
+
+
+def test_get_context_id_from_state_default() -> None:
+    assert get_context_id_from_state({}) == "default"
 
 
 def test_in_memory_fallback_used_when_no_redis_client() -> None:

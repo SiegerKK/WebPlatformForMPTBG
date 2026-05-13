@@ -656,3 +656,24 @@ def test_context_builder_after_strip_can_rebuild_from_cold_memory() -> None:
     ctx = build_agent_context("bot1", agent, state)
     assert ctx is not None
     assert isinstance(agent.get("knowledge_v1"), dict)
+
+
+def test_context_builder_cold_load_exception_records_error(monkeypatch) -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    agent = make_agent()
+    state = make_minimal_state(agent=agent)
+    state["context_id"] = "ctx_err"
+    migrate_agent_memory_to_cold_store(context_id="ctx_err", agent_id="bot1", agent=agent)
+    flush_dirty_agent_memories(context_id="ctx_err", state={"agents": {"bot1": agent}})
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("cold-load-failed")
+
+    import app.games.zone_stalkers.memory.cold_store as _cold_store_mod
+
+    monkeypatch.setattr(_cold_store_mod, "ensure_agent_memory_loaded", _raise)
+    build_agent_context("bot1", agent, state, force_refresh=True)
+    summary = agent.get("memory_summary") or {}
+    assert summary.get("cold_store_error") == "load_failed"
+    assert summary.get("cold_store_error_type") == "RuntimeError"

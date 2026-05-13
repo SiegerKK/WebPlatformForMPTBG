@@ -910,10 +910,19 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     # have memory_ref are skipped.
     _pr5_context_id: str = str(state.get("context_id") or state.get("_context_id") or "default")
     _pr5_cold_store_enabled = bool(state.get("cpu_cold_memory_store_enabled", False))
+    _pr5_redis_client = None
+    try:
+        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+            get_zone_cold_memory_redis_client as _resolve_cold_redis_client,
+        )
+        _pr5_redis_client = _resolve_cold_redis_client(state)
+    except Exception:
+        _pr5_redis_client = None
     if _pr5_cold_store_enabled:
         try:
             from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
                 migrate_agent_memory_to_cold_store as _migrate_to_cold,
+                record_agent_cold_memory_error as _record_cold_error,
             )
             for _pr5_agent_id, _pr5_raw_agent in list(state.get("agents", {}).items()):
                 if not isinstance(_pr5_raw_agent, dict):
@@ -930,9 +939,12 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                     context_id=_pr5_context_id,
                     agent_id=_pr5_agent_id,
                     agent=_pr5_agent,
+                    redis_client=_pr5_redis_client,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            for _pr5_raw_agent in (state.get("agents") or {}).values():
+                if isinstance(_pr5_raw_agent, dict) and _pr5_raw_agent.get("memory_ref"):
+                    _record_cold_error(_pr5_raw_agent, "load_failed", exc)
 
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
@@ -1561,14 +1573,16 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             try:
                 from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
                     ensure_agent_memory_loaded as _ensure_cold_mem,
+                    record_agent_cold_memory_error as _record_cold_error,
                 )
                 _ensure_cold_mem(
                     context_id=_pr5_context_id,
                     agent_id=_agent_id,
                     agent=_agent,
+                    redis_client=_pr5_redis_client,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_cold_error(_agent, "load_failed", exc)
 
         bot_evs = _run_npc_brain_v3_decision(_agent_id, _agent, state, world_turn)
         _npc_brain_decision_count += 1
@@ -1716,10 +1730,17 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         try:
             from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
                 flush_dirty_agent_memories as _flush_cold_memories,
+                record_agent_cold_memory_error as _record_cold_error,
             )
-            _flush_cold_memories(context_id=_pr5_context_id, state=state)
-        except Exception:
-            pass
+            _flush_cold_memories(
+                context_id=_pr5_context_id,
+                state=state,
+                redis_client=_pr5_redis_client,
+            )
+        except Exception as exc:
+            for _agent in (state.get("agents") or {}).values():
+                if isinstance(_agent, dict) and _agent.get("memory_ref"):
+                    _record_cold_error(_agent, "save_failed", exc)
 
     return state, events
 
@@ -2722,6 +2743,14 @@ def _add_memory(
             pass
 
     _add_mem_ctx_id: str = str(state.get("context_id") or state.get("_context_id") or "default")
+    _add_mem_redis_client = None
+    try:
+        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+            get_zone_cold_memory_redis_client as _resolve_cold_redis_client,
+        )
+        _add_mem_redis_client = _resolve_cold_redis_client(state)
+    except Exception:
+        _add_mem_redis_client = None
 
     # Write exclusively to memory_v3.
     write_memory_event_to_v3(
@@ -2731,6 +2760,7 @@ def _add_memory(
         world_turn=world_turn,
         context_id=_add_mem_ctx_id,
         cold_store_enabled=bool(state.get("cpu_cold_memory_store_enabled", False)),
+        redis_client=_add_mem_redis_client,
     )
 
     _action_kind = str(effects.get("action_kind") or "")

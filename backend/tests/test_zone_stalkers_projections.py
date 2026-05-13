@@ -11,6 +11,19 @@ from app.games.zone_stalkers.performance_metrics import get_last_tick_metrics, g
 from app.games.zone_stalkers.projections import build_zone_state_size_report, json_size_bytes, project_zone_state
 
 
+class FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+        self.set_calls: list[tuple[str, bytes, int | None]] = []
+
+    def get(self, key: str) -> bytes | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: bytes, ex: int | None = None) -> None:
+        self.values[key] = value
+        self.set_calls.append((key, value, ex))
+
+
 def _sample_state() -> dict:
     return {
         "context_type": "zone_map",
@@ -445,3 +458,49 @@ def test_game_projection_includes_memory_summary_but_not_memory_v3_or_knowledge_
     assert agent.get("memory_summary", {}).get("records_count") == 7
     assert "memory_v3" not in agent
     assert "knowledge_v1" not in agent
+
+
+def test_full_projection_uses_configured_redis_client() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    redis = FakeRedis()
+    state = _sample_state()
+    state["context_id"] = "ctx_full_redis"
+    agent = state["agents"]["a1"]
+    migrate_agent_memory_to_cold_store(
+        context_id="ctx_full_redis",
+        agent_id="a1",
+        agent=agent,
+        redis_client=redis,
+    )
+    clear_in_memory_store()
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"]["is_loaded"] = False
+    state["_zone_cold_memory_redis_client"] = redis
+
+    projected = project_zone_state(state=state, mode="full")
+    assert "memory_v3" in projected["agents"]["a1"]
+
+
+def test_full_projection_includes_story_events_from_cold_memory() -> None:
+    clear_in_memory_store()
+    reset_cold_metrics()
+    redis = FakeRedis()
+    state = _sample_state()
+    state["context_id"] = "ctx_story_cold"
+    agent = state["agents"]["a1"]
+    migrate_agent_memory_to_cold_store(
+        context_id="ctx_story_cold",
+        agent_id="a1",
+        agent=agent,
+        redis_client=redis,
+    )
+    clear_in_memory_store()
+    agent.pop("memory_v3", None)
+    agent.pop("knowledge_v1", None)
+    agent["memory_summary"]["is_loaded"] = False
+    state["_zone_cold_memory_redis_client"] = redis
+
+    projected = project_zone_state(state=state, mode="full")
+    assert isinstance(projected["agents"]["a1"].get("story_events"), list)

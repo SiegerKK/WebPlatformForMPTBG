@@ -58,6 +58,7 @@ _COLD_METRICS: dict[str, int | float] = {
     "redis_payload_bytes": 0,
     "cold_memory_missing_keys": 0,
     "cold_memory_load_errors": 0,
+    "cold_memory_save_errors": 0,
     "cold_memory_dirty_marks": 0,
     "cold_memory_dirty_saves_skipped": 0,
     "cold_memory_stripped_agents": 0,
@@ -93,11 +94,50 @@ def clear_in_memory_store() -> None:
     _IN_MEMORY_STORE.clear()
 
 
+def get_zone_cold_memory_redis_client(state: dict[str, Any] | None = None) -> Any | None:
+    """Resolve Redis client for zone cold memory runtime paths."""
+    if isinstance(state, dict):
+        injected = state.get("_zone_cold_memory_redis_client")
+        if injected is not None:
+            return injected
+    try:
+        from app.core.state_cache.client import get_redis  # noqa: PLC0415
+
+        return get_redis()
+    except Exception:
+        return None
+
+
 # ── Key helpers ───────────────────────────────────────────────────────────────
 
 def get_agent_memory_ref(context_id: str, agent_id: str) -> str:
     """Return the canonical Redis/in-memory key for an agent's cold memory."""
     return f"ctx:agent_memory:{context_id}:{agent_id}"
+
+
+def record_agent_cold_memory_error(
+    agent: dict[str, Any],
+    error_code: str,
+    exc: Exception | None = None,
+) -> None:
+    """Persist cold-store error state on agent summary and increment metrics."""
+    summary = agent.get("memory_summary")
+    if not isinstance(summary, dict):
+        summary = {}
+        agent["memory_summary"] = summary
+    summary["cold_store_error"] = error_code
+    if exc is not None:
+        summary["cold_store_error_type"] = type(exc).__name__
+    if error_code.startswith("save_"):
+        _COLD_METRICS["cold_memory_save_errors"] = int(_COLD_METRICS["cold_memory_save_errors"]) + 1  # type: ignore[operator]
+    else:
+        _COLD_METRICS["cold_memory_load_errors"] = int(_COLD_METRICS["cold_memory_load_errors"]) + 1  # type: ignore[operator]
+
+
+def agent_memory_load_failed(agent: dict[str, Any]) -> bool:
+    """Return True when agent has a recorded cold-memory load failure."""
+    summary = agent.get("memory_summary")
+    return isinstance(summary, dict) and bool(summary.get("cold_load_error"))
 
 
 def resolve_agent_memory_ref(context_id: str, agent_id: str, agent: dict[str, Any]) -> str:
@@ -251,17 +291,11 @@ def _deserialise_blob(raw: bytes) -> dict[str, Any] | None:
 
 
 def _redis_get(redis_client: Any, key: str) -> bytes | None:
-    try:
-        return redis_client.get(key)
-    except Exception:
-        return None
+    return redis_client.get(key)
 
 
 def _redis_set(redis_client: Any, key: str, value: bytes) -> None:
-    try:
-        redis_client.set(key, value, ex=_COLD_TTL_SECONDS)
-    except Exception:
-        pass
+    redis_client.set(key, value, ex=_COLD_TTL_SECONDS)
 
 
 def _store_get(key: str, redis_client: Any | None) -> bytes | None:
@@ -372,7 +406,15 @@ def load_agent_memory(
     t0 = time.perf_counter()
 
     ref = resolve_agent_memory_ref(context_id, agent_id, agent)
-    raw = _store_get(ref, redis_client)
+    try:
+        raw = _store_get(ref, redis_client)
+    except Exception as exc:
+        record_agent_cold_memory_error(agent, "load_failed", exc)
+        summary = agent.get("memory_summary")
+        if isinstance(summary, dict):
+            summary["cold_load_error"] = "load_failed"
+        refresh_agent_memory_summary(agent, is_loaded=False)
+        return {}
 
     if raw is not None:
         blob = _deserialise_blob(raw)
@@ -403,21 +445,21 @@ def load_agent_memory(
             if redis_client is not None:
                 _COLD_METRICS["redis_payload_bytes"] = int(_COLD_METRICS["redis_payload_bytes"]) + len(encoded)  # type: ignore[operator]
         else:
-            _COLD_METRICS["cold_memory_load_errors"] = int(_COLD_METRICS["cold_memory_load_errors"]) + 1  # type: ignore[operator]
             summary = agent.get("memory_summary")
             if not isinstance(summary, dict):
                 summary = {}
                 agent["memory_summary"] = summary
             summary["cold_load_error"] = "missing_cold_memory_key"
+            record_agent_cold_memory_error(agent, "load_missing_cold_memory_key", None)
             refresh_agent_memory_summary(agent, is_loaded=False)
             return {}
     elif blob is None:
-        _COLD_METRICS["cold_memory_load_errors"] = int(_COLD_METRICS["cold_memory_load_errors"]) + 1  # type: ignore[operator]
         summary = agent.get("memory_summary")
         if not isinstance(summary, dict):
             summary = {}
             agent["memory_summary"] = summary
         summary["cold_load_error"] = "cold_blob_deserialize_failed"
+        record_agent_cold_memory_error(agent, "load_deserialize_failed", None)
         refresh_agent_memory_summary(agent, is_loaded=False)
         return {}
 
@@ -433,6 +475,8 @@ def load_agent_memory(
     summary = agent.get("memory_summary")
     if isinstance(summary, dict):
         summary.pop("cold_load_error", None)
+        summary.pop("cold_store_error", None)
+        summary.pop("cold_store_error_type", None)
     _update_summary_from_loaded_data(agent)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -468,7 +512,14 @@ def save_agent_memory_if_dirty(
     raw_json = json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     encoded = _serialise_blob(blob)
     ref = resolve_agent_memory_ref(context_id, agent_id, agent)
-    _store_set(ref, encoded, redis_client)
+    try:
+        _store_set(ref, encoded, redis_client)
+    except Exception as exc:
+        record_agent_cold_memory_error(agent, "save_failed", exc)
+        summary = agent.get("memory_summary")
+        if isinstance(summary, dict):
+            summary["is_loaded"] = True
+        return False
 
     refresh_agent_memory_summary(agent, dirty=False, is_loaded=True)
 
@@ -480,6 +531,10 @@ def save_agent_memory_if_dirty(
     _COLD_METRICS["cold_memory_bytes_stored"] = int(_COLD_METRICS["cold_memory_bytes_stored"]) + len(encoded)  # type: ignore[operator]
     if redis_client is not None:
         _COLD_METRICS["redis_payload_bytes"] = int(_COLD_METRICS["redis_payload_bytes"]) + len(encoded)  # type: ignore[operator]
+    summary = agent.get("memory_summary")
+    if isinstance(summary, dict):
+        summary.pop("cold_store_error", None)
+        summary.pop("cold_store_error_type", None)
 
     return True
 
@@ -542,7 +597,11 @@ def migrate_agent_memory_to_cold_store(
     blob = _blob_from_agent(agent_id, agent)
     raw_json = json.dumps(blob, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     encoded = _serialise_blob(blob)
-    _store_set(ref, encoded, redis_client)
+    try:
+        _store_set(ref, encoded, redis_client)
+    except Exception as exc:
+        record_agent_cold_memory_error(agent, "save_failed", exc)
+        return
 
     agent["memory_ref"] = ref
     summary = build_memory_summary(
@@ -605,7 +664,13 @@ def flush_dirty_agent_memories(
             agent=agent,
             redis_client=redis_client,
         )
-        strip_cold_memory_from_hot_state(agent)
+        summary = agent.get("memory_summary")
+        is_dirty = bool(isinstance(summary, dict) and summary.get("dirty"))
+        if did_save or not is_dirty:
+            strip_cold_memory_from_hot_state(agent)
+        elif isinstance(summary, dict):
+            # Save failed: keep loaded memory in hot state to avoid data loss.
+            summary["is_loaded"] = True
         if did_save:
             saved += 1
     return saved
