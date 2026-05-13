@@ -225,6 +225,22 @@ def _project_terminal_agent(agent: dict[str, Any]) -> None:
 
 
 def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
+    # PR5: If agent has memory_ref (cold memory), load it now for the debug projection.
+    if agent.get("memory_ref"):
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                ensure_agent_memory_loaded as _load_cold_for_proj,
+                get_context_id_from_state as _ctx_from_state,
+            )
+            _proj_context_id = str(agent.get("_context_id") or "default")
+            _load_cold_for_proj(
+                context_id=_proj_context_id,
+                agent_id=str(agent.get("id") or "unknown"),
+                agent=agent,
+            )
+        except Exception:
+            pass
+
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
     record_rows = [
@@ -277,6 +293,17 @@ def _enrich_agent_full_projection(agent: dict[str, Any]) -> None:
     # brain_context_cache is a large internal payload — strip it from the
     # full projection payload to avoid bloating the serialised output.
     agent.pop("brain_context_cache", None)
+    # PR5: Expose memory_summary and cold store metrics in debug projection.
+    memory_summary = agent.get("memory_summary")
+    if isinstance(memory_summary, dict):
+        agent["memory_summary"] = dict(memory_summary)
+    try:
+        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+            get_cold_metrics as _get_cold_metrics,
+        )
+        stats["cold_store_metrics"] = _get_cold_metrics()
+    except Exception:
+        pass
 
 
 # ── Explicit game projection helpers ─────────────────────────────────────────

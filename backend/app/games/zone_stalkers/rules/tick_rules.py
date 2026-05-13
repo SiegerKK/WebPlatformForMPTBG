@@ -887,6 +887,34 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             if _is_decay_turn:
                 _decay_mem(_pr3_agent, world_turn)
 
+    # PR5: Migrate agents that still carry hot memory_v3 to the cold store.
+    # After migration the agent has memory_ref + memory_summary; memory_v3 is
+    # stripped from hot state and saved to the cold blob.  Agents that already
+    # have memory_ref are skipped.
+    _pr5_context_id: str = str(state.get("context_id") or state.get("_context_id") or "default")
+    try:
+        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+            migrate_agent_memory_to_cold_store as _migrate_to_cold,
+        )
+        for _pr5_agent_id, _pr5_raw_agent in list(state.get("agents", {}).items()):
+            if not isinstance(_pr5_raw_agent, dict):
+                continue
+            # Skip agents that are already migrated.
+            if _pr5_raw_agent.get("memory_ref"):
+                continue
+            # Only migrate agents that have memory_v3 records (non-trivial blobs).
+            _pr5_mem_v3 = _pr5_raw_agent.get("memory_v3")
+            if not isinstance(_pr5_mem_v3, dict):
+                continue
+            _pr5_agent = _runtime_agent(_pr5_agent_id, _pr5_raw_agent)
+            _migrate_to_cold(
+                context_id=_pr5_context_id,
+                agent_id=_pr5_agent_id,
+                agent=_pr5_agent,
+            )
+    except Exception:
+        pass
+
     # One-time migration: normalize terrain types that were removed in the v3 update
     # (urban → plain, underground → plain) and any other unknown types.
     if not state.get("_terrain_migrated_v3"):
@@ -1509,6 +1537,20 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             )
             continue
 
+        # PR5: Load cold memory on demand before brain decision.
+        if _agent.get("memory_ref"):
+            try:
+                from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                    ensure_agent_memory_loaded as _ensure_cold_mem,
+                )
+                _ensure_cold_mem(
+                    context_id=_pr5_context_id,
+                    agent_id=_agent_id,
+                    agent=_agent,
+                )
+            except Exception:
+                pass
+
         bot_evs = _run_npc_brain_v3_decision(_agent_id, _agent, state, world_turn)
         _npc_brain_decision_count += 1
         events.extend(bot_evs)
@@ -1646,6 +1688,18 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         global _last_tick_runtime
         _last_tick_runtime = _tick_runtime
         _current_tick_runtime = previous_runtime
+
+    # PR5: Flush dirty cold memories and strip loaded cold memory from hot state.
+    # Runs after all tick processing so that memory writes during the tick
+    # (observations, brain decisions, plan events) are saved to the cold store
+    # before the state is persisted.
+    try:
+        from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+            flush_dirty_agent_memories as _flush_cold_memories,
+        )
+        _flush_cold_memories(context_id=_pr5_context_id, state=state)
+    except Exception:
+        pass
 
     return state, events
 
@@ -2647,6 +2701,21 @@ def _add_memory(
         except Exception:
             pass
 
+    # PR5: Ensure cold memory is loaded if the agent has a memory_ref.
+    _add_mem_ctx_id: str = str(state.get("context_id") or state.get("_context_id") or "default")
+    if agent.get("memory_ref"):
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                ensure_agent_memory_loaded as _ensure_cold_mem_write,
+            )
+            _ensure_cold_mem_write(
+                context_id=_add_mem_ctx_id,
+                agent_id=str(resolved_agent_id),
+                agent=agent,
+            )
+        except Exception:
+            pass
+
     # Write exclusively to memory_v3.
     write_memory_event_to_v3(
         agent_id=str(resolved_agent_id),
@@ -2654,6 +2723,16 @@ def _add_memory(
         legacy_entry=memory_entry,
         world_turn=world_turn,
     )
+
+    # PR5: Mark cold memory dirty after write so it is saved at end of tick.
+    if agent.get("memory_ref"):
+        try:
+            from app.games.zone_stalkers.memory.cold_store import (  # noqa: PLC0415
+                mark_agent_memory_dirty as _mark_cold_dirty,
+            )
+            _mark_cold_dirty(agent)
+        except Exception:
+            pass
 
     _action_kind = str(effects.get("action_kind") or "")
     _observed_kind = str(effects.get("observed") or "")
