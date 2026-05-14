@@ -54,6 +54,25 @@ def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
             "exhausted_locations": list(hunt.get("exhausted_locations", [])[:10]),
             "lead_count": hunt.get("lead_count"),
         }
+    hunter_prep = ctx.get("hunter_preparation")
+    if isinstance(hunter_prep, dict):
+        compact["hunter_preparation"] = {
+            "active": hunter_prep.get("active"),
+            "target_equipment_known": hunter_prep.get("target_equipment_known"),
+            "target_weapon_class": hunter_prep.get("target_weapon_class"),
+            "target_armor_class": hunter_prep.get("target_armor_class"),
+            "target_combat_strength": hunter_prep.get("target_combat_strength"),
+            "own_weapon_class": hunter_prep.get("own_weapon_class"),
+            "own_armor_class": hunter_prep.get("own_armor_class"),
+            "own_ammo_count": hunter_prep.get("own_ammo_count"),
+            "own_med_count": hunter_prep.get("own_med_count"),
+            "advantage_score": hunter_prep.get("advantage_score"),
+            "required_advantage_score": hunter_prep.get("required_advantage_score"),
+            "is_advantaged": hunter_prep.get("is_advantaged"),
+            "missing_requirements": hunter_prep.get("missing_requirements"),
+            "estimated_money_needed": hunter_prep.get("estimated_money_needed"),
+            "recommended_support_objective": hunter_prep.get("recommended_support_objective"),
+        }
     return compact or None
 
 

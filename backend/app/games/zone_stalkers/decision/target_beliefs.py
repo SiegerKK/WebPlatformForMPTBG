@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 
 from app.games.zone_stalkers.decision.beliefs import BeliefState
+from app.games.zone_stalkers.decision.perception import is_perception_suppressed
 from app.games.zone_stalkers.decision.models.hunt_lead import HuntLead
 from app.games.zone_stalkers.decision.models.target_belief import (
     LocationHypothesis,
@@ -684,7 +685,8 @@ def build_target_belief(
     target_location_id = str(target.get("location_id") or "") if isinstance(target, dict) else ""
     target_alive_from_state: bool | None = bool(target.get("is_alive", True)) if isinstance(target, dict) else None
     direct_co_located_target = bool(
-        isinstance(target, dict)
+        not is_perception_suppressed(agent)
+        and isinstance(target, dict)
         and target_alive_from_state is True
         and current_loc
         and target_location_id == current_loc

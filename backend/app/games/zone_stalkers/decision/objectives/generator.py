@@ -3,11 +3,19 @@ from __future__ import annotations
 from typing import Any
 
 from app.games.zone_stalkers.decision.constants import (
+    ARMOR_CLASS_RANK,
     CRITICAL_REST_THRESHOLD,
     EMISSION_DANGEROUS_TERRAIN,
+    HUNT_MIN_AMMO_ROUNDS,
+    HUNT_MIN_CASH_RESERVE,
+    HUNT_MIN_MED_ITEMS,
+    HUNT_REQUIRED_ADVANTAGE_SCORE,
+    HUNT_REQUIRED_ADVANTAGE_SCORE_CO_LOCATED,
+    HUNT_REQUIRED_ADVANTAGE_SCORE_STRONG_TARGET,
     SOFT_RESTORE_DRINK_THRESHOLD,
     SOFT_RESTORE_FOOD_THRESHOLD,
     SOFT_REST_THRESHOLD,
+    WEAPON_CLASS_RANK,
 )
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext
 from app.games.zone_stalkers.economy.debts import (
@@ -237,12 +245,218 @@ def _replace_or_append(result: list[Objective], objective: Objective) -> None:
     result.append(objective)
 
 
+
+def _get_weapon_class(agent: dict[str, Any]) -> str:
+    """Return weapon class string from agent's equipped weapon or inventory."""
+    equipment = agent.get("equipment") if isinstance(agent.get("equipment"), dict) else {}
+    weapon = equipment.get("weapon")
+    if isinstance(weapon, dict):
+        wtype = str(weapon.get("type") or weapon.get("weapon_class") or "")
+        for wc in WEAPON_CLASS_RANK:
+            if wc != "none" and wc in wtype:
+                return wc
+        if wtype:
+            return "pistol"  # default non-melee if something equipped
+    return "none"
+
+
+def _get_armor_class(agent: dict[str, Any]) -> str:
+    """Return armor class string from agent's equipped armor."""
+    equipment = agent.get("equipment") if isinstance(agent.get("equipment"), dict) else {}
+    armor = equipment.get("armor")
+    if isinstance(armor, dict):
+        atype = str(armor.get("type") or armor.get("armor_class") or armor.get("protection_class") or "")
+        for ac in ARMOR_CLASS_RANK:
+            if ac not in {"none", "unknown"} and ac in atype:
+                return ac
+        if atype:
+            return "light"  # default if something equipped
+    return "none"
+
+
+def _count_ammo_items(agent: dict[str, Any]) -> int:
+    """Return total count of ammo items in agent inventory."""
+    inventory = agent.get("inventory")
+    if not isinstance(inventory, list):
+        return 0
+    return sum(
+        1
+        for item in inventory
+        if isinstance(item, dict) and str(item.get("type") or "").startswith("ammo")
+    )
+
+
+def _count_med_items(agent: dict[str, Any]) -> int:
+    """Return total count of medical items in agent inventory."""
+    inventory = agent.get("inventory")
+    if not isinstance(inventory, list):
+        return 0
+    med_types = {"bandage", "medkit", "stimpack", "antidote", "medicine"}
+    return sum(
+        1
+        for item in inventory
+        if isinstance(item, dict)
+        and any(str(item.get("type") or "").startswith(mt) for mt in med_types)
+    )
+
+
+def evaluate_hunter_equipment_advantage(
+    *,
+    agent: dict[str, Any],
+    target_belief: Any,
+    need_result: Any,
+    world_turn: int,
+) -> dict[str, Any]:
+    """Compute hunter equipment advantage vs known target equipment.
+
+    Returns a dict with:
+    - target_equipment_known (bool)
+    - target_weapon_class, target_armor_class, target_combat_strength
+    - own_weapon_class, own_armor_class, own_ammo_count, own_med_count, own_hp
+    - advantage_score, required_advantage_score
+    - is_advantaged (bool)
+    - missing_requirements (list[str])
+    - estimated_money_needed (int)
+    - recommended_support_objective (str | None)
+    """
+    from app.games.zone_stalkers.knowledge.knowledge_hunt_builder import (  # noqa: PLC0415
+        build_equipment_belief_from_knowledge,
+    )
+    target_id = str(agent.get("kill_target_id") or "") or None
+
+    # Own equipment
+    own_weapon_class = _get_weapon_class(agent)
+    own_armor_class = _get_armor_class(agent)
+    own_ammo_count = _count_ammo_items(agent)
+    own_med_count = _count_med_items(agent)
+    own_hp = int(agent.get("hp") or 100)
+
+    # Target equipment from knowledge
+    target_weapon_class = "none"
+    target_armor_class = "none"
+    target_combat_strength: float | None = None
+    target_equipment_known = False
+
+    if target_id:
+        eq_belief = build_equipment_belief_from_knowledge(
+            agent=agent, target_id=target_id, world_turn=world_turn
+        )
+        target_equipment_known = bool(eq_belief.get("equipment_known"))
+        target_combat_strength = eq_belief.get("combat_strength")
+        # Also read from target_belief if available (may be more up-to-date from direct obs)
+        if target_belief is not None:
+            if not target_equipment_known and bool(target_belief.equipment_known):
+                target_equipment_known = True
+            if target_combat_strength is None and target_belief.combat_strength is not None:
+                target_combat_strength = float(target_belief.combat_strength)
+
+    # Try to read weapon/armor class from known_npcs equipment_summary
+    if target_id:
+        knowledge = agent.get("knowledge_v1")
+        known_npcs = knowledge.get("known_npcs") if isinstance(knowledge, dict) else None
+        npc_entry = known_npcs.get(target_id) if isinstance(known_npcs, dict) else None
+        if isinstance(npc_entry, dict):
+            eq_summary = npc_entry.get("equipment_summary")
+            if isinstance(eq_summary, dict):
+                wc = str(eq_summary.get("weapon_class") or "")
+                if wc and wc not in {"", "unknown"}:
+                    target_weapon_class = wc
+                ac = str(eq_summary.get("armor_class") or "")
+                if ac and ac not in {"", "unknown"}:
+                    target_armor_class = ac
+
+    if target_combat_strength is None:
+        target_combat_strength = 0.5  # conservative assumption
+
+    # Advantage scoring
+    own_weapon_score = WEAPON_CLASS_RANK.get(own_weapon_class, 0)
+    target_weapon_score = WEAPON_CLASS_RANK.get(target_weapon_class, 0)
+    own_armor_score = ARMOR_CLASS_RANK.get(own_armor_class, 0)
+    target_armor_score = ARMOR_CLASS_RANK.get(target_armor_class, 0)
+
+    weapon_delta = own_weapon_score - target_weapon_score
+    armor_delta = own_armor_score - target_armor_score
+    ammo_bonus = min(0.25, own_ammo_count / max(1, HUNT_MIN_AMMO_ROUNDS * 2))
+    med_bonus = min(0.20, own_med_count / max(1, HUNT_MIN_MED_ITEMS + 1))
+    hp_bonus = (own_hp - 60) / 200.0
+    target_strength_penalty = float(target_combat_strength) * 0.5
+
+    advantage_score = (
+        weapon_delta * 0.35
+        + armor_delta * 0.25
+        + ammo_bonus
+        + med_bonus
+        + hp_bonus
+        - target_strength_penalty
+    )
+
+    # Required advantage threshold
+    required_advantage_score = HUNT_REQUIRED_ADVANTAGE_SCORE
+    if float(target_combat_strength) >= 0.8:
+        required_advantage_score = HUNT_REQUIRED_ADVANTAGE_SCORE_STRONG_TARGET
+    target_co_located = bool(target_belief.co_located) if target_belief else False
+    if target_co_located:
+        required_advantage_score = HUNT_REQUIRED_ADVANTAGE_SCORE_CO_LOCATED
+
+    is_advantaged = advantage_score >= required_advantage_score
+
+    # Missing requirements
+    missing_requirements: list[str] = []
+    if target_equipment_known and target_weapon_class not in {"none", "melee"}:
+        if own_weapon_score < target_weapon_score:
+            missing_requirements.append("weapon_upgrade")
+    if own_ammo_count < HUNT_MIN_AMMO_ROUNDS:
+        missing_requirements.append("ammo_resupply")
+    if own_med_count < HUNT_MIN_MED_ITEMS:
+        missing_requirements.append("medicine_resupply")
+    if float(target_combat_strength) >= 0.8 and ARMOR_CLASS_RANK.get(own_armor_class, 0) < 1:
+        missing_requirements.append("armor_upgrade")
+
+    # Estimated money needed (rough)
+    estimated_money_needed = 0
+    if "weapon_upgrade" in missing_requirements:
+        estimated_money_needed += 1500
+    if "ammo_resupply" in missing_requirements:
+        estimated_money_needed += 400
+    if "medicine_resupply" in missing_requirements:
+        estimated_money_needed += 300
+    if "armor_upgrade" in missing_requirements:
+        estimated_money_needed += 1200
+
+    money = int(agent.get("money") or 0)
+    recommended_support_objective: str | None = None
+    if not is_advantaged:
+        recommended_support_objective = (
+            OBJECTIVE_GET_MONEY_FOR_RESUPPLY if money < estimated_money_needed
+            else OBJECTIVE_PREPARE_FOR_HUNT
+        )
+
+    return {
+        "target_equipment_known": target_equipment_known,
+        "target_weapon_class": target_weapon_class,
+        "target_armor_class": target_armor_class,
+        "target_combat_strength": float(target_combat_strength),
+        "own_weapon_class": own_weapon_class,
+        "own_armor_class": own_armor_class,
+        "own_ammo_count": own_ammo_count,
+        "own_med_count": own_med_count,
+        "own_hp": own_hp,
+        "advantage_score": round(advantage_score, 3),
+        "required_advantage_score": round(required_advantage_score, 3),
+        "is_advantaged": is_advantaged,
+        "missing_requirements": missing_requirements,
+        "estimated_money_needed": estimated_money_needed,
+        "recommended_support_objective": recommended_support_objective,
+    }
+
+
 def evaluate_kill_target_combat_readiness(
     *,
     agent: dict[str, Any],
     target_belief: Any,
     need_result: Any,
     context: Any,
+    world_turn: int = 0,
 ) -> dict[str, Any]:
     del context
     readiness = (need_result.combat_readiness or {}) if need_result is not None else {}
@@ -280,9 +494,32 @@ def evaluate_kill_target_combat_readiness(
     elif target_strength is not None and target_strength >= 0.95 and hp < 60:
         reasons.append("target_too_strong")
 
+    # Equipment-based advantage evaluation
+    advantage_result = evaluate_hunter_equipment_advantage(
+        agent=agent,
+        target_belief=target_belief,
+        need_result=need_result,
+        world_turn=world_turn,
+    )
+    equipment_advantaged = bool(advantage_result["is_advantaged"])
+    if advantage_result["target_equipment_known"] and not equipment_advantaged:
+        reasons.append("equipment_disadvantage")
+        if "weapon_upgrade" in advantage_result["missing_requirements"]:
+            reasons.append("weapon_inferior")
+        if "armor_upgrade" in advantage_result["missing_requirements"]:
+            reasons.append("armor_inferior")
+        if "medicine_resupply" in advantage_result["missing_requirements"]:
+            if "no_medicine" not in reasons:
+                reasons.append("no_medicine")
+        if "ammo_resupply" in advantage_result["missing_requirements"]:
+            if "low_ammo" not in reasons:
+                reasons.append("low_ammo")
+
     recommended_support_objective: str | None = None
     if "hp_low" in reasons:
         recommended_support_objective = OBJECTIVE_HEAL_SELF
+    elif advantage_result["recommended_support_objective"]:
+        recommended_support_objective = advantage_result["recommended_support_objective"]
     elif any(reason in reasons for reason in ("no_weapon", "low_ammo", "no_armor", "target_too_strong")):
         recommended_support_objective = (
             OBJECTIVE_GET_MONEY_FOR_RESUPPLY if money_missing > 0 else OBJECTIVE_PREPARE_FOR_HUNT
@@ -306,6 +543,9 @@ def evaluate_kill_target_combat_readiness(
         "armor_ready": armor_ready,
         "hp_ready": hp_ready,
         "recommended_support_objective": recommended_support_objective,
+        "equipment_advantage": advantage_result,
+        "equipment_advantaged": equipment_advantaged,
+        "estimated_money_needed_for_advantage": advantage_result["estimated_money_needed"],
     }
 
 
@@ -783,11 +1023,13 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
 
     if global_goal == "kill_stalker" and not agent.get("global_goal_achieved"):
         target_belief = ctx.target_belief
+        world_turn = int(ctx.world_turn) if hasattr(ctx, "world_turn") and ctx.world_turn is not None else 0
         combat_eval = evaluate_kill_target_combat_readiness(
             agent=agent,
             target_belief=target_belief,
             need_result=need_result,
             context=ctx,
+            world_turn=world_turn,
         )
         blockers: list[dict[str, Any]] = []
         prepare_reasons: list[str] = ["Охота требует предварительной готовности"]
@@ -809,6 +1051,13 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         if "money_missing_for_resupply" in combat_eval["reasons"]:
             blockers.append({"key": "money_missing_for_resupply", "reason": "Не хватает денег на пополнение", "blocked": False, "penalty": 0.25})
             prepare_reasons.append("Нужно добыть деньги на пополнение")
+        if "equipment_disadvantage" in combat_eval["reasons"]:
+            blockers.append({"key": "equipment_disadvantage", "reason": "Снаряжение хуже цели", "blocked": True, "penalty": 0.45})
+            prepare_reasons.append("Нужно улучшить снаряжение для охоты")
+        if "weapon_inferior" in combat_eval["reasons"]:
+            prepare_reasons.append("Оружие слабее цели")
+        if "armor_inferior" in combat_eval["reasons"]:
+            prepare_reasons.append("Броня хуже цели")
 
         target_id = str(agent.get("kill_target_id") or "")
         best_target_loc = target_belief.best_location_id if target_belief else None
@@ -841,6 +1090,8 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             "target_strength": combat_eval["target_strength"],
             "not_attacking_reasons": list(combat_eval["reasons"]),
             "recommended_support_objective": combat_eval["recommended_support_objective"],
+            "equipment_advantaged": combat_eval["equipment_advantaged"],
+            "equipment_advantage": combat_eval["equipment_advantage"],
         }
         no_actionable_hunt_lead = bool(
             target_belief is not None
@@ -852,6 +1103,29 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         )
         hunt_cash_low = int(agent.get("money", 0) or 0) < _MIN_HUNT_INTEL_CASH_RESERVE
         needs_get_money_first = bool(no_actionable_hunt_lead and (hunt_cash_low or money_missing > 0))
+        # Fix C: additional economy pressure when hunter is undergeared even with a weak lead
+        _hunter_in_debt = int((agent.get("economic_state") or {}).get("debt_total") or 0) > 0
+        _hunter_money_low = int(agent.get("money", 0) or 0) < HUNT_MIN_CASH_RESERVE
+        _lead_confidence = float(target_belief.best_location_confidence or 0.0) if target_belief else 0.0
+        _last_seen_turn = target_belief.last_seen_turn if target_belief else None
+        _lead_age = (world_turn - int(_last_seen_turn)) if _last_seen_turn is not None else 999999
+        _lead_is_weak_or_stale = (
+            target_belief is None
+            or not target_belief.possible_locations
+            or _lead_confidence < 0.65
+            or _lead_age > 240
+        )
+        _hunt_not_ready = (
+            bool(blockers)
+            or not combat_eval["combat_ready"]
+            or not combat_eval.get("equipment_advantaged", True)
+        )
+        needs_hunt_preparation = (
+            not target_visible_now
+            and not target_co_located
+            and _hunt_not_ready
+            and (_hunter_money_low or _hunter_in_debt or _lead_is_weak_or_stale)
+        )
 
         if target_alive is False:
             if target_loc:
@@ -1117,6 +1391,46 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         },
                     ),
                 )
+            # Fix C: inject economy pressure even when a weak/stale lead exists
+            if needs_hunt_preparation:
+                _prep_money_reasons = list(prepare_reasons)
+                if _hunter_money_low:
+                    _prep_money_reasons.append("Нужны деньги на подготовку к охоте")
+                if _hunter_in_debt:
+                    _prep_money_reasons.append("Нужно погасить долг")
+                _estimated_money = combat_eval.get("estimated_money_needed_for_advantage", 0)
+                _replace_or_append(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+                        source="global_goal",
+                        urgency=0.87,
+                        expected_value=0.86,
+                        risk=0.24,
+                        time_cost=0.42,
+                        resource_cost=0.12,
+                        confidence=0.82,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[1],
+                        reasons=tuple(_prep_money_reasons),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[0],
+                        metadata={
+                            **_combat_metadata,
+                            "support_objective_for": "kill_stalker",
+                            "hunt_stage": "prepare",
+                            "hunt_preparation_pressure": True,
+                            "preparation_basis": "target_equipment_advantage",
+                            "money": int(agent.get("money") or 0),
+                            "debt_total": int((agent.get("economic_state") or {}).get("debt_total") or 0),
+                            "combat_ready": combat_eval["combat_ready"],
+                            "equipment_advantaged": combat_eval["equipment_advantaged"],
+                            "estimated_money_needed": _estimated_money,
+                            "not_attacking_reasons": list(combat_eval["reasons"]),
+                            "target_location_confidence": _lead_confidence,
+                            "target_last_seen_age": _lead_age,
+                        },
+                    ),
+                )
         else:
             if no_actionable_hunt_lead and (blockers or needs_get_money_first):
                 money_reasons = []
@@ -1214,6 +1528,16 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         },
                     ),
                 )
+
+        # Fix E: Anti-loop policy — suppress soft restore/rest for kill_stalker hunters
+        # when they need to earn/prepare and survival is not critical.
+        # Critical immediate needs (urgency >= 0.8) are always kept.
+        if needs_hunt_preparation and not _has_survival_emergency:
+            _soft_suppress_keys = {OBJECTIVE_RESTORE_FOOD, OBJECTIVE_RESTORE_WATER, OBJECTIVE_REST}
+            result[:] = [
+                obj for obj in result
+                if obj.key not in _soft_suppress_keys or float(obj.urgency) >= 0.8
+            ]
 
     economic_state = agent.get("economic_state") if isinstance(agent.get("economic_state"), dict) else {}
     debt_total = int(economic_state.get("debt_total") or 0)

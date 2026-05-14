@@ -30,6 +30,7 @@ from app.games.zone_stalkers.rules.tick_constants import (
 )
 
 from .models.agent_context import AgentContext
+from .perception import is_perception_suppressed
 
 CONTEXT_CACHE_TURN_BUCKET_SIZE = 10
 
@@ -90,39 +91,41 @@ def build_agent_context(
     }
 
     # ── Visible entities (co-located agents + traders) ────────────────────────
+    # Sleeping/unconscious agents cannot directly perceive co-located entities.
+    _observer_perception_suppressed = is_perception_suppressed(agent)
     visible_entities: list[dict[str, Any]] = []
-    for other_id, other in agents.items():
-        if other_id == agent_id:
-            continue
-        if not other.get("is_alive", True):
-            continue
-        if other.get("has_left_zone"):
-            continue
-        if other.get("location_id") == loc_id:
-            visible_entities.append({
-                "agent_id": other_id,
-                "name": other.get("name", other_id),
-                "archetype": other.get("archetype"),
-                "is_trader": other.get("archetype") == "trader_agent",
-                "global_goal": other.get("global_goal"),
-                "hp": other.get("hp", 100),
-                "is_alive": other.get("is_alive", True),
-            })
-
-    # P3 fix: also add traders from state["traders"] when co-located
-    for trader_id, trader in traders.items():
-        if not trader.get("is_alive", True):
-            continue
-        if trader.get("location_id") == loc_id:
-            visible_entities.append({
-                "agent_id": trader_id,
-                "name": trader.get("name", trader_id),
-                "archetype": "trader_agent",
-                "is_trader": True,
-                "global_goal": None,
-                "hp": trader.get("hp", 100),
-                "is_alive": True,
-            })
+    if not _observer_perception_suppressed:
+        for other_id, other in agents.items():
+            if other_id == agent_id:
+                continue
+            if not other.get("is_alive", True):
+                continue
+            if other.get("has_left_zone"):
+                continue
+            if other.get("location_id") == loc_id:
+                visible_entities.append({
+                    "agent_id": other_id,
+                    "name": other.get("name", other_id),
+                    "archetype": other.get("archetype"),
+                    "is_trader": other.get("archetype") == "trader_agent",
+                    "global_goal": other.get("global_goal"),
+                    "hp": other.get("hp", 100),
+                    "is_alive": other.get("is_alive", True),
+                })
+        # P3 fix: also add traders from state["traders"] when co-located
+        for trader_id, trader in traders.items():
+            if not trader.get("is_alive", True):
+                continue
+            if trader.get("location_id") == loc_id:
+                visible_entities.append({
+                    "agent_id": trader_id,
+                    "name": trader.get("name", trader_id),
+                    "archetype": "trader_agent",
+                    "is_trader": True,
+                    "global_goal": None,
+                    "hp": trader.get("hp", 100),
+                    "is_alive": True,
+                })
 
     # ── Combat context ────────────────────────────────────────────────────────
     combat_context: dict[str, Any] | None = _combat_context_for(agent_id, state)

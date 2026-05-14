@@ -6424,6 +6424,14 @@ def _run_npc_brain_v3_decision_inner(
         "target_visible_now": _selected_objective_metadata.get("target_visible_now"),
         "target_co_located": _selected_objective_metadata.get("target_co_located"),
         "target_strength": _selected_objective_metadata.get("target_strength"),
+        "hunter_preparation": (
+            {
+                "active": not bool(_selected_objective_metadata.get("equipment_advantaged", True)),
+                **_selected_objective_metadata["equipment_advantage"],
+            }
+            if isinstance(_selected_objective_metadata.get("equipment_advantage"), dict)
+            else None
+        ),
         "hunt_target_belief": {
             "target_id": target_belief.target_id,
             "is_known": target_belief.is_known,
