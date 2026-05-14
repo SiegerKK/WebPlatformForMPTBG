@@ -236,6 +236,13 @@ export interface AgentForProfile {
     }>;
     indexes?: Record<string, Record<string, string[]>>;
   } | null;
+  economic_state?: {
+    debt_total?: number;
+    active_debt_count?: number;
+    overdue_debt_count?: number;
+    defaulted_debt_count?: number;
+    creditors?: string[];
+  } | null;
 }
 
 interface Props {
@@ -470,6 +477,51 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
           )}
           {agent.reputation != null && <div style={s.repLine}>⭐ Репутация: {agent.reputation}</div>}
         </Section>
+
+        {/* ── 2b. Debt info ── */}
+        {(() => {
+          const econ = agent.economic_state;
+          const hasDebt = econ != null && (
+            (econ.debt_total ?? 0) > 0 ||
+            (econ.active_debt_count ?? 0) > 0 ||
+            (econ.overdue_debt_count ?? 0) > 0 ||
+            (econ.defaulted_debt_count ?? 0) > 0
+          );
+          if (!hasDebt || econ == null) return null;
+          const overdueColor = (econ.overdue_debt_count ?? 0) > 0 ? '#ef4444' : (econ.defaulted_debt_count ?? 0) > 0 ? '#ef4444' : '#fbbf24';
+          return (
+            <Section label="💳 Долги">
+              <div style={s.debtRow}>
+                <span style={s.debtLabel}>Сумма долга:</span>
+                <span style={{ ...s.debtVal, color: overdueColor }}>{econ.debt_total ?? 0} RU</span>
+              </div>
+              {(econ.active_debt_count ?? 0) > 0 && (
+                <div style={s.debtRow}>
+                  <span style={s.debtLabel}>Активных займов:</span>
+                  <span style={s.debtVal}>{econ.active_debt_count}</span>
+                </div>
+              )}
+              {(econ.overdue_debt_count ?? 0) > 0 && (
+                <div style={s.debtRow}>
+                  <span style={s.debtLabel}>Просроченных:</span>
+                  <span style={{ ...s.debtVal, color: '#f97316' }}>{econ.overdue_debt_count}</span>
+                </div>
+              )}
+              {(econ.defaulted_debt_count ?? 0) > 0 && (
+                <div style={s.debtRow}>
+                  <span style={s.debtLabel}>Дефолт:</span>
+                  <span style={{ ...s.debtVal, color: '#ef4444', fontWeight: 700 }}>{econ.defaulted_debt_count}</span>
+                </div>
+              )}
+              {econ.creditors != null && econ.creditors.length > 0 && (
+                <div style={s.debtRow}>
+                  <span style={s.debtLabel}>Кредиторы:</span>
+                  <span style={s.debtVal}>{econ.creditors.join(', ')}</span>
+                </div>
+              )}
+            </Section>
+          );
+        })()}
 
         {/* ── 2. Current state — Skills ── */}
         {agent.skill_combat != null && (
@@ -849,6 +901,9 @@ const s: Record<string, React.CSSProperties> = {
   moneyRu: { color: '#fbbf24', fontWeight: 600, fontSize: '0.9rem' },
   moneySaveBtn: { background: 'transparent', border: '1px solid #fbbf24', borderRadius: 5, color: '#fbbf24', cursor: 'pointer', fontSize: '0.8rem', padding: '0.1rem 0.3rem', lineHeight: 1 },
   repLine: { color: '#a78bfa', fontSize: '0.8rem' },
+  debtRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0' },
+  debtLabel: { color: '#94a3b8', fontSize: '0.8rem' },
+  debtVal: { color: '#e2e8f0', fontSize: '0.82rem', fontWeight: 600 },
   skillGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 6 },
   skillChip: { background: '#0f172a', borderRadius: 6, padding: '0.3rem 0.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   skillLabel: { color: '#94a3b8', fontSize: '0.72rem' },
