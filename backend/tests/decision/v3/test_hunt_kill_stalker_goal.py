@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
 
 import pytest
 
@@ -363,6 +364,21 @@ class TestHuntObjectiveGeneration:
         assert any(obj.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY for obj in objectives)
         assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
 
+    def test_no_weapon_no_money_get_money_beats_resupply_weapon(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            has_weapon=False,
+            money=0,
+            inventory=[],
+        )
+        state = make_minimal_state(agent=agent)
+        objectives = generate_objectives(_make_ctx(agent, state))
+        decision = choose_objective(objectives, personality=agent)
+
+        assert any(obj.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY for obj in objectives)
+        assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
+
     def test_killer_without_actionable_intel_and_no_money_prefers_get_money_for_hunt(self) -> None:
         agent = make_agent(
             global_goal="kill_stalker",
@@ -412,6 +428,42 @@ class TestHuntObjectiveGeneration:
         decision = choose_objective(objectives, personality=agent)
         assert decision.selected.key in {OBJECTIVE_VERIFY_LEAD, OBJECTIVE_TRACK_TARGET}
 
+    def test_target_intel_without_last_seen_turn_but_actionable_location_does_not_force_get_money(self) -> None:
+        import uuid
+
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = make_minimal_state(agent=agent)
+        ensure_memory_v3(agent)
+        rec = MemoryRecord(
+            id=str(uuid.uuid4()),
+            agent_id="bot1",
+            layer=LAYER_SOCIAL,
+            kind="target_intel",
+            created_turn=95,
+            last_accessed_turn=None,
+            summary="Есть свежий intel о цели",
+            details={"target_agent_id": "target_1", "location_id": "loc_b", "source_agent_id": "trader_1"},
+            location_id="loc_b",
+            confidence=0.69,
+        )
+        add_memory_record(agent, rec)
+
+        ctx = _make_ctx(agent, state)
+        assert ctx.target_belief is not None
+        ctx = ObjectiveGenerationContext(
+            agent_id=ctx.agent_id,
+            world_turn=ctx.world_turn,
+            belief_state=ctx.belief_state,
+            need_result=ctx.need_result,
+            active_plan_summary=ctx.active_plan_summary,
+            personality=ctx.personality,
+            target_belief=replace(ctx.target_belief, last_seen_turn=None),
+        )
+
+        objectives = generate_objectives(ctx)
+        decision = choose_objective(objectives, personality=agent)
+        assert decision.selected.key in {OBJECTIVE_VERIFY_LEAD, OBJECTIVE_TRACK_TARGET}
+
     def test_track_stage_hunt_stage_metadata(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")
@@ -446,6 +498,37 @@ class TestHuntObjectiveGeneration:
         state = _make_state_with_target(agent=agent, target_location_id="loc_a")
         objectives = generate_objectives(_make_ctx(agent, state))
         decision = choose_objective(objectives, personality=agent)
+        assert decision.selected.key == OBJECTIVE_ENGAGE_TARGET
+
+    def test_equipment_disadvantage_is_advisory_for_visible_ready_target(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            location_id="loc_a",
+            has_weapon=True,
+            has_armor=True,
+            has_ammo=True,
+        )
+        agent["knowledge_v1"] = {
+            "known_npcs": {
+                "target_1": {
+                    "is_alive": True,
+                    "confidence": 0.9,
+                    "last_seen_turn": 95,
+                    "equipment_summary": {
+                        "weapon_class": "rifle",
+                        "armor_class": "medium",
+                        "combat_strength_estimate": 0.9,
+                    },
+                }
+            }
+        }
+        state = _make_state_with_target(agent=agent, target_location_id="loc_a")
+        objectives = generate_objectives(_make_ctx(agent, state))
+        objective_keys = {objective.key for objective in objectives}
+        decision = choose_objective(objectives, personality=agent)
+
+        assert OBJECTIVE_ENGAGE_TARGET in objective_keys
         assert decision.selected.key == OBJECTIVE_ENGAGE_TARGET
 
     def test_critical_survival_can_override_visible_kill_target(self) -> None:

@@ -540,7 +540,7 @@ def build_hunt_leads_from_memory_v3_legacy(
         leads.append(lead)
         if lead.source_ref:
             source_refs.append(lead.source_ref)
-        if lead.kind == "target_seen":
+        if lead.kind in {"target_seen", "target_intel", "target_last_known_location"}:
             last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
 
     return {
@@ -745,7 +745,7 @@ def build_target_belief(
         for lead in knowledge_leads:
             if lead.source_ref:
                 source_refs.append(lead.source_ref)
-            if lead.kind in {"target_seen", "target_last_known_location"}:
+            if lead.kind in {"target_seen", "target_last_known_location", "target_intel"}:
                 last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
 
     knowledge = agent.get("knowledge_v1")

@@ -528,11 +528,9 @@ def evaluate_kill_target_combat_readiness(
         if "armor_upgrade" in advantage_result["missing_requirements"]:
             reasons.append("armor_inferior")
         if "medicine_resupply" in advantage_result["missing_requirements"]:
-            if "no_medicine" not in reasons:
-                reasons.append("no_medicine")
+            reasons.append("medicine_resupply")
         if "ammo_resupply" in advantage_result["missing_requirements"]:
-            if "low_ammo" not in reasons:
-                reasons.append("low_ammo")
+            reasons.append("ammo_resupply")
 
     recommended_support_objective: str | None = None
     if "hp_low" in reasons:
@@ -548,7 +546,8 @@ def evaluate_kill_target_combat_readiness(
         reasons.append("money_missing_for_resupply")
 
     reasons = list(dict.fromkeys(reasons))
-    combat_ready = not reasons
+    hard_reasons = {"no_weapon", "low_ammo", "hp_low", "no_armor", "target_too_strong", "no_medicine"}
+    combat_ready = not any(reason in hard_reasons for reason in reasons)
     should_engage_now = combat_ready and target_visible_now and target_co_located
     return {
         "combat_ready": combat_ready,
@@ -1086,6 +1085,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             if not any(b["key"] in ("no_medicine", "medicine_resupply") for b in blockers):
                 blockers.append({"key": "medicine_resupply", "reason": "Недостаточно медикаментов для охоты", "blocked": True, "penalty": 0.25})
 
+        hard_blocker_keys = {"no_weapon", "low_ammo", "hp_low", "target_too_strong"}
+        hard_blockers = [b for b in blockers if str(b.get("key") or "") in hard_blocker_keys]
+
         target_id = str(agent.get("kill_target_id") or "")
         best_target_loc = target_belief.best_location_id if target_belief else None
         target_loc = best_target_loc or (target_belief.last_known_location_id if target_belief else None)
@@ -1138,7 +1140,12 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
         _hunter_money_low = int(agent.get("money", 0) or 0) < HUNT_MIN_CASH_RESERVE
         _lead_confidence = float(target_belief.best_location_confidence or 0.0) if target_belief else 0.0
         _last_seen_turn = target_belief.last_seen_turn if target_belief else None
-        _lead_age = (world_turn - int(_last_seen_turn)) if _last_seen_turn is not None else 999999
+        _lead_has_actionable_location = bool(target_loc) and _lead_confidence >= 0.6
+        _lead_age = (
+            world_turn - int(_last_seen_turn)
+            if _last_seen_turn is not None
+            else (0 if _lead_has_actionable_location else 999999)
+        )
         _lead_is_weak_or_stale = (
             target_belief is None
             or not target_belief.possible_locations
@@ -1154,7 +1161,18 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             not target_visible_now
             and not target_co_located
             and _hunt_not_ready
-            and (_hunter_money_low or _hunter_in_debt or _lead_is_weak_or_stale)
+            and (_hunter_money_low or _hunter_in_debt)
+            and _lead_is_weak_or_stale
+        )
+
+        _safe_sale_options = int(liquidity.get("safe_sale_options") or 0)
+        _risky_sale_options = int(liquidity.get("risky_sale_options") or 0)
+        _emergency_sale_options = int(liquidity.get("emergency_sale_options") or 0)
+        _has_sellable_liquidity = _safe_sale_options > 0
+        _hunter_has_no_money = int(agent.get("money", 0) or 0) <= 0
+        _hunter_lacks_min_equipment = any(
+            key in {"no_weapon", "weapon_upgrade", "armor_upgrade", "money_missing_for_resupply"}
+            for key in (str(b.get("key") or "") for b in blockers)
         )
 
         if target_alive is False:
@@ -1203,7 +1221,8 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     ),
                 )
         elif target_co_located or target_visible_now:
-            if combat_eval["recommended_support_objective"] == OBJECTIVE_GET_MONEY_FOR_RESUPPLY:
+            can_engage_visible_target = bool(combat_eval["combat_ready"]) and not hard_blockers
+            if (not can_engage_visible_target) and combat_eval["recommended_support_objective"] == OBJECTIVE_GET_MONEY_FOR_RESUPPLY:
                 _replace_or_append(
                     result,
                     Objective(
@@ -1227,13 +1246,37 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         },
                     ),
                 )
+            if can_engage_visible_target:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_ENGAGE_TARGET,
+                        source="global_goal",
+                        urgency=0.98,
+                        expected_value=1.0,
+                        risk=0.65,
+                        time_cost=0.15,
+                        resource_cost=0.1,
+                        confidence=0.9,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
+                        reasons=("Цель обнаружена рядом, боеготовность достаточна — атакую",),
+                        source_refs=("global_goal:kill_stalker",),
+                        metadata={**_combat_metadata, "blockers": blockers, "hunt_stage": "engage"},
+                        target={"target_id": target_id, "location_id": target_loc} if target_id else None,
+                    ),
+                )
+                result[:] = [
+                    objective for objective in result
+                    if objective.key not in {OBJECTIVE_HUNT_TARGET, OBJECTIVE_GET_MONEY_FOR_RESUPPLY}
+                ]
             if blockers:
                 _append_unique(
                     result,
                     Objective(
                         key=OBJECTIVE_PREPARE_FOR_HUNT,
                         source="global_goal",
-                        urgency=0.9,
+                        urgency=0.62 if can_engage_visible_target else 0.9,
                         expected_value=0.85,
                         risk=0.25,
                         time_cost=0.45,
@@ -1246,29 +1289,10 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         metadata={
                             **_combat_metadata,
                             "blockers": blockers,
+                            "hard_blockers": hard_blockers,
                             "hunt_stage": "prepare",
                             "support_objective_for": "kill_stalker",
                         },
-                    ),
-                )
-            else:
-                _append_unique(
-                    result,
-                    Objective(
-                        key=OBJECTIVE_ENGAGE_TARGET,
-                        source="global_goal",
-                        urgency=0.95,
-                        expected_value=1.0,
-                        risk=0.75,
-                        time_cost=0.2,
-                        resource_cost=0.15,
-                        confidence=0.8,
-                        goal_alignment=1.0,
-                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_ENGAGE_TARGET)[1],
-                        reasons=("Цель обнаружена рядом, боеготовность достаточна — атакую",),
-                        source_refs=("global_goal:kill_stalker",),
-                        metadata={**_combat_metadata, "blockers": blockers, "hunt_stage": "engage"},
-                        target={"target_id": target_id, "location_id": target_loc} if target_id else None,
                     ),
                 )
         elif _target_recently_here and _combat_readiness_sufficient and not _has_survival_emergency:
@@ -1495,6 +1519,35 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 )
                 if needs_get_money_first:
                     result[:] = [objective for objective in result if objective.key != OBJECTIVE_HUNT_TARGET]
+
+            if _hunter_has_no_money and _hunter_lacks_min_equipment and not _has_sellable_liquidity:
+                _replace_or_append(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+                        source="global_goal",
+                        urgency=0.96,
+                        expected_value=0.9,
+                        risk=0.22,
+                        time_cost=0.4,
+                        resource_cost=0.1,
+                        confidence=0.9,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[1],
+                        reasons=("Нет денег и ликвидности для покупки снаряжения — сначала добываю деньги",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[0],
+                        metadata={
+                            **_combat_metadata,
+                            "support_objective_for": "kill_stalker",
+                            "hunt_stage": "prepare",
+                            "forced_priority": "earn_money_before_resupply",
+                        },
+                    ),
+                )
+                result[:] = [
+                    objective for objective in result
+                    if objective.key not in {OBJECTIVE_RESUPPLY_WEAPON, OBJECTIVE_RESUPPLY_ARMOR}
+                ]
             if not needs_get_money_first:
                 _append_unique(
                     result,
