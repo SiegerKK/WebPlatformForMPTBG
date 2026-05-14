@@ -1159,7 +1159,7 @@ def export_npc_logs(
             "agent_count": len(agent_index),
             "agents": agent_index,
             "knowledge_first_metrics": {
-                "knowledge_only_events": int(runtime_memory_metrics.get("knowledge_only_events", 0)),
+                "runtime_knowledge_only_events": int(runtime_memory_metrics.get("knowledge_only_events", 0)),
                 "observation_memory_records_written": _obs_records_written,
                 "stalkers_seen_memory_records_written": _stalkers_seen_records_written,
                 "corpse_seen_memory_records_written": _corpse_seen_records_written,

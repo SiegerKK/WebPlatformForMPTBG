@@ -48,7 +48,7 @@ OBSERVATION_MEMORY_COMPAT_MODE = False
 #   memory_aggregate  → update one aggregate record, never append new episodic record
 #   knowledge_only    → update knowledge only, never write memory_v3
 #   knowledge_milestone → update knowledge; write memory_v3 only for milestones
-#   knowledge_upsert  → legacy alias for knowledge_milestone
+#   knowledge_upsert  → legacy alias for knowledge_milestone (normalized in resolve_memory_event_policy)
 #   memory_critical   → always write a memory_v3 record (never deduplicated/discarded)
 #   discard           → write nothing
 #   (missing key)     → default write path with dedup where applicable
@@ -1356,9 +1356,9 @@ def should_write_observation_milestone(
     update_result: dict[str, Any],
     agent: dict[str, Any],
     effects: dict[str, Any],
-    world_turn: int,
+    world_turn: int = 0,  # reserved for future time-based predicates; unused for now
 ) -> bool:
-    del world_turn  # reserved for future milestone predicates
+    _ = world_turn  # reserved for future time-based milestone predicates
     if bool(agent.get("force_observation_memory_records", False)):
         return True
 
