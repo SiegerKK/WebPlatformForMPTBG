@@ -238,10 +238,22 @@ export interface AgentForProfile {
   } | null;
   economic_state?: {
     debt_total?: number;
+    active_debt_account_count?: number;
     active_debt_count?: number;
-    overdue_debt_count?: number;
-    defaulted_debt_count?: number;
     creditors?: string[];
+    max_creditor_debt?: number;
+    rollover_count_total?: number;
+    next_due_turn_min?: number | null;
+    debt_escape_threshold?: number;
+    should_escape_zone_due_to_debt?: boolean;
+    debt_accounts?: Array<{
+      account_id?: string;
+      creditor_id?: string;
+      outstanding_total?: number;
+      next_due_turn?: number | null;
+      rollover_count?: number;
+      last_payment_turn?: number | null;
+    }>;
   } | null;
 }
 
@@ -481,36 +493,20 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
         {/* ── 2b. Debt info ── */}
         {(() => {
           const econ = agent.economic_state;
-          const hasDebt = econ != null && (
-            (econ.debt_total ?? 0) > 0 ||
-            (econ.active_debt_count ?? 0) > 0 ||
-            (econ.overdue_debt_count ?? 0) > 0 ||
-            (econ.defaulted_debt_count ?? 0) > 0
-          );
+          const activeDebtCount = econ?.active_debt_account_count ?? econ?.active_debt_count ?? 0;
+          const hasDebt = econ != null && ((econ.debt_total ?? 0) > 0 || activeDebtCount > 0);
           if (!hasDebt || econ == null) return null;
-          const overdueColor = (econ.overdue_debt_count ?? 0) > 0 ? '#ef4444' : (econ.defaulted_debt_count ?? 0) > 0 ? '#ef4444' : '#fbbf24';
+          const debtColor = (econ.should_escape_zone_due_to_debt ?? false) ? '#ef4444' : '#fbbf24';
           return (
             <Section label="💳 Долги">
               <div style={s.debtRow}>
-                <span style={s.debtLabel}>Сумма долга:</span>
-                <span style={{ ...s.debtVal, color: overdueColor }}>{econ.debt_total ?? 0} RU</span>
+                <span style={s.debtLabel}>Всего долг:</span>
+                <span style={{ ...s.debtVal, color: debtColor }}>{econ.debt_total ?? 0} RU</span>
               </div>
-              {(econ.active_debt_count ?? 0) > 0 && (
+              {activeDebtCount > 0 && (
                 <div style={s.debtRow}>
-                  <span style={s.debtLabel}>Активных займов:</span>
-                  <span style={s.debtVal}>{econ.active_debt_count}</span>
-                </div>
-              )}
-              {(econ.overdue_debt_count ?? 0) > 0 && (
-                <div style={s.debtRow}>
-                  <span style={s.debtLabel}>Просроченных:</span>
-                  <span style={{ ...s.debtVal, color: '#f97316' }}>{econ.overdue_debt_count}</span>
-                </div>
-              )}
-              {(econ.defaulted_debt_count ?? 0) > 0 && (
-                <div style={s.debtRow}>
-                  <span style={s.debtLabel}>Дефолт:</span>
-                  <span style={{ ...s.debtVal, color: '#ef4444', fontWeight: 700 }}>{econ.defaulted_debt_count}</span>
+                  <span style={s.debtLabel}>Активных счетов:</span>
+                  <span style={s.debtVal}>{activeDebtCount}</span>
                 </div>
               )}
               {econ.creditors != null && econ.creditors.length > 0 && (
@@ -519,6 +515,22 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                   <span style={s.debtVal}>{econ.creditors.join(', ')}</span>
                 </div>
               )}
+              {econ.next_due_turn_min != null && (
+                <div style={s.debtRow}>
+                  <span style={s.debtLabel}>Следующий рост:</span>
+                  <span style={s.debtVal}>turn {econ.next_due_turn_min}</span>
+                </div>
+              )}
+              <div style={s.debtRow}>
+                <span style={s.debtLabel}>Ростов долга:</span>
+                <span style={s.debtVal}>{econ.rollover_count_total ?? 0}</span>
+              </div>
+              <div style={s.debtRow}>
+                <span style={s.debtLabel}>Побег от долгов:</span>
+                <span style={{ ...s.debtVal, color: (econ.should_escape_zone_due_to_debt ?? false) ? '#ef4444' : '#10b981' }}>
+                  {(econ.should_escape_zone_due_to_debt ?? false) ? 'yes' : 'no'}
+                </span>
+              </div>
             </Section>
           );
         })()}

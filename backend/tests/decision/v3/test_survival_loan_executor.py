@@ -45,11 +45,11 @@ def test_request_loan_success_creates_debt_and_accounts_receivable() -> None:
     )
     ctx = build_agent_context("bot1", agent, state)
     events = execute_plan_step(ctx, plan, state, 100)
-    assert any(ev.get("event_type") == "debt_created" for ev in events)
+    assert any(ev.get("event_type") == "debt_credit_advanced" for ev in events)
     assert int(agent.get("money") or 0) == 45
     assert int(state["traders"]["trader_1"].get("accounts_receivable") or 0) == 35
     assert int(state["traders"]["trader_1"].get("money") or 0) == 0
-    assert state.get("debt_ledger", {}).get("debts")
+    assert state.get("debt_ledger", {}).get("accounts")
 
 
 def test_request_loan_does_not_require_trader_cash() -> None:
@@ -73,7 +73,7 @@ def test_request_loan_does_not_require_trader_cash() -> None:
         )],
     )
     events = execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100)
-    assert any(ev.get("event_type") == "debt_created" for ev in events)
+    assert any(ev.get("event_type") == "debt_credit_advanced" for ev in events)
     assert int(agent.get("money") or 0) == 45
 
 
@@ -89,8 +89,8 @@ def test_failed_request_loan_does_not_advance_plan_to_trade_buy() -> None:
                     "creditor_id": "trader_1",
                     "creditor_type": "trader",
                     "amount": 1000,
-                    "purpose": "survival_drink",
-                    "item_category": "drink",
+                    "purpose": "survival_weapon",
+                    "item_category": "weapon",
                     "required_price": 1000,
                     "daily_interest_rate": 0.05,
                 },
@@ -233,8 +233,8 @@ def test_active_plan_request_loan_failure_marks_step_failed_and_aborts_or_replan
                         "creditor_id": "trader_1",
                         "creditor_type": "trader",
                         "amount": 1000,  # impossible, should fail
-                        "purpose": "survival_drink",
-                        "item_category": "drink",
+                        "purpose": "survival_weapon",
+                        "item_category": "weapon",
                         "required_price": 1000,
                         "daily_interest_rate": 0.05,
                     },

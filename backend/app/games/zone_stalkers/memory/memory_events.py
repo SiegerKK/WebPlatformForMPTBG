@@ -91,9 +91,12 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     # Regular gameplay memory — deduped within cooldown window.
     "trade_sell_failed": "memory",
     "debt_created": "memory",
+    "debt_credit_advanced": "memory",
     "debt_payment": "memory",
     "debt_repaid": "memory",
+    "debt_rolled_over": "memory",
     "debt_defaulted": "memory_critical",
+    "debt_escape_triggered": "memory_critical",
 
     # Important episodic memory — always written and never discarded.
     "death": "memory_critical",
@@ -233,9 +236,12 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     # Trade failures
     "trade_sell_failed": (LAYER_GOAL, "trade_sell_failed", ("trade", "failure", "cooldown")),
     "debt_created": (LAYER_GOAL, "debt_created", ("economy", "debt", "credit")),
+    "debt_credit_advanced": (LAYER_GOAL, "debt_created", ("economy", "debt", "credit")),
     "debt_payment": (LAYER_GOAL, "debt_payment", ("economy", "debt", "repayment")),
     "debt_repaid": (LAYER_GOAL, "debt_repaid", ("economy", "debt", "repayment")),
+    "debt_rolled_over": (LAYER_GOAL, "debt_rolled_over", ("economy", "debt", "rollover")),
     "debt_defaulted": (LAYER_GOAL, "debt_defaulted", ("economy", "debt", "default")),
+    "debt_escape_triggered": (LAYER_GOAL, "debt_escape_triggered", ("economy", "debt", "escape")),
 
     # PR3 hunt prerequisites (taxonomy only; no hunt logic here)
     "target_seen": (LAYER_SOCIAL, "target_seen", ("target", "tracking", "social")),

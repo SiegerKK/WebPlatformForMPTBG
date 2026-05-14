@@ -10,6 +10,11 @@ from app.games.zone_stalkers.decision.constants import (
     SOFT_REST_THRESHOLD,
 )
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveGenerationContext
+from app.games.zone_stalkers.economy.debts import (
+    DEBT_ESCAPE_THRESHOLD,
+    DEBT_REPAYMENT_KEEP_SURVIVAL_RESERVE,
+    DEBT_REPAYMENT_KEEP_TRAVEL_RESERVE,
+)
 
 
 OBJECTIVE_RESTORE_WATER = "RESTORE_WATER"
@@ -34,6 +39,7 @@ OBJECTIVE_SELL_ARTIFACTS = "SELL_ARTIFACTS"
 OBJECTIVE_HUNT_TARGET = "HUNT_TARGET"
 OBJECTIVE_SEARCH_INFORMATION = "SEARCH_INFORMATION"
 OBJECTIVE_LEAVE_ZONE = "LEAVE_ZONE"
+OBJECTIVE_REPAY_DEBT = "REPAY_DEBT"
 OBJECTIVE_IDLE = "IDLE"
 
 OBJECTIVE_CONTINUE_CURRENT_PLAN = "CONTINUE_CURRENT_PLAN"
@@ -1149,6 +1155,65 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                         },
                     ),
                 )
+
+    economic_state = agent.get("economic_state") if isinstance(agent.get("economic_state"), dict) else {}
+    debt_total = int(economic_state.get("debt_total") or 0)
+    debt_creditors = [str(c) for c in (economic_state.get("creditors") or []) if str(c)]
+    next_due_turn_min = economic_state.get("next_due_turn_min")
+    world_turn_int = int(ctx.world_turn)
+
+    if debt_total >= DEBT_ESCAPE_THRESHOLD:
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_LEAVE_ZONE,
+                source="debt_escape",
+                urgency=0.95,
+                expected_value=0.9,
+                risk=0.15,
+                time_cost=0.35,
+                resource_cost=0.05,
+                confidence=0.95,
+                goal_alignment=0.95,
+                memory_confidence=0.8,
+                reasons=("Долг превысил порог побега",),
+                source_refs=("debt_escape_threshold",),
+                metadata={"is_blocking": True, "reason": "debt_escape_threshold", "debt_total": debt_total},
+            ),
+        )
+
+    if debt_total > 0 and debt_creditors:
+        reserve = DEBT_REPAYMENT_KEEP_SURVIVAL_RESERVE if any(
+            _is_critical_need(immediate.key, float(immediate.urgency))
+            for immediate in need_result.immediate_needs
+        ) else DEBT_REPAYMENT_KEEP_TRAVEL_RESERVE
+        money = int(agent.get("money") or 0)
+        surplus = max(0, money - reserve)
+        near_due = isinstance(next_due_turn_min, (int, float)) and int(next_due_turn_min) - world_turn_int <= 180
+        if surplus >= 10 or near_due:
+            urgency = 0.58
+            if near_due:
+                urgency = max(urgency, 0.72)
+            if debt_total >= 2000:
+                urgency = max(urgency, 0.8)
+            _append_unique(
+                result,
+                Objective(
+                    key=OBJECTIVE_REPAY_DEBT,
+                    source="debt_account",
+                    urgency=_clamp01(urgency),
+                    expected_value=_clamp01(0.45 + min(0.35, debt_total / 4000.0)),
+                    risk=0.05,
+                    time_cost=0.2 if debt_creditors else 0.45,
+                    resource_cost=0.1,
+                    confidence=0.85,
+                    goal_alignment=0.85,
+                    memory_confidence=0.8,
+                    reasons=("Нужно сократить долг до следующего роста",),
+                    source_refs=("debt_repayment",),
+                    metadata={"is_blocking": False, "debt_total": debt_total, "creditors": debt_creditors},
+                ),
+            )
 
     if ctx.active_plan_summary:
         continue_refs, continue_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONTINUE_CURRENT_PLAN)

@@ -35,6 +35,7 @@ STEP_CONFIRM_KILL = "confirm_kill"
 STEP_LEAVE_ZONE = "leave_zone"
 STEP_WAIT = "wait"
 STEP_REQUEST_LOAN = "request_loan"
+STEP_REPAY_DEBT = "repay_debt"
 # Backward-compatible alias kept for older traces/tests.
 STEP_TAKE_SURVIVAL_LOAN = STEP_REQUEST_LOAN
 

@@ -28,6 +28,7 @@ INTENT_TRADE = "trade"
 INTENT_LOOT = "loot"
 INTENT_EXPLORE = "explore"
 INTENT_SELL_ARTIFACTS = "sell_artifacts"
+INTENT_REPAY_DEBT = "repay_debt"
 
 # Goal-directed
 INTENT_GET_RICH = "get_rich"
@@ -57,6 +58,7 @@ ALL_INTENTS: tuple[str, ...] = (
     INTENT_REST,
     INTENT_RESUPPLY,
     INTENT_SELL_ARTIFACTS,
+    INTENT_REPAY_DEBT,
     INTENT_TRADE,
     INTENT_UPGRADE_EQUIPMENT,
     INTENT_LOOT,

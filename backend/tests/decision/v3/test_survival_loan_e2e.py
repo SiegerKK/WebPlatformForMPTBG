@@ -73,7 +73,7 @@ def test_e2e_poor_stalker_survives_at_trader_by_taking_survival_credit() -> None
     agent = state["agents"]["bot1"]
     assert bool(agent.get("is_alive", True)) is True
     assert int(agent.get("thirst") or 0) <= 70
-    assert state.get("debt_ledger", {}).get("debts")
+    assert state.get("debt_ledger", {}).get("accounts")
     assert int(state["traders"]["trader_1"].get("accounts_receivable") or 0) > 0
 
     # Focused regression: avoid repeated impossible no_items_sold sell loops.
