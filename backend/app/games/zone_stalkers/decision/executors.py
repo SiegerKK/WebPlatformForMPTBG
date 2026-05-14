@@ -831,20 +831,38 @@ def _exec_loot_corpse(
     from app.games.zone_stalkers.rules.tick_rules import _add_memory
 
     _ = ctx
-    location_id = str(agent.get("location_id") or step.payload.get("location_id") or "")
+    location_id = str(agent.get("location_id") or "")
     corpse_id = str(step.payload.get("corpse_id") or "")
     take_money = bool(step.payload.get("take_money", True))
     take_all = bool(step.payload.get("take_all", False))
     max_items = int(step.payload.get("max_items") or 0)
-    if not location_id:
+    def _record_loot_failure(reason: str) -> list[dict[str, Any]]:
+        _add_memory(
+            agent,
+            world_turn,
+            state,
+            "action",
+            "❌ Не удалось обыскать труп",
+            {
+                "action_kind": "loot_corpse_failed",
+                "reason": reason,
+                "corpse_id": corpse_id or None,
+                "location_id": location_id or None,
+            },
+            summary=f"Обыск трупа сорвался: {reason}.",
+        )
+        step.payload["_loot_step_outcome"] = "failed"
+        step.payload["_loot_failed_reason"] = reason
         agent["action_used"] = True
         return []
+
+    if not location_id:
+        return _record_loot_failure("no_valid_corpse")
 
     loc = state.get("locations", {}).get(location_id, {})
     corpses = loc.get("corpses") if isinstance(loc, dict) else None
     if not isinstance(corpses, list):
-        agent["action_used"] = True
-        return []
+        return _record_loot_failure("no_valid_corpse")
 
     def _is_important(item: dict[str, Any]) -> bool:
         item_type = str(item.get("type") or "")
@@ -876,8 +894,7 @@ def _exec_loot_corpse(
         target_corpse = corpse
         break
     if target_corpse is None:
-        agent["action_used"] = True
-        return []
+        return _record_loot_failure("no_valid_corpse")
 
     corpse_inventory = target_corpse.get("inventory")
     if not isinstance(corpse_inventory, list):

@@ -158,6 +158,16 @@ interface StalkerAgent {
     objective_key?: string | null;
     objective_score?: number | null;
     objective_reason?: string | null;
+    plan_fallback?: {
+      active: boolean;
+      from_objective_key?: string | null;
+      from_intent?: string | null;
+      to_intent?: string | null;
+      reason?: string | null;
+      blocked_category?: string | null;
+      agent_money?: number | null;
+      material_threshold?: number | null;
+    } | null;
     hunt_target_belief?: {
       target_id: string;
       is_known: boolean;

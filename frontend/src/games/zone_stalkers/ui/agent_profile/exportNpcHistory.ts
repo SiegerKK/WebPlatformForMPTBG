@@ -143,7 +143,7 @@ export type CompactNpcHistoryExport = {
 export type CompactTimelineEntry = {
   turn: number;
   time_label: string;
-  category: 'decision' | 'action' | 'observation' | 'system';
+  category: 'decision' | 'action' | 'observation' | 'system' | 'semantic_summary';
   title: string;
   summary?: string;
   objective_key?: string;
@@ -315,7 +315,7 @@ export const toCompactTimelineEntry = (m: MemEntry) => {
         ? { world_day: m.world_day, world_hour: m.world_hour ?? 0, world_minute: m.world_minute ?? 0 }
         : undefined,
     ),
-    category: m.type as 'decision' | 'action' | 'observation' | 'system',
+    category: (typeof effects.category === 'string' ? effects.category : m.type) as 'decision' | 'action' | 'observation' | 'system' | 'semantic_summary',
     title: m.title,
     summary: m.summary,
     action_kind: actionKind,
@@ -415,23 +415,33 @@ const buildStoryEventsFromMemoryV3 = (agent: AgentForProfile): MemEntry[] => {
   const memoryDerived: MemEntry[] = records
     .slice()
     .sort((a, b) => Number(a.created_turn ?? 0) - Number(b.created_turn ?? 0))
-    .map((rec) => ({
-      world_turn: Number(rec.created_turn ?? 0),
-      type:
-        typeof (rec.details as Record<string, unknown> | undefined)?.memory_type === 'string'
-          ? ((rec.details as Record<string, unknown>).memory_type as string)
-          : 'observation',
-      title: (rec.summary as string | undefined) || (rec.kind as string),
-      summary: rec.summary as string | undefined,
-      effects: {
-        ...((rec.details as Record<string, unknown> | undefined) ?? {}),
-        action_kind:
-          typeof (rec.details as Record<string, unknown> | undefined)?.action_kind === 'string'
-            ? ((rec.details as Record<string, unknown>).action_kind as string)
-            : (rec.kind as string),
-        location_id: rec.location_id as string | undefined,
-      },
-    }));
+    .map((rec) => {
+      const rawDetails = ((rec.details as Record<string, unknown> | undefined) ?? {});
+      const actionKind = typeof rawDetails.action_kind === 'string' ? rawDetails.action_kind : (rec.kind as string);
+      const isSemanticSummary = (rec.layer as string | undefined) === 'semantic' || actionKind.startsWith('semantic_');
+      return {
+        world_turn: Number(rec.created_turn ?? 0),
+        type: isSemanticSummary
+          ? 'system'
+          : typeof rawDetails.memory_type === 'string'
+            ? (rawDetails.memory_type as string)
+            : 'observation',
+        title: (rec.summary as string | undefined) || (rec.kind as string),
+        summary: rec.summary as string | undefined,
+        effects: {
+          ...rawDetails,
+          action_kind: actionKind,
+          category: isSemanticSummary ? 'semantic_summary' : rawDetails.category,
+          timeline_visibility: isSemanticSummary ? 'summary_only' : rawDetails.timeline_visibility,
+          last_updated_turn: isSemanticSummary
+            ? Number(rawDetails.last_updated_turn ?? rec.last_accessed_turn ?? rec.created_turn ?? 0)
+            : rawDetails.last_updated_turn,
+          turn_start: isSemanticSummary ? Number(rawDetails.turn_start ?? rawDetails.range_start_turn ?? rawDetails.first_seen_turn ?? rec.created_turn ?? 0) : rawDetails.turn_start,
+          turn_end: isSemanticSummary ? Number(rawDetails.turn_end ?? rawDetails.range_end_turn ?? rawDetails.last_seen_turn ?? rec.last_accessed_turn ?? rec.created_turn ?? 0) : rawDetails.turn_end,
+          location_id: rec.location_id as string | undefined,
+        },
+      };
+    });
 
   const traceDerived: MemEntry[] = (agent.brain_trace?.events ?? []).map((event) => ({
     world_turn: Number(event.turn ?? 0),

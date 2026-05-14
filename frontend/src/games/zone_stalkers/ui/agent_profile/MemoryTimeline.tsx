@@ -47,6 +47,12 @@ export function MemoryTimeline({ memory }: MemoryTimelineProps) {
           );
         }
 
+        if (effects.category === 'semantic_summary') {
+          return (
+            <SemanticSummaryEntry key={i} m={m} effects={effects} timeLabel={timeLabel} />
+          );
+        }
+
         // Default rendering
         return (
           <DefaultEntry key={i} m={m} timeLabel={timeLabel} />
@@ -146,6 +152,37 @@ function V2DecisionEntry({
       {intentScore != null && (
         <div style={st.objScore}>score: {pct(intentScore)}</div>
       )}
+      {!!m.summary && <div style={st.summary}>{m.summary}</div>}
+    </div>
+  );
+}
+
+
+function SemanticSummaryEntry({
+  m,
+  effects,
+  timeLabel,
+}: {
+  m: MemEntry;
+  effects: Record<string, unknown>;
+  timeLabel: string;
+}) {
+  const actionKind = typeof effects.action_kind === 'string' ? effects.action_kind : 'semantic_summary';
+  const turnStart = typeof effects.turn_start === 'number' ? effects.turn_start : null;
+  const turnEnd = typeof effects.turn_end === 'number' ? effects.turn_end : null;
+  const lastUpdatedTurn = typeof effects.last_updated_turn === 'number' ? effects.last_updated_turn : null;
+  const rangeLabel = turnStart != null && turnEnd != null && turnEnd >= turnStart
+    ? `Ходы ${turnStart}-${turnEnd}`
+    : lastUpdatedTurn != null
+    ? `Обновлено на ходу ${lastUpdatedTurn}`
+    : timeLabel;
+  return (
+    <div style={{ ...st.entry, borderLeft: '3px solid #22c55e' }}>
+      <div style={st.meta}>
+        <span style={{ ...st.type, color: '#4ade80' }}>🧾 semantic summary · {actionKind}</span>
+        <span style={st.when}>{rangeLabel}</span>
+      </div>
+      <div style={st.title}>{m.title}</div>
       {!!m.summary && <div style={st.summary}>{m.summary}</div>}
     </div>
   );

@@ -172,10 +172,21 @@ export interface AgentForProfile {
     objective_key?: string | null;
     objective_score?: number | null;
     objective_reason?: string | null;
+    plan_intent?: string | null;
     intent_kind?: string | null;
     intent_score?: number | null;
     intent_reason?: string | null;
     adapter_intent?: { kind?: string | null; score?: number | null; reason?: string | null } | null;
+    plan_fallback?: {
+      active: boolean;
+      from_objective_key?: string | null;
+      from_intent?: string | null;
+      to_intent?: string | null;
+      reason?: string | null;
+      blocked_category?: string | null;
+      agent_money?: number | null;
+      material_threshold?: number | null;
+    } | null;
     hunt_target_belief?: {
       target_id: string;
       is_known: boolean;
@@ -698,6 +709,34 @@ export default function AgentProfileModal({ agent, locationName, onClose, locati
                     ?? agent.brain_v3_context?.intent_kind}
                 </span>
               </div>
+            )}
+            {agent.brain_v3_context?.plan_fallback?.active && (
+              <>
+                <div style={s.goalRow}>
+                  <span style={s.goalLabel}>Эффективный план:</span>
+                  <span style={{ ...s.goalVal, color: '#c4b5fd' }}>
+                    {(agent.brain_v3_context.plan_fallback.to_intent ?? agent.brain_v3_context.plan_intent ?? 'get_rich').toUpperCase()} fallback
+                  </span>
+                </div>
+                {agent.brain_v3_context.plan_fallback.reason && (
+                  <div style={s.goalRow}>
+                    <span style={s.goalLabel}>Причина fallback:</span>
+                    <span style={{ ...s.goalVal, color: '#cbd5f5' }}>{agent.brain_v3_context.plan_fallback.reason}</span>
+                  </div>
+                )}
+                {agent.brain_v3_context.plan_fallback.from_objective_key && (
+                  <div style={s.goalRow}>
+                    <span style={s.goalLabel}>Исходная objective:</span>
+                    <span style={s.goalVal}>{agent.brain_v3_context.plan_fallback.from_objective_key}</span>
+                  </div>
+                )}
+                {agent.brain_v3_context.plan_fallback.blocked_category && (
+                  <div style={s.goalRow}>
+                    <span style={s.goalLabel}>Отложенная категория:</span>
+                    <span style={s.goalVal}>{agent.brain_v3_context.plan_fallback.blocked_category}</span>
+                  </div>
+                )}
+              </>
             )}
             {agent.global_goal === 'kill_stalker' && agent.kill_target_id && (
               <div style={{ color: '#f87171', fontSize: '0.75rem', marginTop: 2 }}>

@@ -424,9 +424,41 @@ class TestHuntObjectiveGeneration:
     def test_engage_stage_when_target_co_located_and_ready(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_a")
-        objectives = generate_objectives(_make_ctx(agent, state))
+        ctx = _make_ctx(agent, state)
+        assert ctx.target_belief is not None
+        assert ctx.target_belief.visible_now is True
+        assert ctx.target_belief.co_located is True
+        assert ctx.target_belief.best_location_id == "loc_a"
+        objectives = generate_objectives(ctx)
         keys = {o.key for o in objectives}
         assert OBJECTIVE_ENGAGE_TARGET in keys
+
+    def test_visible_kill_target_beats_normal_resupply(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            location_id="loc_a",
+            money=0,
+            has_weapon=True,
+            has_armor=True,
+            has_ammo=True,
+        )
+        state = _make_state_with_target(agent=agent, target_location_id="loc_a")
+        objectives = generate_objectives(_make_ctx(agent, state))
+        decision = choose_objective(objectives, personality=agent)
+        assert decision.selected.key == OBJECTIVE_ENGAGE_TARGET
+
+    def test_critical_survival_can_override_visible_kill_target(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            location_id="loc_a",
+            thirst=100,
+        )
+        state = _make_state_with_target(agent=agent, target_location_id="loc_a")
+        objectives = generate_objectives(_make_ctx(agent, state))
+        decision = choose_objective(objectives, personality=agent)
+        assert decision.selected.key != OBJECTIVE_ENGAGE_TARGET
 
     def test_engage_blocked_by_no_weapon_when_co_located(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1",

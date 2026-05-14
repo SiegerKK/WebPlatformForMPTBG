@@ -87,6 +87,53 @@ from app.games.zone_stalkers.economy.debts import (
 
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD = 50
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_DRINK = 40
+
+
+_FALLBACK_PAYLOAD_KEYS: tuple[str, ...] = (
+    "fallback_from_intent",
+    "fallback_from_objective_key",
+    "fallback_to_intent",
+    "fallback_reason",
+    "blocked_resupply_category",
+    "agent_money",
+    "material_threshold",
+)
+
+
+def _build_get_rich_fallback_intent(
+    *,
+    agent: dict[str, Any],
+    source_intent: Intent,
+    world_turn: int,
+    fallback_reason: str,
+    blocked_resupply_category: str | None,
+    reason: str,
+) -> Intent:
+    source_metadata = source_intent.metadata if isinstance(source_intent.metadata, dict) else {}
+    return Intent(
+        kind=INTENT_GET_RICH,
+        score=0.5,
+        source_goal="get_rich",
+        reason=reason,
+        created_turn=world_turn,
+        metadata={
+            "fallback_from_intent": source_intent.kind,
+            "fallback_from_objective_key": source_metadata.get("objective_key"),
+            "fallback_to_intent": INTENT_GET_RICH,
+            "fallback_reason": fallback_reason,
+            "blocked_resupply_category": blocked_resupply_category,
+            "agent_money": int(agent.get("money") or 0),
+            "material_threshold": int(agent.get("material_threshold") or 0),
+        },
+    )
+
+
+def _apply_plan_fallback_payload(payload: dict[str, Any], intent: Intent) -> None:
+    metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
+    for key in _FALLBACK_PAYLOAD_KEYS:
+        value = metadata.get(key)
+        if value is not None:
+            payload[key] = value
 def build_plan(
     ctx: AgentContext,
     intent: Intent,
@@ -1344,14 +1391,17 @@ def _plan_resupply(
             )
 
             if not _is_actionable:
-                _phase1_fb = Intent(
-                    kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                _phase1_fb = _build_get_rich_fallback_intent(
+                    agent=agent,
+                    source_intent=intent,
+                    world_turn=world_turn,
+                    fallback_reason="resupply_not_actionable",
+                    blocked_resupply_category=_buy_category,
                     reason=(
                         "Пополнение отложено политикой "
                         f"({_blocked_by or 'phase_gate'}). "
                         "Перехожу к сбору артефактов."
                     ),
-                    created_turn=world_turn,
                 )
                 return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
 
@@ -1367,14 +1417,17 @@ def _plan_resupply(
                     and _p1_threshold > 0
                     and _p1_money < _p1_threshold
                 ):
-                    _phase1_fb = Intent(
-                        kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                    _phase1_fb = _build_get_rich_fallback_intent(
+                        agent=agent,
+                        source_intent=intent,
+                        world_turn=world_turn,
+                        fallback_reason="phase1_material_threshold_gate",
+                        blocked_resupply_category=_buy_category,
                         reason=(
                             "Phase-1: пополнение запасов желательно, "
                             "но поход к трейдеру отложен до достижения порога богатства. "
                             "Перехожу к сбору артефактов."
                         ),
-                        created_turn=world_turn,
                     )
                     return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
                 return Plan(
@@ -1394,13 +1447,16 @@ def _plan_resupply(
                     confidence=0.8, created_turn=world_turn,
                 )
 
-            get_rich_intent = Intent(
-                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+            get_rich_intent = _build_get_rich_fallback_intent(
+                agent=agent,
+                source_intent=intent,
+                world_turn=world_turn,
+                fallback_reason="no_trader_known",
+                blocked_resupply_category=_buy_category,
                 reason=(
                     "Нужен resupply, но покупка сейчас невозможна/нецелесообразна. "
                     "Перехожу к fallback_get_money через поиск артефактов."
                 ),
-                created_turn=world_turn,
             )
             return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
 
@@ -1424,12 +1480,13 @@ def _plan_resupply(
                 f"forced_resupply_category={forced_category} недоступна сейчас. "
                 "Перехожу к fallback_get_money."
             )
-            get_rich_intent = Intent(
-                kind=INTENT_GET_RICH,
-                score=0.5,
-                source_goal="get_rich",
+            get_rich_intent = _build_get_rich_fallback_intent(
+                agent=agent,
+                source_intent=intent,
+                world_turn=world_turn,
+                fallback_reason="forced_resupply_category_unavailable",
+                blocked_resupply_category=forced_category,
                 reason=fallback_reason,
-                created_turn=world_turn,
             )
             return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
     else:
@@ -1476,16 +1533,17 @@ def _plan_resupply(
 
     _dominant_actionable, _dominant_blocked_by = is_item_need_actionable(agent, dominant.key)
     if not _dominant_actionable:
-        _phase_fb = Intent(
-            kind=INTENT_GET_RICH,
-            score=0.5,
-            source_goal="get_rich",
+        _phase_fb = _build_get_rich_fallback_intent(
+            agent=agent,
+            source_intent=intent,
+            world_turn=world_turn,
+            fallback_reason="resupply_not_actionable",
+            blocked_resupply_category=buy_category,
             reason=(
                 "Пополнение отложено политикой "
                 f"({_dominant_blocked_by or 'phase_gate'}). "
                 "Перехожу к сбору артефактов."
             ),
-            created_turn=world_turn,
         )
         return _plan_get_rich(ctx, _phase_fb, state, world_turn, need_result)
 
@@ -1577,14 +1635,17 @@ def _plan_resupply(
             and _p1r2_threshold > 0
             and _p1r2_money < _p1r2_threshold
         ):
-            _p1r2_intent = Intent(
-                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+            _p1r2_intent = _build_get_rich_fallback_intent(
+                agent=agent,
+                source_intent=intent,
+                world_turn=world_turn,
+                fallback_reason="phase1_material_threshold_gate",
+                blocked_resupply_category=buy_category,
                 reason=(
                     "Phase-1: пополнение запасов желательно, "
                     "но поход к трейдеру отложен до достижения порога богатства. "
                     "Перехожу к сбору артефактов."
                 ),
-                created_turn=world_turn,
             )
             return _plan_get_rich(ctx, _p1r2_intent, state, world_turn, need_result)
         buy_payload: dict[str, Any] = {
@@ -1613,15 +1674,20 @@ def _plan_resupply(
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
 
     # No trader known or cannot afford and no liquidity.
-    get_rich_intent = Intent(
-        kind=INTENT_GET_RICH,
-        score=0.5,
-        source_goal="get_rich",
+    get_rich_intent = _build_get_rich_fallback_intent(
+        agent=agent,
+        source_intent=intent,
+        world_turn=world_turn,
+        fallback_reason=(
+            "no_trader_known"
+            if not trader_loc
+            else "resupply_unaffordable_no_liquidity"
+        ),
+        blocked_resupply_category=buy_category,
         reason=(
             "Нужен resupply, но покупка сейчас невозможна/нецелесообразна. "
             "Перехожу к fallback_get_money через поиск артефактов."
         ),
-        created_turn=world_turn,
     )
     return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
 
@@ -1743,11 +1809,8 @@ def _plan_get_rich(
         used_for="get_rich_sell_artifacts",
     )
     agent_loc = agent.get("location_id", "")
-    fallback_reason = (
-        intent.reason
-        if isinstance(intent.reason, str) and "fallback_get_money" in intent.reason
-        else None
-    )
+    fallback_metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
+    fallback_reason = fallback_metadata.get("fallback_reason") if isinstance(fallback_metadata.get("fallback_reason"), str) else None
     objective_key = str((intent.metadata or {}).get("objective_key") or "FIND_ARTIFACTS")
 
     if objective_key == "GET_MONEY_FOR_RESUPPLY":
@@ -1768,8 +1831,7 @@ def _plan_get_rich(
     # 1. Sell artifacts
     if has_artifacts and trader_loc:
         sell_payload: dict[str, Any] = {"item_category": "artifact"}
-        if fallback_reason:
-            sell_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(sell_payload, intent)
         if trader_loc == agent_loc:
             return Plan(
                 intent_kind=intent.kind,
@@ -1780,8 +1842,7 @@ def _plan_get_rich(
             "target_id": trader_loc,
             "reason": "sell_artifacts_get_rich",
         }
-        if fallback_reason:
-            travel_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(travel_payload, intent)
         return Plan(
             intent_kind=intent.kind,
             steps=[
@@ -1810,8 +1871,7 @@ def _plan_get_rich(
             "target_id": agent_loc,
             "reason": "get_rich_explore_here",
         }
-        if fallback_reason:
-            explore_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(explore_payload, intent)
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
@@ -1857,8 +1917,7 @@ def _plan_get_rich(
             "target_id": best_loc,
             "reason": "get_rich_travel_to_anomaly",
         }
-        if fallback_reason:
-            travel_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(travel_payload, intent)
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(

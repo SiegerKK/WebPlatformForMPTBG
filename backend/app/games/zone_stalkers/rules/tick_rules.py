@@ -6379,6 +6379,22 @@ def _run_npc_brain_v3_decision_inner(
     )
     _selected_combat_ready = _selected_objective_metadata.get("combat_ready")
     _selected_not_attacking_reasons = list(_selected_objective_metadata.get("not_attacking_reasons") or [])
+    _intent_metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
+    _plan_step_0_payload = plan.steps[0].payload if plan.steps and isinstance(plan.steps[0].payload, dict) else {}
+    _plan_fallback_active = bool(
+        _intent_metadata.get("fallback_reason")
+        or _plan_step_0_payload.get("fallback_reason")
+    )
+    _plan_fallback = {
+        "active": _plan_fallback_active,
+        "from_objective_key": _intent_metadata.get("fallback_from_objective_key") or _plan_step_0_payload.get("fallback_from_objective_key"),
+        "from_intent": _intent_metadata.get("fallback_from_intent") or _plan_step_0_payload.get("fallback_from_intent"),
+        "to_intent": _intent_metadata.get("fallback_to_intent") or _plan_step_0_payload.get("fallback_to_intent") or plan.intent_kind,
+        "reason": _intent_metadata.get("fallback_reason") or _plan_step_0_payload.get("fallback_reason"),
+        "blocked_category": _intent_metadata.get("blocked_resupply_category") or _plan_step_0_payload.get("blocked_resupply_category"),
+        "agent_money": _intent_metadata.get("agent_money") or _plan_step_0_payload.get("agent_money"),
+        "material_threshold": _intent_metadata.get("material_threshold") or _plan_step_0_payload.get("material_threshold"),
+    } if _plan_fallback_active else None
 
     # Store context for observability / debug
     agent.pop("_v2_context", None)
@@ -6396,6 +6412,7 @@ def _run_npc_brain_v3_decision_inner(
         "plan_steps": len(plan.steps),
         "plan_confidence": round(plan.confidence, 3),
         "plan_step_0": plan.steps[0].kind if plan.steps else None,
+        "plan_fallback": _plan_fallback,
         "objective_key": _selected_objective_key,
         "objective_score": _selected_objective_score,
         "objective_reason": "; ".join(selected_objective.reasons) if selected_objective and selected_objective.reasons else (intent.reason or None),
