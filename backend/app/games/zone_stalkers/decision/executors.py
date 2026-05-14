@@ -342,16 +342,44 @@ def _exec_trade_buy(
     # Upgrade categories: buy the best upgrade target and immediately equip it.
     if category in ("weapon_upgrade", "armor_upgrade"):
         slot = "weapon" if category == "weapon_upgrade" else "armor"
-        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
+        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, ITEM_TYPES as _ITEM_TYPES
         from app.games.zone_stalkers.rules.tick_rules import (
             _find_upgrade_target, _bot_equip_from_inventory,
         )
+        from app.games.zone_stalkers.decision.constants import WEAPON_CLASS_RANK, ARMOR_CLASS_RANK
         item_types_for_slot = WEAPON_ITEM_TYPES if slot == "weapon" else ARMOR_ITEM_TYPES
         agent_risk = float(agent.get("risk_tolerance", 0.5))
         agent_money = agent.get("money", 0)
         current = agent.get("equipment", {}).get(slot)
         current_type = current.get("type") if isinstance(current, dict) else None
-        upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
+
+        # Honor min class requirement from hunt preparation payload
+        min_weapon_class = step.payload.get("min_weapon_class")
+        min_armor_class = step.payload.get("min_armor_class")
+        min_required_rank = None
+        if slot == "weapon" and min_weapon_class:
+            min_required_rank = WEAPON_CLASS_RANK.get(str(min_weapon_class), 0)
+        elif slot == "armor" and min_armor_class:
+            min_required_rank = ARMOR_CLASS_RANK.get(str(min_armor_class), 0)
+
+        if min_required_rank is not None and min_required_rank > 0:
+            # Filter to items that meet the minimum class requirement AND are affordable
+            class_rank_map = WEAPON_CLASS_RANK if slot == "weapon" else ARMOR_CLASS_RANK
+            candidates = [
+                t for t in item_types_for_slot
+                if class_rank_map.get(t, 0) >= min_required_rank
+                and t in _ITEM_TYPES
+                and agent_money >= int(_ITEM_TYPES[t].get("value", 0) * 1.5)
+            ]
+            if not candidates:
+                # No affordable item meeting requirements → trade_buy_failed (return empty but don't equip)
+                return []
+            # Sort by class rank first, then by price (buy cheapest that meets requirement)
+            candidates.sort(key=lambda t: (class_rank_map.get(t, 0), int(_ITEM_TYPES[t].get("value", 0) * 1.5)))
+            upgrade_key: str | None = candidates[0]
+        else:
+            upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
+
         if upgrade_key is None:
             return []
         bought = _bot_buy_from_trader(agent_id, agent, frozenset([upgrade_key]), state, world_turn,

@@ -1012,6 +1012,13 @@ def _plan_seek_consumable(
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
 
     if trader_loc and trader_loc == agent_loc:
+        compatible_types_for_afford = set(item_types)
+        afford_soft = evaluate_affordability(
+            agent=agent,
+            trader={},
+            category=category,
+            compatible_item_types=compatible_types_for_afford,
+        )
         buy_payload: dict[str, Any] = {
             "item_category": category,
             "reason": f"buy_{category}_stock",
@@ -1026,15 +1033,86 @@ def _plan_seek_consumable(
                 else {}
             ),
         }
-        return Plan(
-            intent_kind=intent.kind,
-            steps=[PlanStep(
-                STEP_TRADE_BUY_ITEM,
-                buy_payload,
-                interruptible=False,
-            )],
-            interruptible=False, confidence=1.0, created_turn=world_turn,
+        if afford_soft.can_buy_now:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    STEP_TRADE_BUY_ITEM,
+                    buy_payload,
+                    interruptible=False,
+                )],
+                interruptible=False, confidence=1.0, created_turn=world_turn,
+            )
+        # Cannot afford — try selling, then loan for survival categories
+        liquidity_opts_soft = find_liquidity_options(
+            agent=agent,
+            immediate_needs=list(need_result.immediate_needs) if need_result else [],
+            item_needs=list(need_result.item_needs) if need_result else evaluate_item_needs(ctx, state),
         )
+        sellable_soft = next((o for o in liquidity_opts_soft if o.safety == "safe"), None)
+        if sellable_soft is not None:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(STEP_TRADE_SELL_ITEM,
+                             {"item_category": "any_sellable", "reason": f"fund_{category}",
+                              "required_price": afford_soft.required_price},
+                             interruptible=False),
+                    PlanStep(STEP_TRADE_BUY_ITEM, buy_payload, interruptible=False),
+                ],
+                interruptible=False, confidence=0.85, created_turn=world_turn,
+            )
+        # No sellable — try survival credit only for immediate survival needs
+        if category in ("food", "drink", "medical"):
+            trader_npc_soft = _find_trader_npc_at_location(trader_loc, state)
+            required_price_soft = int(afford_soft.required_price or 0)
+            loan_amt_soft = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price_soft - int(agent.get("money") or 0)))
+            if trader_npc_soft is not None and loan_amt_soft > 0:
+                ok_loan_soft, _ = can_request_survival_loan(
+                    state=state,
+                    debtor=agent,
+                    creditor=trader_npc_soft,
+                    creditor_type="trader",
+                    item_category=category,
+                    required_price=required_price_soft,
+                    world_turn=world_turn,
+                )
+                if ok_loan_soft:
+                    loan_step_soft = _build_survival_loan_payload(
+                        agent=agent,
+                        trader_npc=trader_npc_soft,
+                        item_category=category,
+                        required_price=required_price_soft,
+                        amount=loan_amt_soft,
+                    )
+                    consume_type = afford_soft.cheapest_viable_item_type
+                    steps_soft = [
+                        PlanStep(STEP_REQUEST_LOAN, loan_step_soft, interruptible=False),
+                        PlanStep(STEP_TRADE_BUY_ITEM,
+                                 {**buy_payload, "reason": f"buy_{category}_survival_credit"},
+                                 interruptible=False),
+                    ]
+                    if consume_type:
+                        steps_soft.append(PlanStep(
+                            STEP_CONSUME_ITEM,
+                            {"item_type": consume_type, "reason": f"need_{category}"},
+                            interruptible=False,
+                        ))
+                    return Plan(
+                        intent_kind=intent.kind,
+                        steps=steps_soft,
+                        interruptible=False, confidence=0.75, created_turn=world_turn,
+                    )
+        # Cannot afford and no loan/sell path → fall through to get_rich
+        get_rich_soft_intent = _build_get_rich_fallback_intent(
+            agent=agent,
+            source_intent=intent,
+            world_turn=world_turn,
+            fallback_reason="soft_restore_unaffordable",
+            blocked_resupply_category=category,
+            reason=f"Нет денег на {category} у трейдера. Перехожу к сбору ресурсов.",
+        )
+        return _plan_get_rich(ctx, get_rich_soft_intent, state, world_turn, need_result)
 
     if trader_loc and trader_loc != agent_loc:
         buy_payload: dict[str, Any] = {
@@ -1291,12 +1369,187 @@ def _resupply_need_key_from_category(category: str | None) -> str | None:
     }.get(str(category).strip().lower())
 
 
+def _plan_prepare_for_hunt(
+    ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
+    need_result: NeedEvaluationResult | None = None
+) -> Optional[Plan]:
+    """Plan specifically for PREPARE_FOR_HUNT objective: buy the actual missing equipment."""
+    from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+    from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
+
+    agent = ctx.self_state
+    agent_loc = agent.get("location_id", "")
+    meta = intent.metadata if isinstance(intent.metadata, dict) else {}
+    required_hunt_equipment = meta.get("required_hunt_equipment") or {}
+    missing = list(required_hunt_equipment.get("missing_requirements") or [])
+    estimated_money_needed = int(meta.get("estimated_money_needed_for_advantage") or 0)
+
+    # If there are no specific missing requirements, fall back to generic resupply
+    if not missing:
+        return None
+
+    # Determine buy category from priority: weapon_upgrade > armor_upgrade > ammo > medical
+    buy_category: str | None = None
+    for req in ("weapon_upgrade", "armor_upgrade", "ammo_resupply", "medicine_resupply"):
+        if req in missing:
+            if req == "weapon_upgrade":
+                buy_category = "weapon_upgrade"
+            elif req == "armor_upgrade":
+                buy_category = "armor_upgrade"
+            elif req == "ammo_resupply":
+                buy_category = "ammo"
+            elif req == "medicine_resupply":
+                buy_category = "medical"
+            break
+
+    if buy_category is None:
+        return None
+
+    trader_loc = _nearest_trader_location(ctx, state)
+    agent_money = int(agent.get("money") or 0)
+
+    # Determine required class for the buy payload
+    buy_payload: dict[str, Any] = {
+        "item_category": buy_category,
+        "reason": "prepare_hunt_equipment",
+    }
+    if buy_category == "weapon_upgrade":
+        min_class = required_hunt_equipment.get("weapon_min_class", "rifle")
+        buy_payload["min_weapon_class"] = min_class
+        buy_payload["target_weapon_class"] = meta.get("equipment_advantage", {}).get("target_weapon_class") if isinstance(meta.get("equipment_advantage"), dict) else None
+    elif buy_category == "armor_upgrade":
+        min_class = required_hunt_equipment.get("armor_min_class", "medium")
+        buy_payload["min_armor_class"] = min_class
+    elif buy_category == "ammo":
+        min_count = required_hunt_equipment.get("ammo_min_count", 20)
+        buy_payload["buy_mode"] = "hunt_ammo_resupply"
+        buy_payload["min_count"] = min_count
+
+    # If not enough money, route to get_rich
+    if agent_money < estimated_money_needed and estimated_money_needed > 0:
+        get_rich_intent = _build_get_rich_fallback_intent(
+            agent=agent,
+            source_intent=intent,
+            world_turn=world_turn,
+            fallback_reason="hunt_preparation_no_money",
+            blocked_resupply_category=buy_category,
+            reason=(
+                f"Нужна подготовка к охоте: {', '.join(missing)}. "
+                f"Не хватает денег (нужно ~{estimated_money_needed}). "
+                "Перехожу к добыче денег."
+            ),
+        )
+        return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+
+    # Agent at trader: try buying directly
+    if trader_loc and trader_loc == agent_loc:
+        afford = evaluate_affordability(
+            agent=agent,
+            trader={},
+            category=buy_category,
+            compatible_item_types=set(WEAPON_ITEM_TYPES) if buy_category == "weapon_upgrade" else (
+                set(ARMOR_ITEM_TYPES) if buy_category == "armor_upgrade" else None
+            ),
+        )
+        if afford.can_buy_now:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[PlanStep(
+                    STEP_TRADE_BUY_ITEM,
+                    buy_payload,
+                    interruptible=False,
+                )],
+                confidence=0.85,
+                created_turn=world_turn,
+            )
+        # Not affordable now → get rich first
+        get_rich_intent = _build_get_rich_fallback_intent(
+            agent=agent,
+            source_intent=intent,
+            world_turn=world_turn,
+            fallback_reason="hunt_preparation_no_money",
+            blocked_resupply_category=buy_category,
+            reason=(
+                f"Нужна подготовка к охоте: {', '.join(missing)}. "
+                "Не хватает денег на покупку снаряжения. Перехожу к добыче денег."
+            ),
+        )
+        return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+
+    # Trader not co-located: travel to trader
+    if trader_loc and trader_loc != agent_loc:
+        afford = evaluate_affordability(
+            agent=agent,
+            trader={},
+            category=buy_category,
+            compatible_item_types=set(WEAPON_ITEM_TYPES) if buy_category == "weapon_upgrade" else (
+                set(ARMOR_ITEM_TYPES) if buy_category == "armor_upgrade" else None
+            ),
+        )
+        if afford.can_buy_now:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[
+                    PlanStep(
+                        STEP_TRAVEL_TO_LOCATION,
+                        {"target_id": trader_loc, "reason": "prepare_hunt_equipment"},
+                        expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+                    ),
+                    PlanStep(
+                        STEP_TRADE_BUY_ITEM,
+                        buy_payload,
+                        interruptible=False,
+                    ),
+                ],
+                confidence=0.7,
+                created_turn=world_turn,
+            )
+        # Not affordable: get rich first
+        get_rich_intent = _build_get_rich_fallback_intent(
+            agent=agent,
+            source_intent=intent,
+            world_turn=world_turn,
+            fallback_reason="hunt_preparation_no_money",
+            blocked_resupply_category=buy_category,
+            reason=(
+                f"Нужна подготовка к охоте: {', '.join(missing)}. "
+                "Не хватает денег. Перехожу к добыче денег."
+            ),
+        )
+        return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+
+    # No trader known
+    get_rich_intent = _build_get_rich_fallback_intent(
+        agent=agent,
+        source_intent=intent,
+        world_turn=world_turn,
+        fallback_reason="no_trader_for_hunt_prep",
+        blocked_resupply_category=buy_category,
+        reason=(
+            f"Нужна подготовка к охоте: {', '.join(missing)}, "
+            "но трейдер недоступен. Перехожу к добыче денег."
+        ),
+    )
+    return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+
+
 def _plan_resupply(
     ctx: AgentContext, intent: Intent, state: dict[str, Any], world_turn: int,
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     """Plan resupply using PR2 ItemNeed dominant-urgency semantics."""
     from app.games.zone_stalkers.rules.tick_rules import _find_item_memory_location
+
+    # Hunt-specific preparation branch: target-aware equipment buying
+    _intent_meta = intent.metadata if isinstance(intent.metadata, dict) else {}
+    if (
+        _intent_meta.get("support_objective_for") == "kill_stalker"
+        and isinstance(_intent_meta.get("required_hunt_equipment"), dict)
+        and (_intent_meta["required_hunt_equipment"].get("missing_requirements") or [])
+    ):
+        _hunt_plan = _plan_prepare_for_hunt(ctx, intent, state, world_turn, need_result)
+        if _hunt_plan is not None:
+            return _hunt_plan
 
     agent = ctx.self_state
     agent_loc = agent.get("location_id", "")

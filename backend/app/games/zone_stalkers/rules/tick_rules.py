@@ -3673,6 +3673,10 @@ def _write_location_observations(
     * **items** (AMBIENT, window=40): current item list replaces the stored one
       on each merge-update; a new entry is created only when outside the window.
     """
+    from app.games.zone_stalkers.decision.perception import is_perception_suppressed
+    # Sleeping / dead / left-zone agents cannot observe anything.
+    if is_perception_suppressed(agent):
+        return
     loc = state.get("locations", {}).get(loc_id, {})
     loc_name = loc.get("name", loc_id)
 

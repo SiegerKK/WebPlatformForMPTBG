@@ -7,6 +7,7 @@ from app.games.zone_stalkers.decision.constants import (
     CRITICAL_REST_THRESHOLD,
     EMISSION_DANGEROUS_TERRAIN,
     HUNT_MIN_AMMO_ROUNDS,
+    HUNT_MIN_ARMOR_CLASS_FOR_STRONG_TARGET,
     HUNT_MIN_CASH_RESERVE,
     HUNT_MIN_MED_ITEMS,
     HUNT_REQUIRED_ADVANTAGE_SCORE,
@@ -431,6 +432,23 @@ def evaluate_hunter_equipment_advantage(
             else OBJECTIVE_PREPARE_FOR_HUNT
         )
 
+    # Determine minimum required classes based on target knowledge
+    _target_weapon_score_for_req = WEAPON_CLASS_RANK.get(target_weapon_class, 0)
+    _weapon_min_class = "none"
+    for wc, rank in WEAPON_CLASS_RANK.items():
+        if rank >= _target_weapon_score_for_req and wc not in {"none"}:
+            _weapon_min_class = wc
+            break
+    _armor_min_class = HUNT_MIN_ARMOR_CLASS_FOR_STRONG_TARGET if float(target_combat_strength) >= 0.8 else "light"
+
+    required_hunt_equipment: dict[str, Any] = {
+        "weapon_min_class": _weapon_min_class,
+        "armor_min_class": _armor_min_class,
+        "ammo_min_count": HUNT_MIN_AMMO_ROUNDS,
+        "medical_min_count": HUNT_MIN_MED_ITEMS,
+        "missing_requirements": list(missing_requirements),
+    }
+
     return {
         "target_equipment_known": target_equipment_known,
         "target_weapon_class": target_weapon_class,
@@ -447,6 +465,7 @@ def evaluate_hunter_equipment_advantage(
         "missing_requirements": missing_requirements,
         "estimated_money_needed": estimated_money_needed,
         "recommended_support_objective": recommended_support_objective,
+        "required_hunt_equipment": required_hunt_equipment,
     }
 
 
@@ -1055,9 +1074,17 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             blockers.append({"key": "equipment_disadvantage", "reason": "Снаряжение хуже цели", "blocked": True, "penalty": 0.45})
             prepare_reasons.append("Нужно улучшить снаряжение для охоты")
         if "weapon_inferior" in combat_eval["reasons"]:
+            blockers.append({"key": "weapon_upgrade", "reason": "Оружие слабее цели", "blocked": True, "penalty": 0.40})
             prepare_reasons.append("Оружие слабее цели")
         if "armor_inferior" in combat_eval["reasons"]:
+            blockers.append({"key": "armor_upgrade", "reason": "Броня хуже цели", "blocked": True, "penalty": 0.30})
             prepare_reasons.append("Броня хуже цели")
+        if "ammo_resupply" in combat_eval.get("equipment_advantage", {}).get("missing_requirements", []):
+            if not any(b["key"] == "low_ammo" for b in blockers):
+                blockers.append({"key": "ammo_resupply", "reason": "Недостаточно патронов для охоты", "blocked": True, "penalty": 0.35})
+        if "medicine_resupply" in combat_eval.get("equipment_advantage", {}).get("missing_requirements", []):
+            if not any(b["key"] in ("no_medicine", "medicine_resupply") for b in blockers):
+                blockers.append({"key": "medicine_resupply", "reason": "Недостаточно медикаментов для охоты", "blocked": True, "penalty": 0.25})
 
         target_id = str(agent.get("kill_target_id") or "")
         best_target_loc = target_belief.best_location_id if target_belief else None
@@ -1092,6 +1119,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             "recommended_support_objective": combat_eval["recommended_support_objective"],
             "equipment_advantaged": combat_eval["equipment_advantaged"],
             "equipment_advantage": combat_eval["equipment_advantage"],
+            "required_hunt_equipment": combat_eval.get("equipment_advantage", {}).get("required_hunt_equipment"),
+            "estimated_money_needed_for_advantage": combat_eval.get("equipment_advantage", {}).get("estimated_money_needed", 0),
+            "preparation_basis": "target_equipment_advantage" if not combat_eval.get("equipment_advantaged", True) else None,
         }
         no_actionable_hunt_lead = bool(
             target_belief is not None
