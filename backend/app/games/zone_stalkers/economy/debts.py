@@ -470,6 +470,14 @@ def repay_debts_to_creditor_if_useful(
     if not debtor_id or not creditor_id:
         return []
 
+    rollover_events, affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+        state=state,
+        world_turn=world_turn,
+    )
+    del rollover_events
+    if affected_debtor_ids:
+        refresh_debtor_economic_states(state, affected_debtor_ids, world_turn=int(world_turn))
+
     ledger = ensure_debt_ledger(state, world_turn=world_turn)
     pair_key = f"{debtor_id}:{creditor_id}"
     account_id = str((ledger.get("by_pair") or {}).get(pair_key) or "")

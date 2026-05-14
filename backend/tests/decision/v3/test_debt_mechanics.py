@@ -180,6 +180,41 @@ def test_partial_repayment_emits_debt_payment_not_debt_repaid() -> None:
     assert "debt_repaid" not in kinds
 
 
+
+
+def test_repayment_amount_is_chosen_after_due_rollover() -> None:
+    state = _state()
+    debtor = state["agents"]["bot1"]
+    creditor = state["traders"]["trader_1"]
+
+    account = advance_survival_credit(
+        state=state,
+        debtor_id="bot1",
+        creditor_id="trader_1",
+        creditor_type="trader",
+        amount=100,
+        purpose="survival_food",
+        location_id="loc_a",
+        world_turn=100,
+    )
+    account["next_due_turn"] = 120
+    debtor["money"] = 200
+
+    events = repay_debts_to_creditor_if_useful(
+        state=state,
+        debtor=debtor,
+        creditor=creditor,
+        world_turn=120,
+    )
+
+    kinds = {ev["event_type"] for ev in events}
+    assert "debt_payment" in kinds
+    assert "debt_repaid" in kinds
+    payment = next(ev for ev in events if ev["event_type"] == "debt_payment")
+    assert int(payment.get("payload", {}).get("amount") or 0) == 120
+    assert int(account.get("outstanding_total") or 0) == 0
+    assert str(account.get("status") or "") == "repaid"
+
 def test_near_due_repayment_pays_more_aggressively() -> None:
     state = _state()
     debtor = state["agents"]["bot1"]
