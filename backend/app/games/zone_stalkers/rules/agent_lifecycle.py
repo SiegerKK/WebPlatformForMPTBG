@@ -284,6 +284,7 @@ def cleanup_stale_corpses(
         ``"stale_corpses_ignored"`` — always 0 (reserved for future use).
     """
     stale_removed = 0
+    # stale_ignored: reserved for future "soft-mark" stale mode (always 0 for now).
     stale_ignored = 0
     for loc in state.get("locations", {}).values():
         if not isinstance(loc, dict):
@@ -291,8 +292,8 @@ def cleanup_stale_corpses(
         corpses = loc.get("corpses")
         if not isinstance(corpses, list) or not corpses:
             continue
-        loc_stale_removed = 0
         valid: list[dict[str, Any]] = []
+        loc_stale_removed = 0  # track per-location removals so we only mutate if needed
         for corpse in corpses:
             if not isinstance(corpse, dict):
                 continue

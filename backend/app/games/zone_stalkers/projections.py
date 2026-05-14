@@ -220,7 +220,7 @@ def _knowledge_first_metrics_for_agent(
     stats = ((agent.get("memory_v3") or {}).get("stats") or {})
     dropped = float(stats.get("memory_write_dropped") or 0.0)
     evictions = float(stats.get("memory_evictions") or 0.0)
-    span = max(1, int(world_turn or 0))
+    span = max(1, int(world_turn or 0))  # elapsed turns (divisor for per-tick rates)
     ctx_metrics = agent.get("brain_context_metrics") if isinstance(agent.get("brain_context_metrics"), dict) else {}
     return {
         "knowledge_only_events": int(write_metrics.get("knowledge_only_events", 0)),

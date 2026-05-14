@@ -1105,7 +1105,7 @@ def export_npc_logs(
     _context_builder_fallbacks = 0
     _memory_evictions_total = 0.0
     _memory_drops_total = 0.0
-    _span_turns = max(1, world_turn)
+    _turns_elapsed = max(1, world_turn)  # elapsed turns (divisor for per-tick rates)
     for _, agent in agents_raw.items():
         if not isinstance(agent, dict):
             continue
@@ -1167,8 +1167,8 @@ def export_npc_logs(
                 "context_builder_memory_fallbacks": _context_builder_fallbacks,
                 "stale_corpse_seen_ignored": int(runtime_memory_metrics.get("stale_corpse_seen_ignored", 0)),
                 "corpse_seen_alive_agent_ignored": int(runtime_memory_metrics.get("corpse_seen_alive_agent_ignored", 0)),
-                "memory_evictions_per_tick": round(_memory_evictions_total / _span_turns, 4),
-                "memory_drops_per_tick": round(_memory_drops_total / _span_turns, 4),
+                "memory_evictions_per_tick": round(_memory_evictions_total / _turns_elapsed, 4),
+                "memory_drops_per_tick": round(_memory_drops_total / _turns_elapsed, 4),
             },
         }
         zf.writestr("_summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
