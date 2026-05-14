@@ -34,7 +34,9 @@ STEP_MONITOR_COMBAT = "monitor_combat"
 STEP_CONFIRM_KILL = "confirm_kill"
 STEP_LEAVE_ZONE = "leave_zone"
 STEP_WAIT = "wait"
-STEP_TAKE_SURVIVAL_LOAN = "take_survival_loan"
+STEP_REQUEST_LOAN = "request_loan"
+# Backward-compatible alias kept for older traces/tests.
+STEP_TAKE_SURVIVAL_LOAN = STEP_REQUEST_LOAN
 
 # ── Legacy bridge kinds ────────────────────────────────────────────────────────
 # These wrap existing tick_rules scheduled_action types.

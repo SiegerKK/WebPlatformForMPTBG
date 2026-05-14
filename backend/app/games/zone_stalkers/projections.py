@@ -407,6 +407,8 @@ def _enrich_agent_full_projection(agent: dict[str, Any], *, redis_client: Any | 
         agent["knowledge_summary"] = build_knowledge_summary(agent, world_turn)
     except Exception:
         pass
+    if isinstance(agent.get("economic_state"), dict):
+        agent["economic_state"] = dict(agent.get("economic_state") or {})
     target_knowledge = _compact_target_knowledge(agent, world_turn=world_turn or 0)
     if target_knowledge is not None:
         agent["target_knowledge"] = target_knowledge
@@ -542,6 +544,7 @@ def _project_agent_game(agent: dict[str, Any], world_turn: int | None = None) ->
         "scheduled_action": _compact_scheduled_action(agent.get("scheduled_action"), world_turn),
         "active_plan_summary": _compact_active_plan(agent.get("active_plan_v3")),
         "memory_summary": dict(_memory_summary) if isinstance(_memory_summary, dict) else None,
+        "economic_state": dict(agent.get("economic_state")) if isinstance(agent.get("economic_state"), dict) else None,
         "equipment_summary": _compact_equipment(agent.get("equipment")),
         "inventory_summary": _compact_inventory(agent.get("inventory")),
         # Keep full equipment/inventory for player agent use in UI

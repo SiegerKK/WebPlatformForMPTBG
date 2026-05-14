@@ -70,7 +70,14 @@ from .models.plan import (
     STEP_LEAVE_ZONE,
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
-    STEP_TAKE_SURVIVAL_LOAN,
+    STEP_REQUEST_LOAN,
+)
+from app.games.zone_stalkers.economy.debts import (
+    SURVIVAL_LOAN_DAILY_INTEREST_RATE,
+    SURVIVAL_LOAN_DUE_TURNS,
+    SURVIVAL_LOAN_MAX_PRINCIPAL,
+    SURVIVAL_LOAN_PURPOSE_BY_CATEGORY,
+    can_request_survival_loan,
 )
 
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD = 50
@@ -392,31 +399,52 @@ def _plan_heal_or_flee(
                 ],
                 interruptible=False, confidence=0.7, created_turn=world_turn,
             )
-        # Nothing to sell at all — try survival loan from the trader.
+        # Nothing to sell at all — try survival credit from trader.
         trader_npc = _find_trader_npc_at_location(trader_loc, state)
-        if trader_npc is not None:
-            from game_sdk.plan_steps.take_survival_loan import can_take_survival_loan, plan_take_survival_loan
-            if can_take_survival_loan(agent, state, trader_npc):
-                loan_step_dict = plan_take_survival_loan(agent, state, trader_npc)
-                if loan_step_dict is not None:
-                    return Plan(
-                        intent_kind=intent.kind,
-                        steps=[
-                            PlanStep(
-                                kind=STEP_TAKE_SURVIVAL_LOAN,
-                                payload=loan_step_dict,
-                                interruptible=False,
-                                expected_duration_ticks=1,
-                            ),
-                            PlanStep(
-                                kind=STEP_TRADE_BUY_ITEM,
-                                payload={"item_category": "medical", "reason": "buy_medical_heal_loan"},
-                                interruptible=False,
-                                expected_duration_ticks=1,
-                            ),
-                        ],
-                        interruptible=False, confidence=0.8, created_turn=world_turn,
-                    )
+        required_price = int(afford.required_price or 0)
+        loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
+        if trader_npc is not None and loan_amount > 0:
+            ok_loan, _ = can_request_survival_loan(
+                state=state,
+                debtor=agent,
+                creditor=trader_npc,
+                creditor_type="trader",
+                item_category="medical",
+                required_price=required_price,
+                world_turn=world_turn,
+            )
+            if ok_loan:
+                loan_step_dict = _build_survival_loan_payload(
+                    agent=agent,
+                    trader_npc=trader_npc,
+                    item_category="medical",
+                    required_price=required_price,
+                    amount=loan_amount,
+                )
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[
+                        PlanStep(
+                            kind=STEP_REQUEST_LOAN,
+                            payload=loan_step_dict,
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                        PlanStep(
+                            kind=STEP_TRADE_BUY_ITEM,
+                            payload={"item_category": "medical", "reason": "buy_medical_heal_loan"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                        PlanStep(
+                            kind=STEP_CONSUME_ITEM,
+                            payload={"item_type": afford.cheapest_viable_item_type, "reason": "emergency_heal"},
+                            interruptible=False,
+                            expected_duration_ticks=1,
+                        ),
+                    ],
+                    interruptible=False, confidence=0.8, created_turn=world_turn,
+                )
         return None
 
     if trader_loc and trader_loc != agent_loc:
@@ -429,7 +457,60 @@ def _plan_heal_or_flee(
             )
             safe_local = next((o for o in liquidity_options if o.safety == "safe"), None)
             if safe_local is None:
-                # Cannot afford and nothing safe to sell
+                trader_npc = _find_trader_npc_at_location(trader_loc, state)
+                required_price = int(afford.required_price or 0)
+                loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
+                if trader_npc is not None and loan_amount > 0:
+                    ok_loan, _ = can_request_survival_loan(
+                        state=state,
+                        debtor=agent,
+                        creditor=trader_npc,
+                        creditor_type="trader",
+                        item_category="medical",
+                        required_price=required_price,
+                        world_turn=world_turn,
+                    )
+                    if ok_loan:
+                        loan_step = _build_survival_loan_payload(
+                            agent=agent,
+                            trader_npc=trader_npc,
+                            item_category="medical",
+                            required_price=required_price,
+                            amount=loan_amount,
+                        )
+                        return Plan(
+                            intent_kind=intent.kind,
+                            steps=[
+                                PlanStep(
+                                    kind=STEP_TRAVEL_TO_LOCATION,
+                                    payload={"target_id": trader_loc, "reason": "buy_heal"},
+                                    interruptible=True,
+                                    expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+                                ),
+                                PlanStep(
+                                    kind=STEP_REQUEST_LOAN,
+                                    payload=loan_step,
+                                    interruptible=False,
+                                    expected_duration_ticks=1,
+                                ),
+                                PlanStep(
+                                    kind=STEP_TRADE_BUY_ITEM,
+                                    payload={"item_category": "medical", "reason": "buy_medical_heal_loan"},
+                                    interruptible=False,
+                                    expected_duration_ticks=1,
+                                ),
+                                PlanStep(
+                                    kind=STEP_CONSUME_ITEM,
+                                    payload={"item_type": afford.cheapest_viable_item_type, "reason": "emergency_heal"},
+                                    interruptible=False,
+                                    expected_duration_ticks=1,
+                                ),
+                            ],
+                            interruptible=True,
+                            confidence=0.75,
+                            created_turn=world_turn,
+                        )
+                # Cannot afford and no safe sell / no loan.
                 return None
         steps = [
             PlanStep(
@@ -680,46 +761,61 @@ def _plan_seek_consumable(
                 ]
                 return Plan(intent_kind=intent.kind, steps=steps, interruptible=False, confidence=1.0, created_turn=world_turn)
 
-            # No sellable item — try survival loan from the trader.
+            # No sellable item — try survival credit from the trader.
             trader_npc = _find_trader_npc_at_location(trader_loc, state)
-            if trader_npc is not None:
-                from game_sdk.plan_steps.take_survival_loan import can_take_survival_loan, plan_take_survival_loan
-                if can_take_survival_loan(agent, state, trader_npc):
-                    loan_step_dict = plan_take_survival_loan(agent, state, trader_npc)
-                    if loan_step_dict is not None:
-                        steps = [
-                            PlanStep(
-                                STEP_TAKE_SURVIVAL_LOAN,
-                                loan_step_dict,
-                                interruptible=False,
-                            ),
-                            PlanStep(
-                                STEP_TRADE_BUY_ITEM,
-                                {
-                                    "item_category": category,
-                                    "reason": f"buy_{category}_survival",
-                                    "buy_mode": "survival_cheapest",
-                                    "compatible_item_types": sorted(compatible_types),
-                                    "required_price": afford.required_price,
-                                },
-                                interruptible=False,
-                            ),
-                            PlanStep(
-                                STEP_CONSUME_ITEM,
-                                {
-                                    "item_type": afford.cheapest_viable_item_type,
-                                    "reason": f"emergency_{category}",
-                                },
-                                interruptible=False,
-                            ),
-                        ]
-                        return Plan(
-                            intent_kind=intent.kind,
-                            steps=steps,
+            required_price = int(afford.required_price or 0)
+            loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
+            if trader_npc is not None and loan_amount > 0:
+                ok_loan, _ = can_request_survival_loan(
+                    state=state,
+                    debtor=agent,
+                    creditor=trader_npc,
+                    creditor_type="trader",
+                    item_category=category,
+                    required_price=required_price,
+                    world_turn=world_turn,
+                )
+                if ok_loan:
+                    loan_step_dict = _build_survival_loan_payload(
+                        agent=agent,
+                        trader_npc=trader_npc,
+                        item_category=category,
+                        required_price=required_price,
+                        amount=loan_amount,
+                    )
+                    steps = [
+                        PlanStep(
+                            STEP_REQUEST_LOAN,
+                            loan_step_dict,
                             interruptible=False,
-                            confidence=0.8,
-                            created_turn=world_turn,
-                        )
+                        ),
+                        PlanStep(
+                            STEP_TRADE_BUY_ITEM,
+                            {
+                                "item_category": category,
+                                "reason": f"buy_{category}_survival",
+                                "buy_mode": "survival_cheapest",
+                                "compatible_item_types": sorted(compatible_types),
+                                "required_price": required_price,
+                            },
+                            interruptible=False,
+                        ),
+                        PlanStep(
+                            STEP_CONSUME_ITEM,
+                            {
+                                "item_type": afford.cheapest_viable_item_type,
+                                "reason": f"emergency_{category}",
+                            },
+                            interruptible=False,
+                        ),
+                    ]
+                    return Plan(
+                        intent_kind=intent.kind,
+                        steps=steps,
+                        interruptible=False,
+                        confidence=0.8,
+                        created_turn=world_turn,
+                    )
 
         if trader_loc and trader_loc != agent_loc:
             # Check affordability before committing to travel→buy.
@@ -741,7 +837,50 @@ def _plan_seek_consumable(
                 )
                 safe_local = next((o for o in local_liq if o.safety in ("safe", "emergency_only")), None)
                 if safe_local is None:
-                    # Cannot afford and nothing to sell — fallback to gather money
+                    trader_npc = _find_trader_npc_at_location(trader_loc, state)
+                    required_price = int(remote_afford.required_price or 0)
+                    loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
+                    if trader_npc is not None and loan_amount > 0:
+                        ok_loan, _ = can_request_survival_loan(
+                            state=state,
+                            debtor=agent,
+                            creditor=trader_npc,
+                            creditor_type="trader",
+                            item_category=category,
+                            required_price=required_price,
+                            world_turn=world_turn,
+                        )
+                        if ok_loan:
+                            loan_step = _build_survival_loan_payload(
+                                agent=agent,
+                                trader_npc=trader_npc,
+                                item_category=category,
+                                required_price=required_price,
+                                amount=loan_amount,
+                            )
+                            steps = [
+                                PlanStep(STEP_TRAVEL_TO_LOCATION,
+                                         {"target_id": trader_loc, "reason": f"buy_{category}_survival"},
+                                         expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
+                                PlanStep(STEP_REQUEST_LOAN, loan_step, interruptible=False),
+                                PlanStep(STEP_TRADE_BUY_ITEM,
+                                         {
+                                             "item_category": category,
+                                             "reason": f"buy_{category}_survival",
+                                             "buy_mode": "survival_cheapest",
+                                             "compatible_item_types": sorted(compatible_types),
+                                             "required_price": required_price,
+                                         },
+                                         interruptible=False),
+                                PlanStep(STEP_CONSUME_ITEM,
+                                         {
+                                             "item_type": remote_afford.cheapest_viable_item_type,
+                                             "reason": f"emergency_{category}",
+                                         },
+                                         interruptible=False),
+                            ]
+                            return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
+                    # Cannot afford, cannot sell, no loan — fallback to gather money.
                     get_rich_intent = Intent(
                         kind=INTENT_GET_RICH,
                         score=0.6,
@@ -2393,12 +2532,29 @@ def _has_sellable_inventory(agent: dict[str, Any], *, item_category: str) -> boo
     from app.games.zone_stalkers.decision.executors import has_sellable_inventory  # noqa: PLC0415
 
     return has_sellable_inventory(agent, item_category=item_category)
-    # Basic sleep duration policy:
-    # linearly map sleepiness 0..100 -> 1..DEFAULT_SLEEP_HOURS.
-    sleepiness = max(0, int(agent.get("sleepiness", 0)))
-    sleepiness_per_hour = max(1, math.ceil(100 / DEFAULT_SLEEP_HOURS))
-    estimated_hours = max(1, math.ceil(sleepiness / sleepiness_per_hour))
-    sleep_hours = min(DEFAULT_SLEEP_HOURS, estimated_hours)
+
+
+def _build_survival_loan_payload(
+    *,
+    agent: dict[str, Any],
+    trader_npc: dict[str, Any],
+    item_category: str,
+    required_price: int,
+    amount: int,
+) -> dict[str, Any]:
+    trader_id = str(trader_npc.get("id") or "")
+    return {
+        "creditor_id": trader_id,
+        "creditor_type": "trader",
+        "amount": int(amount),
+        "purpose": SURVIVAL_LOAN_PURPOSE_BY_CATEGORY.get(item_category, "survival_generic"),
+        "item_category": item_category,
+        "required_price": int(required_price),
+        "daily_interest_rate": SURVIVAL_LOAN_DAILY_INTEREST_RATE,
+        "due_turns": SURVIVAL_LOAN_DUE_TURNS,
+        "reason": f"survival_credit_{item_category}",
+        "location_id": str(agent.get("location_id") or ""),
+    }
 
 def _find_trader_npc_at_location(
     loc_id: str,
@@ -2406,5 +2562,12 @@ def _find_trader_npc_at_location(
 ) -> Optional[dict[str, Any]]:
     """Return the first trader NPC dict at *loc_id*, or None."""
     from app.games.zone_stalkers.rules.tick_rules import _find_trader_at_location
-    return _find_trader_at_location(loc_id, state)
-
+    trader = _find_trader_at_location(loc_id, state)
+    if not isinstance(trader, dict):
+        return None
+    if not trader.get("id"):
+        for trader_id, trader_obj in (state.get("traders") or {}).items():
+            if trader_obj is trader:
+                trader["id"] = str(trader_id)
+                break
+    return trader
