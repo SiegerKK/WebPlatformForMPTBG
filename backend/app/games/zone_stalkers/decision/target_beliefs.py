@@ -96,6 +96,8 @@ def _ensure_target_belief_metrics(agent: dict[str, Any]) -> dict[str, Any]:
     metrics.setdefault("target_belief_known_npc_hits", 0)
     metrics.setdefault("target_belief_known_corpse_hits", 0)
     metrics.setdefault("target_belief_hunt_evidence_hits", 0)
+    metrics.setdefault("target_belief_negative_memory_fallbacks", 0)
+    metrics.setdefault("target_belief_negative_memory_records_scanned", 0)
     return metrics
 
 
@@ -528,6 +530,41 @@ def build_hunt_leads_from_memory_v3_legacy(
     }
 
 
+def build_target_not_found_leads_from_memory_v3_legacy(
+    *,
+    agent: dict[str, Any],
+    target_id: str,
+    world_turn: int,
+) -> dict[str, Any]:
+    """Return only target_not_found (suppression) leads from memory_v3.
+
+    Called even when knowledge_leads already exist so that exhaustion/suppression
+    logic sees legacy negative evidence while positive location leads come from
+    knowledge_v1.  Once target_not_found is fully written to
+    knowledge_v1.hunt_evidence.failed_search_locations, this bridge function
+    becomes a no-op for agents that have fresh knowledge.
+    """
+    leads: list[HuntLead] = []
+    source_refs: list[str] = []
+    records = _iter_memory_v3_records(agent)
+    for record in records:
+        raw_kind = str(record.get("kind") or "")
+        kind = _canonical_kind(raw_kind)
+        if kind != "target_not_found":
+            continue
+        lead = _record_to_hunt_lead(record, target_id=target_id, world_turn=world_turn)
+        if lead is None:
+            continue
+        leads.append(lead)
+        if lead.source_ref:
+            source_refs.append(lead.source_ref)
+    return {
+        "records_scanned": len(records),
+        "leads": leads,
+        "source_refs": source_refs,
+    }
+
+
 def _build_recent_target_contact_from_memory_v3_legacy(
     *,
     agent: dict[str, Any],
@@ -725,6 +762,26 @@ def build_target_belief(
                 target_id=target_id,
                 world_turn=world_turn,
             )
+    else:
+        # Knowledge leads cover positive location evidence; still load legacy
+        # target_not_found (suppression) records so that exhaustion/cooldown
+        # logic works correctly before failed_search_locations is fully
+        # populated via the knowledge write-side.
+        negative_legacy = build_target_not_found_leads_from_memory_v3_legacy(
+            agent=agent, target_id=target_id, world_turn=world_turn
+        )
+        if negative_legacy["leads"]:
+            metrics["target_belief_negative_memory_fallbacks"] = (
+                int(metrics.get("target_belief_negative_memory_fallbacks", 0)) + 1
+            )
+            metrics["target_belief_negative_memory_records_scanned"] = (
+                int(metrics.get("target_belief_negative_memory_records_scanned", 0))
+                + int(negative_legacy.get("records_scanned", 0))
+            )
+            negative_leads = list(negative_legacy["leads"])
+            leads.extend(negative_leads)
+            lead_sources["memory_v3"] += len(negative_leads)
+            source_refs.extend(str(ref) for ref in negative_legacy.get("source_refs", []) if ref)
 
     target = state.get("agents", {}).get(target_id)
     target_alive_from_state: bool | None = None

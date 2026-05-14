@@ -348,7 +348,7 @@ def test_legacy_memory_fallback_used_when_knowledge_missing() -> None:
     assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] >= 1
 
 
-def test_no_memory_scan_when_knowledge_is_sufficient(monkeypatch) -> None:
+def test_no_memory_scan_when_knowledge_is_sufficient() -> None:
     agent = make_agent(kill_target_id="target_1", location_id="loc_a")
     target = _make_target(location_id="loc_b")
     state = make_minimal_state(agent=agent)
@@ -365,17 +365,14 @@ def test_no_memory_scan_when_knowledge_is_sufficient(monkeypatch) -> None:
         observed_agent=target,
     )
 
-    def _fail_records(_: dict) -> list[dict]:
-        raise AssertionError("memory_v3 should not be scanned")
-
-    monkeypatch.setattr(target_beliefs_module, "_iter_memory_v3_records", _fail_records)
-
+    # No memory records exist. Narrow negative scan is allowed but should return nothing.
     belief = _build_belief(agent, state)
     assert belief.best_location_id == "loc_b"
     assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] == 0
+    assert agent["brain_context_metrics"]["target_belief_negative_memory_fallbacks"] == 0
 
 
-def test_target_belief_does_not_scan_memory_when_known_npc_last_seen_is_old_but_sufficient(monkeypatch) -> None:
+def test_target_belief_does_not_scan_memory_when_known_npc_last_seen_is_old_but_sufficient() -> None:
     agent = make_agent(kill_target_id="target_1", location_id="loc_a")
     state = make_minimal_state(agent=agent)
     state["world_turn"] = 500
@@ -392,12 +389,63 @@ def test_target_belief_does_not_scan_memory_when_known_npc_last_seen_is_old_but_
         "confidence": 0.8,
     }
 
-    def _fail_records(_: dict) -> list[dict]:
-        raise AssertionError("memory_v3 should not be scanned")
-
-    monkeypatch.setattr(target_beliefs_module, "_iter_memory_v3_records", _fail_records)
+    # No memory records exist — negative scan returns nothing, but is allowed.
     belief = _build_belief(agent, state)
     assert belief.best_location_id == "loc_b"
     assert belief.last_seen_turn == 300
     assert belief.recent_contact_turn is None
+    # Full memory fallback must not be used when knowledge leads exist.
     assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] == 0
+    # No negative leads in empty memory — negative fallback metric stays zero.
+    assert agent["brain_context_metrics"]["target_belief_negative_memory_fallbacks"] == 0
+
+
+def test_target_belief_applies_legacy_target_not_found_even_when_knowledge_location_lead_exists() -> None:
+    """Regression: target_not_found suppression must fire even when knowledge_v1 already
+    provides a positive location lead. Before this fix, PR9 skipped the negative-only
+    scan when knowledge_leads were present, so exhaustion didn't accumulate."""
+    agent = make_agent(kill_target_id="target_1", location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+    state["agents"]["target_1"] = _make_target(location_id="loc_z")
+
+    # Positive lead from knowledge_v1 — points to loc_false.
+    knowledge = ensure_knowledge_v1(agent)
+    knowledge["hunt_evidence"]["target_1"] = {
+        "target_id": "target_1",
+        "last_seen": {"location_id": "loc_false", "turn": 90, "confidence": 0.8, "source": "witness_report"},
+        "death": None,
+        "route_hints": [],
+        "failed_search_locations": {},
+        "recent_contact": None,
+        "revision": 1,
+    }
+
+    # 3 legacy target_not_found records for loc_false → should exhaust it.
+    mem = ensure_memory_v3(agent)
+    for i in range(3):
+        rec_id = f"tnf_{i}"
+        mem["records"][rec_id] = {
+            "id": rec_id,
+            "agent_id": "bot1",
+            "layer": "spatial",
+            "kind": "target_not_found",
+            "title": "not found",
+            "summary": "target not found",
+            "created_turn": 80 + i,
+            "status": "active",
+            "location_id": "loc_false",
+            "details": {"target_id": "target_1", "location_id": "loc_false"},
+            "entity_ids": ["target_1"],
+            "confidence": 0.75,
+        }
+
+    belief = _build_belief(agent, state)
+    # loc_false must be in exhausted_locations because 3 target_not_found leads
+    # were loaded via the narrow negative scan.
+    assert "loc_false" in belief.exhausted_locations, (
+        f"loc_false should be exhausted; exhausted_locations={belief.exhausted_locations}"
+    )
+    # Full memory fallback must NOT have been used.
+    assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] == 0
+    # Negative scan metric must have been incremented.
+    assert agent["brain_context_metrics"]["target_belief_negative_memory_fallbacks"] >= 1

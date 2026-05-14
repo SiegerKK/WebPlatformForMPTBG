@@ -75,6 +75,7 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "stalkers_seen": "knowledge_upsert",
     "target_seen": "knowledge_upsert",
     "target_last_known_location": "knowledge_upsert",
+    "target_not_found": "knowledge_upsert",
     "target_corpse_seen": "knowledge_upsert",
     "target_corpse_reported": "knowledge_upsert",
     "corpse_seen": "knowledge_upsert",
@@ -1195,6 +1196,25 @@ def _upsert_knowledge_from_event(
             sells_drink=bool(effects.get("sells_drink")),
             confidence=float(effects.get("confidence", 1.0)),
         )
+
+    elif kind == "target_not_found":
+        target_id = str(effects.get("target_id") or "")
+        if not target_id:
+            return result
+        loc_id = str(effects.get("location_id") or "")
+        if not loc_id:
+            return result
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=target_id,
+            kind="target_not_found",
+            location_id=loc_id,
+            world_turn=world_turn,
+            confidence=float(effects.get("confidence", 0.75)),
+            source=str(effects.get("source") or "observation"),
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
 
     elif kind == "travel_hop":
         from_location_id = str(
