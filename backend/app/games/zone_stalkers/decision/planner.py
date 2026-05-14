@@ -37,6 +37,7 @@ from .models.intent import (
     INTENT_REST,
     INTENT_RESUPPLY,
     INTENT_SELL_ARTIFACTS,
+    INTENT_REPAY_DEBT,
     INTENT_TRADE,
     INTENT_GET_RICH,
     INTENT_HUNT_TARGET,
@@ -71,8 +72,12 @@ from .models.plan import (
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
     STEP_REQUEST_LOAN,
+    STEP_REPAY_DEBT,
 )
 from app.games.zone_stalkers.economy.debts import (
+    DEBT_REPAYMENT_MIN_PAYMENT,
+    choose_debt_repayment_amount,
+    ensure_debt_ledger,
     SURVIVAL_LOAN_DAILY_INTEREST_RATE,
     SURVIVAL_LOAN_DUE_TURNS,
     SURVIVAL_LOAN_MAX_PRINCIPAL,
@@ -120,6 +125,7 @@ def build_plan(
         INTENT_REST:                _plan_rest,
         INTENT_RESUPPLY:            _plan_resupply,
         INTENT_SELL_ARTIFACTS:      _plan_sell_artifacts,
+        INTENT_REPAY_DEBT:        _plan_repay_debt,
         INTENT_TRADE:               _plan_sell_artifacts,
         INTENT_GET_RICH:            _plan_get_rich,
         INTENT_HUNT_TARGET:         _plan_hunt_target,
@@ -2476,6 +2482,86 @@ def _nearest_safe_location(
                 return nxt
             queue.append(nxt)
     return None
+
+
+
+def _plan_repay_debt(
+    ctx: AgentContext,
+    intent: Intent,
+    state: dict[str, Any],
+    world_turn: int,
+    need_result: NeedEvaluationResult | None = None,
+) -> Plan | None:
+    agent = ctx.self_state
+    agent_id = str(agent.get("id") or ctx.agent_id or "")
+    if not agent_id:
+        return None
+
+    if need_result is not None and any(
+        need.key in {"drink_now", "eat_now", "heal_now"} and float(need.urgency) >= 0.8
+        for need in need_result.immediate_needs
+    ):
+        return None
+
+    ledger = ensure_debt_ledger(state, world_turn=world_turn)
+    account_ids = (ledger.get("by_debtor") or {}).get(agent_id, []) or []
+    accounts = []
+    for account_id in account_ids:
+        account = (ledger.get("accounts") or {}).get(str(account_id))
+        if not isinstance(account, dict):
+            continue
+        if str(account.get("status") or "") != "active":
+            continue
+        if int(account.get("outstanding_total") or 0) <= 0:
+            continue
+        accounts.append(account)
+    if not accounts:
+        return None
+
+    accounts.sort(key=lambda a: (
+        int(a.get("next_due_turn") or world_turn + 999999),
+        -int(a.get("outstanding_total") or 0),
+    ))
+    account = accounts[0]
+    creditor_id = str(account.get("creditor_id") or "")
+    if not creditor_id:
+        return None
+
+    creditors = state.get("traders") if str(account.get("creditor_type") or "") == "trader" else state.get("agents")
+    creditor = (creditors or {}).get(creditor_id) if isinstance(creditors, dict) else None
+    if not isinstance(creditor, dict):
+        return None
+
+    if choose_debt_repayment_amount(
+        debtor=agent,
+        account=account,
+        world_turn=world_turn,
+        critical_needs=False,
+    ) < DEBT_REPAYMENT_MIN_PAYMENT:
+        return None
+
+    agent_loc = str(agent.get("location_id") or "")
+    creditor_loc = str(creditor.get("location_id") or "")
+    steps: list[PlanStep] = []
+    if creditor_loc and creditor_loc != agent_loc:
+        steps.append(PlanStep(
+            kind=STEP_TRAVEL_TO_LOCATION,
+            payload={"target_id": creditor_loc, "reason": "repay_debt"},
+            interruptible=True,
+        ))
+
+    steps.append(PlanStep(
+        kind=STEP_REPAY_DEBT,
+        payload={
+            "creditor_id": creditor_id,
+            "creditor_type": str(account.get("creditor_type") or "trader"),
+            "account_id": str(account.get("id") or ""),
+            "reason": "reduce_debt_before_rollover",
+            "allow_partial": True,
+        },
+        interruptible=False,
+    ))
+    return Plan(intent_kind=intent.kind, steps=steps, confidence=0.82, created_turn=world_turn)
 
 
 def _find_exit_location(

@@ -66,14 +66,14 @@ from .models.plan import (
     STEP_LEGACY_SCHEDULED_ACTION,
     STEP_HEAL_SELF,
     STEP_REQUEST_LOAN,
+    STEP_REPAY_DEBT,
 )
 from app.games.zone_stalkers.economy.debts import (
-    SURVIVAL_LOAN_DAILY_INTEREST_RATE,
-    SURVIVAL_LOAN_DUE_TURNS,
-    SURVIVAL_LOAN_REPAYMENT_RESERVE_MONEY,
-    auto_repay_debts,
-    can_request_survival_loan,
-    create_debt,
+    advance_survival_credit,
+    can_request_survival_credit,
+    choose_debt_repayment_amount,
+    repay_debt_account,
+    repay_debts_to_creditor_if_useful,
 )
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
@@ -116,6 +116,8 @@ def execute_plan_step(
 
     agent_id = ctx.agent_id
     agent = state["agents"][agent_id]     # mutable reference
+    if isinstance(agent, dict):
+        agent.setdefault("id", agent_id)
 
     dispatch: dict[str, Any] = {
         STEP_TRAVEL_TO_LOCATION:   _exec_travel,
@@ -137,6 +139,7 @@ def execute_plan_step(
         STEP_CONFIRM_KILL:         _exec_confirm_kill,
         STEP_LEAVE_ZONE:           _exec_leave_zone,
         STEP_WAIT:                 _exec_wait,
+        STEP_REPAY_DEBT:           _exec_repay_debt,
         STEP_LEGACY_SCHEDULED_ACTION: _exec_legacy_passthrough,
         STEP_REQUEST_LOAN:         _exec_request_loan,
     }
@@ -167,6 +170,11 @@ def execute_plan_step(
         else:
             step.payload["_loan_failed"] = True
             step.payload["_failure_reason"] = step.payload.get("_failure_reason") or "loan_request_failed"
+    elif step.kind == STEP_REPAY_DEBT:
+        if any(isinstance(ev, dict) and str(ev.get("event_type") or "") in {"debt_payment", "debt_repaid"} for ev in events):
+            plan.advance()
+        else:
+            step.payload["_failure_reason"] = step.payload.get("_failure_reason") or "no_safe_repayment_amount"
 
     return events
 
@@ -418,8 +426,33 @@ def _exec_trade_buy(
         item_types = frozenset([affordable[0]])
 
     reason = step.payload.get("reason", f"buy_{category}")
-    return _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
-                                purchase_reason=reason) or []
+    reason_lower = str(reason).lower()
+    critical_needs = bool(
+        category in {"drink", "food", "medical"}
+        and ("survival" in reason_lower or "emergency" in reason_lower)
+    )
+    trader = None
+    for trader_id, trader_obj in (state.get("traders") or {}).items():
+        if not isinstance(trader_obj, dict):
+            continue
+        if str(trader_obj.get("location_id") or "") != str(agent.get("location_id") or ""):
+            continue
+        trader = trader_obj
+        trader.setdefault("id", str(trader_id))
+        break
+    events: list[dict[str, Any]] = []
+    if isinstance(trader, dict):
+        events.extend(repay_debts_to_creditor_if_useful(
+            state=state,
+            debtor=agent,
+            creditor=trader,
+            world_turn=world_turn,
+            critical_needs=critical_needs,
+        ))
+    buy_events = _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
+                                      purchase_reason=reason) or []
+    events.extend(buy_events)
+    return events
 
 
 
@@ -456,7 +489,7 @@ def _trade_sell_succeeded(events: list[dict[str, Any]]) -> bool:
 
 def _loan_request_succeeded(events: list[dict[str, Any]]) -> bool:
     return any(
-        isinstance(ev, dict) and str(ev.get("event_type") or "") == "debt_created"
+        isinstance(ev, dict) and str(ev.get("event_type") or "") in {"debt_created", "debt_credit_advanced"}
         for ev in events
     )
 
@@ -1722,12 +1755,12 @@ def _apply_debt_repayment_after_sell(
     trader_id = _resolve_trader_id(state, trader)
     if not trader_id:
         return
-    repayment_events = auto_repay_debts(
+    repayment_events = repay_debts_to_creditor_if_useful(
         state=state,
         debtor=agent,
         creditor=trader,
         world_turn=world_turn,
-        reserve_money=SURVIVAL_LOAN_REPAYMENT_RESERVE_MONEY,
+        critical_needs=False,
     )
     if not repayment_events:
         return
@@ -1746,7 +1779,7 @@ def _apply_debt_repayment_after_sell(
         summary = (
             f"Погасил долг: {payload.get('amount', 0)}"
             if event_type == "debt_payment"
-            else f"Полностью закрыл долг {payload.get('debt_id', '')}"
+            else f"Полностью закрыл долг {payload.get('account_id', '')}"
         )
         _add_memory(
             agent,
@@ -1758,6 +1791,89 @@ def _apply_debt_repayment_after_sell(
             summary=summary,
             agent_id=agent_id,
         )
+
+
+def _exec_repay_debt(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    del ctx
+    creditor_id = str(step.payload.get("creditor_id") or "")
+    creditor_type = str(step.payload.get("creditor_type") or "trader")
+    account_id = str(step.payload.get("account_id") or "")
+    if not creditor_id or not account_id:
+        step.payload["_failure_reason"] = "missing_creditor_or_account"
+        return []
+
+    creditors = state.get("traders") if creditor_type == "trader" else state.get("agents")
+    creditor = (creditors or {}).get(creditor_id) if isinstance(creditors, dict) else None
+    if not isinstance(creditor, dict):
+        step.payload["_failure_reason"] = "creditor_not_found"
+        return []
+
+    if str(agent.get("location_id") or "") != str(creditor.get("location_id") or ""):
+        step.payload["_failure_reason"] = "creditor_not_colocated"
+        return []
+
+    # Use runtime chooser so partial repayment can adapt to current money/needs.
+    account = None
+    ledger = state.get("debt_ledger") if isinstance(state.get("debt_ledger"), dict) else {}
+    accounts = ledger.get("accounts") if isinstance(ledger, dict) else {}
+    if isinstance(accounts, dict):
+        account = accounts.get(account_id)
+    if not isinstance(account, dict):
+        step.payload["_failure_reason"] = "account_not_found"
+        return []
+
+    amount = choose_debt_repayment_amount(
+        debtor=agent,
+        account=account,
+        world_turn=world_turn,
+        critical_needs=False,
+    )
+    if amount <= 0:
+        step.payload["_failure_reason"] = "no_safe_repayment_amount"
+        return []
+
+    result = repay_debt_account(
+        state=state,
+        debtor=agent,
+        creditor=creditor,
+        account_id=account_id,
+        amount=amount,
+        world_turn=world_turn,
+    )
+    paid = int(result.get("paid") or 0)
+    if paid <= 0:
+        step.payload["_failure_reason"] = str(result.get("status") or "repayment_failed")
+        return []
+
+    events: list[dict[str, Any]] = [{
+        "event_type": "debt_payment",
+        "payload": {
+            "account_id": account_id,
+            "debtor_id": agent_id,
+            "creditor_id": creditor_id,
+            "amount": paid,
+            "remaining_total": int(result.get("remaining_total") or 0),
+        },
+    }]
+    if bool(result.get("fully_repaid")):
+        events.append({
+            "event_type": "debt_repaid",
+            "payload": {
+                "account_id": account_id,
+                "debtor_id": agent_id,
+                "creditor_id": creditor_id,
+                "total_repaid": int((account or {}).get("repaid_total") or 0),
+            },
+        })
+    return events
+
 
 def _resolve_trader_id(state: dict[str, Any], trader: dict[str, Any]) -> str | None:
     trader_id = str(trader.get("id") or "")
@@ -1791,7 +1907,7 @@ def _exec_request_loan(
     item_category = str(step.payload.get("item_category") or "")
     required_price = int(step.payload.get("required_price") or 0)
     amount = int(step.payload.get("amount") or 0)
-    ok, reason = can_request_survival_loan(
+    ok, reason = can_request_survival_credit(
         state=state,
         debtor=agent,
         creditor=creditor,
@@ -1809,19 +1925,14 @@ def _exec_request_loan(
         step.payload["_failure_reason"] = "amount_not_needed"
         return []
 
-    due_turn = int(world_turn) + int(step.payload.get("due_turns") or SURVIVAL_LOAN_DUE_TURNS)
-    daily_interest_rate = float(step.payload.get("daily_interest_rate") or SURVIVAL_LOAN_DAILY_INTEREST_RATE)
-    debt = create_debt(
+    account = advance_survival_credit(
         state=state,
         debtor_id=agent_id,
         creditor_id=creditor_id,
         creditor_type=creditor_type,
-        principal=amount,
+        amount=amount,
         purpose=str(step.payload.get("purpose") or "survival_credit"),
-        allowed_item_category=item_category,
         location_id=str(agent.get("location_id") or ""),
-        daily_interest_rate=daily_interest_rate,
-        due_turn=due_turn,
         world_turn=world_turn,
     )
 
@@ -1837,14 +1948,14 @@ def _exec_request_loan(
         "action",
         "Получил кредит на выживание",
         {
-            "action_kind": "debt_created",
-            "debt_id": debt["id"],
+            "action_kind": "debt_credit_advanced",
+            "account_id": account["id"],
             "debtor_id": agent_id,
             "creditor_id": creditor_id,
             "creditor_type": creditor_type,
             "principal": amount,
-            "purpose": debt.get("purpose"),
-            "daily_interest_rate": debt.get("daily_interest_rate"),
+            "purpose": str(step.payload.get("purpose") or "survival_credit"),
+            "new_total": int(account.get("outstanding_total") or 0),
             "location_id": agent.get("location_id"),
         },
         summary=f"Взял кредит {amount} у {creditor_id}",
@@ -1852,15 +1963,15 @@ def _exec_request_loan(
     )
 
     return [{
-        "event_type": "debt_created",
+        "event_type": "debt_credit_advanced",
         "payload": {
-            "debt_id": debt["id"],
+            "account_id": account["id"],
             "debtor_id": agent_id,
             "creditor_id": creditor_id,
             "creditor_type": creditor_type,
             "principal": amount,
-            "purpose": debt.get("purpose"),
-            "daily_interest_rate": debt.get("daily_interest_rate"),
+            "purpose": str(step.payload.get("purpose") or "survival_credit"),
+            "new_total": int(account.get("outstanding_total") or 0),
             "location_id": agent.get("location_id"),
         },
     }]

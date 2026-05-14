@@ -1133,43 +1133,46 @@ def export_npc_logs(
             _context_builder_fallbacks += int(ctx_metrics.get("context_builder_memory_fallbacks") or 0)
 
     runtime_memory_metrics = get_memory_metrics()
-    debt_ledger = state.get("debt_ledger") if isinstance(state.get("debt_ledger"), dict) else {}
-    debt_rows = (debt_ledger.get("debts") or {}) if isinstance(debt_ledger, dict) else {}
-    active_debts = 0
-    overdue_debts = 0
-    defaulted_debts = 0
+    try:
+        from app.games.zone_stalkers.economy.debts import DEBT_ESCAPE_THRESHOLD, ensure_debt_ledger  # noqa: PLC0415
+        debt_ledger = ensure_debt_ledger(state, world_turn=world_turn)
+    except Exception:
+        debt_ledger = state.get("debt_ledger") if isinstance(state.get("debt_ledger"), dict) else {}
+        DEBT_ESCAPE_THRESHOLD = 5000
+
+    accounts = (debt_ledger.get("accounts") or {}) if isinstance(debt_ledger, dict) else {}
+    active_accounts = 0
     total_outstanding = 0
-    survival_loans_created = 0
-    survival_loans_repaid = 0
-    if isinstance(debt_rows, dict):
-        try:
-            from app.games.zone_stalkers.economy.debts import accrue_debt_interest  # noqa: PLC0415
-        except Exception:
-            accrue_debt_interest = None
-        for debt in debt_rows.values():
-            if not isinstance(debt, dict):
+    survival_credit_advances = 0
+    debt_payments = 0
+    accounts_repaid = 0
+    rollovers_total = 0
+    accounts_over_escape_threshold = 0
+    debt_escape_triggered_count = 0
+    if isinstance(accounts, dict):
+        for account in accounts.values():
+            if not isinstance(account, dict):
                 continue
-            status = str(debt.get("status") or "")
-            purpose = str(debt.get("purpose") or "")
-            if status in {"active", "overdue"}:
-                if accrue_debt_interest is not None:
-                    try:
-                        accrue_debt_interest(debt, world_turn=world_turn)
-                    except Exception:
-                        pass
-                active_debts += 1
-                total_outstanding += int(
-                    (debt.get("outstanding_principal") or 0)
-                    + (debt.get("accrued_interest") or 0)
-                )
-            if status == "overdue":
-                overdue_debts += 1
-            if status == "defaulted":
-                defaulted_debts += 1
-            if purpose.startswith("survival_"):
-                survival_loans_created += 1
-                if status == "repaid":
-                    survival_loans_repaid += 1
+            status = str(account.get("status") or "")
+            outstanding = int(account.get("outstanding_total") or 0)
+            if status == "active" and outstanding > 0:
+                active_accounts += 1
+                total_outstanding += outstanding
+            survival_credit_advances += int(account.get("credit_advance_count") or 0)
+            if int(account.get("repaid_total") or 0) > 0:
+                debt_payments += 1
+            if status == "repaid":
+                accounts_repaid += 1
+            rollovers_total += int(account.get("rollover_count") or 0)
+            if outstanding >= int(DEBT_ESCAPE_THRESHOLD):
+                accounts_over_escape_threshold += 1
+
+    for _, agent in agents_raw.items():
+        if not isinstance(agent, dict):
+            continue
+        if bool(agent.get("_debt_escape_triggered")):
+            debt_escape_triggered_count += 1
+
     # Build in-memory ZIP
     buf = io.BytesIO()
     agent_index: list[dict] = []
@@ -1208,12 +1211,14 @@ def export_npc_logs(
                 "memory_drops_per_tick": round(_memory_drops_total / _turns_elapsed, 4),
             },
             "debt_summary": {
-                "active_debts": active_debts,
+                "active_accounts": active_accounts,
                 "total_outstanding": total_outstanding,
-                "overdue_debts": overdue_debts,
-                "defaulted_debts": defaulted_debts,
-                "survival_loans_created": survival_loans_created,
-                "survival_loans_repaid": survival_loans_repaid,
+                "survival_credit_advances": survival_credit_advances,
+                "debt_payments": debt_payments,
+                "accounts_repaid": accounts_repaid,
+                "rollovers_total": rollovers_total,
+                "accounts_over_escape_threshold": accounts_over_escape_threshold,
+                "debt_escape_triggered_count": debt_escape_triggered_count,
             },
         }
         zf.writestr("_summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
