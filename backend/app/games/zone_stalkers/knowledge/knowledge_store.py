@@ -769,6 +769,7 @@ def upsert_hunt_evidence_from_observation(
             changed_major = changed_major or (old_count != new_count)
             changed_minor = True
 
+    entry["revision"] = int(entry.get("revision", 0) or 0) + 1
 
     _refresh_stats(knowledge, world_turn)
     _apply_revision_update(
