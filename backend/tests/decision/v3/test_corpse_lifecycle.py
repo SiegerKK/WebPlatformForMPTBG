@@ -261,7 +261,8 @@ class TestCorpseLifecycleIntegration:
         tick_rules.tick_zone_map(state)
         assert calls["count"] == 1
 
-    def test_valid_dead_agent_corpse_seen_still_works(self) -> None:
+    def test_valid_dead_agent_corpse_updates_knowledge_v1(self) -> None:
+        """PR10: corpse_seen for a valid dead agent updates knowledge_v1 but NOT memory_v3."""
         from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
         from tests.decision.conftest import make_agent, make_minimal_state
 
@@ -276,5 +277,11 @@ class TestCorpseLifecycleIntegration:
         ]
 
         _write_location_observations("observer", observer, "loc_a", state, world_turn=101)
+        # PR10: routine corpse_seen goes to knowledge only, no memory_v3 record.
         corpse_seen = self._v3_action_records(observer, "corpse_seen")
-        assert corpse_seen, "Expected corpse_seen memory for valid corpse"
+        assert not corpse_seen, "Expected no memory_v3 record for routine corpse_seen (knowledge-only)"
+        # The knowledge table should record the dead agent.
+        known = (observer.get("knowledge_v1") or {}).get("known_npcs", {})
+        victim_entry = known.get("victim")
+        assert victim_entry is not None, "Expected victim to be in known_npcs after corpse observation"
+        assert victim_entry.get("is_alive") is False, "Expected known_npcs to mark victim as dead"

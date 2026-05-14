@@ -1375,6 +1375,9 @@ def should_write_observation_milestone(
     if event_kind == "target_seen":
         if OBSERVATION_MEMORY_COMPAT_MODE:
             return True
+        # New evidence for the current kill target (first encounter or major update).
+        if is_kill_target and (created or changed_major):
+            return True
         return bool(changed_major and "death_status_changed" in reasons)
 
     if event_kind == "target_last_known_location":

@@ -128,7 +128,8 @@ def test_write_event_indexes_trader_entity_id() -> None:
 
 
 def test_write_event_indexes_target_entity_id() -> None:
-    agent: dict = {"name": "bot1", "memory_v3": None}
+    # PR10: target_seen only writes a memory milestone when the observed NPC is the kill target.
+    agent: dict = {"name": "bot1", "memory_v3": None, "kill_target_id": "agent_target_1"}
     entry = _make_entry(action_kind="target_seen", target_id="agent_target_1")
     write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
 
@@ -169,7 +170,8 @@ def test_target_moved_memory_kind_supported() -> None:
 
 
 def test_target_seen_bridges_with_entity_and_location() -> None:
-    agent: dict = {"name": "bot1", "memory_v3": None}
+    # PR10: target_seen writes a milestone only for the kill target.
+    agent: dict = {"name": "bot1", "memory_v3": None, "kill_target_id": "agent_target_1"}
     entry = _make_entry(action_kind="target_seen", target_id="agent_target_1", location_id="loc_a")
     write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
     mem_v3 = ensure_memory_v3(agent)

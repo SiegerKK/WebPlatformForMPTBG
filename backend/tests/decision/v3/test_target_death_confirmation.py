@@ -51,6 +51,7 @@ def test_target_dies_from_emission_does_not_auto_complete_kill_goal() -> None:
 
 
 def test_witness_sees_corpse_and_remembers_corpse_location() -> None:
+    """PR10: corpse_seen is knowledge-only; knowledge_v1 must record the corpse."""
     hunter, target, state = _build_hunter_and_target_state()
     witness = make_agent(agent_id="witness", location_id="loc_b", has_weapon=False, has_armor=False, has_ammo=False)
     state["agents"]["witness"] = witness
@@ -59,10 +60,18 @@ def test_witness_sees_corpse_and_remembers_corpse_location() -> None:
 
     _write_location_observations("witness", witness, "loc_b", state, world_turn=101)
 
-    assert has_v3_action(witness, "corpse_seen")
+    # PR10: no memory_v3 corpse_seen record (knowledge-only).
+    assert not has_v3_action(witness, "corpse_seen"), (
+        "PR10: corpse_seen should be knowledge-only, not stored in memory_v3"
+    )
+    # Knowledge_v1 must record the corpse location.
+    known = (witness.get("knowledge_v1") or {}).get("known_npcs", {}).get("target", {})
+    assert known, "Witness must know the target via knowledge_v1 after corpse observation"
+    assert known.get("is_alive") is False, "Target must be marked dead in witness's knowledge"
 
 
 def test_hunter_gets_corpse_report_but_goal_not_completed() -> None:
+    """PR10: target_corpse_reported is knowledge-only; hunter's knowledge_v1 must reflect the report."""
     hunter, target, state = _build_hunter_and_target_state()
     witness = make_agent(agent_id="witness", location_id="loc_b", has_weapon=False, has_armor=False, has_ammo=False)
     state["agents"]["witness"] = witness
@@ -75,7 +84,12 @@ def test_hunter_gets_corpse_report_but_goal_not_completed() -> None:
     state["locations"]["loc_a"]["agents"] = ["hunter", "witness"]
     _bot_ask_colocated_stalkers_about_agent("hunter", hunter, "target", "target", state, world_turn=102)
 
-    assert has_v3_action(hunter, "target_corpse_reported")
+    # PR10: target_corpse_reported is knowledge-only, not stored in memory_v3.
+    # The hunter's knowledge_v1 must contain death evidence from the witness's report.
+    hunter_known = (hunter.get("knowledge_v1") or {}).get("known_npcs", {}).get("target", {})
+    assert hunter_known.get("is_alive") is False, (
+        "Hunter must know target is dead (via witness corpse report)"
+    )
     _check_global_goal_completion("hunter", hunter, state, world_turn=103)
     assert hunter.get("global_goal_achieved") is not True
 
@@ -107,7 +121,8 @@ def test_corpse_seen_updates_knowledge_before_reader_migration() -> None:
     assert known.get("last_seen_location_id") == "loc_b"
 
 
-def test_target_corpse_reported_still_creates_retrievable_lead_before_knowledge_tables() -> None:
+def test_target_corpse_reported_updates_knowledge_v1() -> None:
+    """PR10: target_corpse_reported is knowledge-only; knowledge_v1 must be updated."""
     hunter, _, _ = _build_hunter_and_target_state()
     write_memory_event_to_v3(
         agent_id="hunter",
@@ -127,15 +142,19 @@ def test_target_corpse_reported_still_creates_retrievable_lead_before_knowledge_
         world_turn=102,
     )
 
+    # PR10: no memory_v3 record (knowledge-only).
     corpse_report_records = v3_action_records(hunter, "target_corpse_reported")
-    assert corpse_report_records, "target_corpse_reported lead must remain retrievable before PR3 knowledge tables"
-    details = corpse_report_records[-1]["details"]
-    assert details.get("target_id") == "target"
-    assert details.get("location_id") == "loc_b"
-    assert details.get("source_agent_id") == "witness"
+    assert not corpse_report_records, (
+        "PR10: target_corpse_reported must be knowledge-only, not stored in memory_v3"
+    )
+    # Knowledge_v1 must reflect the witness report.
+    known = (hunter.get("knowledge_v1") or {}).get("known_npcs", {}).get("target", {})
+    assert known, "Hunter must know the target via knowledge_v1 after corpse report"
+    assert known.get("is_alive") is False, "Target must be marked dead in hunter's knowledge"
 
 
-def test_target_corpse_reported_still_indexes_target_and_location() -> None:
+def test_target_corpse_reported_indexes_target_and_location_in_knowledge() -> None:
+    """PR10: target_corpse_reported is knowledge-only; knowledge_v1 must reflect target and location."""
     hunter, _, _ = _build_hunter_and_target_state()
     write_memory_event_to_v3(
         agent_id="hunter",
@@ -153,13 +172,18 @@ def test_target_corpse_reported_still_indexes_target_and_location() -> None:
         },
         world_turn=103,
     )
+    # PR10: no memory_v3 records; knowledge is the source of truth.
     memory_v3 = hunter.get("memory_v3", {})
-    records = memory_v3.get("records", {})
-    indexes = memory_v3.get("indexes", {})
-    assert records, "memory_v3 must contain target_corpse_reported record"
-    record_id = next(iter(records.keys()))
-    assert record_id in indexes.get("by_entity", {}).get("target", [])
-    assert record_id in indexes.get("by_location", {}).get("loc_b", [])
+    records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
+    target_cprt_records = [r for r in records.values() if isinstance(r, dict) and r.get("kind") == "target_corpse_reported"]
+    assert not target_cprt_records, "PR10: target_corpse_reported must not be written to memory_v3"
+    # knowledge_v1 must know target is dead near loc_b.
+    known = (hunter.get("knowledge_v1") or {}).get("known_npcs", {}).get("target", {})
+    assert known, "Hunter must know the target via knowledge_v1 after corpse report"
+    de = known.get("death_evidence") or {}
+    assert str(de.get("corpse_location_id") or de.get("reported_turn") or known.get("last_seen_location_id") or "") != "", (
+        "Hunter knowledge must reference a location for the target's corpse"
+    )
 
 
 def test_hunter_travels_to_corpse_and_confirms_kill() -> None:
