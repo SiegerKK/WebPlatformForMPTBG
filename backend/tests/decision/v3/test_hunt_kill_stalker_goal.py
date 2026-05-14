@@ -28,6 +28,7 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_SEARCH_TARGET,
     STEP_START_COMBAT,
     STEP_TRAVEL_TO_LOCATION,
+    STEP_WAIT,
 )
 from app.games.zone_stalkers.decision.executors import execute_plan_step
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
@@ -35,6 +36,7 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_CONFIRM_KILL,
     OBJECTIVE_ENGAGE_TARGET,
     OBJECTIVE_GATHER_INTEL,
+    OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
     OBJECTIVE_HUNT_TARGET,
     OBJECTIVE_LOCATE_TARGET,
     OBJECTIVE_PREPARE_FOR_HUNT,
@@ -341,11 +343,38 @@ class TestHuntObjectiveGeneration:
         state = make_minimal_state(agent=agent)
         objectives = generate_objectives(_make_ctx(agent, state))
         objective_map = {o.key: o for o in objectives}
-        assert OBJECTIVE_LOCATE_TARGET in objective_map
+        assert OBJECTIVE_GET_MONEY_FOR_RESUPPLY in objective_map
         assert OBJECTIVE_PREPARE_FOR_HUNT in objective_map
         prepare = objective_map[OBJECTIVE_PREPARE_FOR_HUNT]
         blockers = prepare.metadata.get("blockers", [])
         assert any(b["key"] == "no_weapon" for b in blockers)
+
+    def test_killer_without_min_equipment_prefers_get_money_for_hunt(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            has_weapon=False,
+            money=0,
+        )
+        state = make_minimal_state(agent=agent)
+        objectives = generate_objectives(_make_ctx(agent, state))
+        decision = choose_objective(objectives, personality=agent)
+
+        assert any(obj.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY for obj in objectives)
+        assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
+
+    def test_killer_without_actionable_intel_and_no_money_prefers_get_money_for_hunt(self) -> None:
+        agent = make_agent(
+            global_goal="kill_stalker",
+            kill_target_id="target_1",
+            money=0,
+        )
+        state = make_minimal_state(agent=agent)
+        objectives = generate_objectives(_make_ctx(agent, state))
+        decision = choose_objective(objectives, personality=agent)
+
+        assert any(obj.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY for obj in objectives)
+        assert decision.selected.key == OBJECTIVE_GET_MONEY_FOR_RESUPPLY
 
     def test_track_stage_when_location_known_but_not_co_located(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
@@ -491,6 +520,33 @@ class TestHuntPlannerSteps:
         assert plan is not None
         step_kinds = [s.kind for s in plan.steps]
         assert STEP_QUESTION_WITNESSES in step_kinds or STEP_ASK_FOR_INTEL in step_kinds
+
+    def test_gather_intel_exhausted_hub_expands_search_instead_of_wait(self) -> None:
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = make_minimal_state(agent=agent)
+        state["agents"]["target_1"] = _make_target(location_id="loc_b")
+        ensure_memory_v3(agent)
+        agent["memory_v3"]["records"] = {
+            "exhausted_here": {
+                "id": "exhausted_here",
+                "agent_id": "bot1",
+                "layer": "observation",
+                "kind": "witness_source_exhausted",
+                "created_turn": state["world_turn"],
+                "details": {
+                    "action_kind": "witness_source_exhausted",
+                    "target_id": "target_1",
+                    "location_id": "loc_a",
+                    "cooldown_until_turn": state["world_turn"] + 180,
+                },
+            }
+        }
+
+        plan = self._build_hunt_plan("GATHER_INTEL", agent, state)
+        assert plan is not None
+        step_kinds = [s.kind for s in plan.steps]
+        assert STEP_WAIT not in step_kinds
+        assert STEP_TRAVEL_TO_LOCATION in step_kinds or STEP_LOOK_FOR_TRACKS in step_kinds
 
     def test_track_plan_with_known_location_includes_travel_and_search(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")

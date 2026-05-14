@@ -660,6 +660,23 @@ def upsert_known_corpse(
     }
 
 
+_FAILED_SEARCH_EXHAUSTION_THRESHOLD = 3
+_FAILED_SEARCH_COOLDOWN_TURNS = 300
+_FAILED_SEARCH_HUB_COOLDOWN_TURNS = 90
+_POSITIVE_HUNT_EVIDENCE_KINDS: frozenset[str] = frozenset({
+    "target_seen",
+    "target_last_known_location",
+    "target_intel",
+    "intel_from_stalker",
+    "intel_from_trader",
+})
+
+
+def _is_hunt_hub_details(details: dict[str, Any]) -> bool:
+    location_kind = str(details.get("location_kind") or "")
+    return bool(details.get("is_hub_location")) or location_kind in {"trader_hub", "intel_hub"}
+
+
 def upsert_hunt_evidence_from_observation(
     agent: dict[str, Any],
     *,
@@ -693,7 +710,7 @@ def upsert_hunt_evidence_from_observation(
 
     details = details or {}
 
-    if kind in {"target_seen", "target_last_known_location"}:
+    if kind in _POSITIVE_HUNT_EVIDENCE_KINDS:
         last_seen = entry.get("last_seen") if isinstance(entry.get("last_seen"), dict) else {}
         old_sig = (
             last_seen.get("location_id"),
@@ -707,6 +724,14 @@ def upsert_hunt_evidence_from_observation(
         }
         entry["last_seen"] = new_last_seen
         entry["recent_contact"] = {"turn": world_turn, "location_id": location_id}
+        if location_id:
+            failed_locs = entry.get("failed_search_locations") if isinstance(entry.get("failed_search_locations"), dict) else {}
+            failed_entry = failed_locs.get(location_id)
+            failed_turn = int((failed_entry or {}).get("turn", 0) or 0) if isinstance(failed_entry, dict) else 0
+            if failed_turn and world_turn > failed_turn:
+                failed_locs.pop(location_id, None)
+                changed_major = True
+                changed_minor = True
         new_sig = (
             new_last_seen.get("location_id"),
             new_last_seen.get("source"),
@@ -760,29 +785,35 @@ def upsert_hunt_evidence_from_observation(
 
     elif kind == "target_not_found":
         if location_id:
-            # Threshold must match _SEARCH_EXHAUSTION_THRESHOLD in target_beliefs.py.
-            _FAILED_SEARCH_EXHAUSTION_THRESHOLD = 3
-            _FAILED_SEARCH_COOLDOWN_TURNS = 300
             failed_locs: dict[str, Any] = entry.setdefault("failed_search_locations", {})
             existing_entry = failed_locs.get(location_id)
+            explicit_count = int(details.get("failed_search_count", 0) or 0)
             if isinstance(existing_entry, dict):
                 old_count = int(existing_entry.get("count", 1) or 1)
-                new_count = old_count + 1
             else:
                 old_count = 0
-                new_count = 1
-            # Only set cooldown when the exhaustion threshold is reached; before that,
-            # keep cooldown_until_turn = 0 so the location is not prematurely excluded.
+            new_count = max(old_count + 1, explicit_count or 0)
+            prev_cooldown = int((existing_entry or {}).get("cooldown_until_turn", 0) or 0)
+            explicit_cooldown = int(details.get("cooldown_until_turn", 0) or 0)
+            is_hub_location = _is_hunt_hub_details(details)
+            cooldown_turns = int(details.get("cooldown_turns", 0) or 0)
+            if cooldown_turns <= 0:
+                cooldown_turns = (
+                    _FAILED_SEARCH_HUB_COOLDOWN_TURNS if is_hub_location else _FAILED_SEARCH_COOLDOWN_TURNS
+                )
             if new_count >= _FAILED_SEARCH_EXHAUSTION_THRESHOLD:
-                prev_cooldown = int((existing_entry or {}).get("cooldown_until_turn", 0) or 0)
-                cooldown_until: int = max(prev_cooldown, world_turn + _FAILED_SEARCH_COOLDOWN_TURNS)
+                computed_cooldown = world_turn + cooldown_turns
+                cooldown_until = max(prev_cooldown, explicit_cooldown, computed_cooldown)
             else:
-                cooldown_until = int((existing_entry or {}).get("cooldown_until_turn", 0) or 0)
+                cooldown_until = max(prev_cooldown, explicit_cooldown)
             new_failed: dict[str, Any] = {
                 "count": new_count,
                 "turn": world_turn,
                 "cooldown_until_turn": cooldown_until,
                 "confidence": float(confidence),
+                "location_kind": details.get("location_kind") if details.get("location_kind") else None,
+                "is_hub_location": bool(is_hub_location),
+                "cooldown_turns": cooldown_turns,
             }
             failed_locs[location_id] = new_failed
             changed_major = changed_major or (old_count != new_count)

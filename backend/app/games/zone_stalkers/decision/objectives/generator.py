@@ -88,6 +88,8 @@ ITEM_NEED_TO_OBJECTIVE = {
     "medicine": OBJECTIVE_RESUPPLY_MEDICINE,
 }
 
+_MIN_HUNT_INTEL_CASH_RESERVE = 200
+
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
@@ -259,6 +261,7 @@ def evaluate_kill_target_combat_readiness(
         else None
     )
     money_missing = int(liquidity.get("money_missing") or 0)
+    medicine_missing = int(readiness.get("medicine_missing") or 0)
 
     reasons: list[str] = []
     if not weapon_ready:
@@ -267,6 +270,8 @@ def evaluate_kill_target_combat_readiness(
         reasons.append("low_ammo")
     if not hp_ready:
         reasons.append("hp_low")
+    if medicine_missing > 0 and hp < 70:
+        reasons.append("no_medicine")
     if target_strength is not None and target_strength >= 0.8 and not armor_ready:
         reasons.append("no_armor")
         reasons.append("target_too_strong")
@@ -837,6 +842,16 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             "not_attacking_reasons": list(combat_eval["reasons"]),
             "recommended_support_objective": combat_eval["recommended_support_objective"],
         }
+        no_actionable_hunt_lead = bool(
+            target_belief is not None
+            and target_alive is not False
+            and not target_visible_now
+            and not target_co_located
+            and not bool(target_belief.possible_locations)
+            and not bool(target_belief.likely_routes)
+        )
+        hunt_cash_low = int(agent.get("money", 0) or 0) < _MIN_HUNT_INTEL_CASH_RESERVE
+        needs_get_money_first = bool(no_actionable_hunt_lead and (hunt_cash_low or money_missing > 0))
 
         if target_alive is False:
             if target_loc:
@@ -982,7 +997,17 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             )
         elif target_loc:
             best_is_exhausted = target_loc in exhausted_locations
-            if not best_is_exhausted:
+            route_track_location = (
+                route_hypothesis.to_location_id
+                if route_hypothesis
+                and route_hypothesis.to_location_id
+                and (
+                    best_is_exhausted
+                    or (float(target_belief.best_location_confidence) if target_belief else 0.0) <= 0.3
+                )
+                else target_loc
+            )
+            if not best_is_exhausted and route_track_location == target_loc:
                 _append_unique(
                     result,
                     Objective(
@@ -1093,51 +1118,85 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     ),
                 )
         else:
-            _append_unique(
-                result,
-                Objective(
-                    key=OBJECTIVE_GATHER_INTEL,
-                    source="global_goal",
-                    urgency=0.84,
-                    expected_value=0.82,
-                    risk=0.18,
-                    time_cost=0.48,
-                    resource_cost=0.08,
-                    confidence=0.76,
-                    goal_alignment=1.0,
-                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[1],
-                    reasons=("Полезных зацепок нет — собираю новые разведданные",),
-                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[0],
-                    metadata={"is_blocking": False, "hunt_stage": "gather_intel", "target_id": target_id},
-                    target={"target_id": target_id} if target_id else None,
-                ),
-            )
-            _append_unique(
-                result,
-                Objective(
-                    key=OBJECTIVE_LOCATE_TARGET,
-                    source="global_goal",
-                    urgency=0.82,
-                    expected_value=0.8,
-                    risk=0.2,
-                    time_cost=0.55,
-                    resource_cost=0.1,
-                    confidence=0.75,
-                    goal_alignment=1.0,
-                    memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[1],
-                    reasons=("Местоположение цели неизвестно — собираю разведданные",),
-                    source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[0],
-                    metadata={"is_blocking": False, "hunt_stage": "locate", "target_id": target_id},
-                    target={"target_id": target_id} if target_id else None,
-                ),
-            )
+            if no_actionable_hunt_lead and (blockers or needs_get_money_first):
+                money_reasons = []
+                if blockers:
+                    money_reasons.extend(prepare_reasons)
+                if hunt_cash_low:
+                    money_reasons.append("Нужны деньги на покупку сведений и подготовку к охоте")
+                _replace_or_append(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_GET_MONEY_FOR_RESUPPLY,
+                        source="global_goal",
+                        urgency=0.9 if blockers else 0.86,
+                        expected_value=0.86,
+                        risk=0.24,
+                        time_cost=0.42,
+                        resource_cost=0.12,
+                        confidence=0.82,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[1],
+                        reasons=tuple(money_reasons),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GET_MONEY_FOR_RESUPPLY)[0],
+                        metadata={
+                            **_combat_metadata,
+                            "blockers": blockers,
+                            "hunt_stage": "prepare",
+                            "support_objective_for": "kill_stalker",
+                            "money_missing": money_missing,
+                            "hunt_cash_low": hunt_cash_low,
+                        },
+                    ),
+                )
+                if needs_get_money_first:
+                    result[:] = [objective for objective in result if objective.key != OBJECTIVE_HUNT_TARGET]
+            if not needs_get_money_first:
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_GATHER_INTEL,
+                        source="global_goal",
+                        urgency=0.84,
+                        expected_value=0.82,
+                        risk=0.18,
+                        time_cost=0.48,
+                        resource_cost=0.08,
+                        confidence=0.76,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[1],
+                        reasons=("Полезных зацепок нет — расширяю поиск и собираю новые разведданные",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_GATHER_INTEL)[0],
+                        metadata={"is_blocking": False, "hunt_stage": "gather_intel", "target_id": target_id},
+                        target={"target_id": target_id} if target_id else None,
+                    ),
+                )
+                _append_unique(
+                    result,
+                    Objective(
+                        key=OBJECTIVE_LOCATE_TARGET,
+                        source="global_goal",
+                        urgency=0.82,
+                        expected_value=0.8,
+                        risk=0.2,
+                        time_cost=0.55,
+                        resource_cost=0.1,
+                        confidence=0.75,
+                        goal_alignment=1.0,
+                        memory_confidence=_objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[1],
+                        reasons=("Местоположение цели неизвестно — расширяю поиск",),
+                        source_refs=("global_goal:kill_stalker",) + _objective_memory_refs_and_confidence(ctx, OBJECTIVE_LOCATE_TARGET)[0],
+                        metadata={"is_blocking": False, "hunt_stage": "locate", "target_id": target_id},
+                        target={"target_id": target_id} if target_id else None,
+                    ),
+                )
             if blockers:
                 _append_unique(
                     result,
                     Objective(
                         key=OBJECTIVE_PREPARE_FOR_HUNT,
                         source="global_goal",
-                        urgency=0.70,
+                        urgency=0.78 if no_actionable_hunt_lead else 0.70,
                         expected_value=0.80,
                         risk=0.20,
                         time_cost=0.45,

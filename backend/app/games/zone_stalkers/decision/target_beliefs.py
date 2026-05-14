@@ -63,6 +63,7 @@ _KIND_ALIASES: dict[str, str] = {
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
 _SEARCH_LOCATION_COOLDOWN_TURNS = 300
+_SEARCH_LOCATION_HUB_COOLDOWN_TURNS = 90
 _MISS_SCORE_MULTIPLIERS: dict[int, float] = {
     1: 0.45,
     2: 0.20,
@@ -329,21 +330,44 @@ def _collect_failed_search_stats(
     counts: dict[str, int] = defaultdict(int)
     cooldowns: dict[str, int] = {}
     latest_turns: dict[str, int] = {}
+    latest_positive_turns: dict[str, int] = {}
+    hub_locations: set[str] = set()
+    positive_kinds = {"target_seen", "target_last_known_location", "target_intel"}
+
+    for lead in leads:
+        if lead.kind not in positive_kinds or not lead.location_id:
+            continue
+        latest_positive_turns[lead.location_id] = max(
+            latest_positive_turns.get(lead.location_id, 0),
+            int(lead.created_turn),
+        )
+
     for lead in leads:
         if lead.kind != "target_not_found" or not lead.location_id:
             continue
         location_id = lead.location_id
+        failed_turn = int(lead.created_turn)
+        if latest_positive_turns.get(location_id, 0) > failed_turn:
+            continue
         explicit_count = _coerce_int(lead.details.get("failed_search_count"))
         counts[location_id] = max(counts[location_id] + 1, explicit_count or 0)
-        latest_turns[location_id] = max(latest_turns.get(location_id, 0), int(lead.created_turn))
+        latest_turns[location_id] = max(latest_turns.get(location_id, 0), failed_turn)
         explicit_cooldown = _coerce_int(lead.details.get("cooldown_until_turn"))
         if explicit_cooldown is not None:
             cooldowns[location_id] = max(cooldowns.get(location_id, 0), explicit_cooldown)
+        location_kind = str(lead.details.get("location_kind") or "")
+        if bool(lead.details.get("is_hub_location")) or location_kind in {"trader_hub", "intel_hub"}:
+            hub_locations.add(location_id)
     for location_id, count in counts.items():
         if count >= _SEARCH_EXHAUSTION_THRESHOLD and cooldowns.get(location_id, 0) <= world_turn:
+            cooldown_turns = (
+                _SEARCH_LOCATION_HUB_COOLDOWN_TURNS
+                if location_id in hub_locations
+                else _SEARCH_LOCATION_COOLDOWN_TURNS
+            )
             cooldowns[location_id] = max(
                 cooldowns.get(location_id, 0),
-                latest_turns.get(location_id, world_turn) + _SEARCH_LOCATION_COOLDOWN_TURNS,
+                latest_turns.get(location_id, world_turn) + cooldown_turns,
             )
     return dict(counts), cooldowns
 

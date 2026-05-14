@@ -539,3 +539,53 @@ def test_knowledge_first_target_not_found_via_memory_event() -> None:
     failed = hunt_evidence["target_1"].get("failed_search_locations", {})
     assert "loc_false" in failed, "loc_false must be in failed_search_locations"
     assert failed["loc_false"]["count"] >= 1
+
+
+def test_target_not_found_uses_shorter_cooldown_for_trader_hub() -> None:
+    from app.games.zone_stalkers.knowledge.knowledge_store import upsert_hunt_evidence_from_observation
+
+    agent = _bare_agent()
+    for turn in (10, 20, 30):
+        upsert_hunt_evidence_from_observation(
+            agent,
+            target_id="target_1",
+            kind="target_not_found",
+            location_id="loc_trader",
+            world_turn=turn,
+            confidence=0.75,
+            source="observation",
+            details={"location_kind": "trader_hub", "is_hub_location": True, "cooldown_turns": 90},
+        )
+
+    entry = agent["knowledge_v1"]["hunt_evidence"]["target_1"]
+    failed = entry["failed_search_locations"]["loc_trader"]
+    assert failed["count"] == 3
+    assert failed["cooldown_until_turn"] == 120
+    assert failed["is_hub_location"] is True
+
+
+def test_positive_hunt_intel_clears_failed_search_for_newer_location_fact() -> None:
+    from app.games.zone_stalkers.knowledge.knowledge_store import upsert_hunt_evidence_from_observation
+
+    agent = _bare_agent()
+    upsert_hunt_evidence_from_observation(
+        agent,
+        target_id="target_1",
+        kind="target_not_found",
+        location_id="loc_b",
+        world_turn=10,
+        confidence=0.75,
+        source="observation",
+    )
+    upsert_hunt_evidence_from_observation(
+        agent,
+        target_id="target_1",
+        kind="target_last_known_location",
+        location_id="loc_b",
+        world_turn=20,
+        confidence=0.8,
+        source="witness_report",
+    )
+
+    failed = agent["knowledge_v1"]["hunt_evidence"]["target_1"].get("failed_search_locations", {})
+    assert "loc_b" not in failed

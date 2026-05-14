@@ -78,6 +78,7 @@ from app.games.zone_stalkers.economy.debts import (
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
 _SEARCH_LOCATION_COOLDOWN_TURNS = 300
+_SEARCH_LOCATION_HUB_COOLDOWN_TURNS = 90
 # Fix 6 — cooldown turns after exhausting a witness source at a location
 WITNESS_SOURCE_COOLDOWN_TURNS = 180
 TRADE_FAIL_TRADER_NO_MONEY = "trader_no_money"
@@ -1065,6 +1066,24 @@ def _exec_question_witnesses(
     return []
 
 
+def _is_hunt_hub_location(state: dict[str, Any], location_id: str | None) -> bool:
+    if not location_id:
+        return False
+    traders = state.get("traders")
+    if not isinstance(traders, dict):
+        return False
+    return any(
+        isinstance(raw_trader, dict)
+        and raw_trader.get("is_alive", True)
+        and str(raw_trader.get("location_id") or "") == str(location_id)
+        for raw_trader in traders.values()
+    )
+
+
+def _search_location_cooldown_turns(state: dict[str, Any], location_id: str | None) -> int:
+    return _SEARCH_LOCATION_HUB_COOLDOWN_TURNS if _is_hunt_hub_location(state, location_id) else _SEARCH_LOCATION_COOLDOWN_TURNS
+
+
 def _count_target_not_found_failures(
     agent: dict[str, Any],
     *,
@@ -1320,8 +1339,9 @@ def _exec_search_target(
             target_id=target_id,
             location_id=str(expected_loc),
         ) + 1
+        cooldown_turns = _search_location_cooldown_turns(state, str(expected_loc))
         cooldown_until_turn = (
-            world_turn + _SEARCH_LOCATION_COOLDOWN_TURNS
+            world_turn + cooldown_turns
             if failed_search_count >= _SEARCH_EXHAUSTION_THRESHOLD
             else None
         )
@@ -1338,6 +1358,9 @@ def _exec_search_target(
                 "confirmed_empty": True,
                 "failed_search_count": failed_search_count,
                 "cooldown_until_turn": cooldown_until_turn,
+                "cooldown_turns": cooldown_turns,
+                "location_kind": "trader_hub" if _is_hunt_hub_location(state, str(expected_loc)) else "search_location",
+                "is_hub_location": _is_hunt_hub_location(state, str(expected_loc)),
             },
             summary="Цель отсутствует в проверенной локации.",
         )

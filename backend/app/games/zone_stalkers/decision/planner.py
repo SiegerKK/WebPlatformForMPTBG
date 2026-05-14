@@ -177,13 +177,14 @@ def _is_location_exhausted_for_money(
     return False
 
 
-def _is_support_source_exhausted(
+def _has_active_support_exhaustion(
     agent: dict[str, Any],
     *,
     location_id: str | None,
     target_id: str | None,
     objective_key: str,
     world_turn: int,
+    action_kinds: set[str],
 ) -> bool:
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
@@ -197,7 +198,7 @@ def _is_support_source_exhausted(
         if not isinstance(details, dict):
             details = {}
         action_kind = str(details.get("action_kind") or rec.get("kind") or "")
-        if action_kind not in {"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"}:
+        if action_kind not in action_kinds:
             continue
         rec_location_id = str(details.get("location_id") or rec.get("location_id") or "")
         if location_id_str and rec_location_id and rec_location_id != location_id_str:
@@ -222,6 +223,24 @@ def _is_support_source_exhausted(
         }:
             return True
     return False
+
+
+def _is_support_source_exhausted(
+    agent: dict[str, Any],
+    *,
+    location_id: str | None,
+    target_id: str | None,
+    objective_key: str,
+    world_turn: int,
+) -> bool:
+    return _has_active_support_exhaustion(
+        agent,
+        location_id=location_id,
+        target_id=target_id,
+        objective_key=objective_key,
+        world_turn=world_turn,
+        action_kinds={"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"},
+    )
 
 
 # ── Plan builders ─────────────────────────────────────────────────────────────
@@ -1867,13 +1886,22 @@ def _plan_hunt_target(
     target_loc = intent.target_location_id
     agent_loc = ctx.self_state.get("location_id")
 
+    exhaustion_location_id = target_loc or agent_loc
     if objective_key and _is_support_source_exhausted(
         ctx.self_state,
-        location_id=target_loc,
+        location_id=exhaustion_location_id,
         target_id=target_id,
         objective_key=objective_key,
         world_turn=world_turn,
     ):
+        if objective_key in {"GATHER_INTEL", "LOCATE_TARGET", "VERIFY_LEAD", "TRACK_TARGET"}:
+            return _build_hunt_expand_search_plan(
+                ctx,
+                intent,
+                state,
+                world_turn,
+                target_id=target_id,
+            )
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(STEP_WAIT, {"reason": "support_source_exhausted_preplan"})],
@@ -2110,25 +2138,33 @@ def _plan_hunt_target(
                     expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
                 ),
                 PlanStep(
-                    STEP_QUESTION_WITNESSES,
-                    {"target_id": target_id, "reason": "hunt_intel"},
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_buy_or_request_intel"},
                     expected_duration_ticks=1,
                 ),
             ],
             confidence=0.65,
             created_turn=world_turn,
         )
-    return Plan(
-        intent_kind=intent.kind,
-        steps=[
-            PlanStep(
-                STEP_QUESTION_WITNESSES,
-                {"target_id": target_id, "reason": "hunt_intel"},
-                expected_duration_ticks=1,
-            )
-        ],
-        confidence=0.5,
-        created_turn=world_turn,
+    if _location_has_live_trader(state, str(agent_loc or "")):
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_buy_or_request_intel"},
+                    expected_duration_ticks=1,
+                )
+            ],
+            confidence=0.55,
+            created_turn=world_turn,
+        )
+    return _build_hunt_expand_search_plan(
+        ctx,
+        intent,
+        state,
+        world_turn,
+        target_id=target_id,
     )
 
 
@@ -2394,6 +2430,146 @@ def _nearest_trader_location(
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
     agent_loc = agent.get("location_id", "")
     return _find_nearest_trader_location(agent_loc, state)
+
+
+def _location_has_live_trader(state: dict[str, Any], location_id: str | None) -> bool:
+    if not location_id:
+        return False
+    traders = state.get("traders")
+    if not isinstance(traders, dict):
+        return False
+    return any(
+        isinstance(raw_trader, dict)
+        and raw_trader.get("is_alive", True)
+        and str(raw_trader.get("location_id") or "") == str(location_id)
+        for raw_trader in traders.values()
+    )
+
+
+def _build_hunt_expand_search_plan(
+    ctx: AgentContext,
+    intent: Intent,
+    state: dict[str, Any],
+    world_turn: int,
+    *,
+    target_id: str | None,
+) -> Plan:
+    from app.games.zone_stalkers.rules.tick_rules import _dijkstra_reachable_locations
+
+    agent = ctx.self_state
+    agent_loc = str(agent.get("location_id") or "")
+    reachable = _dijkstra_reachable_locations(agent_loc, state.get("locations", {}), max_minutes=9999)
+    current_trader_exhausted = _has_active_support_exhaustion(
+        agent,
+        location_id=agent_loc,
+        target_id=target_id,
+        objective_key="GATHER_INTEL",
+        world_turn=world_turn,
+        action_kinds={"support_source_exhausted"},
+    )
+
+    trader_candidates = sorted(
+        {
+            str(raw_trader.get("location_id") or "")
+            for raw_trader in (state.get("traders") or {}).values()
+            if isinstance(raw_trader, dict)
+            and raw_trader.get("is_alive", True)
+            and str(raw_trader.get("location_id") or "")
+            and str(raw_trader.get("location_id") or "") != agent_loc
+            and not _has_active_support_exhaustion(
+                agent,
+                location_id=str(raw_trader.get("location_id") or ""),
+                target_id=target_id,
+                objective_key="GATHER_INTEL",
+                world_turn=world_turn,
+                action_kinds={"support_source_exhausted"},
+            )
+        },
+        key=lambda loc: (int(reachable.get(loc, 10**9)), loc),
+    )
+    if trader_candidates:
+        trader_loc = trader_candidates[0]
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": trader_loc, "reason": "hunt_expand_search_trader_hub"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+                ),
+                PlanStep(
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_expand_search_trader_hub"},
+                    expected_duration_ticks=1,
+                ),
+            ],
+            confidence=0.62,
+            created_turn=world_turn,
+        )
+
+    witness_candidates = [
+        loc
+        for loc, _distance in sorted(reachable.items(), key=lambda item: (int(item[1]), item[0]))
+        if loc != agent_loc
+        and not _is_support_source_exhausted(
+            agent,
+            location_id=str(loc),
+            target_id=target_id,
+            objective_key="GATHER_INTEL",
+            world_turn=world_turn,
+        )
+    ]
+    if witness_candidates:
+        dest = str(witness_candidates[0])
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": dest, "reason": "hunt_expand_search_neighbor"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, dest, state),
+                ),
+                PlanStep(
+                    STEP_QUESTION_WITNESSES,
+                    {"target_id": target_id, "reason": "hunt_expand_search_neighbor"},
+                    expected_duration_ticks=1,
+                ),
+                PlanStep(
+                    STEP_LOOK_FOR_TRACKS,
+                    {"target_id": target_id, "target_location_id": dest, "reason": "hunt_expand_search_neighbor"},
+                    expected_duration_ticks=1,
+                ),
+            ],
+            confidence=0.56,
+            created_turn=world_turn,
+        )
+
+    if not current_trader_exhausted and _location_has_live_trader(state, agent_loc):
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_expand_search_local_trader"},
+                    expected_duration_ticks=1,
+                )
+            ],
+            confidence=0.5,
+            created_turn=world_turn,
+        )
+
+    return Plan(
+        intent_kind=intent.kind,
+        steps=[
+            PlanStep(
+                STEP_LOOK_FOR_TRACKS,
+                {"target_id": target_id, "target_location_id": agent_loc, "reason": "hunt_expand_search_tracks"},
+                expected_duration_ticks=1,
+            )
+        ],
+        confidence=0.4,
+        created_turn=world_turn,
+    )
 
 
 def _artifact_item_types(agent: dict[str, Any]) -> set[str]:
