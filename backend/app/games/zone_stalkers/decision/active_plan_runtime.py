@@ -28,7 +28,7 @@ from app.games.zone_stalkers.decision.models.active_plan import (
 from app.games.zone_stalkers.decision.models.plan import (
     Plan, PlanStep, STEP_SEARCH_TARGET, STEP_TRADE_SELL_ITEM,
     STEP_TRADE_BUY_ITEM, STEP_EXPLORE_LOCATION, STEP_TRAVEL_TO_LOCATION,
-    STEP_SLEEP_FOR_HOURS,
+    STEP_SLEEP_FOR_HOURS, STEP_REQUEST_LOAN,
 )
 from app.games.zone_stalkers.decision.plan_monitor import is_v3_monitored_bot
 
@@ -62,6 +62,22 @@ def _invalidate_brain_on_trade_sell_failure_abort(
         agent,
         None,
         reason="trade_sell_failed",
+        priority="normal",
+        world_turn=world_turn,
+    )
+
+
+def _invalidate_brain_on_request_loan_failure(
+    agent: dict[str, Any],
+    *,
+    world_turn: int,
+) -> None:
+    from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain  # noqa: PLC0415
+
+    invalidate_brain(
+        agent,
+        None,
+        reason="request_loan_failed",
         priority="normal",
         world_turn=world_turn,
     )
@@ -538,6 +554,29 @@ def start_or_continue_active_plan_step(
             state=state,
             add_memory=add_memory,
             reason=f"trade_sell_failed:{failure_reason}",
+        )
+        save_active_plan(agent, refreshed_plan)
+        return events
+
+    if (
+        current_step.kind == STEP_REQUEST_LOAN
+        and _executed_payload.get("_loan_failed")
+        and step_plan.current_step_index == 0
+    ):
+        failure_reason = str(
+            _executed_payload.get("_failure_reason") or "loan_request_failed"
+        )
+        mark_active_plan_step_failed(
+            agent,
+            refreshed_plan,
+            world_turn=world_turn,
+            state=state,
+            add_memory=add_memory,
+            reason=f"request_loan_failed:{failure_reason}",
+        )
+        _invalidate_brain_on_request_loan_failure(
+            agent,
+            world_turn=world_turn,
         )
         save_active_plan(agent, refreshed_plan)
         return events

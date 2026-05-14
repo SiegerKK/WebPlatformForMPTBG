@@ -1791,6 +1791,12 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     except Exception:
         pass
     state.setdefault("debug", {})
+    try:
+        from app.games.zone_stalkers.economy.debts import mark_overdue_debts  # noqa: PLC0415
+
+        mark_overdue_debts(state, world_turn=int(state.get("world_turn") or 0))
+    except Exception:
+        pass
 
     # ── PR1: Store profiler counters + last runtime ───────────────────────────
     try:

@@ -1133,6 +1133,43 @@ def export_npc_logs(
             _context_builder_fallbacks += int(ctx_metrics.get("context_builder_memory_fallbacks") or 0)
 
     runtime_memory_metrics = get_memory_metrics()
+    debt_ledger = state.get("debt_ledger") if isinstance(state.get("debt_ledger"), dict) else {}
+    debt_rows = (debt_ledger.get("debts") or {}) if isinstance(debt_ledger, dict) else {}
+    active_debts = 0
+    overdue_debts = 0
+    defaulted_debts = 0
+    total_outstanding = 0
+    survival_loans_created = 0
+    survival_loans_repaid = 0
+    if isinstance(debt_rows, dict):
+        try:
+            from app.games.zone_stalkers.economy.debts import accrue_debt_interest  # noqa: PLC0415
+        except Exception:
+            accrue_debt_interest = None
+        for debt in debt_rows.values():
+            if not isinstance(debt, dict):
+                continue
+            status = str(debt.get("status") or "")
+            purpose = str(debt.get("purpose") or "")
+            if status in {"active", "overdue"}:
+                if accrue_debt_interest is not None:
+                    try:
+                        accrue_debt_interest(debt, world_turn=world_turn)
+                    except Exception:
+                        pass
+                active_debts += 1
+                total_outstanding += int(
+                    (debt.get("outstanding_principal") or 0)
+                    + (debt.get("accrued_interest") or 0)
+                )
+            if status == "overdue":
+                overdue_debts += 1
+            if status == "defaulted":
+                defaulted_debts += 1
+            if purpose.startswith("survival_"):
+                survival_loans_created += 1
+                if status == "repaid":
+                    survival_loans_repaid += 1
     # Build in-memory ZIP
     buf = io.BytesIO()
     agent_index: list[dict] = []
@@ -1169,6 +1206,14 @@ def export_npc_logs(
                 "corpse_seen_alive_agent_ignored": int(runtime_memory_metrics.get("corpse_seen_alive_agent_ignored", 0)),
                 "memory_evictions_per_tick": round(_memory_evictions_total / _turns_elapsed, 4),
                 "memory_drops_per_tick": round(_memory_drops_total / _turns_elapsed, 4),
+            },
+            "debt_summary": {
+                "active_debts": active_debts,
+                "total_outstanding": total_outstanding,
+                "overdue_debts": overdue_debts,
+                "defaulted_debts": defaulted_debts,
+                "survival_loans_created": survival_loans_created,
+                "survival_loans_repaid": survival_loans_repaid,
             },
         }
         zf.writestr("_summary.json", json.dumps(summary, ensure_ascii=False, indent=2))

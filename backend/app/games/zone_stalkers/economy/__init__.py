@@ -1,0 +1,2 @@
+"""Zone Stalkers economy domain."""
+
