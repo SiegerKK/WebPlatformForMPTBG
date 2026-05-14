@@ -116,6 +116,8 @@ def execute_plan_step(
 
     agent_id = ctx.agent_id
     agent = state["agents"][agent_id]     # mutable reference
+    if isinstance(agent, dict):
+        agent.setdefault("id", agent_id)
 
     dispatch: dict[str, Any] = {
         STEP_TRAVEL_TO_LOCATION:   _exec_travel,
@@ -424,6 +426,11 @@ def _exec_trade_buy(
         item_types = frozenset([affordable[0]])
 
     reason = step.payload.get("reason", f"buy_{category}")
+    reason_lower = str(reason).lower()
+    critical_needs = bool(
+        category in {"drink", "food", "medical"}
+        and ("survival" in reason_lower or "emergency" in reason_lower)
+    )
     trader = None
     for trader_id, trader_obj in (state.get("traders") or {}).items():
         if not isinstance(trader_obj, dict):
@@ -440,7 +447,7 @@ def _exec_trade_buy(
             debtor=agent,
             creditor=trader,
             world_turn=world_turn,
-            critical_needs=False,
+            critical_needs=critical_needs,
         ))
     buy_events = _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                       purchase_reason=reason) or []

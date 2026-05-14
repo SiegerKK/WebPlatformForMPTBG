@@ -1794,12 +1794,19 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     try:
         from app.games.zone_stalkers.economy.debts import (
             DEBT_ESCAPE_THRESHOLD,
-            apply_due_rollovers,
+            apply_due_rollovers_with_affected_debtors,
             get_debtor_debt_total,
+            refresh_debtor_economic_states,
         )  # noqa: PLC0415
 
         current_turn = int(state.get("world_turn") or 0)
-        events.extend(apply_due_rollovers(state=state, world_turn=current_turn))
+        rollover_events, affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+            state=state,
+            world_turn=current_turn,
+        )
+        events.extend(rollover_events)
+        if affected_debtor_ids:
+            refresh_debtor_economic_states(state, affected_debtor_ids, world_turn=current_turn)
         for _agent_id, _agent in (state.get("agents") or {}).items():
             if not isinstance(_agent, dict):
                 continue

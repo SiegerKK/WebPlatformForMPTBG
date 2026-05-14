@@ -236,7 +236,7 @@ _ACTION_KIND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     # Trade failures
     "trade_sell_failed": (LAYER_GOAL, "trade_sell_failed", ("trade", "failure", "cooldown")),
     "debt_created": (LAYER_GOAL, "debt_created", ("economy", "debt", "credit")),
-    "debt_credit_advanced": (LAYER_GOAL, "debt_created", ("economy", "debt", "credit")),
+    "debt_credit_advanced": (LAYER_GOAL, "debt_credit_advanced", ("economy", "debt", "credit")),
     "debt_payment": (LAYER_GOAL, "debt_payment", ("economy", "debt", "repayment")),
     "debt_repaid": (LAYER_GOAL, "debt_repaid", ("economy", "debt", "repayment")),
     "debt_rolled_over": (LAYER_GOAL, "debt_rolled_over", ("economy", "debt", "rollover")),

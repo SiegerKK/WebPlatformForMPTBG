@@ -270,3 +270,38 @@ def test_completed_global_goal_adds_leave_zone_objective() -> None:
 
     assert OBJECTIVE_LEAVE_ZONE in objective_map
     assert objective_map[OBJECTIVE_LEAVE_ZONE].source == "global_goal_completed"
+
+
+def test_debt_total_above_5000_selects_leave_zone_from_debt() -> None:
+    agent = make_agent(thirst=10, hunger=10, global_goal="get_rich")
+    agent["economic_state"] = {
+        "debt_total": 5200,
+        "creditors": ["trader_1"],
+        "next_due_turn_min": 180,
+        "should_escape_zone_due_to_debt": True,
+    }
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    decision = choose_objective(objectives, personality=agent)
+
+    assert decision.selected.key == OBJECTIVE_LEAVE_ZONE
+    assert decision.selected.source == "debt_escape"
+    assert decision.selected.metadata.get("reason") == "debt_escape_threshold"
+
+
+def test_debt_escape_priority_below_critical_survival() -> None:
+    agent = make_agent(thirst=100, hunger=10, global_goal="get_rich")
+    agent["economic_state"] = {
+        "debt_total": 5200,
+        "creditors": ["trader_1"],
+        "next_due_turn_min": 150,
+        "should_escape_zone_due_to_debt": True,
+    }
+    state = make_minimal_state(agent=agent)
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    decision = choose_objective(objectives, personality=agent)
+
+    assert any(obj.key == OBJECTIVE_LEAVE_ZONE and obj.source == "debt_escape" for obj in objectives)
+    assert decision.selected.key == OBJECTIVE_RESTORE_WATER

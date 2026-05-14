@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from app.games.zone_stalkers.decision.beliefs import build_belief_state
+from app.games.zone_stalkers.decision.context_builder import build_agent_context
+from app.games.zone_stalkers.decision.models.objective import ObjectiveGenerationContext
+from app.games.zone_stalkers.decision.needs import evaluate_need_result
+from app.games.zone_stalkers.decision.objectives.generator import OBJECTIVE_LEAVE_ZONE, generate_objectives
 from app.games.zone_stalkers.economy.debts import (
     DEBT_ESCAPE_THRESHOLD,
     SURVIVAL_CREDIT_ROLLOVER_TURNS,
@@ -12,6 +17,7 @@ from app.games.zone_stalkers.economy.debts import (
     repay_debts_to_creditor_if_useful,
     should_escape_zone_due_to_debt,
 )
+from app.games.zone_stalkers.rules.tick_rules import tick_zone_map
 
 
 def _state() -> dict:
@@ -201,3 +207,107 @@ def test_near_due_repayment_pays_more_aggressively() -> None:
         critical_needs=False,
     )
     assert urgent >= normal
+
+
+def test_rollover_updates_agent_economic_state_for_objective_generation() -> None:
+    state = {
+        "world_turn": 100,
+        "world_day": 1,
+        "world_hour": 12,
+        "world_minute": 0,
+        "emission_active": False,
+        "emission_scheduled_turn": None,
+        "emission_ends_turn": None,
+        "agents": {
+            "bot1": {
+                "id": "bot1",
+                "name": "bot1",
+                "controller": {"kind": "bot"},
+                "is_alive": True,
+                "has_left_zone": False,
+                "location_id": "loc_a",
+                "hp": 100,
+                "max_hp": 100,
+                "radiation": 0,
+                "hunger": 10,
+                "thirst": 10,
+                "sleepiness": 10,
+                "money": 250,
+                "equipment": {"weapon": {"type": "pistol", "value": 300}, "armor": {"type": "leather_jacket", "value": 200}},
+                "inventory": [{"id": "food", "type": "bread", "value": 0}, {"id": "water", "type": "water", "value": 0}],
+                "action_queue": [],
+                "scheduled_action": None,
+                "action_used": False,
+                "global_goal": "get_rich",
+                "material_threshold": 1000,
+                "risk_tolerance": 0.5,
+            }
+        },
+        "traders": {
+            "trader_1": {
+                "id": "trader_1",
+                "name": "Trader",
+                "location_id": "loc_a",
+                "is_alive": True,
+                "money": 5000,
+                "accounts_receivable": 0,
+                "inventory": [],
+            }
+        },
+        "locations": {
+            "loc_a": {
+                "id": "loc_a",
+                "name": "A",
+                "terrain_type": "buildings",
+                "anomaly_activity": 0,
+                "connections": [{"to": "loc_exit", "travel_time": 2}],
+                "items": [],
+                "agents": ["bot1", "trader_1"],
+            },
+            "loc_exit": {
+                "id": "loc_exit",
+                "name": "Exit",
+                "terrain_type": "buildings",
+                "anomaly_activity": 0,
+                "exit_zone": True,
+                "connections": [{"to": "loc_a", "travel_time": 2}],
+                "items": [],
+                "agents": [],
+            },
+        },
+        "combat_interactions": {},
+        "relations": {},
+        "groups": {},
+    }
+
+    account = advance_survival_credit(
+        state=state,
+        debtor_id="bot1",
+        creditor_id="trader_1",
+        creditor_type="trader",
+        amount=4900,
+        purpose="survival_food",
+        location_id="loc_a",
+        world_turn=100,
+    )
+    account["next_due_turn"] = 101
+
+    state, _events = tick_zone_map(state)
+
+    econ = state["agents"]["bot1"].get("economic_state") or {}
+    assert int(econ.get("debt_total") or 0) >= DEBT_ESCAPE_THRESHOLD
+    assert bool(econ.get("should_escape_zone_due_to_debt")) is True
+
+    agent = state["agents"]["bot1"]
+    ctx = build_agent_context("bot1", agent, state)
+    belief = build_belief_state(ctx, agent, state["world_turn"])
+    need_result = evaluate_need_result(ctx, state)
+    objectives = generate_objectives(ObjectiveGenerationContext(
+        agent_id="bot1",
+        world_turn=state["world_turn"],
+        belief_state=belief,
+        need_result=need_result,
+        active_plan_summary=None,
+        personality=agent,
+    ))
+    assert any(obj.key == OBJECTIVE_LEAVE_ZONE and obj.source == "debt_escape" for obj in objectives)

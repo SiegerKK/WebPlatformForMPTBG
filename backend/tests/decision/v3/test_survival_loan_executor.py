@@ -12,6 +12,7 @@ from app.games.zone_stalkers.decision.models.plan import (
 from app.games.zone_stalkers.decision.active_plan_manager import create_active_plan, get_active_plan, save_active_plan
 from app.games.zone_stalkers.decision.active_plan_runtime import process_active_plan_v3, start_or_continue_active_plan_step
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveDecision, ObjectiveScore
+from app.games.zone_stalkers.economy.debts import advance_survival_credit
 from tests.decision.conftest import make_agent, make_state_with_trader
 
 
@@ -275,3 +276,35 @@ def test_active_plan_request_loan_failure_marks_step_failed_and_aborts_or_replan
         isinstance(inv, dict) and str(inv.get("reason") or "") == "request_loan_failed"
         for inv in invalidators
     )
+
+
+def test_debtor_with_enough_money_repays_on_trader_interaction_agent39_regression() -> None:
+    agent = make_agent(money=47435, thirst=20, hunger=20, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    trader = state["traders"]["trader_1"]
+    trader["inventory"] = [{"id": "w1", "type": "water", "name": "Water", "value": 30}]
+
+    account = advance_survival_credit(
+        state=state,
+        debtor_id="bot1",
+        creditor_id="trader_1",
+        creditor_type="trader",
+        amount=600,
+        purpose="survival_food",
+        location_id="loc_a",
+        world_turn=100,
+    )
+
+    before_money = int(agent.get("money") or 0)
+    plan = Plan(
+        intent_kind="seek_water",
+        steps=[PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "drink", "reason": "buy_drink_survival", "buy_mode": "survival_cheapest"}, interruptible=False)],
+    )
+    events = execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 101)
+
+    event_types = [str((ev or {}).get("event_type") or "") for ev in events if isinstance(ev, dict)]
+    assert "debt_payment" in event_types
+    assert "debt_repaid" in event_types
+    assert int(account.get("outstanding_total") or 0) == 0
+    assert str(account.get("status") or "") == "repaid"
+    assert int(agent.get("money") or 0) < before_money

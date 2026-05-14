@@ -1158,8 +1158,7 @@ def export_npc_logs(
             if status == "active" and outstanding > 0:
                 active_accounts += 1
                 total_outstanding += outstanding
-            if int(account.get("principal_advanced_total") or 0) > 0:
-                survival_credit_advances += 1
+            survival_credit_advances += int(account.get("credit_advance_count") or 0)
             if int(account.get("repaid_total") or 0) > 0:
                 debt_payments += 1
             if status == "repaid":

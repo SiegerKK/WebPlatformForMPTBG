@@ -55,6 +55,7 @@ def _normalize_account(account: dict[str, Any], *, world_turn: int) -> dict[str,
     account["outstanding_total"] = max(0, _safe_int(account.get("outstanding_total"), 0))
     account["principal_advanced_total"] = max(0, _safe_int(account.get("principal_advanced_total"), account["outstanding_total"]))
     account["repaid_total"] = max(0, _safe_int(account.get("repaid_total"), 0))
+    account["credit_advance_count"] = max(0, _safe_int(account.get("credit_advance_count"), 0))
     account["rollover_added_total"] = max(0, _safe_int(account.get("rollover_added_total"), 0))
     account["daily_rollover_rate"] = float(account.get("daily_rollover_rate") or SURVIVAL_CREDIT_ROLLOVER_RATE)
     account["created_turn"] = _safe_int(account.get("created_turn"), world_turn)
@@ -168,6 +169,7 @@ def _migrate_v1_to_v2(ledger: dict[str, Any], *, world_turn: int) -> None:
             "outstanding_total": max(0, int(outstanding_total)),
             "principal_advanced_total": max(0, int(principal_total)),
             "repaid_total": max(0, int(repaid_total)),
+            "credit_advance_count": len(rows) if principal_total > 0 else 0,
             "rollover_added_total": max(0, int(rollover_total)),
             "daily_rollover_rate": SURVIVAL_CREDIT_ROLLOVER_RATE,
             "created_turn": created_turn,
@@ -248,6 +250,7 @@ def get_or_create_debt_account(
         "outstanding_total": 0,
         "principal_advanced_total": 0,
         "repaid_total": 0,
+        "credit_advance_count": 0,
         "rollover_added_total": 0,
         "daily_rollover_rate": SURVIVAL_CREDIT_ROLLOVER_RATE,
         "created_turn": int(world_turn),
@@ -268,13 +271,14 @@ def get_or_create_debt_account(
     return account
 
 
-def apply_due_rollovers(
+def apply_due_rollovers_with_affected_debtors(
     *,
     state: dict[str, Any],
     world_turn: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], set[str]]:
     ledger = ensure_debt_ledger(state, world_turn=world_turn)
     events: list[dict[str, Any]] = []
+    affected_debtor_ids: set[str] = set()
     for account in (ledger.get("accounts") or {}).values():
         if not isinstance(account, dict):
             continue
@@ -283,6 +287,7 @@ def apply_due_rollovers(
         if _safe_int(account.get("outstanding_total"), 0) <= 0:
             account["status"] = "repaid"
             continue
+        debtor_id = str(account.get("debtor_id") or "")
         next_due_turn = account.get("next_due_turn")
         if next_due_turn is None:
             account["next_due_turn"] = int(world_turn) + SURVIVAL_CREDIT_ROLLOVER_TURNS
@@ -308,6 +313,17 @@ def apply_due_rollovers(
                     "rollover_count": _safe_int(account.get("rollover_count"), 0),
                 },
             })
+            if debtor_id:
+                affected_debtor_ids.add(debtor_id)
+    return events, affected_debtor_ids
+
+
+def apply_due_rollovers(
+    *,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    events, _ = apply_due_rollovers_with_affected_debtors(state=state, world_turn=world_turn)
     return events
 
 
@@ -322,7 +338,12 @@ def advance_survival_credit(
     location_id: str,
     world_turn: int,
 ) -> dict[str, Any]:
-    apply_due_rollovers(state=state, world_turn=world_turn)
+    rollover_events, affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+        state=state,
+        world_turn=world_turn,
+    )
+    del rollover_events
+    refresh_debtor_economic_states(state, affected_debtor_ids, world_turn=int(world_turn))
     account = get_or_create_debt_account(
         state=state,
         debtor_id=str(debtor_id),
@@ -335,6 +356,8 @@ def advance_survival_credit(
     amount_int = max(0, _safe_int(amount, 0))
     account["outstanding_total"] = _safe_int(account.get("outstanding_total"), 0) + amount_int
     account["principal_advanced_total"] = _safe_int(account.get("principal_advanced_total"), 0) + amount_int
+    if amount_int > 0:
+        account["credit_advance_count"] = _safe_int(account.get("credit_advance_count"), 0) + 1
     account["last_advanced_turn"] = int(world_turn)
     if account.get("next_due_turn") is None:
         account["next_due_turn"] = int(world_turn) + SURVIVAL_CREDIT_ROLLOVER_TURNS
@@ -358,7 +381,12 @@ def repay_debt_account(
     amount: int,
     world_turn: int,
 ) -> dict[str, Any]:
-    apply_due_rollovers(state=state, world_turn=world_turn)
+    rollover_events, affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+        state=state,
+        world_turn=world_turn,
+    )
+    del rollover_events
+    refresh_debtor_economic_states(state, affected_debtor_ids, world_turn=int(world_turn))
     ledger = ensure_debt_ledger(state, world_turn=world_turn)
     account = (ledger.get("accounts") or {}).get(str(account_id))
     if not isinstance(account, dict):
@@ -501,7 +529,11 @@ def get_debtor_debt_total(
     *,
     world_turn: int,
 ) -> int:
-    apply_due_rollovers(state=state, world_turn=world_turn)
+    rollover_events, _affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+        state=state,
+        world_turn=world_turn,
+    )
+    del rollover_events, _affected_debtor_ids
     ledger = ensure_debt_ledger(state, world_turn=world_turn)
     account_ids = (ledger.get("by_debtor") or {}).get(str(debtor_id), []) or []
     total = 0
@@ -638,7 +670,11 @@ def get_debtor_active_debts(
     world_turn: int,
     creditor_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    apply_due_rollovers(state=state, world_turn=world_turn)
+    rollover_events, _affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+        state=state,
+        world_turn=world_turn,
+    )
+    del rollover_events, _affected_debtor_ids
     ledger = ensure_debt_ledger(state, world_turn=world_turn)
     ids = (ledger.get("by_debtor") or {}).get(str(debtor_id), []) or []
     rows: list[dict[str, Any]] = []
@@ -685,7 +721,11 @@ def summarize_debtor_economic_state(
     world_turn: int,
 ) -> dict[str, Any]:
     ledger = ensure_debt_ledger(state, world_turn=world_turn)
-    apply_due_rollovers(state=state, world_turn=world_turn)
+    rollover_events, _affected_debtor_ids = apply_due_rollovers_with_affected_debtors(
+        state=state,
+        world_turn=world_turn,
+    )
+    del rollover_events, _affected_debtor_ids
     account_ids = (ledger.get("by_debtor") or {}).get(str(debtor_id), []) or []
     debt_total = 0
     active_count = 0
@@ -747,3 +787,15 @@ def _update_debtor_summary(state: dict[str, Any], debtor_id: str, *, world_turn:
     if not isinstance(debtor, dict):
         return
     debtor["economic_state"] = summarize_debtor_economic_state(state, str(debtor_id), world_turn=world_turn)
+
+
+def refresh_debtor_economic_states(
+    state: dict[str, Any],
+    debtor_ids: set[str] | list[str] | tuple[str, ...],
+    *,
+    world_turn: int,
+) -> None:
+    for debtor_id in debtor_ids:
+        if not debtor_id:
+            continue
+        _update_debtor_summary(state, str(debtor_id), world_turn=world_turn)

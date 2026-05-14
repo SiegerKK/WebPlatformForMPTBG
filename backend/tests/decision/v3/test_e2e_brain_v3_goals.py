@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.games.zone_stalkers.economy.debts import advance_survival_credit
 from app.games.zone_stalkers.rules.tick_rules import _add_memory, tick_zone_map
 
 from tests.decision.v3.e2e_helpers import (
@@ -715,3 +716,62 @@ def test_hunter_exhausts_empty_location_without_omniscient_tracks() -> None:
         or any_objective_decision(hunter, "LOCATE_TARGET")
         or any_memory(hunter, "no_witnesses")
     ), "After exhausting false lead hunter should switch to intel-gathering behavior"
+
+
+def test_e2e_debt_escape_reaches_left_zone() -> None:
+    locations = {
+        "loc_spawn": {
+            "name": "Spawn",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "connections": [{"to": "loc_exit", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+        "loc_exit": {
+            "name": "Exit",
+            "terrain_type": "buildings",
+            "anomaly_activity": 0,
+            "exit_zone": True,
+            "connections": [{"to": "loc_spawn", "travel_time": 2}],
+            "items": [],
+            "agents": [],
+        },
+    }
+    state = _base_state(locations)
+    state["traders"]["trader_1"] = {
+        "id": "trader_1",
+        "name": "Trader",
+        "location_id": "loc_spawn",
+        "is_alive": True,
+        "money": 100000,
+        "accounts_receivable": 0,
+        "inventory": [],
+    }
+    hunter = _hunter(goal="get_rich")
+    hunter["location_id"] = "loc_spawn"
+    hunter["global_goal"] = "get_rich"
+    hunter["money"] = 250
+    state["agents"]["hunter"] = hunter
+    state["locations"]["loc_spawn"]["agents"] = ["hunter", "trader_1"]
+
+    advance_survival_credit(
+        state=state,
+        debtor_id="hunter",
+        creditor_id="trader_1",
+        creditor_type="trader",
+        amount=5200,
+        purpose="survival_food",
+        location_id="loc_spawn",
+        world_turn=int(state.get("world_turn") or 0),
+    )
+
+    state, _ = run_until(
+        state,
+        lambda s, _events: bool((s.get("agents") or {}).get("hunter", {}).get("has_left_zone")),
+        max_ticks=240,
+    )
+    hunter = state["agents"]["hunter"]
+    assert hunter.get("has_left_zone") is True
+    assert any_objective_decision(hunter, "LEAVE_ZONE")
+    assert any_memory(hunter, "left_zone")
