@@ -450,6 +450,23 @@ class TestAdditionalPr10Metrics:
         result = ana.analyze_sources([zp])
         assert result["fleet"]["max_context_builder_memory_scan_records_per_agent_decision"] == 5.0
 
+    def test_knowledge_first_fallback_and_rate_metrics(self, tmp_path: Path) -> None:
+        agent = _make_agent("a1")
+        agent["brain_context_metrics"] = {
+            "target_belief_memory_fallbacks": 2,
+            "context_builder_memory_fallbacks": 3,
+        }
+        agent["memory_v3"] = {
+            "records": {},
+            "stats": {"memory_write_dropped": 10, "memory_evictions": 5},
+        }
+        zp = _write_zip(tmp_path, [agent])
+        result = ana.analyze_sources([zp], world_turn=100)
+        assert result["fleet"]["target_belief_memory_fallbacks"] == 2
+        assert result["fleet"]["context_builder_memory_fallbacks"] == 3
+        assert "memory_evictions_per_tick" in result["fleet"]
+        assert "memory_drops_per_tick" in result["fleet"]
+
 
 # ---------------------------------------------------------------------------
 # test_analyzer_markdown_and_json_output

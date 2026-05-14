@@ -1096,6 +1096,43 @@ def export_npc_logs(
     world_turn: int = int(state.get("world_turn") or 0)
     world_day: int = int(state.get("world_day") or 0)
 
+    from app.games.zone_stalkers.memory.memory_events import get_memory_metrics  # noqa: PLC0415
+
+    _obs_records_written = 0
+    _stalkers_seen_records_written = 0
+    _corpse_seen_records_written = 0
+    _target_belief_fallbacks = 0
+    _context_builder_fallbacks = 0
+    _memory_evictions_total = 0.0
+    _memory_drops_total = 0.0
+    _span_turns = max(1, world_turn)
+    for _, agent in agents_raw.items():
+        if not isinstance(agent, dict):
+            continue
+        memory_v3 = agent.get("memory_v3") if isinstance(agent.get("memory_v3"), dict) else {}
+        records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
+        if isinstance(records, dict):
+            for raw in records.values():
+                if not isinstance(raw, dict):
+                    continue
+                details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+                action_kind = str(details.get("action_kind") or raw.get("kind") or "")
+                if str(details.get("memory_type") or "") == "observation":
+                    _obs_records_written += 1
+                if action_kind == "stalkers_seen":
+                    _stalkers_seen_records_written += 1
+                if action_kind in {"corpse_seen", "target_corpse_seen", "target_corpse_reported"}:
+                    _corpse_seen_records_written += 1
+        stats = memory_v3.get("stats") if isinstance(memory_v3, dict) else {}
+        if isinstance(stats, dict):
+            _memory_evictions_total += float(stats.get("memory_evictions") or 0.0)
+            _memory_drops_total += float(stats.get("memory_write_dropped") or 0.0)
+        ctx_metrics = agent.get("brain_context_metrics")
+        if isinstance(ctx_metrics, dict):
+            _target_belief_fallbacks += int(ctx_metrics.get("target_belief_memory_fallbacks") or 0)
+            _context_builder_fallbacks += int(ctx_metrics.get("context_builder_memory_fallbacks") or 0)
+
+    runtime_memory_metrics = get_memory_metrics()
     # Build in-memory ZIP
     buf = io.BytesIO()
     agent_index: list[dict] = []
@@ -1115,13 +1152,24 @@ def export_npc_logs(
                 "is_alive": bool(agent.get("is_alive")),
                 "controller": (agent.get("controller") or {}).get("kind", "unknown"),
             })
-
         summary = {
             "context_id": str(ctx.id),
             "exported_at_turn": world_turn,
             "world_day": world_day,
             "agent_count": len(agent_index),
             "agents": agent_index,
+            "knowledge_first_metrics": {
+                "knowledge_only_events": int(runtime_memory_metrics.get("knowledge_only_events", 0)),
+                "observation_memory_records_written": _obs_records_written,
+                "stalkers_seen_memory_records_written": _stalkers_seen_records_written,
+                "corpse_seen_memory_records_written": _corpse_seen_records_written,
+                "target_belief_memory_fallbacks": _target_belief_fallbacks,
+                "context_builder_memory_fallbacks": _context_builder_fallbacks,
+                "stale_corpse_seen_ignored": int(runtime_memory_metrics.get("stale_corpse_seen_ignored", 0)),
+                "corpse_seen_alive_agent_ignored": int(runtime_memory_metrics.get("corpse_seen_alive_agent_ignored", 0)),
+                "memory_evictions_per_tick": round(_memory_evictions_total / _span_turns, 4),
+                "memory_drops_per_tick": round(_memory_drops_total / _span_turns, 4),
+            },
         }
         zf.writestr("_summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
 

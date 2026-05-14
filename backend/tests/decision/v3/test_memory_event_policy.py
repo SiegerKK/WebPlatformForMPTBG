@@ -114,9 +114,9 @@ def test_resolve_memory_event_policy_returns_memory_aggregate() -> None:
     assert resolve_memory_event_policy("active_plan_aborted", {}) == "memory_aggregate"
 
 
-def test_resolve_memory_event_policy_returns_knowledge_upsert() -> None:
-    assert resolve_memory_event_policy("stalkers_seen", {}) == "knowledge_upsert"
-    assert resolve_memory_event_policy("travel_hop", {}) == "knowledge_upsert"
+def test_resolve_memory_event_policy_returns_knowledge_milestone() -> None:
+    assert resolve_memory_event_policy("stalkers_seen", {}) == "knowledge_milestone"
+    assert resolve_memory_event_policy("travel_hop", {}) == "knowledge_milestone"
 
 
 def test_resolve_memory_event_policy_returns_memory_critical() -> None:
@@ -131,8 +131,8 @@ def test_resolve_memory_event_policy_defaults_to_memory() -> None:
 
 def test_resolve_memory_event_policy_falls_through_to_obs_type() -> None:
     """resolve_memory_event_policy uses the effective action kind (possibly obs_type) for lookup."""
-    # "travel_hop" as action_kind returns knowledge_upsert.
-    assert resolve_memory_event_policy("travel_hop", {}) == "knowledge_upsert"
+    # "travel_hop" as action_kind returns knowledge_milestone.
+    assert resolve_memory_event_policy("travel_hop", {}) == "knowledge_milestone"
     # Unknown effective kinds default to "memory".
     assert resolve_memory_event_policy("unknown_obs", {"observed": "unknown_obs"}) == "memory"
 

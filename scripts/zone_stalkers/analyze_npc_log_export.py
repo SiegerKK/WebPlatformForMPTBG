@@ -330,6 +330,8 @@ def compute_agent_metrics(agent: dict[str, Any], world_turn: int) -> dict[str, A
         "observation_memory_records": observation_memory_records,
         "memory_write_dropped": int(stats.get("memory_write_dropped") or 0),
         "memory_evictions": int(stats.get("memory_evictions") or 0),
+        "target_belief_memory_fallbacks": int(context_metrics.get("target_belief_memory_fallbacks") or 0),
+        "context_builder_memory_fallbacks": int(context_metrics.get("context_builder_memory_fallbacks") or 0),
         "context_builder_memory_scan_records": int(context_metrics.get("context_builder_memory_scan_records") or 0),
         "context_builder_calls": int(context_metrics.get("context_builder_calls") or 0),
         "zombie": zombie,
@@ -393,6 +395,12 @@ def aggregate_fleet_metrics(
     )
     memory_write_dropped_total = sum(int(m.get("memory_write_dropped") or 0) for m in agent_metrics)
     memory_evictions_total = sum(int(m.get("memory_evictions") or 0) for m in agent_metrics)
+    target_belief_memory_fallbacks = sum(
+        int(m.get("target_belief_memory_fallbacks") or 0) for m in agent_metrics
+    )
+    context_builder_memory_fallbacks = sum(
+        int(m.get("context_builder_memory_fallbacks") or 0) for m in agent_metrics
+    )
     corpse_seen_records = sum(int(m.get("corpse_seen_records") or 0) for m in agent_metrics)
     stalkers_seen_records = sum(int(m.get("stalkers_seen_records") or 0) for m in agent_metrics)
     semantic_stalkers_seen_records = sum(int(m.get("semantic_stalkers_seen_records") or 0) for m in agent_metrics)
@@ -427,13 +435,20 @@ def aggregate_fleet_metrics(
         "trade_sell_failed_empty_item_types": trade_sell_failed_empty_item_types,
         "memory_write_dropped_total": memory_write_dropped_total,
         "memory_evictions_total": memory_evictions_total,
+        "target_belief_memory_fallbacks": target_belief_memory_fallbacks,
+        "context_builder_memory_fallbacks": context_builder_memory_fallbacks,
         "corpse_seen_records": corpse_seen_records,
         "stalkers_seen_records": stalkers_seen_records,
         "semantic_stalkers_seen_records": semantic_stalkers_seen_records,
         "observation_memory_records": observation_memory_records,
+        "observation_memory_records_written": observation_memory_records,
+        "stalkers_seen_memory_records_written": stalkers_seen_records,
+        "corpse_seen_memory_records_written": corpse_seen_records,
         "context_builder_memory_scan_records": context_builder_memory_scan_records,
         "context_builder_calls": context_builder_calls,
         "max_context_builder_memory_scan_records_per_agent_decision": max_context_builder_memory_scan_records_per_agent_decision,
+        "memory_evictions_per_tick": round(memory_evictions_total / span, 4),
+        "memory_drops_per_tick": round(memory_write_dropped_total / span, 4),
         "max_trade_sell_failed_empty_item_types_per_1000_turns": round(
             (trade_sell_failed_empty_item_types * 1000.0) / span, 3
         ),

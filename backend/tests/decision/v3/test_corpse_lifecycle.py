@@ -101,15 +101,15 @@ class TestIsValidCorpseObject:
         assert self._call(corpse, state) is True
 
     def test_invalid_corpse_missing_agent_id(self) -> None:
-        """Corpse with no agent_id / dead_agent_id field is structurally invalid."""
+        """Corpse with no agent_id / dead_agent_id is generic and therefore valid."""
         state = _make_state({})
         corpse: dict[str, Any] = {"decay_turn": 9999, "items": []}  # no id field
-        assert self._call(corpse, state) is False
+        assert self._call(corpse, state) is True
 
     def test_invalid_corpse_empty_agent_id_string(self) -> None:
         state = _make_state({})
         corpse = {"agent_id": "", "decay_turn": 9999}
-        assert self._call(corpse, state) is False
+        assert self._call(corpse, state) is True
 
     def test_valid_corpse_is_alive_false_explicitly(self) -> None:
         """is_alive=False explicitly marks agent as dead."""
@@ -155,11 +155,12 @@ class TestCleanupStaleCorpses:
         assert result["stale_corpses_removed"] == 1
         assert state["locations"]["loc_a"]["corpses"] == []
 
-    def test_stale_corpse_removed_no_id_field(self) -> None:
+    def test_generic_corpse_without_id_not_removed(self) -> None:
         state = _make_state({})
         state["locations"]["loc_a"]["corpses"] = [{"decay_turn": 9999}]  # no id
         result = self._call(state)
-        assert result["stale_corpses_removed"] == 1
+        assert result["stale_corpses_removed"] == 0
+        assert len(state["locations"]["loc_a"]["corpses"]) == 1
 
     def test_mixed_corpses_only_stale_removed(self) -> None:
         dead = _make_dead_agent("dead_1")

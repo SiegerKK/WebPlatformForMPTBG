@@ -196,6 +196,46 @@ def _memory_stats(records: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
     return stats, health
 
 
+def _knowledge_first_metrics_for_agent(
+    agent: dict[str, Any],
+    *,
+    write_metrics: dict[str, int],
+    world_turn: int,
+) -> dict[str, Any]:
+    records = ((agent.get("memory_v3") or {}).get("records") or {})
+    rows = [raw for raw in (records.values() if isinstance(records, dict) else []) if isinstance(raw, dict)]
+    observation_records = 0
+    stalkers_seen_records = 0
+    corpse_seen_records = 0
+    for raw in rows:
+        details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        action_kind = str(details.get("action_kind") or raw.get("kind") or "")
+        if str(details.get("memory_type") or "") == "observation":
+            observation_records += 1
+        if action_kind == "stalkers_seen":
+            stalkers_seen_records += 1
+        if action_kind in {"corpse_seen", "target_corpse_seen", "target_corpse_reported"}:
+            corpse_seen_records += 1
+
+    stats = ((agent.get("memory_v3") or {}).get("stats") or {})
+    dropped = float(stats.get("memory_write_dropped") or 0.0)
+    evictions = float(stats.get("memory_evictions") or 0.0)
+    span = max(1, int(world_turn or 0))
+    ctx_metrics = agent.get("brain_context_metrics") if isinstance(agent.get("brain_context_metrics"), dict) else {}
+    return {
+        "knowledge_only_events": int(write_metrics.get("knowledge_only_events", 0)),
+        "observation_memory_records_written": observation_records,
+        "stalkers_seen_memory_records_written": stalkers_seen_records,
+        "corpse_seen_memory_records_written": corpse_seen_records,
+        "target_belief_memory_fallbacks": int(ctx_metrics.get("target_belief_memory_fallbacks") or 0),
+        "context_builder_memory_fallbacks": int(ctx_metrics.get("context_builder_memory_fallbacks") or 0),
+        "stale_corpse_seen_ignored": int(write_metrics.get("stale_corpse_seen_ignored", 0)),
+        "corpse_seen_alive_agent_ignored": int(write_metrics.get("corpse_seen_alive_agent_ignored", 0)),
+        "memory_evictions_per_tick": round(evictions / span, 4),
+        "memory_drops_per_tick": round(dropped / span, 4),
+    }
+
+
 def _agent_story_events(agent: dict[str, Any]) -> tuple[list[dict[str, Any]], int, bool]:
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records") if isinstance(memory_v3, dict) else {}
@@ -374,6 +414,11 @@ def _enrich_agent_full_projection(agent: dict[str, Any], *, redis_client: Any | 
     ctx_metrics = agent.get("brain_context_metrics")
     if isinstance(ctx_metrics, dict):
         agent["brain_context_metrics"] = dict(ctx_metrics)
+    agent["knowledge_first_metrics"] = _knowledge_first_metrics_for_agent(
+        agent,
+        write_metrics=write_metrics,
+        world_turn=int(world_turn or 0),
+    )
     # brain_context_cache is a large internal payload — strip it from the
     # full projection payload to avoid bloating the serialised output.
     agent.pop("brain_context_cache", None)
