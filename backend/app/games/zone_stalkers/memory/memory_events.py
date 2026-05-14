@@ -77,7 +77,7 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "stalkers_seen": "knowledge_milestone",
     "target_seen": "knowledge_milestone",
     "target_last_known_location": "knowledge_milestone",
-    "target_not_found": "knowledge_milestone",
+    "target_not_found": "knowledge_only",
     "retreat_observed": "knowledge_milestone",
     "target_corpse_seen": "knowledge_milestone",
     "target_corpse_reported": "knowledge_milestone",
@@ -1383,6 +1383,10 @@ def should_write_observation_milestone(
     if event_kind == "target_last_known_location":
         if OBSERVATION_MEMORY_COMPAT_MODE:
             return True
+        return False
+
+    if event_kind == "target_not_found":
+        # Negative search evidence goes to hunt_evidence.failed_search_locations only.
         return False
 
     if event_kind == "corpse_seen":

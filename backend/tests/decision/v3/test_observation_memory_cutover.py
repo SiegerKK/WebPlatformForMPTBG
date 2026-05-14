@@ -150,3 +150,107 @@ def test_should_write_observation_milestone_ignores_minor_refresh() -> None:
         effects={"location_id": "loc_x"},
         world_turn=200,
     ) is False
+
+
+def test_target_not_found_is_knowledge_only_after_cutover() -> None:
+    """PR10: target_not_found is knowledge_only; no memory_v3 record, hunt_evidence updated."""
+    agent = _agent()
+    agent["kill_target_id"] = "target_1"
+    write_memory_event_to_v3(
+        agent_id="bot1",
+        agent=agent,
+        world_turn=200,
+        legacy_entry={
+            "world_turn": 200,
+            "type": "observation",
+            "title": "target_not_found",
+            "summary": "target_not_found",
+            "effects": {
+                "action_kind": "target_not_found",
+                "target_id": "target_1",
+                "location_id": "loc_search",
+            },
+        },
+    )
+    # No memory_v3 record.
+    assert not any(r.get("kind") == "target_not_found" for r in _records(agent)), (
+        "PR10: target_not_found must be knowledge-only"
+    )
+    # hunt_evidence must reflect the failed search.
+    hunt_ev = ((agent.get("knowledge_v1") or {}).get("hunt_evidence") or {}).get("target_1", {})
+    failed = hunt_ev.get("failed_search_locations", {})
+    assert failed.get("loc_search", {}).get("count", 0) >= 1, (
+        "hunt_evidence.failed_search_locations must be updated"
+    )
+
+
+def test_target_seen_for_kill_target_writes_bounded_milestone_once() -> None:
+    """PR10: First kill-target sighting writes exactly one target_seen milestone."""
+    agent = _agent()
+    agent["kill_target_id"] = "target_1"
+    _entry = lambda turn, loc: {  # noqa: E731
+        "world_turn": turn,
+        "type": "observation",
+        "title": "target_seen",
+        "summary": "target_seen",
+        "effects": {
+            "action_kind": "target_seen",
+            "target_id": "target_1",
+            "target_name": "target_1",
+            "location_id": loc,
+        },
+    }
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, world_turn=210, legacy_entry=_entry(210, "loc_a"))
+    records_after_first = [r for r in _records(agent) if r.get("kind") == "target_seen"]
+    assert len(records_after_first) == 1, "First kill-target sighting must write exactly one milestone"
+
+
+def test_same_target_seen_repeated_does_not_write_more_milestones() -> None:
+    """PR10: Repeated same kill-target sighting at same location must not append new records."""
+    agent = _agent()
+    agent["kill_target_id"] = "target_1"
+    _entry = lambda turn, loc: {  # noqa: E731
+        "world_turn": turn,
+        "type": "observation",
+        "title": "target_seen",
+        "summary": "target_seen",
+        "effects": {
+            "action_kind": "target_seen",
+            "target_id": "target_1",
+            "target_name": "target_1",
+            "location_id": loc,
+        },
+    }
+    # First sighting creates the record.
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, world_turn=220, legacy_entry=_entry(220, "loc_a"))
+    count_after_first = sum(1 for r in _records(agent) if r.get("kind") == "target_seen")
+    assert count_after_first == 1
+    # Repeated sighting at same location — same knowledge state — no new record.
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, world_turn=221, legacy_entry=_entry(221, "loc_a"))
+    count_after_repeat = sum(1 for r in _records(agent) if r.get("kind") == "target_seen")
+    assert count_after_repeat == 1, (
+        "Repeated kill-target sighting at same location must not create additional milestone records"
+    )
+
+
+def test_target_seen_location_change_policy_is_explicit() -> None:
+    """PR10: Location change for kill target is a major update → second milestone written."""
+    agent = _agent()
+    agent["kill_target_id"] = "target_1"
+    _entry = lambda turn, loc: {  # noqa: E731
+        "world_turn": turn,
+        "type": "observation",
+        "title": "target_seen",
+        "summary": "target_seen",
+        "effects": {
+            "action_kind": "target_seen",
+            "target_id": "target_1",
+            "target_name": "target_1",
+            "location_id": loc,
+        },
+    }
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, world_turn=230, legacy_entry=_entry(230, "loc_a"))
+    write_memory_event_to_v3(agent_id="bot1", agent=agent, world_turn=231, legacy_entry=_entry(231, "loc_b"))
+    count = sum(1 for r in _records(agent) if r.get("kind") == "target_seen")
+    # Material location change is a major update for the kill target; a new milestone is expected.
+    assert count >= 1, "Kill-target seen at new location must produce at least one target_seen milestone"

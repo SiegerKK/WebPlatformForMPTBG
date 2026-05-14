@@ -223,7 +223,7 @@ def _knowledge_first_metrics_for_agent(
     span = max(1, int(world_turn or 0))  # elapsed turns (divisor for per-tick rates)
     ctx_metrics = agent.get("brain_context_metrics") if isinstance(agent.get("brain_context_metrics"), dict) else {}
     return {
-        "knowledge_only_events": int(write_metrics.get("knowledge_only_events", 0)),
+        "runtime_knowledge_only_events": int(write_metrics.get("knowledge_only_events", 0)),
         "observation_memory_records_written": observation_records,
         "stalkers_seen_memory_records_written": stalkers_seen_records,
         "corpse_seen_memory_records_written": corpse_seen_records,

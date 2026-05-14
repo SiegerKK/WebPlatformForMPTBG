@@ -142,14 +142,21 @@ def test_write_event_indexes_target_entity_id() -> None:
     assert rec_id in mem_v3["indexes"]["by_entity"].get("agent_target_1", [])
 
 
-def test_target_not_found_memory_kind_supported() -> None:
-    agent: dict = {"name": "bot1", "memory_v3": None}
+def test_target_not_found_updates_hunt_evidence_knowledge_only() -> None:
+    """PR10: target_not_found is knowledge_only; no memory_v3 record, hunt_evidence updated."""
+    agent: dict = {"name": "bot1", "memory_v3": None, "knowledge_v1": None}
     entry = _make_entry(action_kind="target_not_found", target_id="agent_target_1", location_id="loc_b")
     write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
-    rec = next(iter(ensure_memory_v3(agent)["records"].values()))
-    assert rec["kind"] == "target_not_found"
-    assert rec["layer"] == "spatial"
-    assert "target" in rec["tags"]
+    # No memory_v3 record.
+    assert not ensure_memory_v3(agent)["records"], (
+        "PR10: target_not_found must not write a memory_v3 record"
+    )
+    # hunt_evidence.failed_search_locations must be updated.
+    hunt_ev = ((agent.get("knowledge_v1") or {}).get("hunt_evidence") or {}).get("agent_target_1", {})
+    failed = hunt_ev.get("failed_search_locations", {})
+    assert failed.get("loc_b", {}).get("count", 0) >= 1, (
+        "hunt_evidence.failed_search_locations[loc_b] must be updated"
+    )
 
 
 def test_target_moved_memory_kind_supported() -> None:
@@ -184,16 +191,20 @@ def test_target_seen_bridges_with_entity_and_location() -> None:
     assert rec_id in mem_v3["indexes"]["by_location"].get("loc_a", [])
 
 
-def test_target_not_found_bridges_with_location() -> None:
-    agent: dict = {"name": "bot1", "memory_v3": None}
+def test_target_not_found_location_is_recorded_in_knowledge_v1() -> None:
+    """PR10: target_not_found is knowledge-only; location is stored via hunt_evidence."""
+    agent: dict = {"name": "bot1", "memory_v3": None, "knowledge_v1": None}
     entry = _make_entry(action_kind="target_not_found", target_id="agent_target_1", location_id="loc_b")
     write_memory_event_to_v3(agent_id="bot1", agent=agent, legacy_entry=entry, world_turn=100)
-    mem_v3 = ensure_memory_v3(agent)
-    rec_id = next(iter(mem_v3["records"]))
-    rec = mem_v3["records"][rec_id]
-    assert rec["kind"] == "target_not_found"
-    assert rec["location_id"] == "loc_b"
-    assert rec_id in mem_v3["indexes"]["by_location"].get("loc_b", [])
+    # No memory_v3 record.
+    assert not ensure_memory_v3(agent)["records"], (
+        "PR10: target_not_found must not write a memory_v3 record"
+    )
+    # Location must appear in hunt_evidence.failed_search_locations.
+    hunt_ev = ((agent.get("knowledge_v1") or {}).get("hunt_evidence") or {}).get("agent_target_1", {})
+    assert "loc_b" in hunt_ev.get("failed_search_locations", {}), (
+        "loc_b must be in hunt_evidence.failed_search_locations"
+    )
 
 
 def test_target_death_confirmed_bridges_with_entity_id() -> None:
