@@ -9,6 +9,9 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_REQUEST_LOAN,
     STEP_TRADE_BUY_ITEM,
 )
+from app.games.zone_stalkers.decision.active_plan_manager import create_active_plan, get_active_plan, save_active_plan
+from app.games.zone_stalkers.decision.active_plan_runtime import process_active_plan_v3, start_or_continue_active_plan_step
+from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveDecision, ObjectiveScore
 from tests.decision.conftest import make_agent, make_state_with_trader
 
 
@@ -190,3 +193,85 @@ def test_request_loan_then_trade_buy_then_consume_medical() -> None:
     while not plan.is_complete:
         execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100 + plan.current_step_index)
     assert int(agent.get("hp") or 0) >= hp_before
+
+
+def test_active_plan_request_loan_failure_marks_step_failed_and_aborts_or_replans() -> None:
+    agent = make_agent(money=0, thirst=100, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    objective = Objective(
+        key="RESTORE_WATER",
+        source="test",
+        urgency=1.0,
+        expected_value=1.0,
+        risk=0.1,
+        time_cost=0.1,
+        resource_cost=0.1,
+        confidence=1.0,
+        goal_alignment=1.0,
+        memory_confidence=1.0,
+    )
+    decision = ObjectiveDecision(
+        selected=objective,
+        selected_score=ObjectiveScore(
+            objective_key="RESTORE_WATER",
+            raw_score=1.0,
+            final_score=1.0,
+            factors=(),
+            penalties=(),
+        ),
+        alternatives=(),
+    )
+    active_plan = create_active_plan(
+        decision,
+        world_turn=100,
+        plan=Plan(
+            intent_kind="seek_water",
+            steps=[
+                PlanStep(
+                    kind=STEP_REQUEST_LOAN,
+                    payload={
+                        "creditor_id": "trader_1",
+                        "creditor_type": "trader",
+                        "amount": 1000,  # impossible, should fail
+                        "purpose": "survival_drink",
+                        "item_category": "drink",
+                        "required_price": 1000,
+                        "daily_interest_rate": 0.05,
+                    },
+                    interruptible=False,
+                ),
+                PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "drink"}, interruptible=False),
+            ],
+        ),
+    )
+    save_active_plan(agent, active_plan)
+
+    events = start_or_continue_active_plan_step(
+        "bot1",
+        agent,
+        active_plan,
+        state,
+        100,
+        add_memory=lambda *args, **kwargs: None,
+    )
+    assert all((ev.get("event_type") or "") != "bot_bought_item" for ev in events if isinstance(ev, dict))
+    failed_plan = get_active_plan(agent)
+    assert failed_plan is not None
+    assert failed_plan.current_step is not None
+    assert failed_plan.current_step.kind == STEP_REQUEST_LOAN
+    assert failed_plan.current_step.status == "failed"
+    assert str(failed_plan.current_step.failure_reason or "").startswith("request_loan_failed:")
+
+    handled, _ = process_active_plan_v3(
+        "bot1",
+        agent,
+        state,
+        101,
+        add_memory=lambda *args, **kwargs: None,
+    )
+    assert handled is False
+    invalidators = ((agent.get("brain_runtime") or {}).get("invalidators") or [])
+    assert any(
+        isinstance(inv, dict) and str(inv.get("reason") or "") == "request_loan_failed"
+        for inv in invalidators
+    )

@@ -1142,12 +1142,21 @@ def export_npc_logs(
     survival_loans_created = 0
     survival_loans_repaid = 0
     if isinstance(debt_rows, dict):
+        try:
+            from app.games.zone_stalkers.economy.debts import accrue_debt_interest  # noqa: PLC0415
+        except Exception:
+            accrue_debt_interest = None
         for debt in debt_rows.values():
             if not isinstance(debt, dict):
                 continue
             status = str(debt.get("status") or "")
             purpose = str(debt.get("purpose") or "")
             if status in {"active", "overdue"}:
+                if accrue_debt_interest is not None:
+                    try:
+                        accrue_debt_interest(debt, world_turn=world_turn)
+                    except Exception:
+                        pass
                 active_debts += 1
                 total_outstanding += int(
                     (debt.get("outstanding_principal") or 0)

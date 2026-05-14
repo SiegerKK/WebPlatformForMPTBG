@@ -211,6 +211,22 @@ def test_active_debt_cap_blocks_infinite_loans() -> None:
     assert reason == "debt_limit_reached"
 
 
+def test_can_request_survival_loan_uses_agent_id_fallback() -> None:
+    state = _state()
+    debtor = {"agent_id": "bot1", "is_alive": True, "money": 0}
+    ok, reason = can_request_survival_loan(
+        state=state,
+        debtor=debtor,
+        creditor=state["traders"]["trader_1"],
+        creditor_type="trader",
+        item_category="drink",
+        required_price=45,
+        world_turn=100,
+    )
+    assert ok is True
+    assert reason == "ok"
+
+
 def test_successful_artifact_sale_auto_repays_debt_interest_first() -> None:
     state = _state()
     debtor = state["agents"]["bot1"]

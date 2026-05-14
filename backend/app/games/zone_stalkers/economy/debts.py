@@ -140,7 +140,7 @@ def can_request_survival_loan(
     if creditor_type == "agent" and not bool(creditor.get("is_alive", True)):
         return False, "creditor_not_alive"
 
-    debtor_id = str(debtor.get("id") or "")
+    debtor_id = str(debtor.get("id") or debtor.get("agent_id") or "")
     ledger = ensure_debt_ledger(state)
     ids = ledger["by_debtor"].get(debtor_id, []) or []
     has_defaulted = any(
@@ -398,4 +398,3 @@ def _update_debtor_summary(state: dict[str, Any], debtor_id: str, *, world_turn:
     if not isinstance(debtor, dict):
         return
     debtor["economic_state"] = summarize_debtor_economic_state(state, str(debtor_id), world_turn=world_turn)
-
