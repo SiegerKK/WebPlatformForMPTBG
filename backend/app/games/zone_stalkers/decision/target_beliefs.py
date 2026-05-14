@@ -63,6 +63,7 @@ _KIND_ALIASES: dict[str, str] = {
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
 _SEARCH_LOCATION_COOLDOWN_TURNS = 300
+_SEARCH_LOCATION_HUB_COOLDOWN_TURNS = 90
 _MISS_SCORE_MULTIPLIERS: dict[int, float] = {
     1: 0.45,
     2: 0.20,
@@ -329,21 +330,44 @@ def _collect_failed_search_stats(
     counts: dict[str, int] = defaultdict(int)
     cooldowns: dict[str, int] = {}
     latest_turns: dict[str, int] = {}
+    latest_positive_turns: dict[str, int] = {}
+    hub_locations: set[str] = set()
+    positive_kinds = {"target_seen", "target_last_known_location", "target_intel"}
+
+    for lead in leads:
+        if lead.kind not in positive_kinds or not lead.location_id:
+            continue
+        latest_positive_turns[lead.location_id] = max(
+            latest_positive_turns.get(lead.location_id, 0),
+            int(lead.created_turn),
+        )
+
     for lead in leads:
         if lead.kind != "target_not_found" or not lead.location_id:
             continue
         location_id = lead.location_id
+        failed_turn = int(lead.created_turn)
+        if latest_positive_turns.get(location_id, 0) > failed_turn:
+            continue
         explicit_count = _coerce_int(lead.details.get("failed_search_count"))
         counts[location_id] = max(counts[location_id] + 1, explicit_count or 0)
-        latest_turns[location_id] = max(latest_turns.get(location_id, 0), int(lead.created_turn))
+        latest_turns[location_id] = max(latest_turns.get(location_id, 0), failed_turn)
         explicit_cooldown = _coerce_int(lead.details.get("cooldown_until_turn"))
         if explicit_cooldown is not None:
             cooldowns[location_id] = max(cooldowns.get(location_id, 0), explicit_cooldown)
+        location_kind = str(lead.details.get("location_kind") or "")
+        if bool(lead.details.get("is_hub_location")) or location_kind in {"trader_hub", "intel_hub"}:
+            hub_locations.add(location_id)
     for location_id, count in counts.items():
         if count >= _SEARCH_EXHAUSTION_THRESHOLD and cooldowns.get(location_id, 0) <= world_turn:
+            cooldown_turns = (
+                _SEARCH_LOCATION_HUB_COOLDOWN_TURNS
+                if location_id in hub_locations
+                else _SEARCH_LOCATION_COOLDOWN_TURNS
+            )
             cooldowns[location_id] = max(
                 cooldowns.get(location_id, 0),
-                latest_turns.get(location_id, world_turn) + _SEARCH_LOCATION_COOLDOWN_TURNS,
+                latest_turns.get(location_id, world_turn) + cooldown_turns,
             )
     return dict(counts), cooldowns
 
@@ -655,6 +679,17 @@ def build_target_belief(
     lead_sources = {"visible": 0, "knowledge": 0, "memory_v3": 0, "debug_state": 0}
     memory_fallback_used = False
 
+    current_loc = str(agent.get("location_id") or belief_state.location_id or "")
+    target = state.get("agents", {}).get(target_id)
+    target_location_id = str(target.get("location_id") or "") if isinstance(target, dict) else ""
+    target_alive_from_state: bool | None = bool(target.get("is_alive", True)) if isinstance(target, dict) else None
+    direct_co_located_target = bool(
+        isinstance(target, dict)
+        and target_alive_from_state is True
+        and current_loc
+        and target_location_id == current_loc
+    )
+
     visible_entity = next(
         (
             entity for entity in belief_state.visible_entities
@@ -662,9 +697,10 @@ def build_target_belief(
         ),
         None,
     )
-    visible_now = visible_entity is not None
-    co_located = visible_now
-    current_loc = str(agent.get("location_id") or belief_state.location_id or "")
+    if visible_entity is None and direct_co_located_target and isinstance(target, dict):
+        visible_entity = target
+    visible_now = visible_entity is not None or direct_co_located_target
+    co_located = visible_now and (direct_co_located_target or target_location_id == current_loc)
     if visible_now:
         knowledge = agent.get("knowledge_v1")
         known_npcs = knowledge.get("known_npcs") if isinstance(knowledge, dict) else None
@@ -675,7 +711,6 @@ def build_target_belief(
             "corpse_seen",
             "confirmed_dead",
         }:
-            target = state.get("agents", {}).get(target_id)
             upsert_known_npc(
                 agent,
                 other_agent_id=target_id,
@@ -796,11 +831,8 @@ def build_target_belief(
             lead_sources["memory_v3"] += len(negative_leads)
             source_refs.extend(str(ref) for ref in negative_legacy.get("source_refs", []) if ref)
 
-    target = state.get("agents", {}).get(target_id)
-    target_alive_from_state: bool | None = None
     omniscient_targets = bool(state.get("debug_omniscient_targets"))
     if isinstance(target, dict):
-        target_alive_from_state = bool(target.get("is_alive", True))
         if omniscient_targets and not visible_now:
             debug_lead = _build_debug_hunt_lead(
                 target_id=target_id,
@@ -832,6 +864,24 @@ def build_target_belief(
     )
     best_location_id = best_hypothesis.location_id if best_hypothesis is not None else None
     best_location_confidence = best_hypothesis.confidence if best_hypothesis is not None else 0.0
+    if direct_co_located_target and current_loc:
+        co_located_refs = tuple(dict.fromkeys(("state:co_located_kill_target",) + tuple(source_refs)))
+        possible_locations = tuple(
+            [
+                LocationHypothesis(
+                    location_id=current_loc,
+                    probability=1.0,
+                    confidence=1.0,
+                    freshness=1.0,
+                    reason="target_seen",
+                    source_refs=co_located_refs,
+                )
+            ]
+            + [hypothesis for hypothesis in possible_locations if hypothesis.location_id != current_loc]
+        )
+        exhausted_locations = tuple(location_id for location_id in exhausted_locations if location_id != current_loc)
+        best_location_id = current_loc
+        best_location_confidence = 1.0
     exhausted_set = set(exhausted_locations)
     route_hints = tuple(
         dict.fromkeys(

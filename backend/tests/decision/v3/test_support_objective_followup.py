@@ -186,5 +186,5 @@ def test_planner_prefilters_exhausted_witness_source_before_travel() -> None:
     )
     plan = _plan_hunt_target(ctx, intent, {"locations": locations, "agents": {}}, world_turn=100)
     assert plan is not None
-    assert plan.steps[0].kind == STEP_WAIT
-    assert plan.steps[0].payload["reason"] == "support_source_exhausted_preplan"
+    assert plan.steps[0].kind != STEP_WAIT
+    assert plan.steps[0].kind in {"look_for_tracks", "travel_to_location"}

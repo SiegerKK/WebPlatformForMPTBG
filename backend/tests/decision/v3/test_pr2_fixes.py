@@ -887,28 +887,91 @@ def test_resupply_drink_stock_uses_reserve_basic_buy_mode() -> None:
     )
 
 
-def test_resupply_fallback_get_money_reason_is_explicit_in_step_payload() -> None:
-    """Resupply fallback to get_rich should carry explicit fallback reason in payload."""
+def test_soft_resupply_drink_below_material_threshold_falls_back_to_get_rich_explore() -> None:
     agent = make_agent(
-        has_weapon=False,
-        has_armor=True,
-        has_ammo=False,
-        money=0,
-        inventory=[],
+        money=2383,
+        inventory=[
+            {"id": "food_0", "type": "bread", "value": 20},
+            {"id": "food_1", "type": "bread", "value": 20},
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},
+            {"id": "med_2", "type": "bandage", "value": 50},
+        ],
+        global_goal="get_rich",
     )
-    state = make_minimal_state(agent=agent)
-    state["traders"] = {}
+    agent["material_threshold"] = 5477
+    state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    state["locations"]["loc_a"]["anomaly_activity"] = 5
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
-    intent = _make_intent(INTENT_RESUPPLY)
+    intent = Intent(
+        kind=INTENT_RESUPPLY,
+        score=0.8,
+        created_turn=100,
+        metadata={"objective_key": "RESUPPLY_DRINK", "forced_resupply_category": "drink"},
+    )
     plan = build_plan(ctx, intent, state, 100, need_result=need_result)
     assert plan is not None
     assert plan.intent_kind == INTENT_GET_RICH
     first_payload = plan.steps[0].payload
-    assert "fallback_reason" in first_payload, (
-        f"Fallback plan step must include fallback_reason for traceability, got {first_payload}"
+    assert plan.steps[0].kind == "explore_location"
+    assert first_payload["reason"] == "get_rich_explore_here"
+    assert first_payload["fallback_from_objective_key"] == "RESUPPLY_DRINK"
+    assert first_payload["fallback_reason"] == "phase1_material_threshold_gate"
+
+
+def test_critical_restore_water_does_not_fallback_to_get_rich_under_material_threshold() -> None:
+    agent = make_agent(
+        thirst=100,
+        money=10,
+        inventory=[],
+        global_goal="get_rich",
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
     )
-    assert "fallback_get_money" in first_payload["fallback_reason"]
+    agent["material_threshold"] = 5477
+    state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    plan = build_plan(ctx, Intent(kind=INTENT_SEEK_WATER, score=1.0, created_turn=100), state, 100, need_result=need_result)
+    assert plan is not None
+    assert not any(step.kind == "explore_location" and step.payload.get("reason") == "get_rich_explore_here" for step in plan.steps)
+
+
+def test_resupply_to_get_rich_fallback_visible_in_brain_debug_context() -> None:
+    from app.games.zone_stalkers.rules.tick_rules import _run_npc_brain_v3_decision_inner
+
+    agent = make_agent(
+        money=2383,
+        inventory=[
+            {"id": "food_0", "type": "bread", "value": 20},
+            {"id": "food_1", "type": "bread", "value": 20},
+            {"id": "med_0", "type": "bandage", "value": 50},
+            {"id": "med_1", "type": "bandage", "value": 50},
+            {"id": "med_2", "type": "bandage", "value": 50},
+        ],
+        global_goal="get_rich",
+        location_id="loc_a",
+    )
+    agent["material_threshold"] = 5477
+    state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    state["agents"]["bot1"] = agent
+    state["locations"]["loc_a"]["anomaly_activity"] = 5
+
+    _run_npc_brain_v3_decision_inner("bot1", agent, state, 100)
+
+    fallback = (agent.get("brain_v3_context") or {}).get("plan_fallback") or {}
+    assert fallback == {
+        "active": True,
+        "from_objective_key": "RESUPPLY_DRINK",
+        "from_intent": "resupply",
+        "to_intent": "get_rich",
+        "reason": "phase1_material_threshold_gate",
+        "blocked_category": "drink",
+        "agent_money": 2383,
+        "material_threshold": 5477,
+    }
 
 
 def test_noncritical_thirst_below_soft_threshold_does_not_select_seek_water_if_get_rich_available() -> None:

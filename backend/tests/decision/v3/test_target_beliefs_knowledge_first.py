@@ -420,7 +420,7 @@ def test_target_belief_applies_legacy_target_not_found_even_when_knowledge_locat
         "revision": 1,
     }
 
-    # 3 legacy target_not_found records for loc_false → should exhaust it.
+    # 3 legacy target_not_found records newer than the stale positive lead → should exhaust it.
     mem = ensure_memory_v3(agent)
     for i in range(3):
         rec_id = f"tnf_{i}"
@@ -431,7 +431,7 @@ def test_target_belief_applies_legacy_target_not_found_even_when_knowledge_locat
             "kind": "target_not_found",
             "title": "not found",
             "summary": "target not found",
-            "created_turn": 80 + i,
+            "created_turn": 95 + i,
             "status": "active",
             "location_id": "loc_false",
             "details": {"target_id": "target_1", "location_id": "loc_false"},
@@ -526,3 +526,67 @@ def test_target_belief_uses_confirmed_death_from_known_npc_death_evidence() -> N
         f"belief.is_alive={belief.is_alive}"
     )
 
+
+
+def test_fresh_intel_resets_failed_search_suppression_for_location() -> None:
+    agent = make_agent(kill_target_id="target_1", location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+    state["agents"]["target_1"] = _make_target(location_id="loc_z")
+
+    knowledge = ensure_knowledge_v1(agent)
+    knowledge["hunt_evidence"]["target_1"] = {
+        "target_id": "target_1",
+        "last_seen": {"location_id": "loc_b", "turn": 125, "confidence": 0.82, "source": "witness_report"},
+        "death": None,
+        "route_hints": [],
+        "failed_search_locations": {
+            "loc_b": {"count": 3, "turn": 110, "cooldown_until_turn": 180, "confidence": 0.8},
+        },
+        "recent_contact": {"turn": 125, "location_id": "loc_b"},
+        "revision": 1,
+    }
+
+    belief = _build_belief(agent, state)
+    assert belief.best_location_id == "loc_b"
+    assert "loc_b" not in belief.exhausted_locations
+
+
+def test_trader_hub_repeated_new_sightings_are_not_ignored_after_failed_search() -> None:
+    agent = make_agent(kill_target_id="target_1", location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+    state["agents"]["target_1"] = _make_target(location_id="loc_trader")
+    state["locations"]["loc_trader"] = {
+        "name": "Trader Hub",
+        "terrain_type": "buildings",
+        "anomaly_activity": 0,
+        "connections": [{"to": "loc_a", "travel_time": 12}],
+        "items": [],
+        "agents": ["trader_1"],
+    }
+    state["traders"] = {
+        "trader_1": {"id": "trader_1", "name": "Trader", "location_id": "loc_trader", "is_alive": True}
+    }
+
+    knowledge = ensure_knowledge_v1(agent)
+    knowledge["hunt_evidence"]["target_1"] = {
+        "target_id": "target_1",
+        "last_seen": {"location_id": "loc_trader", "turn": 140, "confidence": 0.85, "source": "trader_network"},
+        "death": None,
+        "route_hints": [],
+        "failed_search_locations": {
+            "loc_trader": {
+                "count": 3,
+                "turn": 120,
+                "cooldown_until_turn": 210,
+                "confidence": 0.8,
+                "location_kind": "trader_hub",
+                "is_hub_location": True,
+            },
+        },
+        "recent_contact": {"turn": 140, "location_id": "loc_trader"},
+        "revision": 1,
+    }
+
+    belief = _build_belief(agent, state)
+    assert belief.best_location_id == "loc_trader"
+    assert "loc_trader" not in belief.exhausted_locations

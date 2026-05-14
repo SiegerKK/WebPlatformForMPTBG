@@ -559,3 +559,22 @@ def test_full_projection_includes_story_events_from_cold_memory() -> None:
 
     projected = project_zone_state(state=state, mode="full")
     assert isinstance(projected["agents"]["a1"].get("story_events"), list)
+
+
+def test_full_projection_marks_semantic_combat_entries_as_summary_events() -> None:
+    state = _sample_state()
+    state["agents"]["a1"]["memory_v3"]["records"]["semantic_1"] = {
+        "id": "semantic_1",
+        "kind": "semantic_combat_ended",
+        "layer": "semantic",
+        "created_turn": 12,
+        "last_accessed_turn": 16,
+        "summary": "Combat summary",
+        "details": {"action_kind": "semantic_combat_ended", "turn_start": 10, "turn_end": 16},
+    }
+    projected = project_zone_state(state=state, mode="full")
+    semantic = next(event for event in projected["agents"]["a1"]["story_events"] if event["effects"].get("action_kind") == "semantic_combat_ended")
+    assert semantic["type"] == "system"
+    assert semantic["effects"]["category"] == "semantic_summary"
+    assert semantic["effects"]["turn_start"] == 10
+    assert semantic["effects"]["turn_end"] == 16

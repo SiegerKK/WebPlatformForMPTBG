@@ -199,3 +199,61 @@ def test_get_money_for_resupply_can_plan_local_corpse_loot() -> None:
     assert plan.steps
     assert plan.steps[0].kind == STEP_LOOT_CORPSE
     assert plan.steps[0].payload.get("corpse_id") == "corpse_money"
+
+
+def test_no_corpse_at_location_does_not_plan_loot_step() -> None:
+    looter, target, state = _build_loot_state()
+    _ = target
+    state["locations"]["loc_b"]["corpses"] = []
+
+    ctx = build_agent_context("looter", looter, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = Intent(kind="get_rich", score=0.8, metadata={"objective_key": "GET_MONEY_FOR_RESUPPLY"})
+    plan = build_plan(ctx, intent, state, state["world_turn"], need_result=need_result)
+
+    assert plan is not None
+    assert plan.steps[0].kind != STEP_LOOT_CORPSE
+
+
+def test_stale_known_corpse_does_not_plan_loot_step_without_actual_corpse() -> None:
+    looter, target, state = _build_loot_state()
+    _ = target
+    looter["knowledge_v1"] = {
+        "revision": 1,
+        "major_revision": 1,
+        "known_npcs": {},
+        "known_locations": {},
+        "known_traders": {},
+        "known_hazards": {},
+        "known_corpses": {
+            "corpse_stale": {"corpse_id": "corpse_stale", "location_id": "loc_b", "agent_id": "dead_old"}
+        },
+        "hunt_evidence": {},
+        "stats": {},
+    }
+    state["locations"]["loc_b"].pop("corpses", None)
+
+    ctx = build_agent_context("looter", looter, state)
+    need_result = evaluate_need_result(ctx, state)
+    intent = Intent(kind="get_rich", score=0.8, metadata={"objective_key": "GET_MONEY_FOR_RESUPPLY"})
+    plan = build_plan(ctx, intent, state, state["world_turn"], need_result=need_result)
+
+    assert plan is not None
+    assert plan.steps[0].kind != STEP_LOOT_CORPSE
+
+
+def test_loot_corpse_removed_before_execution_does_not_transfer_inventory() -> None:
+    looter, target, state = _build_loot_state()
+    corpse = _kill_target(state, target)
+    corpse_id = str(corpse["corpse_id"])
+    state["locations"]["loc_b"]["corpses"] = []
+    inventory_before = list(looter.get("inventory", []))
+    money_before = int(looter.get("money") or 0)
+
+    _loot_corpse(looter, state, corpse_id)
+
+    assert looter.get("inventory", []) == inventory_before
+    assert int(looter.get("money") or 0) == money_before
+    assert has_v3_action(looter, "loot_corpse_failed")
+    failure = v3_action_records(looter, "loot_corpse_failed")[-1]
+    assert failure["details"].get("reason") == "no_valid_corpse"

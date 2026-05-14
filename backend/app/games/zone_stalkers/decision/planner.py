@@ -87,6 +87,53 @@ from app.games.zone_stalkers.economy.debts import (
 
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD = 50
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_DRINK = 40
+
+
+_FALLBACK_PAYLOAD_KEYS: tuple[str, ...] = (
+    "fallback_from_intent",
+    "fallback_from_objective_key",
+    "fallback_to_intent",
+    "fallback_reason",
+    "blocked_resupply_category",
+    "agent_money",
+    "material_threshold",
+)
+
+
+def _build_get_rich_fallback_intent(
+    *,
+    agent: dict[str, Any],
+    source_intent: Intent,
+    world_turn: int,
+    fallback_reason: str,
+    blocked_resupply_category: str | None,
+    reason: str,
+) -> Intent:
+    source_metadata = source_intent.metadata if isinstance(source_intent.metadata, dict) else {}
+    return Intent(
+        kind=INTENT_GET_RICH,
+        score=0.5,
+        source_goal="get_rich",
+        reason=reason,
+        created_turn=world_turn,
+        metadata={
+            "fallback_from_intent": source_intent.kind,
+            "fallback_from_objective_key": source_metadata.get("objective_key"),
+            "fallback_to_intent": INTENT_GET_RICH,
+            "fallback_reason": fallback_reason,
+            "blocked_resupply_category": blocked_resupply_category,
+            "agent_money": int(agent.get("money") or 0),
+            "material_threshold": int(agent.get("material_threshold") or 0),
+        },
+    )
+
+
+def _apply_plan_fallback_payload(payload: dict[str, Any], intent: Intent) -> None:
+    metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
+    for key in _FALLBACK_PAYLOAD_KEYS:
+        value = metadata.get(key)
+        if value is not None:
+            payload[key] = value
 def build_plan(
     ctx: AgentContext,
     intent: Intent,
@@ -177,13 +224,14 @@ def _is_location_exhausted_for_money(
     return False
 
 
-def _is_support_source_exhausted(
+def _has_active_support_exhaustion(
     agent: dict[str, Any],
     *,
     location_id: str | None,
     target_id: str | None,
     objective_key: str,
     world_turn: int,
+    action_kinds: set[str],
 ) -> bool:
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
@@ -197,7 +245,7 @@ def _is_support_source_exhausted(
         if not isinstance(details, dict):
             details = {}
         action_kind = str(details.get("action_kind") or rec.get("kind") or "")
-        if action_kind not in {"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"}:
+        if action_kind not in action_kinds:
             continue
         rec_location_id = str(details.get("location_id") or rec.get("location_id") or "")
         if location_id_str and rec_location_id and rec_location_id != location_id_str:
@@ -222,6 +270,24 @@ def _is_support_source_exhausted(
         }:
             return True
     return False
+
+
+def _is_support_source_exhausted(
+    agent: dict[str, Any],
+    *,
+    location_id: str | None,
+    target_id: str | None,
+    objective_key: str,
+    world_turn: int,
+) -> bool:
+    return _has_active_support_exhaustion(
+        agent,
+        location_id=location_id,
+        target_id=target_id,
+        objective_key=objective_key,
+        world_turn=world_turn,
+        action_kinds={"anomaly_search_exhausted", "support_source_exhausted", "witness_source_exhausted"},
+    )
 
 
 # ── Plan builders ─────────────────────────────────────────────────────────────
@@ -1325,14 +1391,17 @@ def _plan_resupply(
             )
 
             if not _is_actionable:
-                _phase1_fb = Intent(
-                    kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                _phase1_fb = _build_get_rich_fallback_intent(
+                    agent=agent,
+                    source_intent=intent,
+                    world_turn=world_turn,
+                    fallback_reason="resupply_not_actionable",
+                    blocked_resupply_category=_buy_category,
                     reason=(
                         "Пополнение отложено политикой "
                         f"({_blocked_by or 'phase_gate'}). "
                         "Перехожу к сбору артефактов."
                     ),
-                    created_turn=world_turn,
                 )
                 return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
 
@@ -1348,14 +1417,17 @@ def _plan_resupply(
                     and _p1_threshold > 0
                     and _p1_money < _p1_threshold
                 ):
-                    _phase1_fb = Intent(
-                        kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+                    _phase1_fb = _build_get_rich_fallback_intent(
+                        agent=agent,
+                        source_intent=intent,
+                        world_turn=world_turn,
+                        fallback_reason="phase1_material_threshold_gate",
+                        blocked_resupply_category=_buy_category,
                         reason=(
                             "Phase-1: пополнение запасов желательно, "
                             "но поход к трейдеру отложен до достижения порога богатства. "
                             "Перехожу к сбору артефактов."
                         ),
-                        created_turn=world_turn,
                     )
                     return _plan_get_rich(ctx, _phase1_fb, state, world_turn, need_result)
                 return Plan(
@@ -1375,13 +1447,16 @@ def _plan_resupply(
                     confidence=0.8, created_turn=world_turn,
                 )
 
-            get_rich_intent = Intent(
-                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+            get_rich_intent = _build_get_rich_fallback_intent(
+                agent=agent,
+                source_intent=intent,
+                world_turn=world_turn,
+                fallback_reason="no_trader_known",
+                blocked_resupply_category=_buy_category,
                 reason=(
                     "Нужен resupply, но покупка сейчас невозможна/нецелесообразна. "
                     "Перехожу к fallback_get_money через поиск артефактов."
                 ),
-                created_turn=world_turn,
             )
             return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
 
@@ -1405,12 +1480,13 @@ def _plan_resupply(
                 f"forced_resupply_category={forced_category} недоступна сейчас. "
                 "Перехожу к fallback_get_money."
             )
-            get_rich_intent = Intent(
-                kind=INTENT_GET_RICH,
-                score=0.5,
-                source_goal="get_rich",
+            get_rich_intent = _build_get_rich_fallback_intent(
+                agent=agent,
+                source_intent=intent,
+                world_turn=world_turn,
+                fallback_reason="forced_resupply_category_unavailable",
+                blocked_resupply_category=forced_category,
                 reason=fallback_reason,
-                created_turn=world_turn,
             )
             return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
     else:
@@ -1457,16 +1533,17 @@ def _plan_resupply(
 
     _dominant_actionable, _dominant_blocked_by = is_item_need_actionable(agent, dominant.key)
     if not _dominant_actionable:
-        _phase_fb = Intent(
-            kind=INTENT_GET_RICH,
-            score=0.5,
-            source_goal="get_rich",
+        _phase_fb = _build_get_rich_fallback_intent(
+            agent=agent,
+            source_intent=intent,
+            world_turn=world_turn,
+            fallback_reason="resupply_not_actionable",
+            blocked_resupply_category=buy_category,
             reason=(
                 "Пополнение отложено политикой "
                 f"({_dominant_blocked_by or 'phase_gate'}). "
                 "Перехожу к сбору артефактов."
             ),
-            created_turn=world_turn,
         )
         return _plan_get_rich(ctx, _phase_fb, state, world_turn, need_result)
 
@@ -1558,14 +1635,17 @@ def _plan_resupply(
             and _p1r2_threshold > 0
             and _p1r2_money < _p1r2_threshold
         ):
-            _p1r2_intent = Intent(
-                kind=INTENT_GET_RICH, score=0.5, source_goal="get_rich",
+            _p1r2_intent = _build_get_rich_fallback_intent(
+                agent=agent,
+                source_intent=intent,
+                world_turn=world_turn,
+                fallback_reason="phase1_material_threshold_gate",
+                blocked_resupply_category=buy_category,
                 reason=(
                     "Phase-1: пополнение запасов желательно, "
                     "но поход к трейдеру отложен до достижения порога богатства. "
                     "Перехожу к сбору артефактов."
                 ),
-                created_turn=world_turn,
             )
             return _plan_get_rich(ctx, _p1r2_intent, state, world_turn, need_result)
         buy_payload: dict[str, Any] = {
@@ -1594,15 +1674,20 @@ def _plan_resupply(
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.6, created_turn=world_turn)
 
     # No trader known or cannot afford and no liquidity.
-    get_rich_intent = Intent(
-        kind=INTENT_GET_RICH,
-        score=0.5,
-        source_goal="get_rich",
+    get_rich_intent = _build_get_rich_fallback_intent(
+        agent=agent,
+        source_intent=intent,
+        world_turn=world_turn,
+        fallback_reason=(
+            "no_trader_known"
+            if not trader_loc
+            else "resupply_unaffordable_no_liquidity"
+        ),
+        blocked_resupply_category=buy_category,
         reason=(
             "Нужен resupply, но покупка сейчас невозможна/нецелесообразна. "
             "Перехожу к fallback_get_money через поиск артефактов."
         ),
-        created_turn=world_turn,
     )
     return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
 
@@ -1724,11 +1809,8 @@ def _plan_get_rich(
         used_for="get_rich_sell_artifacts",
     )
     agent_loc = agent.get("location_id", "")
-    fallback_reason = (
-        intent.reason
-        if isinstance(intent.reason, str) and "fallback_get_money" in intent.reason
-        else None
-    )
+    fallback_metadata = intent.metadata if isinstance(intent.metadata, dict) else {}
+    fallback_reason = fallback_metadata.get("fallback_reason") if isinstance(fallback_metadata.get("fallback_reason"), str) else None
     objective_key = str((intent.metadata or {}).get("objective_key") or "FIND_ARTIFACTS")
 
     if objective_key == "GET_MONEY_FOR_RESUPPLY":
@@ -1749,8 +1831,7 @@ def _plan_get_rich(
     # 1. Sell artifacts
     if has_artifacts and trader_loc:
         sell_payload: dict[str, Any] = {"item_category": "artifact"}
-        if fallback_reason:
-            sell_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(sell_payload, intent)
         if trader_loc == agent_loc:
             return Plan(
                 intent_kind=intent.kind,
@@ -1761,8 +1842,7 @@ def _plan_get_rich(
             "target_id": trader_loc,
             "reason": "sell_artifacts_get_rich",
         }
-        if fallback_reason:
-            travel_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(travel_payload, intent)
         return Plan(
             intent_kind=intent.kind,
             steps=[
@@ -1791,8 +1871,7 @@ def _plan_get_rich(
             "target_id": agent_loc,
             "reason": "get_rich_explore_here",
         }
-        if fallback_reason:
-            explore_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(explore_payload, intent)
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
@@ -1838,8 +1917,7 @@ def _plan_get_rich(
             "target_id": best_loc,
             "reason": "get_rich_travel_to_anomaly",
         }
-        if fallback_reason:
-            travel_payload["fallback_reason"] = fallback_reason
+        _apply_plan_fallback_payload(travel_payload, intent)
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(
@@ -1867,13 +1945,22 @@ def _plan_hunt_target(
     target_loc = intent.target_location_id
     agent_loc = ctx.self_state.get("location_id")
 
+    exhaustion_location_id = target_loc or agent_loc
     if objective_key and _is_support_source_exhausted(
         ctx.self_state,
-        location_id=target_loc,
+        location_id=exhaustion_location_id,
         target_id=target_id,
         objective_key=objective_key,
         world_turn=world_turn,
     ):
+        if objective_key in {"GATHER_INTEL", "LOCATE_TARGET", "VERIFY_LEAD", "TRACK_TARGET"}:
+            return _build_hunt_expand_search_plan(
+                ctx,
+                intent,
+                state,
+                world_turn,
+                target_id=target_id,
+            )
         return Plan(
             intent_kind=intent.kind,
             steps=[PlanStep(STEP_WAIT, {"reason": "support_source_exhausted_preplan"})],
@@ -2110,25 +2197,33 @@ def _plan_hunt_target(
                     expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
                 ),
                 PlanStep(
-                    STEP_QUESTION_WITNESSES,
-                    {"target_id": target_id, "reason": "hunt_intel"},
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_buy_or_request_intel"},
                     expected_duration_ticks=1,
                 ),
             ],
             confidence=0.65,
             created_turn=world_turn,
         )
-    return Plan(
-        intent_kind=intent.kind,
-        steps=[
-            PlanStep(
-                STEP_QUESTION_WITNESSES,
-                {"target_id": target_id, "reason": "hunt_intel"},
-                expected_duration_ticks=1,
-            )
-        ],
-        confidence=0.5,
-        created_turn=world_turn,
+    if _location_has_live_trader(state, str(agent_loc or "")):
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_buy_or_request_intel"},
+                    expected_duration_ticks=1,
+                )
+            ],
+            confidence=0.55,
+            created_turn=world_turn,
+        )
+    return _build_hunt_expand_search_plan(
+        ctx,
+        intent,
+        state,
+        world_turn,
+        target_id=target_id,
     )
 
 
@@ -2394,6 +2489,147 @@ def _nearest_trader_location(
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
     agent_loc = agent.get("location_id", "")
     return _find_nearest_trader_location(agent_loc, state)
+
+
+def _location_has_live_trader(state: dict[str, Any], location_id: str | None) -> bool:
+    if not location_id:
+        return False
+    traders = state.get("traders")
+    if not isinstance(traders, dict):
+        return False
+    return any(
+        isinstance(raw_trader, dict)
+        and raw_trader.get("is_alive", True)
+        and str(raw_trader.get("location_id") or "") == str(location_id)
+        for raw_trader in traders.values()
+    )
+
+
+def _build_hunt_expand_search_plan(
+    ctx: AgentContext,
+    intent: Intent,
+    state: dict[str, Any],
+    world_turn: int,
+    *,
+    target_id: str | None,
+) -> Plan:
+    from app.games.zone_stalkers.rules.tick_rules import _dijkstra_reachable_locations
+
+    agent = ctx.self_state
+    agent_loc = str(agent.get("location_id") or "")
+    reachable = _dijkstra_reachable_locations(agent_loc, state.get("locations", {}), max_minutes=9999)
+    search_objective_key = str((intent.metadata or {}).get("objective_key") or "GATHER_INTEL")
+    current_trader_exhausted = _has_active_support_exhaustion(
+        agent,
+        location_id=agent_loc,
+        target_id=target_id,
+        objective_key=search_objective_key,
+        world_turn=world_turn,
+        action_kinds={"support_source_exhausted"},
+    )
+
+    trader_candidates = sorted(
+        {
+            str(raw_trader.get("location_id") or "")
+            for raw_trader in (state.get("traders") or {}).values()
+            if isinstance(raw_trader, dict)
+            and raw_trader.get("is_alive", True)
+            and str(raw_trader.get("location_id") or "")
+            and str(raw_trader.get("location_id") or "") != agent_loc
+            and not _has_active_support_exhaustion(
+                agent,
+                location_id=str(raw_trader.get("location_id") or ""),
+                target_id=target_id,
+                objective_key=search_objective_key,
+                world_turn=world_turn,
+                action_kinds={"support_source_exhausted"},
+            )
+        },
+        key=lambda loc: (int(reachable.get(loc, 10**9)), loc),
+    )
+    if trader_candidates:
+        trader_loc = trader_candidates[0]
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": trader_loc, "reason": "hunt_expand_search_trader_hub"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state),
+                ),
+                PlanStep(
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_expand_search_trader_hub"},
+                    expected_duration_ticks=1,
+                ),
+            ],
+            confidence=0.62,
+            created_turn=world_turn,
+        )
+
+    witness_candidates = [
+        loc
+        for loc, _distance in sorted(reachable.items(), key=lambda item: (int(item[1]), item[0]))
+        if loc != agent_loc
+        and not _is_support_source_exhausted(
+            agent,
+            location_id=str(loc),
+            target_id=target_id,
+            objective_key=search_objective_key,
+            world_turn=world_turn,
+        )
+    ]
+    if witness_candidates:
+        dest = str(witness_candidates[0])
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_TRAVEL_TO_LOCATION,
+                    {"target_id": dest, "reason": "hunt_expand_search_neighbor"},
+                    expected_duration_ticks=_estimate_travel_ticks(ctx, dest, state),
+                ),
+                PlanStep(
+                    STEP_QUESTION_WITNESSES,
+                    {"target_id": target_id, "reason": "hunt_expand_search_neighbor"},
+                    expected_duration_ticks=1,
+                ),
+                PlanStep(
+                    STEP_LOOK_FOR_TRACKS,
+                    {"target_id": target_id, "target_location_id": dest, "reason": "hunt_expand_search_neighbor"},
+                    expected_duration_ticks=1,
+                ),
+            ],
+            confidence=0.56,
+            created_turn=world_turn,
+        )
+
+    if not current_trader_exhausted and _location_has_live_trader(state, agent_loc):
+        return Plan(
+            intent_kind=intent.kind,
+            steps=[
+                PlanStep(
+                    STEP_ASK_FOR_INTEL,
+                    {"target_id": target_id, "reason": "hunt_expand_search_local_trader"},
+                    expected_duration_ticks=1,
+                )
+            ],
+            confidence=0.5,
+            created_turn=world_turn,
+        )
+
+    return Plan(
+        intent_kind=intent.kind,
+        steps=[
+            PlanStep(
+                STEP_LOOK_FOR_TRACKS,
+                {"target_id": target_id, "target_location_id": agent_loc, "reason": "hunt_expand_search_tracks"},
+                expected_duration_ticks=1,
+            )
+        ],
+        confidence=0.4,
+        created_turn=world_turn,
+    )
 
 
 def _artifact_item_types(agent: dict[str, Any]) -> set[str]:

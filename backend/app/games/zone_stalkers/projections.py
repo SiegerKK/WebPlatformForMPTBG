@@ -40,7 +40,7 @@ def _compact_brain_context(agent: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(ctx, dict):
         return None
     compact: dict[str, Any] = {}
-    for key in ("objective_key", "intent_kind", "selected_plan_key"):
+    for key in ("objective_key", "intent_kind", "selected_plan_key", "plan_fallback"):
         if key in ctx:
             compact[key] = ctx.get(key)
     hunt = ctx.get("hunt_target_belief")
@@ -248,13 +248,27 @@ def _agent_story_events(agent: dict[str, Any]) -> tuple[list[dict[str, Any]], in
             kind = str(details.get("action_kind") or raw.get("kind") or "")
             world_turn = _record_created_turn(raw)
             title = str(raw.get("title") or raw.get("summary") or kind)
+            layer = str(raw.get("layer") or "")
+            is_semantic_summary = layer == "semantic" or kind.startswith("semantic_")
+            effects = dict(details)
+            effects.setdefault("action_kind", kind)
+            if is_semantic_summary:
+                effects["category"] = "semantic_summary"
+                effects["timeline_visibility"] = "summary_only"
+                effects["last_updated_turn"] = int(raw.get("last_accessed_turn") or world_turn)
+                turn_start = details.get("turn_start") or details.get("range_start_turn") or details.get("first_seen_turn")
+                turn_end = details.get("turn_end") or details.get("range_end_turn") or details.get("last_seen_turn") or effects.get("last_updated_turn")
+                if turn_start is not None:
+                    effects["turn_start"] = int(turn_start)
+                if turn_end is not None:
+                    effects["turn_end"] = int(turn_end)
             rows.append({
                 "world_turn": world_turn,
-                "type": kind,
+                "type": "system" if is_semantic_summary else kind,
                 "title": title,
                 "summary": str(raw.get("summary") or kind),
                 "source": "memory_v3",
-                "effects": dict(details),
+                "effects": effects,
             })
     trace = agent.get("brain_trace")
     if isinstance(trace, dict):
