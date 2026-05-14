@@ -70,6 +70,7 @@ from .models.plan import (
     STEP_LEAVE_ZONE,
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
+    STEP_TAKE_SURVIVAL_LOAN,
 )
 
 _MIN_NONCRITICAL_CONSUME_THRESHOLD_FOOD = 50
@@ -391,7 +392,31 @@ def _plan_heal_or_flee(
                 ],
                 interruptible=False, confidence=0.7, created_turn=world_turn,
             )
-        # Nothing to sell at all; wait/idle
+        # Nothing to sell at all — try survival loan from the trader.
+        trader_npc = _find_trader_npc_at_location(trader_loc, state)
+        if trader_npc is not None:
+            from game_sdk.plan_steps.take_survival_loan import can_take_survival_loan, plan_take_survival_loan
+            if can_take_survival_loan(agent, state, trader_npc):
+                loan_step_dict = plan_take_survival_loan(agent, state, trader_npc)
+                if loan_step_dict is not None:
+                    return Plan(
+                        intent_kind=intent.kind,
+                        steps=[
+                            PlanStep(
+                                kind=STEP_TAKE_SURVIVAL_LOAN,
+                                payload=loan_step_dict,
+                                interruptible=False,
+                                expected_duration_ticks=1,
+                            ),
+                            PlanStep(
+                                kind=STEP_TRADE_BUY_ITEM,
+                                payload={"item_category": "medical", "reason": "buy_medical_heal_loan"},
+                                interruptible=False,
+                                expected_duration_ticks=1,
+                            ),
+                        ],
+                        interruptible=False, confidence=0.8, created_turn=world_turn,
+                    )
         return None
 
     if trader_loc and trader_loc != agent_loc:
@@ -654,6 +679,47 @@ def _plan_seek_consumable(
                     ),
                 ]
                 return Plan(intent_kind=intent.kind, steps=steps, interruptible=False, confidence=1.0, created_turn=world_turn)
+
+            # No sellable item — try survival loan from the trader.
+            trader_npc = _find_trader_npc_at_location(trader_loc, state)
+            if trader_npc is not None:
+                from game_sdk.plan_steps.take_survival_loan import can_take_survival_loan, plan_take_survival_loan
+                if can_take_survival_loan(agent, state, trader_npc):
+                    loan_step_dict = plan_take_survival_loan(agent, state, trader_npc)
+                    if loan_step_dict is not None:
+                        steps = [
+                            PlanStep(
+                                STEP_TAKE_SURVIVAL_LOAN,
+                                loan_step_dict,
+                                interruptible=False,
+                            ),
+                            PlanStep(
+                                STEP_TRADE_BUY_ITEM,
+                                {
+                                    "item_category": category,
+                                    "reason": f"buy_{category}_survival",
+                                    "buy_mode": "survival_cheapest",
+                                    "compatible_item_types": sorted(compatible_types),
+                                    "required_price": afford.required_price,
+                                },
+                                interruptible=False,
+                            ),
+                            PlanStep(
+                                STEP_CONSUME_ITEM,
+                                {
+                                    "item_type": afford.cheapest_viable_item_type,
+                                    "reason": f"emergency_{category}",
+                                },
+                                interruptible=False,
+                            ),
+                        ]
+                        return Plan(
+                            intent_kind=intent.kind,
+                            steps=steps,
+                            interruptible=False,
+                            confidence=0.8,
+                            created_turn=world_turn,
+                        )
 
         if trader_loc and trader_loc != agent_loc:
             # Check affordability before committing to travel→buy.
@@ -2333,3 +2399,12 @@ def _has_sellable_inventory(agent: dict[str, Any], *, item_category: str) -> boo
     sleepiness_per_hour = max(1, math.ceil(100 / DEFAULT_SLEEP_HOURS))
     estimated_hours = max(1, math.ceil(sleepiness / sleepiness_per_hour))
     sleep_hours = min(DEFAULT_SLEEP_HOURS, estimated_hours)
+
+def _find_trader_npc_at_location(
+    loc_id: str,
+    state: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Return the first trader NPC dict at *loc_id*, or None."""
+    from app.games.zone_stalkers.rules.tick_rules import _find_trader_at_location
+    return _find_trader_at_location(loc_id, state)
+

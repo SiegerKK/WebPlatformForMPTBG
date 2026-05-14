@@ -65,6 +65,7 @@ from .models.plan import (
     STEP_WAIT,
     STEP_LEGACY_SCHEDULED_ACTION,
     STEP_HEAL_SELF,
+    STEP_TAKE_SURVIVAL_LOAN,
 )
 
 _SEARCH_EXHAUSTION_THRESHOLD = 3
@@ -129,6 +130,7 @@ def execute_plan_step(
         STEP_LEAVE_ZONE:           _exec_leave_zone,
         STEP_WAIT:                 _exec_wait,
         STEP_LEGACY_SCHEDULED_ACTION: _exec_legacy_passthrough,
+        STEP_TAKE_SURVIVAL_LOAN:   _exec_take_survival_loan,
     }
 
     executor = dispatch.get(step.kind, _exec_unknown)
@@ -141,6 +143,7 @@ def execute_plan_step(
         STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM,
         STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
         STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
+        STEP_TAKE_SURVIVAL_LOAN,
     ):
         plan.advance()
     elif step.kind == STEP_TRADE_SELL_ITEM:
@@ -669,6 +672,8 @@ def _exec_trade_sell(
     sold_by_event = _trade_sell_succeeded(events)
 
     if sold_by_event or sold_by_state:
+        # ── Debt repayment on successful sale ─────────────────────────────
+        _apply_debt_repayment_after_sell(agent_id, agent, trader, state, world_turn, events)
         return events
 
     reason = _trade_sell_failure_reason(events)
@@ -1683,3 +1688,106 @@ def has_sellable_inventory(
 ) -> bool:
     """Return True when the agent has at least one sellable item of *item_category*."""
     return bool(get_sellable_inventory_items(agent, item_category=item_category))
+
+
+# ── Debt repayment helper (called after a successful trade sell) ──────────────
+
+_REPAYMENT_FRACTION = 0.5
+
+
+def _apply_debt_repayment_after_sell(
+    agent_id: str,
+    agent: "dict[str, Any]",
+    trader: "dict[str, Any]",
+    state: "dict[str, Any]",
+    world_turn: int,
+    events: "list[dict[str, Any]]",
+) -> None:
+    """Apply partial debt repayment to the trader after a successful sale.
+
+    Uses REPAYMENT_FRACTION (0.5) of the agent's current money to repay
+    active debts owed to this trader.  Modifies agent/trader money and the
+    debt_ledger in-place.  Appends a 'debt_repaid' key to the first event
+    dict if any repayment is made.
+    """
+    try:
+        from game_sdk.debt_ledger import (
+            get_active_debts_for_debtor,
+            total_debt_balance,
+            apply_repayment,
+        )
+    except ImportError:
+        return
+
+    trader_id = str(trader.get("agent_id") or trader.get("id") or "")
+    active_debts = [
+        d for d in get_active_debts_for_debtor(state, agent_id)
+        if str(d.get("creditor_id") or "") == trader_id
+    ]
+    if not active_debts:
+        return
+
+    total_owed = total_debt_balance(state, agent_id)
+    if total_owed <= 0:
+        return
+
+    npc_money = float(agent.get("money") or 0)
+    repayment_budget = min(npc_money * _REPAYMENT_FRACTION, total_owed)
+    if repayment_budget <= 0:
+        return
+
+    remaining = repayment_budget
+    for debt in active_debts:
+        if remaining <= 0:
+            break
+        debt_balance = float(debt.get("balance") or 0)
+        chunk = min(remaining, debt_balance)
+        apply_repayment(state, debt["id"], chunk, world_turn)
+        remaining -= chunk
+
+    repayment_total = repayment_budget - max(0.0, remaining)
+    if repayment_total > 0:
+        agent["money"] = max(0.0, npc_money - repayment_total)
+        trader_money = float(trader.get("money") or 0)
+        trader["money"] = trader_money + repayment_total
+        # Annotate the first event with debt_repaid for observability
+        if events and isinstance(events[0], dict):
+            events[0].setdefault("payload", {})["debt_repaid"] = repayment_total
+
+# ── Survival loan executor ────────────────────────────────────────────────────
+
+def _exec_take_survival_loan(
+    agent_id: str,
+    agent: dict[str, Any],
+    step: PlanStep,
+    ctx: AgentContext,
+    state: dict[str, Any],
+    world_turn: int,
+) -> list[dict[str, Any]]:
+    """Execute the take_survival_loan step.
+
+    Delegates to execute_take_survival_loan from the game_sdk executors.
+    Returns a synthetic event list representing the outcome.
+    """
+    from game_sdk.executors.execute_take_survival_loan import execute_take_survival_loan
+
+    result = execute_take_survival_loan(
+        npc=agent,
+        state=state,
+        step=step.payload,
+        current_tick=world_turn,
+    )
+    status = result.get("status")
+    if status == "success":
+        return [{
+            "event_type": "survival_loan_taken",
+            "payload": {
+                "agent_id": agent_id,
+                "debt_id": result.get("debt_id"),
+                "amount": result.get("amount"),
+                "trader_id": step.payload.get("trader_id"),
+            },
+        }]
+    # skipped or failed — return empty (no loan taken)
+    return []
+
