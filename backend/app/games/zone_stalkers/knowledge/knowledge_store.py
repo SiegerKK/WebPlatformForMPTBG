@@ -739,6 +739,55 @@ def upsert_hunt_evidence_from_observation(
         changed_major = changed_major or (old_sig != new_sig)
         changed_minor = True
 
+    elif kind == "target_death_confirmed":
+        death = entry.get("death") if isinstance(entry.get("death"), dict) else {}
+        old_sig = (death.get("status"), death.get("location_id"))
+        new_death = {
+            "status": "confirmed_dead",
+            "corpse_id": details.get("corpse_id"),
+            "location_id": location_id,
+            "turn": world_turn,
+            "confidence": confidence,
+            "source": source,
+            "directly_observed": bool(details.get("directly_observed", True)),
+            "killer_id": str(details.get("killer_id") or "") or None,
+            "death_cause": str(details.get("target_death_cause") or details.get("death_cause") or "") or None,
+        }
+        entry["death"] = new_death
+        new_sig = (new_death.get("status"), new_death.get("location_id"))
+        changed_major = changed_major or (old_sig != new_sig)
+        changed_minor = True
+
+    elif kind == "target_not_found":
+        if location_id:
+            # Threshold must match _SEARCH_EXHAUSTION_THRESHOLD in target_beliefs.py.
+            _FAILED_SEARCH_EXHAUSTION_THRESHOLD = 3
+            _FAILED_SEARCH_COOLDOWN_TURNS = 300
+            failed_locs: dict[str, Any] = entry.setdefault("failed_search_locations", {})
+            existing_entry = failed_locs.get(location_id)
+            if isinstance(existing_entry, dict):
+                old_count = int(existing_entry.get("count", 1) or 1)
+                new_count = old_count + 1
+            else:
+                old_count = 0
+                new_count = 1
+            # Only set cooldown when the exhaustion threshold is reached; before that,
+            # keep cooldown_until_turn = 0 so the location is not prematurely excluded.
+            if new_count >= _FAILED_SEARCH_EXHAUSTION_THRESHOLD:
+                prev_cooldown = int((existing_entry or {}).get("cooldown_until_turn", 0) or 0)
+                cooldown_until: int = max(prev_cooldown, world_turn + _FAILED_SEARCH_COOLDOWN_TURNS)
+            else:
+                cooldown_until = int((existing_entry or {}).get("cooldown_until_turn", 0) or 0)
+            new_failed: dict[str, Any] = {
+                "count": new_count,
+                "turn": world_turn,
+                "cooldown_until_turn": cooldown_until,
+                "confidence": float(confidence),
+            }
+            failed_locs[location_id] = new_failed
+            changed_major = changed_major or (old_count != new_count)
+            changed_minor = True
+
     entry["revision"] = int(entry.get("revision", 0) or 0) + 1
 
     _refresh_stats(knowledge, world_turn)

@@ -109,7 +109,7 @@ def test_context_builder_falls_back_to_memory_v3_when_knowledge_missing():
     assert "other_1" in entity_ids
 
 
-def test_context_builder_merges_knowledge_and_memory_entities_when_knowledge_partial():
+def test_context_builder_prefers_knowledge_entities_without_memory_merge_when_knowledge_present():
     agent = _bare_agent("bot1", location_id="loc_A")
     target = _bare_agent("target_1", location_id="loc_X")
     from_memory = _bare_agent("memory_only", location_id="loc_M")
@@ -146,7 +146,7 @@ def test_context_builder_merges_knowledge_and_memory_entities_when_knowledge_par
     ctx = build_agent_context("bot1", agent, state)
     ids = {e["agent_id"] for e in ctx.known_entities}
     assert "target_1" in ids
-    assert "memory_only" in ids
+    assert "memory_only" not in ids
 
 
 def test_context_builder_keeps_memory_target_lead_when_knowledge_has_unrelated_npc():
@@ -185,7 +185,7 @@ def test_context_builder_keeps_memory_target_lead_when_knowledge_has_unrelated_n
     assert target_entry["last_known_location"] == "loc_T"
 
 
-def test_context_builder_merges_knowledge_and_memory_locations():
+def test_context_builder_prefers_knowledge_locations_without_memory_merge_when_knowledge_present():
     agent = _bare_agent("bot1", location_id="loc_A")
     agent["knowledge_v1"] = {
         "revision": 1,
@@ -228,7 +228,7 @@ def test_context_builder_merges_knowledge_and_memory_locations():
     ctx = build_agent_context("bot1", agent, state)
     loc_ids = {loc["location_id"] for loc in ctx.known_locations}
     assert "loc_K" in loc_ids
-    assert "loc_M" in loc_ids
+    assert "loc_M" not in loc_ids
 
 
 def test_context_builder_visible_trader_does_not_suppress_memory_traders():

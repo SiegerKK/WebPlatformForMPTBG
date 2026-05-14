@@ -460,3 +460,82 @@ def test_debug_projection_empty_for_agent_without_knowledge():
     assert summary["known_traders_count"] == 0
     assert summary["revision"] == 0
     assert summary["top_recent_known_npcs"] == []
+
+
+def test_upsert_hunt_evidence_records_target_not_found_failed_search_location() -> None:
+    """P1 regression: upsert_hunt_evidence_from_observation(kind='target_not_found')
+    must write to hunt_evidence[target_id].failed_search_locations and increment count."""
+    from app.games.zone_stalkers.knowledge.knowledge_store import (  # noqa: PLC0415
+        upsert_hunt_evidence_from_observation,
+    )
+    agent = _bare_agent()
+
+    # First miss — creates entry with count=1.
+    r1 = upsert_hunt_evidence_from_observation(
+        agent,
+        target_id="target_1",
+        kind="target_not_found",
+        location_id="loc_false",
+        world_turn=10,
+        confidence=0.75,
+        source="observation",
+    )
+    assert r1["created"] is True
+    knowledge = agent["knowledge_v1"]
+    entry = knowledge["hunt_evidence"]["target_1"]
+    assert entry["failed_search_locations"]["loc_false"]["count"] == 1
+    # Cooldown must NOT be set until exhaustion threshold (3) is reached.
+    assert entry["failed_search_locations"]["loc_false"]["cooldown_until_turn"] == 0
+
+    # Second miss — increments count.
+    upsert_hunt_evidence_from_observation(
+        agent,
+        target_id="target_1",
+        kind="target_not_found",
+        location_id="loc_false",
+        world_turn=20,
+        confidence=0.75,
+        source="observation",
+    )
+    assert entry["failed_search_locations"]["loc_false"]["count"] == 2
+    assert entry["failed_search_locations"]["loc_false"]["cooldown_until_turn"] == 0
+
+    # Third miss — count reaches exhaustion threshold.
+    upsert_hunt_evidence_from_observation(
+        agent,
+        target_id="target_1",
+        kind="target_not_found",
+        location_id="loc_false",
+        world_turn=30,
+        confidence=0.75,
+        source="observation",
+    )
+    assert entry["failed_search_locations"]["loc_false"]["count"] == 3
+    assert entry["failed_search_locations"]["loc_false"]["cooldown_until_turn"] > 30
+
+
+def test_knowledge_first_target_not_found_via_memory_event() -> None:
+    """target_not_found written via write_memory_event_to_v3 must be routed to
+    hunt_evidence.failed_search_locations through the knowledge_upsert path."""
+    agent = _bare_agent()
+
+    write_memory_event_to_v3(
+        agent_id="bot1",
+        agent=agent,
+        legacy_entry={
+            "effects": {
+                "action_kind": "target_not_found",
+                "target_id": "target_1",
+                "location_id": "loc_false",
+                "confidence": 0.75,
+            }
+        },
+        world_turn=50,
+    )
+
+    knowledge = agent.get("knowledge_v1", {})
+    hunt_evidence = knowledge.get("hunt_evidence", {})
+    assert "target_1" in hunt_evidence, "hunt_evidence entry must be created"
+    failed = hunt_evidence["target_1"].get("failed_search_locations", {})
+    assert "loc_false" in failed, "loc_false must be in failed_search_locations"
+    assert failed["loc_false"]["count"] >= 1

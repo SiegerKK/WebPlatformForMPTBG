@@ -416,6 +416,61 @@ def test_full_projection_exposes_brain_context_metrics_and_strips_cache() -> Non
     assert m["context_builder_cache_hits"] == 5
 
 
+def test_full_projection_includes_compact_target_knowledge() -> None:
+    state = _sample_state()
+    state["world_turn"] = 120
+    agent = state["agents"]["a1"]
+    agent["kill_target_id"] = "t1"
+    agent["knowledge_v1"] = {
+        "revision": 3,
+        "major_revision": 2,
+        "minor_revision": 1,
+        "known_npcs": {
+            "t1": {
+                "agent_id": "t1",
+                "name": "Target",
+                "last_seen_location_id": "loc_b",
+                "last_seen_turn": 118,
+                "last_direct_seen_turn": 118,
+                "is_alive": True,
+                "confidence": 0.9,
+                "death_evidence": {"status": "alive"},
+                "equipment_summary": {
+                    "weapon_class": "rifle",
+                    "armor_class": "medium",
+                    "combat_strength_estimate": 0.7,
+                },
+            }
+        },
+        "known_corpses": {},
+        "known_locations": {},
+        "known_traders": {},
+        "known_hazards": {},
+        "hunt_evidence": {
+            "t1": {
+                "last_seen": {"location_id": "loc_b", "turn": 118, "confidence": 0.9, "source": "direct_observation"},
+                "death": None,
+                "route_hints": [{"to_location_id": "loc_c"}],
+                "failed_search_locations": {"loc_x": {"count": 2}},
+                "recent_contact": {"turn": 118, "location_id": "loc_b"},
+                "revision": 4,
+            }
+        },
+    }
+    agent["brain_v3_context"]["_target_knowledge_debug"] = {
+        "target_id": "t1",
+        "legacy_memory_fallback_used": False,
+        "lead_sources": {"visible": 1, "knowledge": 2, "memory_v3": 0, "debug_state": 0},
+    }
+
+    projected = project_zone_state(state=state, mode="full")
+    target_knowledge = projected["agents"]["a1"]["target_knowledge"]
+    assert target_knowledge["target_id"] == "t1"
+    assert target_knowledge["known_npc"]["last_seen_location_id"] == "loc_b"
+    assert target_knowledge["hunt_evidence"]["route_hints_count"] == 1
+    assert target_knowledge["lead_sources"]["knowledge"] == 2
+
+
 def test_debug_full_profile_loads_cold_memory() -> None:
     clear_in_memory_store()
     reset_cold_metrics()

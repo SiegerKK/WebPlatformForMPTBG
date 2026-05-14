@@ -17,6 +17,11 @@ from .knowledge_builder import (
     build_known_traders_from_knowledge,
     build_known_hazards_from_knowledge,
 )
+from .knowledge_hunt_builder import (
+    build_hunt_leads_from_knowledge,
+    build_recent_target_contact_from_knowledge,
+    build_equipment_belief_from_knowledge,
+)
 
 __all__ = [
     "ensure_knowledge_v1",
@@ -30,4 +35,7 @@ __all__ = [
     "build_known_locations_from_knowledge",
     "build_known_traders_from_knowledge",
     "build_known_hazards_from_knowledge",
+    "build_hunt_leads_from_knowledge",
+    "build_recent_target_contact_from_knowledge",
+    "build_equipment_belief_from_knowledge",
 ]

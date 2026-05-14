@@ -75,6 +75,8 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
     "stalkers_seen": "knowledge_upsert",
     "target_seen": "knowledge_upsert",
     "target_last_known_location": "knowledge_upsert",
+    "target_not_found": "knowledge_upsert",
+    "retreat_observed": "knowledge_upsert",
     "target_corpse_seen": "knowledge_upsert",
     "target_corpse_reported": "knowledge_upsert",
     "corpse_seen": "knowledge_upsert",
@@ -1196,6 +1198,87 @@ def _upsert_knowledge_from_event(
             confidence=float(effects.get("confidence", 1.0)),
         )
 
+    elif kind == "target_not_found":
+        target_id = str(effects.get("target_id") or "")
+        if not target_id:
+            return result
+        loc_id = str(effects.get("location_id") or "")
+        if not loc_id:
+            return result
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=target_id,
+            kind="target_not_found",
+            location_id=loc_id,
+            world_turn=world_turn,
+            confidence=float(effects.get("confidence", 0.75)),
+            source=str(effects.get("source") or "observation"),
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
+
+    elif kind == "retreat_observed":
+        # Hunter directly observed an enemy fleeing combat.  If the subject is
+        # the agent's kill target, update hunt_evidence.last_seen to the
+        # destination so the hunter can pursue.
+        kill_target_id = str(agent.get("kill_target_id") or "")
+        subject_id = str(effects.get("subject") or effects.get("target_id") or "")
+        if not subject_id or subject_id != kill_target_id:
+            return result
+        to_loc = str(effects.get("to_location") or effects.get("to_location_id") or "")
+        if not to_loc:
+            return result
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=subject_id,
+            kind="target_last_known_location",
+            location_id=to_loc,
+            world_turn=world_turn,
+            confidence=0.85,
+            source="combat_retreat_observed",
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
+
+    elif kind == "target_death_confirmed":
+        target_id = str(effects.get("target_id") or "")
+        if not target_id:
+            return result
+        target_name = str(effects.get("target_name") or "") or None
+        loc_id = str(
+            effects.get("location_id")
+            or effects.get("corpse_location_id")
+            or ""
+        )
+        _merge_update(_upsert_npc(
+            agent,
+            other_agent_id=target_id,
+            name=target_name,
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            source="direct_observation",
+            confidence=1.0,
+            death_status={
+                "is_alive": False,
+                "confirmed_dead": True,
+                "death_directly_confirmed": True,
+                "death_cause": str(effects.get("target_death_cause") or effects.get("death_cause") or "") or None,
+                "killer_id": str(effects.get("killer_id") or "") or None,
+                "reported_corpse_location_id": loc_id or None,
+            },
+        ))
+        _merge_update(_upsert_hunt_evidence(
+            agent,
+            target_id=target_id,
+            kind="target_death_confirmed",
+            location_id=loc_id or None,
+            world_turn=world_turn,
+            confidence=1.0,
+            source="combat",
+            details=effects,
+        ))
+        _METRICS["hunt_evidence_upserts"] += 1
+
     elif kind == "travel_hop":
         from_location_id = str(
             effects.get("from_location_id")
@@ -1543,6 +1626,16 @@ def write_memory_event_to_v3(
     # Apply sanitization — truncate summary and details fields.
     is_critical = policy == "memory_critical" or record.kind in _NO_DEDUP_KINDS
     record = _sanitize_record_payload(record, is_critical=is_critical)
+
+    # target_death_confirmed is memory_critical (always writes episodic) but also
+    # needs to update knowledge tables so target_alive_from_knowledge is correct.
+    if record.kind == "target_death_confirmed":
+        _upsert_knowledge_from_event(
+            agent=agent,
+            kind=record.kind,
+            effects=record.details if isinstance(record.details, dict) else {},
+            world_turn=world_turn,
+        )
 
     if is_critical:
         _METRICS["memory_write_critical"] += 1

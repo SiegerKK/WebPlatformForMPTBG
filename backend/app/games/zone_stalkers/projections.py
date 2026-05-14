@@ -83,6 +83,82 @@ def _compact_brain_runtime(agent: dict[str, Any]) -> dict[str, Any] | None:
     return compact or None
 
 
+def _compact_target_knowledge(agent: dict[str, Any], *, world_turn: int) -> dict[str, Any] | None:
+    target_id = str(agent.get("kill_target_id") or "") or None
+    if not target_id:
+        return None
+
+    brain_ctx = agent.get("brain_v3_context")
+    debug_payload = brain_ctx.get("_target_knowledge_debug") if isinstance(brain_ctx, dict) else None
+    if isinstance(brain_ctx, dict):
+        brain_ctx.pop("_target_knowledge_debug", None)
+
+    knowledge = agent.get("knowledge_v1")
+    known_npc = None
+    hunt_evidence = None
+    if isinstance(knowledge, dict):
+        known_npcs = knowledge.get("known_npcs")
+        if isinstance(known_npcs, dict):
+            raw_known_npc = known_npcs.get(target_id)
+            if isinstance(raw_known_npc, dict):
+                try:
+                    from app.games.zone_stalkers.knowledge.knowledge_store import effective_known_npc_confidence  # noqa: PLC0415
+
+                    effective_confidence = effective_known_npc_confidence(raw_known_npc, world_turn)
+                except Exception:
+                    effective_confidence = raw_known_npc.get("confidence")
+                death_evidence = raw_known_npc.get("death_evidence") if isinstance(raw_known_npc.get("death_evidence"), dict) else {}
+                equipment_summary = raw_known_npc.get("equipment_summary") if isinstance(raw_known_npc.get("equipment_summary"), dict) else {}
+                known_npc = {
+                    "last_seen_location_id": raw_known_npc.get("last_seen_location_id"),
+                    "last_seen_turn": raw_known_npc.get("last_seen_turn"),
+                    "last_direct_seen_turn": raw_known_npc.get("last_direct_seen_turn"),
+                    "is_alive": raw_known_npc.get("is_alive"),
+                    "effective_confidence": effective_confidence,
+                    "death_status": death_evidence.get("status"),
+                    "corpse_location_id": death_evidence.get("corpse_location_id"),
+                    "weapon_class": equipment_summary.get("weapon_class"),
+                    "armor_class": equipment_summary.get("armor_class"),
+                    "combat_strength_estimate": equipment_summary.get("combat_strength_estimate"),
+                }
+        hunt_table = knowledge.get("hunt_evidence")
+        if isinstance(hunt_table, dict):
+            raw_hunt = hunt_table.get(target_id)
+            if isinstance(raw_hunt, dict):
+                failed_search_locations = raw_hunt.get("failed_search_locations")
+                route_hints = raw_hunt.get("route_hints")
+                hunt_evidence = {
+                    "last_seen": copy.deepcopy(raw_hunt.get("last_seen")) if isinstance(raw_hunt.get("last_seen"), dict) else None,
+                    "death": copy.deepcopy(raw_hunt.get("death")) if isinstance(raw_hunt.get("death"), dict) else None,
+                    "recent_contact": copy.deepcopy(raw_hunt.get("recent_contact")) if isinstance(raw_hunt.get("recent_contact"), dict) else None,
+                    "route_hints_count": len(route_hints) if isinstance(route_hints, list) else 0,
+                    "failed_search_locations_count": len(failed_search_locations) if isinstance(failed_search_locations, dict) else 0,
+                    "revision": raw_hunt.get("revision", 0),
+                }
+
+    lead_sources = {
+        "visible": 0,
+        "knowledge": 0,
+        "memory_v3": 0,
+        "debug_state": 0,
+    }
+    legacy_memory_fallback_used = False
+    if isinstance(debug_payload, dict):
+        lead_sources.update({
+            key: int(debug_payload.get("lead_sources", {}).get(key, 0))
+            for key in lead_sources
+        })
+        legacy_memory_fallback_used = bool(debug_payload.get("legacy_memory_fallback_used"))
+
+    return {
+        "target_id": target_id,
+        "known_npc": known_npc,
+        "hunt_evidence": hunt_evidence,
+        "legacy_memory_fallback_used": legacy_memory_fallback_used,
+        "lead_sources": lead_sources,
+    }
+
+
 def _record_created_turn(record: dict[str, Any]) -> int:
     try:
         return int(record.get("created_turn", 0) or 0)
@@ -291,6 +367,9 @@ def _enrich_agent_full_projection(agent: dict[str, Any], *, redis_client: Any | 
         agent["knowledge_summary"] = build_knowledge_summary(agent, world_turn)
     except Exception:
         pass
+    target_knowledge = _compact_target_knowledge(agent, world_turn=world_turn or 0)
+    if target_knowledge is not None:
+        agent["target_knowledge"] = target_knowledge
     # PR4: Expose brain_context_metrics in full/debug projection.
     ctx_metrics = agent.get("brain_context_metrics")
     if isinstance(ctx_metrics, dict):
