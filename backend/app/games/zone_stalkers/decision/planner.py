@@ -1425,21 +1425,10 @@ def _plan_prepare_for_hunt(
         buy_payload["buy_mode"] = "hunt_ammo_resupply"
         buy_payload["min_count"] = min_count
 
-    # If not enough money, route to get_rich
-    if agent_money < estimated_money_needed and estimated_money_needed > 0:
-        get_rich_intent = _build_get_rich_fallback_intent(
-            agent=agent,
-            source_intent=intent,
-            world_turn=world_turn,
-            fallback_reason="hunt_preparation_no_money",
-            blocked_resupply_category=buy_category,
-            reason=(
-                f"Нужна подготовка к охоте: {', '.join(missing)}. "
-                f"Не хватает денег (нужно ~{estimated_money_needed}). "
-                "Перехожу к добыче денег."
-            ),
-        )
-        return _plan_get_rich(ctx, get_rich_intent, state, world_turn, need_result)
+    # Check per-item (priority item) affordability rather than full estimated total.
+    # This allows buying the priority item (e.g. AK-74) even if total budget for all
+    # requirements is not yet met.
+    # Per-path affordability check below handles the get_rich fallback.
 
     # Agent at trader: try buying directly
     if trader_loc and trader_loc == agent_loc:

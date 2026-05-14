@@ -296,3 +296,41 @@ AMMO_FOR_WEAPON: dict = {
     for weapon_key, weapon_v in ITEM_TYPES.items()
     if weapon_v["type"] == "weapon"
 }
+
+
+# ── Item-class helpers ────────────────────────────────────────────────────────
+# Maps specific item-type keys to their weapon/armor class names used in
+# WEAPON_CLASS_RANK / ARMOR_CLASS_RANK (in decision/constants.py).
+# Must be kept in sync with ITEM_TYPES weapon/armor entries above.
+
+_WEAPON_ITEM_CLASS: dict[str, str] = {
+    "pistol":   "pistol",
+    "shotgun":  "shotgun",
+    "ak74":     "rifle",
+    "pkm":      "rifle",
+    "svu_svd":  "sniper",
+}
+
+_ARMOR_ITEM_CLASS: dict[str, str] = {
+    "leather_jacket": "light",
+    "stalker_suit":   "medium",
+    "seva_suit":      "medium",
+    "combat_armor":   "heavy",
+    "exoskeleton":    "heavy",
+}
+
+
+def weapon_class_for_item_type(item_type: str) -> str:
+    """Return the weapon-class name (e.g. 'rifle') for a given item-type key.
+
+    Returns 'none' for unknown / non-weapon types.
+    """
+    return _WEAPON_ITEM_CLASS.get(str(item_type), "none")
+
+
+def armor_class_for_item_type(item_type: str) -> str:
+    """Return the armor-class name (e.g. 'medium') for a given item-type key.
+
+    Returns 'none' for unknown / non-armor types.
+    """
+    return _ARMOR_ITEM_CLASS.get(str(item_type), "none")

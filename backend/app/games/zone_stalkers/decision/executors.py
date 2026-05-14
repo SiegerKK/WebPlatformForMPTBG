@@ -152,11 +152,17 @@ def execute_plan_step(
     # advance the plan index immediately.
     if step.kind in (
         STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM, STEP_LOOT_CORPSE,
-        STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM,
+        STEP_HEAL_SELF, STEP_WAIT,
         STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
         STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
     ):
         plan.advance()
+    elif step.kind == STEP_TRADE_BUY_ITEM:
+        if _trade_buy_succeeded(events):
+            plan.advance()
+        else:
+            step.payload["_trade_buy_failed"] = True
+            step.payload["_failure_reason"] = step.payload.get("_failure_reason") or "trade_buy_failed"
     elif step.kind == STEP_TRADE_SELL_ITEM:
         if _trade_sell_succeeded(events):
             plan.advance()
@@ -338,11 +344,16 @@ def _exec_trade_buy(
     from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
 
     category = step.payload.get("item_category", "medical")
+    buy_mode = step.payload.get("buy_mode")
+    agent_loc = str(agent.get("location_id") or "")
 
     # Upgrade categories: buy the best upgrade target and immediately equip it.
     if category in ("weapon_upgrade", "armor_upgrade"):
         slot = "weapon" if category == "weapon_upgrade" else "armor"
-        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, ITEM_TYPES as _ITEM_TYPES
+        from app.games.zone_stalkers.balance.items import (
+            WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, ITEM_TYPES as _ITEM_TYPES,
+            weapon_class_for_item_type, armor_class_for_item_type,
+        )
         from app.games.zone_stalkers.rules.tick_rules import (
             _find_upgrade_target, _bot_equip_from_inventory,
         )
@@ -363,25 +374,40 @@ def _exec_trade_buy(
             min_required_rank = ARMOR_CLASS_RANK.get(str(min_armor_class), 0)
 
         if min_required_rank is not None and min_required_rank > 0:
-            # Filter to items that meet the minimum class requirement AND are affordable
+            # Filter to items that meet the minimum class requirement AND are affordable.
+            # Use item-class helpers because item type keys like "ak74" differ from
+            # class names like "rifle" in WEAPON_CLASS_RANK.
             class_rank_map = WEAPON_CLASS_RANK if slot == "weapon" else ARMOR_CLASS_RANK
+            get_item_class = weapon_class_for_item_type if slot == "weapon" else armor_class_for_item_type
             candidates = [
                 t for t in item_types_for_slot
-                if class_rank_map.get(t, 0) >= min_required_rank
+                if class_rank_map.get(get_item_class(t), 0) >= min_required_rank
                 and t in _ITEM_TYPES
                 and agent_money >= int(_ITEM_TYPES[t].get("value", 0) * 1.5)
             ]
             if not candidates:
-                # No affordable item meeting requirements → trade_buy_failed (return empty but don't equip)
-                return []
+                return [_make_trade_buy_failed_event(
+                    agent_id=agent_id,
+                    reason="no_matching_upgrade",
+                    item_category=category,
+                    buy_mode=buy_mode,
+                    location_id=agent_loc,
+                    required_price=None,
+                )]
             # Sort by class rank first, then by price (buy cheapest that meets requirement)
-            candidates.sort(key=lambda t: (class_rank_map.get(t, 0), int(_ITEM_TYPES[t].get("value", 0) * 1.5)))
+            candidates.sort(key=lambda t: (class_rank_map.get(get_item_class(t), 0), int(_ITEM_TYPES[t].get("value", 0) * 1.5)))
             upgrade_key: str | None = candidates[0]
         else:
             upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
 
         if upgrade_key is None:
-            return []
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="no_upgrade_target",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+            )]
         bought = _bot_buy_from_trader(agent_id, agent, frozenset([upgrade_key]), state, world_turn,
                                       purchase_reason=f"апгрейд {slot}") or []
         if bought:
@@ -389,23 +415,35 @@ def _exec_trade_buy(
                 agent_id, agent, frozenset([upgrade_key]), slot, state, world_turn,
             )
             return bought + equip_evs
-        return []
+        return [_make_trade_buy_failed_event(
+            agent_id=agent_id,
+            reason="not_enough_money",
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+        )]
 
     # Bug fix: defensive guard — never buy equipment the agent already has equipped.
+    # These return [] (not a failure event) because the step is considered "done".
     eq = agent.get("equipment", {})
     if category in ("weapon", "equipment") and eq.get("weapon") is not None:
-        return []   # already armed — nothing to purchase
+        return []   # already armed — step is a no-op, not a failure
     if category == "armor" and eq.get("armor") is not None:
-        return []   # already armoured — nothing to purchase
+        return []   # already armoured — step is a no-op, not a failure
 
     if category == "ammo":
         # Only buy ammo that is compatible with the agent's equipped weapon.
-        # Using AMMO_ITEM_TYPES (all ammo) would allow buying wrong-caliber ammo.
         weapon = eq.get("weapon")
         weapon_type = weapon.get("type") if isinstance(weapon, dict) else None
         required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
         if not required_ammo:
-            return []   # no weapon or unknown caliber — nothing to buy
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="no_weapon_for_ammo",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+            )]
         item_types: "frozenset[str]" = frozenset([required_ammo])
     else:
         type_map = {
@@ -419,10 +457,11 @@ def _exec_trade_buy(
         item_types = type_map.get(category, HEAL_ITEM_TYPES)
 
     # PR2 survival mode: force cheapest affordable viable item.
-    buy_mode = step.payload.get("buy_mode")
     compatible_item_types = step.payload.get("compatible_item_types")
     if isinstance(compatible_item_types, list) and compatible_item_types:
         item_types = frozenset(str(t) for t in compatible_item_types)
+
+    required_price_from_payload = step.payload.get("required_price")
 
     if buy_mode == "survival_cheapest":
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
@@ -435,7 +474,14 @@ def _exec_trade_buy(
             key=lambda t: (int(ITEM_TYPES[t].get("value", 0) * 1.5), t),
         )
         if not affordable:
-            return []
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="not_enough_money",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+                required_price=required_price_from_payload,
+            )]
         item_types = frozenset([affordable[0]])
     elif buy_mode == "reserve_basic":
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
@@ -451,7 +497,14 @@ def _exec_trade_buy(
             key=lambda t: (int(ITEM_TYPES[t].get("value", 0) * 1.5), t),
         )
         if not affordable:
-            return []
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="not_enough_money",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+                required_price=required_price_from_payload,
+            )]
         item_types = frozenset([affordable[0]])
 
     reason = step.payload.get("reason", f"buy_{category}")
@@ -481,6 +534,16 @@ def _exec_trade_buy(
     buy_events = _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                       purchase_reason=reason) or []
     events.extend(buy_events)
+    # If no purchase happened, emit a failure event so the plan step is not silently skipped.
+    if not buy_events:
+        events.append(_make_trade_buy_failed_event(
+            agent_id=agent_id,
+            reason="not_enough_money",
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+            required_price=required_price_from_payload,
+        ))
     return events
 
 
@@ -521,6 +584,45 @@ def _loan_request_succeeded(events: list[dict[str, Any]]) -> bool:
         isinstance(ev, dict) and str(ev.get("event_type") or "") in {"debt_created", "debt_credit_advanced"}
         for ev in events
     )
+
+
+def _trade_buy_succeeded(events: list[dict[str, Any]]) -> bool:
+    """Return True if at least one event indicates a successful item purchase or equip."""
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        et = str(ev.get("event_type") or "")
+        if et in {"bot_bought_item", "item_bought", "trade_buy", "item_equipped"}:
+            return True
+        # Legacy payload-based check
+        payload = ev.get("payload") or ev
+        if isinstance(payload, dict) and payload.get("items_bought"):
+            return True
+        if isinstance(payload, dict) and int(payload.get("money_spent") or 0) > 0:
+            return True
+    return False
+
+
+def _make_trade_buy_failed_event(
+    *,
+    agent_id: str,
+    reason: str,
+    item_category: str,
+    buy_mode: str | None,
+    location_id: str,
+    required_price: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "event_type": "trade_buy_failed",
+        "payload": {
+            "agent_id": agent_id,
+            "reason": reason,
+            "item_category": item_category,
+            "buy_mode": buy_mode,
+            "location_id": location_id,
+            "required_price": required_price,
+        },
+    }
 
 
 def _trade_sell_failure_reason(events: list[dict[str, Any]]) -> str | None:
