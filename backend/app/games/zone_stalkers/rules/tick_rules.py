@@ -1699,7 +1699,14 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         # When disabled: brain_trace is not grown; only latest_decision_summary
         # (written inside _run_npc_brain_v3_decision) is kept.
 
-    cleanup_stale_corpses(state)
+    _stale_cleanup_metrics = cleanup_stale_corpses(state)
+    try:
+        from app.games.zone_stalkers.memory.memory_events import (  # noqa: PLC0415
+            record_stale_corpse_cleanup_metrics as _record_stale_cleanup_metrics,
+        )
+        _record_stale_cleanup_metrics(_stale_cleanup_metrics)
+    except Exception:
+        pass
     _update_corpse_visibility(state=state, world_turn=world_turn)
 
     # 3b. Per-turn location observations for every alive stalker agent.

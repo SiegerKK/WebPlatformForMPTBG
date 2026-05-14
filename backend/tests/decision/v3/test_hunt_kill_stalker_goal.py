@@ -578,10 +578,15 @@ class TestHuntExecutors:
             agent, state,
         )
         memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
+        # PR10: target_seen is a milestone for the kill target (first encounter).
         assert "target_seen" in memory_kinds
-        assert "target_last_known_location" in memory_kinds
+        # PR10: target_last_known_location is a routine refresh → knowledge only, no memory record.
+        assert "target_last_known_location" not in memory_kinds
+        # Knowledge tables must reflect the sighting regardless.
+        known = (agent.get("knowledge_v1") or {}).get("known_npcs", {}).get("target_1", {})
+        assert known.get("last_seen_location_id") == "loc_a"
 
-    def test_search_target_not_found_writes_target_not_found_memory(self) -> None:
+    def test_search_target_not_found_updates_hunt_evidence_without_memory_record(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_b")  # target elsewhere
         self._run_executor(
@@ -589,7 +594,14 @@ class TestHuntExecutors:
             agent, state,
         )
         memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
-        assert "target_not_found" in memory_kinds
+        # PR10: target_not_found is knowledge-only; no memory_v3 record.
+        assert "target_not_found" not in memory_kinds
+        # hunt_evidence.failed_search_locations must be updated.
+        hunt_ev = ((agent.get("knowledge_v1") or {}).get("hunt_evidence") or {}).get("target_1", {})
+        failed = hunt_ev.get("failed_search_locations", {})
+        assert failed.get("loc_a", {}).get("count", 0) >= 1, (
+            "Expected loc_a in failed_search_locations with count >= 1"
+        )
 
     def test_start_combat_creates_combat_interaction(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")

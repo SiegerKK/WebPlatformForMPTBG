@@ -596,22 +596,24 @@ def test_hunter_does_not_repeat_search_target_same_empty_location_forever() -> N
         mv3 = hunter.get("memory_v3", {})
         return any(r.get("kind") == kind for r in mv3.get("records", {}).values())
 
-    def _count_memory_v3(kind: str, *, location_id: str | None = None) -> int:
-        mv3 = hunter.get("memory_v3", {})
-        return sum(
-            1
-            for r in mv3.get("records", {}).values()
-            if r.get("kind") == kind and (location_id is None or r.get("location_id") == location_id)
-        )
-
-    # The hunter must have searched loc_false and recorded it as "not found".
-    assert _any_memory_v3_kind("target_not_found"), (
-        "Hunter must record target_not_found at the false lead location"
+    hunt_evidence = (
+        hunter.get("knowledge_v1", {})
+        .get("hunt_evidence", {})
+        .get("target", {})
+    )
+    failed_locations = hunt_evidence.get("failed_search_locations", {})
+    false_failed = failed_locations.get("loc_false", {})
+    assert "loc_false" in failed_locations, (
+        "Hunter must store failed search for false lead in knowledge_v1.hunt_evidence"
+    )
+    # PR10 cutover: target_not_found must not be written into memory_v3.
+    assert not _any_memory_v3_kind("target_not_found"), (
+        "target_not_found must be knowledge-only after PR10 cutover"
     )
     # Crucially: the hunter must NOT have looped on loc_false indefinitely.
     # The exhaustion threshold is 3, so loc_false must be bounded even when
     # the first lead is wrong.
-    false_lead_searches = _count_memory_v3("target_not_found", location_id="loc_false")
+    false_lead_searches = int(false_failed.get("count", 0))
     assert false_lead_searches >= 1, (
         "Hunter must search the false lead at least once"
     )
@@ -685,25 +687,28 @@ def test_hunter_exhausts_empty_location_without_omniscient_tracks() -> None:
     hunter = state["agents"]["hunter"]
     mv3 = hunter.get("memory_v3", {})
     records = mv3.get("records", {}) if isinstance(mv3, dict) else {}
-    false_not_found = [
-        record
-        for record in records.values()
-        if isinstance(record, dict)
-        and record.get("kind") == "target_not_found"
-        and record.get("location_id") == "loc_false"
-    ]
-
-    assert 1 <= len(false_not_found) <= 3, (
-        f"Hunter must stop repeatedly searching loc_false after exhaustion threshold (<=3), got {len(false_not_found)}"
+    hunt_evidence = (
+        hunter.get("knowledge_v1", {})
+        .get("hunt_evidence", {})
+        .get("target", {})
     )
-    assert any(
-        isinstance(record, dict)
-        and record.get("kind") == "target_not_found"
-        and record.get("location_id") == "loc_false"
-        and isinstance(record.get("details"), dict)
-        and int(record.get("details", {}).get("failed_search_count") or 0) >= 2
+    failed_locations = hunt_evidence.get("failed_search_locations", {})
+    false_failed = failed_locations.get("loc_false", {})
+
+    assert "loc_false" in failed_locations, (
+        "Hunter must store failed loc_false searches in knowledge hunt evidence"
+    )
+    assert 1 <= int(false_failed.get("count", 0)) <= 3, (
+        "Hunter must stop repeatedly searching loc_false after exhaustion threshold (<=3)"
+    )
+    assert int(false_failed.get("count", 0)) >= 2, (
+        "loc_false should be marked exhausted after repeated failed searches"
+    )
+    # PR10 cutover: target_not_found must not be written into memory_v3.
+    assert not any(
+        isinstance(record, dict) and record.get("kind") == "target_not_found"
         for record in records.values()
-    ), "loc_false should be marked exhausted after repeated failed searches"
+    ), "target_not_found must be knowledge-only after PR10 cutover"
 
     assert (
         any_objective_decision(hunter, "GATHER_INTEL")

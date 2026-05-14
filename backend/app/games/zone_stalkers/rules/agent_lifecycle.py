@@ -231,9 +231,12 @@ def is_valid_corpse_object(
 ) -> bool:
     """Return True when *corpse* references a genuinely dead agent.
 
-    A corpse is *invalid* (stale) when:
-    - It has no ``dead_agent_id`` / ``agent_id`` field.
-    - The referenced agent exists in ``state["agents"]`` and is still alive.
+    A corpse is *invalid* (stale) when the referenced agent exists in
+    ``state["agents"]`` and is still alive.
+
+    A corpse with no ``dead_agent_id`` / ``agent_id`` is treated as a generic
+    world corpse object (valid for location rendering, but not tied to NPC death
+    knowledge updates).
 
     A corpse is *valid* when the referenced agent is confirmed dead (or
     the agent is absent from state, which counts as dead-or-removed).
@@ -249,7 +252,9 @@ def is_valid_corpse_object(
         corpse.get("dead_agent_id") or corpse.get("agent_id") or ""
     )
     if not dead_agent_id:
-        return False
+        # Generic corpse object (no mapped NPC) is allowed; it should not mutate
+        # known_npcs death state in knowledge writers.
+        return True
     agent = state.get("agents", {}).get(dead_agent_id)
     if isinstance(agent, dict) and agent.get("is_alive", True):
         # Agent is still alive — this corpse is invalid / stale.
@@ -279,6 +284,8 @@ def cleanup_stale_corpses(
         ``"stale_corpses_ignored"`` — always 0 (reserved for future use).
     """
     stale_removed = 0
+    # stale_ignored: reserved for future "soft-mark" stale mode (always 0 for now).
+    stale_ignored = 0
     for loc in state.get("locations", {}).values():
         if not isinstance(loc, dict):
             continue
@@ -286,6 +293,7 @@ def cleanup_stale_corpses(
         if not isinstance(corpses, list) or not corpses:
             continue
         valid: list[dict[str, Any]] = []
+        loc_stale_removed = 0  # track per-location removals so we only mutate if needed
         for corpse in corpses:
             if not isinstance(corpse, dict):
                 continue
@@ -293,9 +301,12 @@ def cleanup_stale_corpses(
                 valid.append(corpse)
             else:
                 stale_removed += 1
-        if stale_removed:
+                loc_stale_removed += 1
+        if loc_stale_removed:
             loc["corpses"] = valid
     return {
+        "stale_corpse_removed": stale_removed,
+        "stale_corpse_seen_ignored": stale_ignored,
         "stale_corpses_removed": stale_removed,
-        "stale_corpses_ignored": 0,
+        "stale_corpses_ignored": stale_ignored,
     }

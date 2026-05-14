@@ -11,22 +11,27 @@ def _agent() -> dict:
 
 def test_observation_memory_compat_mode_preserves_legacy_target_lead_records() -> None:
     agent = _agent()
-    write_memory_event_to_v3(
-        agent_id="bot1",
-        agent=agent,
-        world_turn=100,
-        legacy_entry={
-            "world_turn": 100,
-            "type": "observation",
-            "title": "target_last_known_location",
-            "summary": "target_last_known_location",
-            "effects": {
-                "action_kind": "target_last_known_location",
-                "target_id": "target_1",
-                "location_id": "loc_a",
+    old_mode = ev.OBSERVATION_MEMORY_COMPAT_MODE
+    ev.OBSERVATION_MEMORY_COMPAT_MODE = True
+    try:
+        write_memory_event_to_v3(
+            agent_id="bot1",
+            agent=agent,
+            world_turn=100,
+            legacy_entry={
+                "world_turn": 100,
+                "type": "observation",
+                "title": "target_last_known_location",
+                "summary": "target_last_known_location",
+                "effects": {
+                    "action_kind": "target_last_known_location",
+                    "target_id": "target_1",
+                    "location_id": "loc_a",
+                },
             },
-        },
-    )
+        )
+    finally:
+        ev.OBSERVATION_MEMORY_COMPAT_MODE = old_mode
     records = list(ensure_memory_v3(agent).get("records", {}).values())
     assert any(r.get("kind") == "target_last_known_location" for r in records)
 

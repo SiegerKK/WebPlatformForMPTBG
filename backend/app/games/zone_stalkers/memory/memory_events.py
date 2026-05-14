@@ -40,13 +40,15 @@ def _get_knowledge_upserts():
 
 
 KNOWLEDGE_FIRST_OBSERVATIONS_ENABLED = True
-OBSERVATION_MEMORY_COMPAT_MODE = True
+OBSERVATION_MEMORY_COMPAT_MODE = False
 
 # Explicit memory event policy.
 # Routing:
 #   trace_only        → debug trace only, never written to memory_v3
 #   memory_aggregate  → update one aggregate record, never append new episodic record
-#   knowledge_upsert  → update knowledge/aggregate, no episodic record
+#   knowledge_only    → update knowledge only, never write memory_v3
+#   knowledge_milestone → update knowledge; write memory_v3 only for milestones
+#   knowledge_upsert  → legacy alias for knowledge_milestone (normalized in resolve_memory_event_policy)
 #   memory_critical   → always write a memory_v3 record (never deduplicated/discarded)
 #   discard           → write nothing
 #   (missing key)     → default write path with dedup where applicable
@@ -71,18 +73,18 @@ MEMORY_EVENT_POLICY: dict[str, str] = {
 
     # Knowledge upsert — knowledge-first routing; selected kinds still keep
     # episodic writes for gameplay compatibility until PR3 knowledge tables.
-    "stalkers": "knowledge_upsert",  # obs_type alias for stalkers_seen
-    "stalkers_seen": "knowledge_upsert",
-    "target_seen": "knowledge_upsert",
-    "target_last_known_location": "knowledge_upsert",
-    "target_not_found": "knowledge_upsert",
-    "retreat_observed": "knowledge_upsert",
-    "target_corpse_seen": "knowledge_upsert",
-    "target_corpse_reported": "knowledge_upsert",
-    "corpse_seen": "knowledge_upsert",
-    "trader_seen": "knowledge_upsert",
-    "location_visited": "knowledge_upsert",
-    "travel_hop": "knowledge_upsert",
+    "stalkers": "knowledge_milestone",  # obs_type alias for stalkers_seen
+    "stalkers_seen": "knowledge_milestone",
+    "target_seen": "knowledge_milestone",
+    "target_last_known_location": "knowledge_milestone",
+    "target_not_found": "knowledge_only",
+    "retreat_observed": "knowledge_milestone",
+    "target_corpse_seen": "knowledge_milestone",
+    "target_corpse_reported": "knowledge_milestone",
+    "corpse_seen": "knowledge_milestone",
+    "trader_seen": "knowledge_milestone",
+    "location_visited": "knowledge_milestone",
+    "travel_hop": "knowledge_milestone",
     # TODO(PR follow-up): route hazard events (anomaly/emission) into
     # known_hazards knowledge upserts when hazard knowledge tables are expanded.
 
@@ -114,6 +116,14 @@ _KNOWLEDGE_UPSERT_KINDS: frozenset[str] = frozenset(
     k for k, v in MEMORY_EVENT_POLICY.items() if v == "knowledge_upsert"
 )
 
+_KNOWLEDGE_ONLY_ACTION_KINDS: frozenset[str] = frozenset(
+    k for k, v in MEMORY_EVENT_POLICY.items() if v == "knowledge_only"
+)
+
+_KNOWLEDGE_MILESTONE_ACTION_KINDS: frozenset[str] = frozenset(
+    k for k, v in MEMORY_EVENT_POLICY.items() if v in {"knowledge_milestone", "knowledge_upsert"}
+)
+
 _CRITICAL_ACTION_KINDS: frozenset[str] = frozenset(
     k for k, v in MEMORY_EVENT_POLICY.items() if v == "memory_critical"
 )
@@ -121,11 +131,16 @@ _CRITICAL_ACTION_KINDS: frozenset[str] = frozenset(
 
 def resolve_memory_event_policy(action_kind: str, effects: dict[str, Any]) -> str:
     """Return the policy class for a given action_kind (or observed kind from effects)."""
+    def _normalize(policy_value: str) -> str:
+        if policy_value == "knowledge_upsert":
+            return "knowledge_milestone"
+        return policy_value
+
     if action_kind in MEMORY_EVENT_POLICY:
-        return MEMORY_EVENT_POLICY[action_kind]
+        return _normalize(MEMORY_EVENT_POLICY[action_kind])
     obs_type = str(effects.get("observed", ""))
     if obs_type in MEMORY_EVENT_POLICY:
-        return MEMORY_EVENT_POLICY[obs_type]
+        return _normalize(MEMORY_EVENT_POLICY[obs_type])
     return "memory"
 
 
@@ -293,8 +308,10 @@ _METRICS: dict[str, int] = {
     "observation_memory_milestones_written": 0,
     "stalkers_seen_memory_suppressed": 0,
     "corpse_seen_memory_suppressed": 0,
+    "stale_corpse_removed": 0,
     "stale_corpse_seen_ignored": 0,
     "corpse_seen_alive_agent_ignored": 0,
+    "valid_corpse_seen_knowledge_updates": 0,
     "hunt_evidence_upserts": 0,
 }
 
@@ -308,6 +325,26 @@ def reset_memory_metrics() -> None:
     """Reset all memory metrics to zero (useful in tests)."""
     for key in _METRICS:
         _METRICS[key] = 0
+
+
+def record_stale_corpse_cleanup_metrics(cleanup_result: dict[str, Any] | None) -> None:
+    """Merge stale-corpse cleanup counters into global memory metrics."""
+    if not isinstance(cleanup_result, dict):
+        return
+    removed = int(
+        cleanup_result.get("stale_corpse_removed")
+        or cleanup_result.get("stale_corpses_removed")
+        or 0
+    )
+    ignored = int(
+        cleanup_result.get("stale_corpse_seen_ignored")
+        or cleanup_result.get("stale_corpses_ignored")
+        or 0
+    )
+    if removed > 0:
+        _METRICS["stale_corpse_removed"] += removed
+    if ignored > 0:
+        _METRICS["stale_corpse_seen_ignored"] += ignored
 
 
 # ── Summary / details sanitization ──────────────────────────────────────────
@@ -1313,6 +1350,65 @@ def _upsert_knowledge_from_event(
     return result
 
 
+def should_write_observation_milestone(
+    *,
+    event_kind: str,
+    update_result: dict[str, Any],
+    agent: dict[str, Any],
+    effects: dict[str, Any],
+    world_turn: int = 0,  # reserved for future time-based predicates; unused for now
+) -> bool:
+    _ = world_turn  # reserved for future time-based milestone predicates
+    if bool(agent.get("force_observation_memory_records", False)):
+        return True
+
+    changed_major = bool(update_result.get("changed_major", False))
+    created = bool(update_result.get("created", False))
+    reasons = {str(reason) for reason in (update_result.get("reasons") or []) if reason}
+    kill_target_id = str(agent.get("kill_target_id") or "")
+    target_id = str(effects.get("target_id") or effects.get("dead_agent_id") or "")
+    is_kill_target = bool(kill_target_id and target_id and kill_target_id == target_id)
+
+    if event_kind in {"stalkers_seen", "trader_seen"}:
+        return False
+
+    if event_kind == "target_seen":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        # New evidence for the current kill target (first encounter or major update).
+        if is_kill_target and (created or changed_major):
+            return True
+        return bool(changed_major and "death_status_changed" in reasons)
+
+    if event_kind == "target_last_known_location":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return False
+
+    if event_kind == "target_not_found":
+        # Negative search evidence goes to hunt_evidence.failed_search_locations only.
+        return False
+
+    if event_kind == "corpse_seen":
+        if bool(update_result.get("ignored", False)):
+            return False
+        if not OBSERVATION_MEMORY_COMPAT_MODE:
+            return False
+        return created
+
+    if event_kind == "target_corpse_seen":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return bool(is_kill_target)
+
+    if event_kind == "target_corpse_reported":
+        if OBSERVATION_MEMORY_COMPAT_MODE:
+            return True
+        return False
+
+    return True
+
+
 def _should_write_observation_milestone(
     *,
     agent: dict[str, Any],
@@ -1320,47 +1416,13 @@ def _should_write_observation_milestone(
     effects: dict[str, Any],
     knowledge_update: dict[str, Any],
 ) -> bool:
-    if bool(agent.get("force_observation_memory_records", False)):
-        return True
-
-    changed_major = bool(knowledge_update.get("changed_major", False))
-    created = bool(knowledge_update.get("created", False))
-    reasons = {str(reason) for reason in (knowledge_update.get("reasons") or []) if reason}
-    kill_target_id = str(agent.get("kill_target_id") or "")
-    target_id = str(effects.get("target_id") or effects.get("dead_agent_id") or "")
-    is_kill_target = bool(kill_target_id and target_id and kill_target_id == target_id)
-
-    if kind in {"stalkers_seen", "trader_seen"}:
-        return False
-
-    if kind == "target_seen":
-        if OBSERVATION_MEMORY_COMPAT_MODE:
-            return True
-        return bool(changed_major and "death_status_changed" in reasons)
-
-    if kind == "target_last_known_location":
-        if OBSERVATION_MEMORY_COMPAT_MODE:
-            return True
-        return False
-
-    if kind == "corpse_seen":
-        if bool(knowledge_update.get("ignored", False)):
-            return False
-        if not OBSERVATION_MEMORY_COMPAT_MODE:
-            return False
-        return created
-
-    if kind == "target_corpse_seen":
-        if OBSERVATION_MEMORY_COMPAT_MODE:
-            return True
-        return bool(is_kill_target)
-
-    if kind == "target_corpse_reported":
-        if OBSERVATION_MEMORY_COMPAT_MODE:
-            return True
-        return False
-
-    return True
+    return should_write_observation_milestone(
+        event_kind=kind,
+        update_result=knowledge_update,
+        agent=agent,
+        effects=effects,
+        world_turn=int(effects.get("world_turn") or 0),
+    )
 
 
 def _record_suppressed_observation_metric(kind: str) -> None:
@@ -1541,8 +1603,8 @@ def write_memory_event_to_v3(
             return
         # Urgent decision falls through to normal episodic write below.
 
-    # knowledge_upsert: PR8 knowledge-first observations.
-    if policy == "knowledge_upsert":
+    # knowledge_only / knowledge_milestone: PR10 strict knowledge-first observations.
+    if policy in {"knowledge_only", "knowledge_milestone"}:
         _METRICS["memory_write_knowledge_upserts"] += 1
         _METRICS["knowledge_upsert_attempts"] += 1
         knowledge_update = _upsert_knowledge_from_event(
@@ -1557,6 +1619,9 @@ def write_memory_event_to_v3(
             _METRICS["knowledge_upsert_minor_refreshes"] += 1
         _sync_cold_after_mutation()
 
+        if record.kind == "corpse_seen" and not bool(knowledge_update.get("ignored", False)):
+            _METRICS["valid_corpse_seen_knowledge_updates"] += 1
+
         if record.kind == "travel_hop":
             _upsert_semantic_route_traveled(
                 agent_id=agent_id,
@@ -1565,6 +1630,19 @@ def write_memory_event_to_v3(
                 world_turn=world_turn,
             )
             # Fall through to write episodic record so gameplay queries still work.
+        elif policy == "knowledge_only":
+            _METRICS["knowledge_only_events"] += 1
+            if record.kind in {
+                "stalkers_seen",
+                "target_seen",
+                "target_last_known_location",
+                "corpse_seen",
+                "target_corpse_seen",
+                "target_corpse_reported",
+                "trader_seen",
+            }:
+                _record_suppressed_observation_metric(record.kind)
+            return
         elif KNOWLEDGE_FIRST_OBSERVATIONS_ENABLED and record.kind in {
             "stalkers_seen",
             "target_seen",
@@ -1574,11 +1652,12 @@ def write_memory_event_to_v3(
             "target_corpse_reported",
             "trader_seen",
         }:
-            if not _should_write_observation_milestone(
+            if not should_write_observation_milestone(
+                event_kind=record.kind,
+                update_result=knowledge_update,
                 agent=agent,
-                kind=record.kind,
                 effects=record.details if isinstance(record.details, dict) else {},
-                knowledge_update=knowledge_update,
+                world_turn=world_turn,
             ):
                 _METRICS["knowledge_only_events"] += 1
                 _record_suppressed_observation_metric(record.kind)

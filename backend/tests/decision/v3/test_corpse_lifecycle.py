@@ -101,15 +101,15 @@ class TestIsValidCorpseObject:
         assert self._call(corpse, state) is True
 
     def test_invalid_corpse_missing_agent_id(self) -> None:
-        """Corpse with no agent_id / dead_agent_id field is structurally invalid."""
+        """Corpse with no agent_id / dead_agent_id is generic and therefore valid."""
         state = _make_state({})
         corpse: dict[str, Any] = {"decay_turn": 9999, "items": []}  # no id field
-        assert self._call(corpse, state) is False
+        assert self._call(corpse, state) is True
 
     def test_invalid_corpse_empty_agent_id_string(self) -> None:
         state = _make_state({})
         corpse = {"agent_id": "", "decay_turn": 9999}
-        assert self._call(corpse, state) is False
+        assert self._call(corpse, state) is True
 
     def test_valid_corpse_is_alive_false_explicitly(self) -> None:
         """is_alive=False explicitly marks agent as dead."""
@@ -155,11 +155,12 @@ class TestCleanupStaleCorpses:
         assert result["stale_corpses_removed"] == 1
         assert state["locations"]["loc_a"]["corpses"] == []
 
-    def test_stale_corpse_removed_no_id_field(self) -> None:
+    def test_generic_corpse_without_id_not_removed(self) -> None:
         state = _make_state({})
         state["locations"]["loc_a"]["corpses"] = [{"decay_turn": 9999}]  # no id
         result = self._call(state)
-        assert result["stale_corpses_removed"] == 1
+        assert result["stale_corpses_removed"] == 0
+        assert len(state["locations"]["loc_a"]["corpses"]) == 1
 
     def test_mixed_corpses_only_stale_removed(self) -> None:
         dead = _make_dead_agent("dead_1")
@@ -260,7 +261,8 @@ class TestCorpseLifecycleIntegration:
         tick_rules.tick_zone_map(state)
         assert calls["count"] == 1
 
-    def test_valid_dead_agent_corpse_seen_still_works(self) -> None:
+    def test_valid_dead_agent_corpse_updates_knowledge_v1(self) -> None:
+        """PR10: corpse_seen for a valid dead agent updates knowledge_v1 but NOT memory_v3."""
         from app.games.zone_stalkers.rules.tick_rules import _write_location_observations
         from tests.decision.conftest import make_agent, make_minimal_state
 
@@ -275,5 +277,11 @@ class TestCorpseLifecycleIntegration:
         ]
 
         _write_location_observations("observer", observer, "loc_a", state, world_turn=101)
+        # PR10: routine corpse_seen goes to knowledge only, no memory_v3 record.
         corpse_seen = self._v3_action_records(observer, "corpse_seen")
-        assert corpse_seen, "Expected corpse_seen memory for valid corpse"
+        assert not corpse_seen, "Expected no memory_v3 record for routine corpse_seen (knowledge-only)"
+        # The knowledge table should record the dead agent.
+        known = (observer.get("knowledge_v1") or {}).get("known_npcs", {})
+        victim_entry = known.get("victim")
+        assert victim_entry is not None, "Expected victim to be in known_npcs after corpse observation"
+        assert victim_entry.get("is_alive") is False, "Expected known_npcs to mark victim as dead"
