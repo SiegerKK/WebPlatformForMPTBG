@@ -739,6 +739,25 @@ def upsert_hunt_evidence_from_observation(
         changed_major = changed_major or (old_sig != new_sig)
         changed_minor = True
 
+    elif kind == "target_death_confirmed":
+        death = entry.get("death") if isinstance(entry.get("death"), dict) else {}
+        old_sig = (death.get("status"), death.get("location_id"))
+        new_death = {
+            "status": "confirmed_dead",
+            "corpse_id": details.get("corpse_id"),
+            "location_id": location_id,
+            "turn": world_turn,
+            "confidence": confidence,
+            "source": source,
+            "directly_observed": bool(details.get("directly_observed", True)),
+            "killer_id": str(details.get("killer_id") or "") or None,
+            "death_cause": str(details.get("target_death_cause") or details.get("death_cause") or "") or None,
+        }
+        entry["death"] = new_death
+        new_sig = (new_death.get("status"), new_death.get("location_id"))
+        changed_major = changed_major or (old_sig != new_sig)
+        changed_minor = True
+
     elif kind == "target_not_found":
         if location_id:
             # Threshold must match _SEARCH_EXHAUSTION_THRESHOLD in target_beliefs.py.

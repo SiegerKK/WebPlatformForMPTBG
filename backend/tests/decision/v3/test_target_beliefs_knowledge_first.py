@@ -449,3 +449,80 @@ def test_target_belief_applies_legacy_target_not_found_even_when_knowledge_locat
     assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] == 0
     # Negative scan metric must have been incremented.
     assert agent["brain_context_metrics"]["target_belief_negative_memory_fallbacks"] >= 1
+
+
+def test_target_belief_uses_confirmed_death_from_knowledge_over_stale_alive_known_npc() -> None:
+    """confirmed_dead in hunt_evidence.death overrides stale is_alive=True in known_npcs."""
+    agent = make_agent(kill_target_id="target_1", location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+
+    knowledge = ensure_knowledge_v1(agent)
+
+    # Seed stale known_npc with is_alive=True.
+    upsert_known_npc(
+        agent,
+        other_agent_id="target_1",
+        name="Target",
+        location_id="loc_b",
+        world_turn=5,
+        source="direct_observation",
+        confidence=0.9,
+        death_status={"is_alive": True},
+    )
+
+    # Write confirmed_dead to hunt_evidence directly (as the combat kill path would).
+    knowledge["hunt_evidence"]["target_1"] = {
+        "target_id": "target_1",
+        "last_seen": {"location_id": "loc_b", "turn": 5, "confidence": 0.9, "source": "direct_observation"},
+        "death": {
+            "status": "confirmed_dead",
+            "location_id": "loc_b",
+            "turn": 6,
+            "confidence": 1.0,
+            "source": "combat",
+            "directly_observed": True,
+        },
+        "route_hints": [],
+        "failed_search_locations": {},
+        "recent_contact": None,
+        "revision": 2,
+    }
+
+    target = _make_target(location_id="loc_b", is_alive=True)  # game state still shows alive
+    state["agents"]["target_1"] = target
+
+    belief = _build_belief(agent, state)
+    assert belief.is_alive is False, (
+        f"confirmed_dead in hunt_evidence must override stale known_npc.is_alive=True; "
+        f"belief.is_alive={belief.is_alive}"
+    )
+
+
+def test_target_belief_uses_confirmed_death_from_known_npc_death_evidence() -> None:
+    """confirmed_dead in known_npcs.death_evidence overrides stale is_alive=True."""
+    agent = make_agent(kill_target_id="target_1", location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+
+    ensure_knowledge_v1(agent)
+
+    # Seed known_npc with is_alive=True but death_evidence=confirmed_dead.
+    upsert_known_npc(
+        agent,
+        other_agent_id="target_1",
+        name="Target",
+        location_id="loc_b",
+        world_turn=5,
+        source="direct_observation",
+        confidence=0.9,
+        death_status={"is_alive": False, "confirmed_dead": True, "death_directly_confirmed": True},
+    )
+
+    target = _make_target(location_id="loc_b", is_alive=True)
+    state["agents"]["target_1"] = target
+
+    belief = _build_belief(agent, state)
+    assert belief.is_alive is False, (
+        f"confirmed_dead in known_npc.death_evidence must set belief.is_alive=False; "
+        f"belief.is_alive={belief.is_alive}"
+    )
+

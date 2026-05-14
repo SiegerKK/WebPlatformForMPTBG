@@ -714,11 +714,24 @@ def build_target_belief(
     knowledge = agent.get("knowledge_v1")
     known_npcs = knowledge.get("known_npcs") if isinstance(knowledge, dict) else None
     if isinstance(known_npcs, dict) and isinstance(known_npcs.get(target_id), dict):
-        target_alive_from_knowledge = bool(known_npcs[target_id].get("is_alive", True))
+        npc_entry = known_npcs[target_id]
+        # Death evidence with confirmed_dead or corpse_seen status overrides stale is_alive=True.
+        death_evidence = npc_entry.get("death_evidence")
+        if isinstance(death_evidence, dict) and str(death_evidence.get("status") or "") in {
+            "confirmed_dead",
+            "corpse_seen",
+        }:
+            target_alive_from_knowledge = False
+        else:
+            target_alive_from_knowledge = bool(npc_entry.get("is_alive", True))
         metrics["target_belief_known_npc_hits"] = int(metrics.get("target_belief_known_npc_hits", 0)) + 1
     hunt_evidence = knowledge.get("hunt_evidence") if isinstance(knowledge, dict) else None
     if isinstance(hunt_evidence, dict) and isinstance(hunt_evidence.get(target_id), dict):
         metrics["target_belief_hunt_evidence_hits"] = int(metrics.get("target_belief_hunt_evidence_hits", 0)) + 1
+        # hunt_evidence.death.status == "confirmed_dead" is the authoritative death signal.
+        hunt_death = hunt_evidence[target_id].get("death")
+        if isinstance(hunt_death, dict) and str(hunt_death.get("status") or "") == "confirmed_dead":
+            target_alive_from_knowledge = False
     corpse_hits = _count_known_target_corpses(agent, target_id)
     if corpse_hits:
         metrics["target_belief_known_corpse_hits"] = int(metrics.get("target_belief_known_corpse_hits", 0)) + corpse_hits
