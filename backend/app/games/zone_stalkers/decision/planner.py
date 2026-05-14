@@ -2459,11 +2459,12 @@ def _build_hunt_expand_search_plan(
     agent = ctx.self_state
     agent_loc = str(agent.get("location_id") or "")
     reachable = _dijkstra_reachable_locations(agent_loc, state.get("locations", {}), max_minutes=9999)
+    search_objective_key = str((intent.metadata or {}).get("objective_key") or "GATHER_INTEL")
     current_trader_exhausted = _has_active_support_exhaustion(
         agent,
         location_id=agent_loc,
         target_id=target_id,
-        objective_key="GATHER_INTEL",
+        objective_key=search_objective_key,
         world_turn=world_turn,
         action_kinds={"support_source_exhausted"},
     )
@@ -2480,7 +2481,7 @@ def _build_hunt_expand_search_plan(
                 agent,
                 location_id=str(raw_trader.get("location_id") or ""),
                 target_id=target_id,
-                objective_key="GATHER_INTEL",
+                objective_key=search_objective_key,
                 world_turn=world_turn,
                 action_kinds={"support_source_exhausted"},
             )
@@ -2515,7 +2516,7 @@ def _build_hunt_expand_search_plan(
             agent,
             location_id=str(loc),
             target_id=target_id,
-            objective_key="GATHER_INTEL",
+            objective_key=search_objective_key,
             world_turn=world_turn,
         )
     ]
