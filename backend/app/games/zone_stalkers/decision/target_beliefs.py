@@ -16,7 +16,6 @@ from app.games.zone_stalkers.knowledge.knowledge_hunt_builder import (
     build_recent_target_contact_from_knowledge,
 )
 from app.games.zone_stalkers.knowledge.knowledge_store import (
-    effective_known_npc_confidence,
     upsert_known_npc,
 )
 
@@ -114,28 +113,6 @@ def _count_known_target_corpses(agent: dict[str, Any], target_id: str) -> int:
         and str(corpse.get("dead_agent_id") or "") == target_id
         and not bool(corpse.get("is_stale"))
     )
-
-
-def _knowledge_has_sufficient_target_signal(
-    agent: dict[str, Any],
-    *,
-    target_id: str,
-    world_turn: int,
-) -> bool:
-    knowledge = agent.get("knowledge_v1")
-    if not isinstance(knowledge, dict):
-        return False
-
-    known_npcs = knowledge.get("known_npcs")
-    npc_entry = known_npcs.get(target_id) if isinstance(known_npcs, dict) else None
-    if isinstance(npc_entry, dict) and effective_known_npc_confidence(npc_entry, world_turn) >= 0.05:
-        return True
-
-    hunt_evidence = knowledge.get("hunt_evidence")
-    if isinstance(hunt_evidence, dict) and isinstance(hunt_evidence.get(target_id), dict):
-        return True
-
-    return _count_known_target_corpses(agent, target_id) > 0
 
 
 def _store_target_knowledge_debug(
@@ -716,11 +693,7 @@ def build_target_belief(
     source_refs.extend(str(ref) for ref in equipment_belief.get("source_refs", ()) if ref)
 
     recent_contact = build_recent_target_contact_from_knowledge(agent=agent, target_id=target_id, world_turn=world_turn)
-    needs_memory_fallback = not _knowledge_has_sufficient_target_signal(agent, target_id=target_id, world_turn=world_turn)
-    if recent_contact is None:
-        needs_memory_fallback = True
-    if not equipment_known and combat_strength is None:
-        needs_memory_fallback = True
+    needs_memory_fallback = (not visible_now) and (not knowledge_leads)
 
     if needs_memory_fallback:
         memory_fallback_used = True

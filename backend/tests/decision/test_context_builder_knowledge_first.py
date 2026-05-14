@@ -228,3 +228,58 @@ def test_context_builder_target_without_hunt_signal_still_uses_memory_fallback()
     cache = agent["brain_context_cache"]["derived"]
     assert cache["target_leads"]
     assert agent["brain_context_metrics"]["context_builder_memory_fallbacks"] >= 1
+
+
+def test_context_builder_does_not_scan_memory_when_known_npcs_exist_but_no_hazards_or_traders(monkeypatch) -> None:
+    agent = make_agent(location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+    state["agents"]["other_1"] = make_agent(agent_id="other_1", location_id="loc_b")
+    upsert_known_npc(
+        agent,
+        other_agent_id="other_1",
+        name="Other",
+        location_id="loc_b",
+        world_turn=99,
+        source="direct_observation",
+        confidence=0.9,
+        observed_agent=state["agents"]["other_1"],
+    )
+
+    monkeypatch.setattr(
+        context_builder_module,
+        "_memory_v3_records",
+        lambda _: (_ for _ in ()).throw(AssertionError("memory_v3 should not be scanned")),
+    )
+    ctx = build_agent_context("bot1", agent, state)
+    assert {entry["agent_id"] for entry in ctx.known_entities} == {"other_1"}
+    assert agent["brain_context_metrics"]["context_builder_knowledge_primary_hits"] >= 1
+
+
+def test_context_builder_cache_not_invalidated_by_unrelated_memory_revision_when_knowledge_sufficient() -> None:
+    agent = make_agent(location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+    state["world_turn"] = 500
+    state["agents"]["other_1"] = make_agent(agent_id="other_1", location_id="loc_b")
+    upsert_known_npc(
+        agent,
+        other_agent_id="other_1",
+        name="Other",
+        location_id="loc_b",
+        world_turn=500,
+        source="direct_observation",
+        confidence=0.9,
+        observed_agent=state["agents"]["other_1"],
+    )
+
+    build_agent_context("bot1", agent, state)
+    hits_before = agent["brain_context_metrics"]["context_builder_cache_hits"]
+    misses_before = agent["brain_context_metrics"]["context_builder_cache_misses"]
+
+    ensure_memory_v3(agent)["stats"]["memory_revision"] = (
+        int(ensure_memory_v3(agent)["stats"].get("memory_revision", 0)) + 1
+    )
+    state["world_turn"] = 501
+    build_agent_context("bot1", agent, state)
+
+    assert agent["brain_context_metrics"]["context_builder_cache_hits"] == hits_before + 1
+    assert agent["brain_context_metrics"]["context_builder_cache_misses"] == misses_before

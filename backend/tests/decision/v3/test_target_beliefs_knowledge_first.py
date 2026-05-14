@@ -373,3 +373,31 @@ def test_no_memory_scan_when_knowledge_is_sufficient(monkeypatch) -> None:
     belief = _build_belief(agent, state)
     assert belief.best_location_id == "loc_b"
     assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] == 0
+
+
+def test_target_belief_does_not_scan_memory_when_known_npc_last_seen_is_old_but_sufficient(monkeypatch) -> None:
+    agent = make_agent(kill_target_id="target_1", location_id="loc_a")
+    state = make_minimal_state(agent=agent)
+    state["world_turn"] = 500
+    state["agents"]["target_1"] = _make_target(location_id="loc_z")
+
+    knowledge = ensure_knowledge_v1(agent)
+    knowledge["known_npcs"]["target_1"] = {
+        "agent_id": "target_1",
+        "name": "Цель",
+        "last_seen_turn": 300,
+        "last_direct_seen_turn": None,
+        "last_seen_location_id": "loc_b",
+        "is_alive": True,
+        "confidence": 0.8,
+    }
+
+    def _fail_records(_: dict) -> list[dict]:
+        raise AssertionError("memory_v3 should not be scanned")
+
+    monkeypatch.setattr(target_beliefs_module, "_iter_memory_v3_records", _fail_records)
+    belief = _build_belief(agent, state)
+    assert belief.best_location_id == "loc_b"
+    assert belief.last_seen_turn == 300
+    assert belief.recent_contact_turn is None
+    assert agent["brain_context_metrics"]["target_belief_memory_fallbacks"] == 0

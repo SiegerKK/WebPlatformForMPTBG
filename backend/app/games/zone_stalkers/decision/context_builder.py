@@ -130,6 +130,11 @@ def build_agent_context(
     world_turn: int = world_context["world_turn"]
     target_id: str | None = str(agent.get("kill_target_id") or "") or None
     objective_key = _resolve_objective_key(agent)
+    should_scan_memory = _should_scan_memory_for_context(
+        agent,
+        target_id=target_id,
+        deep_debug=deep_debug,
+    )
     cache_key = _build_context_cache_key(
         agent=agent,
         state=state,
@@ -137,6 +142,7 @@ def build_agent_context(
         location_id=loc_id,
         objective_key=objective_key,
         target_id=target_id,
+        include_memory_revision=should_scan_memory,
     )
     bypass_cache = _should_bypass_context_cache(
         agent=agent,
@@ -187,6 +193,7 @@ def build_agent_context(
             target_id=target_id,
             visible_entities=visible_entities,
             deep_debug=deep_debug,
+            should_scan_memory=should_scan_memory,
         )
         if not bypass_cache:
             _store_context_cache(
@@ -339,14 +346,11 @@ def _build_context_cache_key(
     location_id: str,
     objective_key: str,
     target_id: str | None,
+    include_memory_revision: bool,
 ) -> dict[str, Any]:
-    # memory_revision is always included for correctness (MVP).
-    # When knowledge_v1 fully covers derived context, memory_revision can be
-    # excluded to improve hit-rate.  Left as a future optimization once
-    # knowledge-first coverage is confirmed complete.
     return {
         "knowledge_major_revision": _resolve_knowledge_major_revision(agent),
-        "memory_revision": _resolve_memory_revision(agent),
+        "memory_revision": _resolve_memory_revision(agent) if include_memory_revision else 0,
         "world_turn_bucket": world_turn // CONTEXT_CACHE_TURN_BUCKET_SIZE,
         "location_id": location_id,
         "objective_key": objective_key,
@@ -375,12 +379,11 @@ def _should_scan_memory_for_context(
     known_corpses = knowledge.get("known_corpses")
     hunt_evidence = knowledge.get("hunt_evidence")
 
-    has_routine_knowledge = all(
+    has_any_structured_knowledge = any(
         isinstance(table, dict) and bool(table)
-        for table in (known_npcs, known_locations, known_traders, known_hazards)
+        for table in (known_npcs, known_locations, known_traders, known_hazards, known_corpses, hunt_evidence)
     )
-    has_corpse_knowledge = isinstance(known_corpses, dict) and bool(known_corpses)
-    if not has_routine_knowledge and not has_corpse_knowledge:
+    if not has_any_structured_knowledge:
         return True
 
     if target_id:
@@ -505,6 +508,7 @@ def _build_derived_context_parts(
     target_id: str | None,
     visible_entities: list[dict[str, Any]],
     deep_debug: bool = False,
+    should_scan_memory: bool | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]]:
     from app.games.zone_stalkers.knowledge.knowledge_builder import (  # noqa: PLC0415
         build_known_entities_from_knowledge,
@@ -521,11 +525,12 @@ def _build_derived_context_parts(
         knowledge_entries_scanned += len(knowledge.get("known_traders", {}) or {})
         knowledge_entries_scanned += len(knowledge.get("known_hazards", {}) or {})
 
-    should_scan_memory = _should_scan_memory_for_context(
-        agent,
-        target_id=target_id,
-        deep_debug=deep_debug,
-    )
+    if should_scan_memory is None:
+        should_scan_memory = _should_scan_memory_for_context(
+            agent,
+            target_id=target_id,
+            deep_debug=deep_debug,
+        )
     memory_records = _memory_v3_records(agent) if should_scan_memory else []
     memory_scan_records = len(memory_records)
 
