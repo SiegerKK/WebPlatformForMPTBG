@@ -12,6 +12,7 @@ from app.games.zone_stalkers.decision.models.plan import (
 from app.games.zone_stalkers.decision.active_plan_manager import create_active_plan, get_active_plan, save_active_plan
 from app.games.zone_stalkers.decision.active_plan_runtime import process_active_plan_v3, start_or_continue_active_plan_step
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveDecision, ObjectiveScore
+from app.games.zone_stalkers.balance.items import ITEM_TYPES
 from app.games.zone_stalkers.economy.debts import advance_survival_credit
 from tests.decision.conftest import make_agent, make_state_with_trader
 
@@ -23,6 +24,33 @@ def _state(agent: dict) -> dict:
     trader["money"] = 0
     trader["accounts_receivable"] = 0
     return state
+
+
+def _run_plan_steps(agent: dict, state: dict, plan: Plan, *, max_steps: int = 10) -> None:
+    for _ in range(max_steps):
+        if plan.is_complete:
+            return
+        execute_plan_step(
+            build_agent_context("bot1", agent, state),
+            plan,
+            state,
+            100 + plan.current_step_index,
+        )
+
+
+def _run_plan_until_complete(agent: dict, state: dict, plan: Plan, *, max_steps: int = 10) -> None:
+    _run_plan_steps(agent, state, plan, max_steps=max_steps)
+    if plan.is_complete:
+        return
+    current_step = plan.steps[plan.current_step_index] if plan.current_step_index < len(plan.steps) else None
+    raise AssertionError({
+        "reason": "plan did not complete",
+        "current_step_index": plan.current_step_index,
+        "current_step": current_step.kind if current_step else None,
+        "step_payload": current_step.payload if current_step else None,
+        "agent_money": agent.get("money"),
+        "inventory": agent.get("inventory"),
+    })
 
 
 def test_request_loan_success_creates_debt_and_accounts_receivable() -> None:
@@ -131,8 +159,7 @@ def test_request_loan_then_trade_buy_then_consume_water() -> None:
         current_step_index=0,
     )
     thirst_before = int(agent.get("thirst") or 0)
-    while not plan.is_complete:
-        execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100 + plan.current_step_index)
+    _run_plan_until_complete(agent, state, plan)
     assert int(agent.get("thirst") or 0) < thirst_before
 
 
@@ -161,12 +188,41 @@ def test_request_loan_then_trade_buy_then_consume_food() -> None:
         current_step_index=0,
     )
     hunger_before = int(agent.get("hunger") or 0)
-    while not plan.is_complete:
-        execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100 + plan.current_step_index)
+    _run_plan_until_complete(agent, state, plan)
     assert int(agent.get("hunger") or 0) < hunger_before
 
 
 def test_request_loan_then_trade_buy_then_consume_medical() -> None:
+    agent = make_agent(money=0, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    bandage_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+    plan = Plan(
+        intent_kind="heal_self",
+        steps=[
+            PlanStep(
+                kind=STEP_REQUEST_LOAN,
+                payload={
+                    "creditor_id": "trader_1",
+                    "creditor_type": "trader",
+                    "amount": bandage_price,
+                    "purpose": "survival_medical",
+                    "item_category": "medical",
+                    "required_price": bandage_price,
+                    "daily_interest_rate": 0.05,
+                },
+                interruptible=False,
+            ),
+            PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "medical", "buy_mode": "survival_cheapest", "reason": "buy_medical_survival"}, interruptible=False),
+            PlanStep(kind=STEP_CONSUME_ITEM, payload={"item_type": "bandage", "reason": "emergency_heal"}, interruptible=False),
+        ],
+        current_step_index=0,
+    )
+    hp_before = int(agent.get("hp") or 0)
+    _run_plan_until_complete(agent, state, plan)
+    assert int(agent.get("hp") or 0) >= hp_before
+
+
+def test_request_loan_medical_insufficient_amount_does_not_complete_plan() -> None:
     agent = make_agent(money=0, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
     state = _state(agent)
     plan = Plan(
@@ -185,15 +241,19 @@ def test_request_loan_then_trade_buy_then_consume_medical() -> None:
                 },
                 interruptible=False,
             ),
-            PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "medical", "buy_mode": "survival_cheapest"}, interruptible=False),
+            PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "medical", "buy_mode": "survival_cheapest", "reason": "buy_medical_survival"}, interruptible=False),
             PlanStep(kind=STEP_CONSUME_ITEM, payload={"item_type": "bandage", "reason": "emergency_heal"}, interruptible=False),
         ],
         current_step_index=0,
     )
-    hp_before = int(agent.get("hp") or 0)
-    while not plan.is_complete:
-        execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100 + plan.current_step_index)
-    assert int(agent.get("hp") or 0) >= hp_before
+
+    _run_plan_steps(agent, state, plan, max_steps=3)
+
+    assert not plan.is_complete
+    assert plan.current_step_index == 1
+    assert plan.steps[1].payload.get("_trade_buy_failed") is True
+    failure_reason = str(plan.steps[1].payload.get("_failure_reason") or "")
+    assert failure_reason in {"trade_buy_failed", "not_enough_money", "trade_buy_failed:not_enough_money"}
 
 
 def test_active_plan_request_loan_failure_marks_step_failed_and_aborts_or_replans() -> None:
