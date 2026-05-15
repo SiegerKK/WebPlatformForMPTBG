@@ -30,3 +30,34 @@ ACTIVE_PLAN_TRADE_PENDING_TIMEOUT_TURNS: int = 5
 ACTIVE_PLAN_EXPLORE_PENDING_TIMEOUT_TURNS: int = 5
 # Grace turns added on top of the expected step duration before calling a RUNNING step timed out.
 ACTIVE_PLAN_RUNNING_GRACE_TURNS: int = 5
+
+# ── Hunter preparation — equipment class ranking ──────────────────────────────
+# Used by evaluate_hunter_equipment_advantage() in the objective generator.
+WEAPON_CLASS_RANK: dict[str, int] = {
+    "none": 0,
+    "melee": 1,
+    "pistol": 2,
+    "shotgun": 3,
+    "rifle": 4,
+    "sniper": 5,
+}
+
+ARMOR_CLASS_RANK: dict[str, int] = {
+    "none": 0,
+    "unknown": 0,
+    "light": 1,
+    "medium": 2,
+    "heavy": 3,
+}
+
+# Minimum thresholds for a hunter (kill_stalker NPC) to be considered prepared.
+HUNT_MIN_CASH_RESERVE: int = 300
+HUNT_MIN_AMMO_ROUNDS: int = 20
+HUNT_MIN_MED_ITEMS: int = 2
+HUNT_MIN_ARMOR_CLASS_FOR_STRONG_TARGET: str = "medium"
+HUNT_MIN_WEAPON_CLASS_FOR_RIFLE_TARGET: str = "rifle"
+
+# Minimum advantage score required before engaging a target.
+HUNT_REQUIRED_ADVANTAGE_SCORE: float = 0.20
+HUNT_REQUIRED_ADVANTAGE_SCORE_STRONG_TARGET: float = 0.35   # target combat_strength >= 0.8
+HUNT_REQUIRED_ADVANTAGE_SCORE_CO_LOCATED: float = 0.10      # opportunistic engagement

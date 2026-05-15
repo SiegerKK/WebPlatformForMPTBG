@@ -305,3 +305,87 @@ def test_debt_escape_priority_below_critical_survival() -> None:
 
     assert any(obj.key == OBJECTIVE_LEAVE_ZONE and obj.source == "debt_escape" for obj in objectives)
     assert decision.selected.key == OBJECTIVE_RESTORE_WATER
+
+
+# ── Equipment class detection regression tests ─────────────────────────────────
+
+def test_generator_weapon_class_uses_item_mapping_for_ak74() -> None:
+    """_get_weapon_class must return 'rifle' for ak74, not fallback 'pistol'."""
+    from app.games.zone_stalkers.decision.objectives.generator import _get_weapon_class
+
+    agent: dict = {
+        "equipment": {
+            "weapon": {"type": "ak74", "value": 1500},
+        },
+    }
+    assert _get_weapon_class(agent) == "rifle"
+
+
+def test_generator_armor_class_uses_item_mapping_for_stalker_suit() -> None:
+    """_get_armor_class must return 'medium' for stalker_suit, not fallback 'light'."""
+    from app.games.zone_stalkers.decision.objectives.generator import _get_armor_class
+
+    agent: dict = {
+        "equipment": {
+            "armor": {"type": "stalker_suit", "value": 1200},
+        },
+    }
+    assert _get_armor_class(agent) == "medium"
+
+
+def test_ready_hunter_not_marked_weapon_inferior_due_to_ak74_mapping() -> None:
+    """A hunter equipped with ak74 and stalker_suit should NOT receive
+    equipment_disadvantage or weapon_inferior hints in generated objectives.
+    The canonical item mapping must prevent ak74 from being misclassified as
+    'pistol' and triggering PREPARE_FOR_HUNT unnecessarily.
+    """
+    agent = make_agent(
+        global_goal="kill_stalker",
+        kill_target_id="target_1",
+        money=5000,
+    )
+    agent["equipment"] = {
+        "weapon": {"type": "ak74", "value": 1500},
+        "armor": {"type": "stalker_suit", "value": 1200},
+    }
+    # Add ammo matching the ak74 (ammo_545)
+    agent["inventory"] += [
+        {"id": f"ammo545_{i}", "type": "ammo_545", "value": 0}
+        for i in range(30)
+    ]
+    # Add medkits
+    agent["inventory"] += [
+        {"id": "med_0", "type": "medkit", "value": 0},
+        {"id": "med_1", "type": "medkit", "value": 0},
+    ]
+    state = make_minimal_state(agent=agent)
+    # Give target known location
+    state["agents"]["target_1"] = {
+        "id": "target_1",
+        "is_alive": True,
+        "location_id": "loc_b",
+        "equipment": {"weapon": {"type": "pistol", "value": 300}},
+        "inventory": [],
+    }
+    state["locations"]["loc_b"] = {
+        "name": "Target",
+        "terrain_type": "buildings",
+        "anomaly_activity": 0,
+        "connections": [{"to": "loc_a", "travel_time": 2}],
+        "agents": ["target_1"],
+        "items": [],
+    }
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    meta_tags = set()
+    for obj in objectives:
+        for tag in (obj.metadata or {}).get("hints", []):
+            meta_tags.add(tag)
+        if obj.key == "PREPARE_FOR_HUNT":
+            reasons = (obj.metadata or {}).get("reasons", [])
+            assert "weapon_inferior" not in reasons, (
+                f"ak74 wrongly flagged as weapon_inferior: {reasons}"
+            )
+            assert "equipment_disadvantage" not in reasons, (
+                f"ak74 wrongly flagged as equipment_disadvantage: {reasons}"
+            )

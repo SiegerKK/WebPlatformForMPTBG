@@ -152,11 +152,17 @@ def execute_plan_step(
     # advance the plan index immediately.
     if step.kind in (
         STEP_CONSUME_ITEM, STEP_EQUIP_ITEM, STEP_PICKUP_ITEM, STEP_LOOT_CORPSE,
-        STEP_HEAL_SELF, STEP_WAIT, STEP_TRADE_BUY_ITEM,
+        STEP_HEAL_SELF, STEP_WAIT,
         STEP_ASK_FOR_INTEL, STEP_LOOK_FOR_TRACKS, STEP_QUESTION_WITNESSES,
         STEP_SEARCH_TARGET, STEP_START_COMBAT, STEP_CONFIRM_KILL,
     ):
         plan.advance()
+    elif step.kind == STEP_TRADE_BUY_ITEM:
+        if _trade_buy_succeeded(events):
+            plan.advance()
+        else:
+            step.payload["_trade_buy_failed"] = True
+            step.payload["_failure_reason"] = step.payload.get("_failure_reason") or "trade_buy_failed"
     elif step.kind == STEP_TRADE_SELL_ITEM:
         if _trade_sell_succeeded(events):
             plan.advance()
@@ -338,22 +344,70 @@ def _exec_trade_buy(
     from app.games.zone_stalkers.rules.tick_rules import _bot_buy_from_trader
 
     category = step.payload.get("item_category", "medical")
+    buy_mode = step.payload.get("buy_mode")
+    agent_loc = str(agent.get("location_id") or "")
 
     # Upgrade categories: buy the best upgrade target and immediately equip it.
     if category in ("weapon_upgrade", "armor_upgrade"):
         slot = "weapon" if category == "weapon_upgrade" else "armor"
-        from app.games.zone_stalkers.balance.items import WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES
+        from app.games.zone_stalkers.balance.items import (
+            WEAPON_ITEM_TYPES, ARMOR_ITEM_TYPES, ITEM_TYPES as _ITEM_TYPES,
+            weapon_class_for_item_type, armor_class_for_item_type,
+        )
         from app.games.zone_stalkers.rules.tick_rules import (
             _find_upgrade_target, _bot_equip_from_inventory,
         )
+        from app.games.zone_stalkers.decision.constants import WEAPON_CLASS_RANK, ARMOR_CLASS_RANK
         item_types_for_slot = WEAPON_ITEM_TYPES if slot == "weapon" else ARMOR_ITEM_TYPES
         agent_risk = float(agent.get("risk_tolerance", 0.5))
         agent_money = agent.get("money", 0)
         current = agent.get("equipment", {}).get(slot)
         current_type = current.get("type") if isinstance(current, dict) else None
-        upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
+
+        # Honor min class requirement from hunt preparation payload
+        min_weapon_class = step.payload.get("min_weapon_class")
+        min_armor_class = step.payload.get("min_armor_class")
+        min_required_rank = None
+        if slot == "weapon" and min_weapon_class:
+            min_required_rank = WEAPON_CLASS_RANK.get(str(min_weapon_class), 0)
+        elif slot == "armor" and min_armor_class:
+            min_required_rank = ARMOR_CLASS_RANK.get(str(min_armor_class), 0)
+
+        if min_required_rank is not None and min_required_rank > 0:
+            # Filter to items that meet the minimum class requirement AND are affordable.
+            # Use item-class helpers because item type keys like "ak74" differ from
+            # class names like "rifle" in WEAPON_CLASS_RANK.
+            class_rank_map = WEAPON_CLASS_RANK if slot == "weapon" else ARMOR_CLASS_RANK
+            get_item_class = weapon_class_for_item_type if slot == "weapon" else armor_class_for_item_type
+            candidates = [
+                t for t in item_types_for_slot
+                if class_rank_map.get(get_item_class(t), 0) >= min_required_rank
+                and t in _ITEM_TYPES
+                and agent_money >= int(_ITEM_TYPES[t].get("value", 0) * 1.5)
+            ]
+            if not candidates:
+                return [_make_trade_buy_failed_event(
+                    agent_id=agent_id,
+                    reason="no_matching_upgrade",
+                    item_category=category,
+                    buy_mode=buy_mode,
+                    location_id=agent_loc,
+                    required_price=None,
+                )]
+            # Sort by class rank first, then by price (buy cheapest that meets requirement)
+            candidates.sort(key=lambda t: (class_rank_map.get(get_item_class(t), 0), int(_ITEM_TYPES[t].get("value", 0) * 1.5)))
+            upgrade_key: str | None = candidates[0]
+        else:
+            upgrade_key = _find_upgrade_target(item_types_for_slot, current_type, agent_risk, agent_money)
+
         if upgrade_key is None:
-            return []
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="no_upgrade_target",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+            )]
         bought = _bot_buy_from_trader(agent_id, agent, frozenset([upgrade_key]), state, world_turn,
                                       purchase_reason=f"апгрейд {slot}") or []
         if bought:
@@ -361,23 +415,47 @@ def _exec_trade_buy(
                 agent_id, agent, frozenset([upgrade_key]), slot, state, world_turn,
             )
             return bought + equip_evs
-        return []
+        return [_make_trade_buy_failed_event(
+            agent_id=agent_id,
+            reason="not_enough_money",
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+        )]
 
-    # Bug fix: defensive guard — never buy equipment the agent already has equipped.
+    # Defensive guard: never buy equipment the agent already has equipped.
+    # Emit an explicit skipped-success event so active-plan runtime can advance.
     eq = agent.get("equipment", {})
     if category in ("weapon", "equipment") and eq.get("weapon") is not None:
-        return []   # already armed — nothing to purchase
+        return [_make_trade_buy_skipped_event(
+            agent_id=agent_id,
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+            reason="already_equipped",
+        )]
     if category == "armor" and eq.get("armor") is not None:
-        return []   # already armoured — nothing to purchase
+        return [_make_trade_buy_skipped_event(
+            agent_id=agent_id,
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+            reason="already_equipped",
+        )]
 
     if category == "ammo":
         # Only buy ammo that is compatible with the agent's equipped weapon.
-        # Using AMMO_ITEM_TYPES (all ammo) would allow buying wrong-caliber ammo.
         weapon = eq.get("weapon")
         weapon_type = weapon.get("type") if isinstance(weapon, dict) else None
         required_ammo = AMMO_FOR_WEAPON.get(weapon_type) if weapon_type else None
         if not required_ammo:
-            return []   # no weapon or unknown caliber — nothing to buy
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="no_weapon_for_ammo",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+            )]
         item_types: "frozenset[str]" = frozenset([required_ammo])
     else:
         type_map = {
@@ -391,10 +469,11 @@ def _exec_trade_buy(
         item_types = type_map.get(category, HEAL_ITEM_TYPES)
 
     # PR2 survival mode: force cheapest affordable viable item.
-    buy_mode = step.payload.get("buy_mode")
     compatible_item_types = step.payload.get("compatible_item_types")
     if isinstance(compatible_item_types, list) and compatible_item_types:
         item_types = frozenset(str(t) for t in compatible_item_types)
+
+    required_price_from_payload = step.payload.get("required_price")
 
     if buy_mode == "survival_cheapest":
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
@@ -407,7 +486,14 @@ def _exec_trade_buy(
             key=lambda t: (int(ITEM_TYPES[t].get("value", 0) * 1.5), t),
         )
         if not affordable:
-            return []
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="not_enough_money",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+                required_price=required_price_from_payload,
+            )]
         item_types = frozenset([affordable[0]])
     elif buy_mode == "reserve_basic":
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
@@ -423,7 +509,14 @@ def _exec_trade_buy(
             key=lambda t: (int(ITEM_TYPES[t].get("value", 0) * 1.5), t),
         )
         if not affordable:
-            return []
+            return [_make_trade_buy_failed_event(
+                agent_id=agent_id,
+                reason="not_enough_money",
+                item_category=category,
+                buy_mode=buy_mode,
+                location_id=agent_loc,
+                required_price=required_price_from_payload,
+            )]
         item_types = frozenset([affordable[0]])
 
     reason = step.payload.get("reason", f"buy_{category}")
@@ -453,6 +546,16 @@ def _exec_trade_buy(
     buy_events = _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                       purchase_reason=reason) or []
     events.extend(buy_events)
+    # If no purchase happened, emit a failure event so the plan step is not silently skipped.
+    if not buy_events:
+        events.append(_make_trade_buy_failed_event(
+            agent_id=agent_id,
+            reason="not_enough_money",
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+            required_price=required_price_from_payload,
+        ))
     return events
 
 
@@ -493,6 +596,65 @@ def _loan_request_succeeded(events: list[dict[str, Any]]) -> bool:
         isinstance(ev, dict) and str(ev.get("event_type") or "") in {"debt_created", "debt_credit_advanced"}
         for ev in events
     )
+
+
+def _trade_buy_succeeded(events: list[dict[str, Any]]) -> bool:
+    """Return True if at least one event indicates a successful item purchase or equip."""
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        et = str(ev.get("event_type") or "")
+        if et in {"bot_bought_item", "item_bought", "trade_buy", "item_equipped", "trade_buy_skipped"}:
+            return True
+        # Legacy payload-based check
+        payload = ev.get("payload") or ev
+        if isinstance(payload, dict) and payload.get("items_bought"):
+            return True
+        if isinstance(payload, dict) and int(payload.get("money_spent") or 0) > 0:
+            return True
+    return False
+
+
+def _make_trade_buy_skipped_event(
+    *,
+    agent_id: str,
+    item_category: str,
+    buy_mode: str | None,
+    location_id: str,
+    reason: str = "already_equipped",
+) -> dict[str, Any]:
+    return {
+        "event_type": "trade_buy_skipped",
+        "payload": {
+            "agent_id": agent_id,
+            "reason": reason,
+            "item_category": item_category,
+            "buy_mode": buy_mode,
+            "location_id": location_id,
+        },
+    }
+
+
+def _make_trade_buy_failed_event(
+    *,
+    agent_id: str,
+    reason: str,
+    item_category: str,
+    buy_mode: str | None,
+    location_id: str,
+    required_price: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "event_type": "trade_buy_failed",
+        "payload": {
+            "agent_id": agent_id,
+            "reason": reason,
+            "item_category": item_category,
+            "buy_mode": buy_mode,
+            "location_id": location_id,
+            "required_price": required_price,
+        },
+    }
 
 
 def _trade_sell_failure_reason(events: list[dict[str, Any]]) -> str | None:
@@ -1481,7 +1643,11 @@ def _exec_confirm_kill(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _add_memory,
+        _mark_kill_stalker_goal_achieved,
+        _recent_combat_with_target,
+    )
 
     target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
     if not target_id:
@@ -1490,9 +1656,21 @@ def _exec_confirm_kill(
 
     target = state.get("agents", {}).get(target_id)
     target_name = target.get("name", target_id) if isinstance(target, dict) else target_id
+
+    def _has_personal_kill_evidence() -> bool:
+        for rec in _v3r_ex(agent):
+            fx = _v3fx_ex(rec)
+            if str(fx.get("target_id") or fx.get("target") or "") != target_id:
+                continue
+            if _v3ak_ex(rec) in {"target_death_confirmed", "hunt_target_killed"}:
+                return True
+        return False
+
     if isinstance(target, dict) and not target.get("is_alive", True):
         current_loc = str(agent.get("location_id") or "")
+
         corpse: dict[str, Any] | None = None
+        corpse_loc_id: str | None = None
         for raw_corpse in (state.get("locations", {}).get(current_loc, {}).get("corpses") or []):
             if (
                 isinstance(raw_corpse, dict)
@@ -1500,9 +1678,35 @@ def _exec_confirm_kill(
                 and str(raw_corpse.get("agent_id") or "") == target_id
             ):
                 corpse = raw_corpse
+                corpse_loc_id = current_loc
                 break
 
-        direct_confirmation = bool(corpse)
+        if corpse is None:
+            for loc_id, loc in (state.get("locations", {}) or {}).items():
+                if not isinstance(loc, dict):
+                    continue
+                for raw_corpse in (loc.get("corpses") or []):
+                    if (
+                        isinstance(raw_corpse, dict)
+                        and bool(raw_corpse.get("visible", True))
+                        and str(raw_corpse.get("agent_id") or "") == target_id
+                    ):
+                        corpse = raw_corpse
+                        corpse_loc_id = str(loc_id)
+                        break
+                if corpse is not None:
+                    break
+
+        direct_confirmation = bool(corpse) and str(corpse_loc_id or "") == current_loc
+        has_personal_evidence = _has_personal_kill_evidence()
+        recently_engaged = _recent_combat_with_target(
+            agent_id,
+            agent,
+            target_id,
+            state,
+            world_turn,
+        )
+
         if direct_confirmation:
             _add_memory(
                 agent,
@@ -1524,6 +1728,49 @@ def _exec_confirm_kill(
                 },
                 summary=f"Лично подтвердил смерть цели «{target_name}» по телу.",
             )
+            _mark_kill_stalker_goal_achieved(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                target_id,
+                confirmation_source="self_observed_body",
+            )
+        elif corpse is not None and (has_personal_evidence or recently_engaged):
+            observed_here = str(corpse_loc_id or "") == current_loc
+            confirmation_source = "combat_result_state" if observed_here else "state_confirmed_after_personal_combat"
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                f"✅ Подтверждена ликвидация цели «{target_name}»",
+                {
+                    "action_kind": "target_death_confirmed",
+                    "target_id": target_id,
+                    "target_name": target_name,
+                    "confirmation_source": confirmation_source,
+                    "directly_observed": observed_here,
+                    "corpse_id": (corpse or {}).get("corpse_id"),
+                    "corpse_location_id": str(corpse_loc_id or ""),
+                    "target_death_cause": (corpse or {}).get("death_cause") or target.get("death_cause"),
+                    "killer_id": (corpse or {}).get("killer_id"),
+                    "location_id": current_loc,
+                },
+                summary=(
+                    f"Подтвердил смерть цели «{target_name}» по результатам боя."
+                    if observed_here
+                    else f"Подтвердил смерть цели «{target_name}» по итогам боя и обнаружению тела в другой локации."
+                ),
+            )
+            _mark_kill_stalker_goal_achieved(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                target_id,
+                confirmation_source=confirmation_source,
+            )
         else:
             _add_memory(
                 agent,
@@ -1536,7 +1783,7 @@ def _exec_confirm_kill(
                     "target_id": target_id,
                     "reason": "no_direct_confirmation",
                 },
-                summary="Цель мертва, но без прямого подтверждения на месте.",
+                summary="Цель мертва, но без подтверждения личным боевым контекстом.",
             )
     else:
         _add_memory(
@@ -1564,6 +1811,8 @@ def _exec_monitor_combat(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
     target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
     if not target_id:
         step.payload["_monitor_complete"] = True
@@ -1586,7 +1835,30 @@ def _exec_monitor_combat(
             combat_active = True
             break
 
-    step.payload["_monitor_complete"] = (not combat_active) or (not target_alive)
+    monitor_complete = (not combat_active) or (not target_alive)
+    step.payload["_monitor_complete"] = monitor_complete
+
+    if monitor_complete and target_alive and not combat_active:
+        recent_same = any(
+            _v3ak_ex(rec) == "combat_ended_without_kill"
+            and str(_v3fx_ex(rec).get("target_id") or "") == target_id
+            and int(rec.get("created_turn") or 0) >= world_turn - 1
+            for rec in _v3r_ex(agent)
+        )
+        if not recent_same:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                "⚠️ Бой завершён без ликвидации цели",
+                {
+                    "action_kind": "combat_ended_without_kill",
+                    "target_id": target_id,
+                },
+                summary="Бой завершился, но цель осталась жива или ушла — требуется перепланирование.",
+            )
+
     agent["action_used"] = True
     return []
 

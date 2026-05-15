@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 
 from app.games.zone_stalkers.decision.beliefs import BeliefState
+from app.games.zone_stalkers.decision.perception import is_perception_suppressed
 from app.games.zone_stalkers.decision.models.hunt_lead import HuntLead
 from app.games.zone_stalkers.decision.models.target_belief import (
     LocationHypothesis,
@@ -539,7 +540,7 @@ def build_hunt_leads_from_memory_v3_legacy(
         leads.append(lead)
         if lead.source_ref:
             source_refs.append(lead.source_ref)
-        if lead.kind == "target_seen":
+        if lead.kind in {"target_seen", "target_intel", "target_last_known_location"}:
             last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
 
     return {
@@ -684,7 +685,8 @@ def build_target_belief(
     target_location_id = str(target.get("location_id") or "") if isinstance(target, dict) else ""
     target_alive_from_state: bool | None = bool(target.get("is_alive", True)) if isinstance(target, dict) else None
     direct_co_located_target = bool(
-        isinstance(target, dict)
+        not is_perception_suppressed(agent)
+        and isinstance(target, dict)
         and target_alive_from_state is True
         and current_loc
         and target_location_id == current_loc
@@ -743,7 +745,7 @@ def build_target_belief(
         for lead in knowledge_leads:
             if lead.source_ref:
                 source_refs.append(lead.source_ref)
-            if lead.kind in {"target_seen", "target_last_known_location"}:
+            if lead.kind in {"target_seen", "target_last_known_location", "target_intel"}:
                 last_seen_turn = max(last_seen_turn or -1, int(lead.created_turn))
 
     knowledge = agent.get("knowledge_v1")

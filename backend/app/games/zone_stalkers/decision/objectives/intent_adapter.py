@@ -71,6 +71,22 @@ def _prepare_for_hunt_forced_category(objective: Objective) -> str | None:
     if objective.key != "PREPARE_FOR_HUNT":
         return None
     metadata = objective.metadata if isinstance(objective.metadata, dict) else {}
+
+    # Prefer structured required_hunt_equipment if available (most specific)
+    req = metadata.get("required_hunt_equipment")
+    if isinstance(req, dict) and req.get("missing_requirements"):
+        missing = set(req["missing_requirements"])
+        # Priority: weapon_upgrade > armor_upgrade > ammo_resupply > medicine_resupply
+        if "weapon_upgrade" in missing:
+            return "weapon_upgrade"
+        if "armor_upgrade" in missing:
+            return "armor_upgrade"
+        if "ammo_resupply" in missing:
+            return "ammo"
+        if "medicine_resupply" in missing:
+            return "medical"
+
+    # Fall back to blocker-key approach for legacy compatibility
     blockers = metadata.get("blockers")
     if not isinstance(blockers, list):
         return None
@@ -81,9 +97,13 @@ def _prepare_for_hunt_forced_category(objective: Objective) -> str | None:
     }
     if "no_weapon" in blocker_keys:
         return "weapon"
-    if "low_ammo" in blocker_keys:
+    if "weapon_upgrade" in blocker_keys:
+        return "weapon_upgrade"
+    if "armor_upgrade" in blocker_keys:
+        return "armor_upgrade"
+    if "ammo_resupply" in blocker_keys or "low_ammo" in blocker_keys:
         return "ammo"
-    if "hp_low" in blocker_keys or "no_medicine" in blocker_keys:
+    if "medicine_resupply" in blocker_keys or "hp_low" in blocker_keys or "no_medicine" in blocker_keys:
         return "medical"
     if "target_too_strong" in blocker_keys:
         return "armor"
@@ -126,6 +146,16 @@ def objective_to_intent(
         "target_co_located",
         "target_strength",
         "recommended_support_objective",
+        # Hunt preparation metadata — must be preserved for planner decisions
+        "equipment_advantage",
+        "equipment_advantaged",
+        "estimated_money_needed_for_advantage",
+        "required_hunt_equipment",
+        "missing_requirements",
+        "preparation_basis",
+        "hunter_preparation",
+        "hunt_stage",
+        "hunt_preparation_pressure",
     ):
         if key in objective_metadata:
             metadata[key] = objective_metadata.get(key)

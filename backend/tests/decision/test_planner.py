@@ -503,7 +503,7 @@ class TestResupplyWeaponGuard:
         assert needs.reload_or_rearm == 0.65
 
     def test_executor_guard_skips_weapon_buy_when_equipped(self):
-        """_exec_trade_buy with category='weapon' returns [] when weapon already equipped."""
+        """_exec_trade_buy with category='weapon' returns trade_buy_skipped when weapon already equipped."""
         from app.games.zone_stalkers.decision.executors import execute_plan_step
         from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_TRADE_BUY_ITEM
         from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
@@ -522,15 +522,16 @@ class TestResupplyWeaponGuard:
             confidence=0.8, created_turn=100,
         )
         events = execute_plan_step(ctx, plan, state, 100)
-        # Should be empty: guard prevented the duplicate weapon purchase
-        assert events == [], (
-            f"Guard should block weapon purchase when already equipped; got events={events}"
-        )
+        assert any(
+            isinstance(ev, dict) and ev.get("event_type") == "trade_buy_skipped"
+            for ev in events
+        ), f"Guard should emit trade_buy_skipped when already equipped; got events={events}"
+        assert plan.current_step_index == 1
         # Money must be unchanged
         assert state["agents"]["bot1"]["money"] == 5000
 
     def test_executor_guard_skips_equipment_buy_when_weapon_equipped(self):
-        """_exec_trade_buy with legacy category='equipment' also blocked when weapon equipped."""
+        """_exec_trade_buy with legacy category='equipment' emits trade_buy_skipped when weapon equipped."""
         from app.games.zone_stalkers.decision.executors import execute_plan_step
         from app.games.zone_stalkers.decision.models.plan import Plan, PlanStep, STEP_TRADE_BUY_ITEM
         from app.games.zone_stalkers.decision.models.intent import INTENT_RESUPPLY
@@ -548,9 +549,11 @@ class TestResupplyWeaponGuard:
             confidence=0.8, created_turn=100,
         )
         events = execute_plan_step(ctx, plan, state, 100)
-        assert events == [], (
-            "Guard should block 'equipment' category buy when weapon already equipped"
-        )
+        assert any(
+            isinstance(ev, dict) and ev.get("event_type") == "trade_buy_skipped"
+            for ev in events
+        ), "Guard should emit trade_buy_skipped for legacy 'equipment' when weapon equipped"
+        assert plan.current_step_index == 1
         assert state["agents"]["bot1"]["money"] == 5000
 
 

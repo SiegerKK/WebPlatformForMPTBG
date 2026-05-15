@@ -19,6 +19,66 @@ def run_until(
     raise AssertionError("condition not reached")
 
 
+def run_until_or_dump(
+    state: dict[str, Any],
+    predicate: Callable[[dict[str, Any], list[dict[str, Any]]], bool],
+    max_ticks: int = 1000,
+    *,
+    agent_id: str = "hunter",
+    label: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    events: list[dict[str, Any]] = []
+    for _ in range(max_ticks):
+        state, events = tick_zone_map(state)
+        if predicate(state, events):
+            return state, events
+
+    agent = state.get("agents", {}).get(agent_id, {})
+    target_id = agent.get("kill_target_id")
+    target = state.get("agents", {}).get(target_id, {}) if target_id else {}
+
+    records = ((agent.get("memory_v3") or {}).get("records") or {})
+    recent_records = sorted(
+        [record for record in records.values() if isinstance(record, dict)],
+        key=lambda record: int(record.get("created_turn") or 0),
+    )[-20:]
+
+    raise AssertionError(
+        {
+            "label": label,
+            "world_turn": state.get("world_turn"),
+            "agent": {
+                "location_id": agent.get("location_id"),
+                "hp": agent.get("hp"),
+                "money": agent.get("money"),
+                "global_goal": agent.get("global_goal"),
+                "global_goal_achieved": agent.get("global_goal_achieved"),
+                "has_left_zone": agent.get("has_left_zone"),
+                "active_objective": agent.get("active_objective"),
+                "current_goal": agent.get("current_goal"),
+                "scheduled_action": agent.get("scheduled_action"),
+                "active_plan_v3": agent.get("active_plan_v3"),
+                "brain_v3_context": agent.get("brain_v3_context"),
+            },
+            "target": {
+                "target_id": target_id,
+                "is_alive": target.get("is_alive"),
+                "hp": target.get("hp"),
+                "location_id": target.get("location_id"),
+            },
+            "recent_memory_kinds": [
+                {
+                    "turn": record.get("created_turn"),
+                    "kind": record.get("kind"),
+                    "details": record.get("details"),
+                }
+                for record in recent_records
+            ],
+            "last_events": events[-20:] if isinstance(events, list) else events,
+        }
+    )
+
+
 def _memory_v3_records(agent: dict[str, Any]) -> list[dict[str, Any]]:
     records = ((agent.get("memory_v3") or {}).get("records") or {})
     if not isinstance(records, dict):

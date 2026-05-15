@@ -13,6 +13,7 @@ jobs:
   backend-core:
     name: Backend core tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,18 +29,12 @@ jobs:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
         run: |
-          pytest \
-            backend/tests/test_*.py \
-            -q \
-            --ignore=backend/tests/test_zone_stalkers.py \
-            --ignore=backend/tests/test_zone_stalkers_tick.py \
-            --ignore=backend/tests/test_zone_stalkers_copy_on_write_runtime.py \
-            --ignore=backend/tests/test_zone_stalkers_location_images.py \
-            --ignore=backend/tests/test_memory_merge.py
+          pytest             backend/tests/test_*.py             -vv             --tb=short             --ignore=backend/tests/test_zone_stalkers.py             --ignore=backend/tests/test_zone_stalkers_tick.py             --ignore=backend/tests/test_zone_stalkers_copy_on_write_runtime.py             --ignore=backend/tests/test_zone_stalkers_location_images.py             --ignore=backend/tests/test_memory_merge.py             --durations=25             --timeout=60             --timeout-method=thread
 
   backend-zone-stalkers-core:
     name: Zone Stalkers core tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,16 +50,12 @@ jobs:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
         run: |
-          pytest \
-            backend/tests/test_zone_stalkers.py \
-            backend/tests/test_zone_stalkers_tick.py \
-            backend/tests/test_zone_stalkers_copy_on_write_runtime.py \
-            backend/tests/test_zone_stalkers_location_images.py \
-            -q
+          pytest             backend/tests/test_zone_stalkers.py             backend/tests/test_zone_stalkers_tick.py             backend/tests/test_zone_stalkers_copy_on_write_runtime.py             backend/tests/test_zone_stalkers_location_images.py             -vv             --tb=short             --durations=25             --timeout=90             --timeout-method=thread
 
-  backend-decision-core:
-    name: Decision core tests
+  backend-decision-unit:
+    name: Decision unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,19 +66,80 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-      - name: Run decision core tests
+      - name: Run decision unit tests
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
         run: |
-          pytest \
-            backend/tests/decision \
-            -q \
-            --ignore=backend/tests/decision/v3/test_e2e_brain_v3_goals.py
+          pytest             backend/tests/decision             -vv             --tb=short             --ignore=backend/tests/decision/v3             --durations=25             --timeout=60             --timeout-method=thread
+
+  backend-decision-v3-memory:
+    name: Decision v3 memory tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: Run v3 memory tests
+        env:
+          PYTHONPATH: backend
+          MEDIA_ROOT: /tmp/media
+        run: |
+          pytest             backend/tests/decision/v3/test_memory_store.py             backend/tests/decision/v3/test_memory_retrieval.py             backend/tests/decision/v3/test_memory_retrieval_fast_path.py             backend/tests/decision/v3/test_memory_v3_only_runtime.py             backend/tests/decision/test_context_builder_memory_v3.py             -vv             --tb=short             --durations=25             --timeout=60             --timeout-method=thread
+
+  backend-decision-v3-hunt-non-e2e:
+    name: Decision v3 hunt non-e2e tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: Run v3 hunt non-e2e tests
+        env:
+          PYTHONPATH: backend
+          MEDIA_ROOT: /tmp/media
+        run: |
+          pytest             backend/tests/decision/v3/test_hunt_prep_trade_buy_integration.py             backend/tests/decision/v3/test_hunter_preparation_and_sleeping_perception.py             backend/tests/decision/v3/test_target_death_confirmation.py             backend/tests/decision/v3/test_hunt_kill_stalker_goal.py             -vv             --tb=short             --durations=25             --timeout=90             --timeout-method=thread
+
+  backend-decision-v3-other:
+    name: Decision v3 other tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: Run remaining v3 decision tests
+        env:
+          PYTHONPATH: backend
+          MEDIA_ROOT: /tmp/media
+        run: |
+          pytest             backend/tests/decision/v3             -vv             --tb=short             --ignore=backend/tests/decision/v3/test_e2e_brain_v3_goals.py             --ignore=backend/tests/decision/v3/test_hunt_leads.py             --ignore=backend/tests/decision/v3/test_hunt_fixes.py             --ignore=backend/tests/decision/v3/test_hunt_kill_stalker_goal.py             --ignore=backend/tests/decision/v3/test_hunt_prep_trade_buy_integration.py             --ignore=backend/tests/decision/v3/test_hunter_preparation_and_sleeping_perception.py             --ignore=backend/tests/decision/v3/test_target_death_confirmation.py             --ignore=backend/tests/decision/v3/test_memory_store.py             --ignore=backend/tests/decision/v3/test_memory_retrieval.py             --ignore=backend/tests/decision/v3/test_memory_retrieval_fast_path.py             --ignore=backend/tests/decision/v3/test_memory_v3_only_runtime.py             --durations=25             --timeout=60             --timeout-method=thread
 
   backend-memory-pr5:
     name: Memory v3 / PR5 tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -103,17 +155,12 @@ jobs:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
         run: |
-          pytest \
-            backend/tests/decision/v3/test_memory_store.py \
-            backend/tests/decision/v3/test_memory_retrieval.py \
-            backend/tests/decision/v3/test_memory_retrieval_fast_path.py \
-            backend/tests/decision/v3/test_memory_v3_only_runtime.py \
-            backend/tests/decision/test_context_builder_memory_v3.py \
-            -q
+          pytest             backend/tests/decision/v3/test_memory_store.py             backend/tests/decision/v3/test_memory_retrieval.py             backend/tests/decision/v3/test_memory_retrieval_fast_path.py             backend/tests/decision/v3/test_memory_v3_only_runtime.py             backend/tests/decision/test_context_builder_memory_v3.py             -vv             --tb=short             --durations=25             --timeout=60             --timeout-method=thread
 
   backend-brain-v3-e2e:
-    name: Brain v3 E2E tests
+    name: Brain v3 E2E tests (${{ matrix.test_file }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -136,11 +183,57 @@ jobs:
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
-        run: pytest ${{ matrix.test_file }} -q
+        run: |
+          pytest ${{ matrix.test_file }}             -vv             --tb=short             --durations=25             --timeout=120             --timeout-method=thread
 
-  backend-full-sentinel:
-    name: Backend full non-e2e sentinel
+  backend-non-e2e-sentinel:
+    name: Backend non-e2e sentinel (${{ matrix.shard.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: backend-root
+            command: >-
+              pytest backend/tests/test_*.py
+              --ignore=backend/tests/test_zone_stalkers.py
+              --ignore=backend/tests/test_zone_stalkers_tick.py
+              --ignore=backend/tests/test_zone_stalkers_copy_on_write_runtime.py
+              --ignore=backend/tests/test_zone_stalkers_location_images.py
+              --ignore=backend/tests/test_memory_merge.py
+              -vv --tb=short --durations=25 --timeout=60 --timeout-method=thread
+          - name: zone-stalkers-core
+            command: >-
+              pytest backend/tests/test_zone_stalkers.py backend/tests/test_zone_stalkers_tick.py backend/tests/test_zone_stalkers_copy_on_write_runtime.py backend/tests/test_zone_stalkers_location_images.py
+              -vv --tb=short --durations=25 --timeout=90 --timeout-method=thread
+          - name: decision-non-v3
+            command: >-
+              pytest backend/tests/decision --ignore=backend/tests/decision/v3
+              -vv --tb=short --durations=25 --timeout=60 --timeout-method=thread
+          - name: decision-v3-memory
+            command: >-
+              pytest backend/tests/decision/v3/test_memory_store.py backend/tests/decision/v3/test_memory_retrieval.py backend/tests/decision/v3/test_memory_retrieval_fast_path.py backend/tests/decision/v3/test_memory_v3_only_runtime.py backend/tests/decision/test_context_builder_memory_v3.py
+              -vv --tb=short --durations=25 --timeout=60 --timeout-method=thread
+          - name: decision-v3-hunt-non-e2e
+            command: >-
+              pytest backend/tests/decision/v3/test_hunt_prep_trade_buy_integration.py backend/tests/decision/v3/test_hunter_preparation_and_sleeping_perception.py backend/tests/decision/v3/test_target_death_confirmation.py backend/tests/decision/v3/test_hunt_kill_stalker_goal.py
+              -vv --tb=short --durations=25 --timeout=90 --timeout-method=thread
+          - name: decision-v3-other
+            command: >-
+              pytest backend/tests/decision/v3
+              --ignore=backend/tests/decision/v3/test_e2e_brain_v3_goals.py
+              --ignore=backend/tests/decision/v3/test_hunt_leads.py
+              --ignore=backend/tests/decision/v3/test_hunt_fixes.py
+              --ignore=backend/tests/decision/v3/test_hunt_kill_stalker_goal.py
+              --ignore=backend/tests/decision/v3/test_hunt_prep_trade_buy_integration.py
+              --ignore=backend/tests/decision/v3/test_hunter_preparation_and_sleeping_perception.py
+              --ignore=backend/tests/decision/v3/test_target_death_confirmation.py
+              --ignore=backend/tests/decision/v3/test_memory_store.py
+              --ignore=backend/tests/decision/v3/test_memory_retrieval.py
+              --ignore=backend/tests/decision/v3/test_memory_retrieval_fast_path.py
+              --ignore=backend/tests/decision/v3/test_memory_v3_only_runtime.py
+              -vv --tb=short --durations=25 --timeout=60 --timeout-method=thread
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -151,15 +244,16 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-      - name: Run full non-e2e backend suite
+      - name: Run shard
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
-        run: pytest backend/tests -k "not e2e" -q
+        run: ${{ matrix.shard.command }}
 
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     defaults:
       run:
