@@ -747,3 +747,275 @@ def test_delete_all_slots_clears_image_url(
     assert loc.get("primary_image_slot") is None
     slots = loc.get("image_slots") or {}
     assert all(v is None for v in slots.values())
+
+
+def test_upload_group_slot_updates_v2_and_db_group(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+    from app.games.zone_stalkers.models import LocationImage
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    patch_profile = test_client.patch(
+        f"/api/locations/{context_id}/{location_id}/image-profile",
+        headers=auth_headers,
+        json={"is_anomalous": True},
+    )
+    assert patch_profile.status_code == 200
+
+    resp = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("gloom_rain.jpg", b"gloom-rain", "image/jpeg")},
+        data={"group": "gloom", "slot": "rain"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["group"] == "gloom"
+    assert body["slot"] == "rain"
+
+    row = (
+        db_session.query(LocationImage)
+        .filter(
+            LocationImage.context_id == context_id,
+            LocationImage.location_id == location_id,
+            LocationImage.group == "gloom",
+            LocationImage.slot == "rain",
+        )
+        .first()
+    )
+    assert row is not None
+
+    ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
+    state = load_context_state(ctx.id, ctx)
+    loc = state["locations"][location_id]
+    assert (loc.get("image_slots_v2") or {}).get("gloom", {}).get("rain") == body["url"]
+
+
+def test_upload_rejects_disabled_group(
+    test_client, auth_headers, monkeypatch, tmp_path, zone_context
+):
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    resp = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("psi_high.jpg", b"psi", "image/jpeg")},
+        data={"group": "psi", "slot": "high"},
+    )
+    assert resp.status_code == 400
+
+
+def test_set_primary_image_endpoint_updates_primary_ref(
+    test_client, auth_headers, db_session, monkeypatch, tmp_path, zone_context
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import load_context_state
+    from app.games.zone_stalkers import router as zone_router
+
+    monkeypatch.setattr(zone_router, "MEDIA_ROOT", str(tmp_path))
+    context_id = zone_context["context_id"]
+    location_id = zone_context["location_id"]
+
+    # Enable anomaly group and upload image there
+    test_client.patch(
+        f"/api/locations/{context_id}/{location_id}/image-profile",
+        headers=auth_headers,
+        json={"is_anomalous": True},
+    )
+    up = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image",
+        headers=auth_headers,
+        files={"file": ("anomaly_clear.jpg", b"a", "image/jpeg")},
+        data={"group": "anomaly", "slot": "clear"},
+    )
+    assert up.status_code == 200
+
+    set_primary = test_client.post(
+        f"/api/locations/{context_id}/{location_id}/image/primary",
+        headers=auth_headers,
+        json={"group": "anomaly", "slot": "clear"},
+    )
+    assert set_primary.status_code == 200
+
+    ctx = db_session.query(GameContext).filter(GameContext.id == context_id).first()
+    state = load_context_state(ctx.id, ctx)
+    loc = state["locations"][location_id]
+    assert loc.get("primary_image_ref") == {"group": "anomaly", "slot": "clear"}
+    assert isinstance(loc.get("image_url"), str)
+
+
+def test_projection_and_delta_include_image_v2_fields():
+    from app.games.zone_stalkers.delta import build_zone_delta
+    from app.games.zone_stalkers.projections import project_zone_state
+
+    state = {
+        "context_type": "zone_map",
+        "world_turn": 1,
+        "world_day": 1,
+        "world_hour": 12,
+        "world_minute": 0,
+        "game_over": False,
+        "emission_active": False,
+        "emission_scheduled_turn": 0,
+        "emission_ends_turn": 0,
+        "auto_tick_enabled": False,
+        "auto_tick_speed": None,
+        "player_agents": {},
+        "active_events": [],
+        "debug_layout": {"positions": {}},
+        "state_revision": 1,
+        "map_revision": 1,
+        "agents": {},
+        "traders": {},
+        "mutants": {},
+        "locations": {
+            "L1": {
+                "id": "L1",
+                "name": "Loc",
+                "connections": [],
+                "agents": [],
+                "artifacts": [],
+                "items": [],
+                "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+                "image_slots_v2": {"normal": {"clear": "/media/x.jpg"}},
+                "primary_image_ref": {"group": "normal", "slot": "clear"},
+                "image_url": "/media/x.jpg",
+                "image_slots": {"clear": "/media/x.jpg"},
+                "primary_image_slot": "clear",
+            }
+        },
+    }
+
+    projected = project_zone_state(state=state, mode="game")
+    loc = projected["locations"]["L1"]
+    assert "image_profile" in loc
+    assert "image_slots_v2" in loc
+    assert "primary_image_ref" in loc
+
+    new_state = {
+        **state,
+        "state_revision": 2,
+        "locations": {
+            "L1": {
+                **state["locations"]["L1"],
+                "primary_image_ref": {"group": "normal", "slot": "fog"},
+            }
+        },
+    }
+    delta = build_zone_delta(old_state=state, new_state=new_state, events=[], mode="game")
+    assert "L1" in delta["changes"]["locations"]
+    assert "primary_image_ref" in delta["changes"]["locations"]["L1"]
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: image_url must not resurrect deleted v2 slots
+# ---------------------------------------------------------------------------
+
+def test_delete_last_v2_image_does_not_resurrect_image_url_into_normal_clear():
+    """After deleting the last v2 slot, sync must not re-inject stale image_url."""
+    from app.games.zone_stalkers.location_images import sync_location_primary_image_url_v2
+
+    loc = {
+        "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+        "image_slots_v2": {
+            "normal": {
+                "clear": None,
+                "fog": None,
+                "rain": "/media/locations/ctx/loc/normal/rain/img.webp",
+                "night_clear": None,
+                "night_rain": None,
+            },
+            "gloom": {},
+            "anomaly": {},
+            "psi": {},
+            "underground": {},
+        },
+        "primary_image_ref": {"group": "normal", "slot": "rain"},
+        "image_url": "/media/locations/ctx/loc/normal/rain/img.webp",
+        "image_slots": {"clear": None, "fog": None, "rain": "/media/locations/ctx/loc/normal/rain/img.webp", "night_clear": None, "night_rain": None},
+        "primary_image_slot": "rain",
+    }
+
+    # Simulate what delete_location_image handler does for a group+slot delete:
+    # clears v2 slot, legacy slot, primary_image_slot, and primary_image_ref.
+    loc["image_slots_v2"]["normal"]["rain"] = None
+    loc["image_slots"]["rain"] = None
+    loc["primary_image_slot"] = None
+    loc["primary_image_ref"] = None
+
+    sync_location_primary_image_url_v2(loc)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] is None, "normal.clear must not be re-populated from stale image_url"
+    assert loc["image_slots_v2"]["normal"]["rain"] is None
+    assert loc["primary_image_ref"] is None
+    assert loc["image_url"] is None
+    assert loc["image_slots"]["clear"] is None
+    assert loc["image_slots"]["rain"] is None
+    assert loc["primary_image_slot"] is None
+
+
+def test_delete_rain_image_does_not_move_deleted_url_to_clear():
+    """Deleting normal.rain must not cause the URL to appear in normal.clear."""
+    from app.games.zone_stalkers.location_images import sync_location_primary_image_url_v2
+
+    loc = {
+        "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+        "image_slots_v2": {
+            "normal": {
+                "clear": None,
+                "fog": None,
+                "rain": "/media/loc/rain.webp",
+                "night_clear": None,
+                "night_rain": None,
+            },
+        },
+        "primary_image_ref": {"group": "normal", "slot": "rain"},
+        "image_url": "/media/loc/rain.webp",
+        "image_slots": {"clear": None, "fog": None, "rain": "/media/loc/rain.webp", "night_clear": None, "night_rain": None},
+        "primary_image_slot": "rain",
+    }
+
+    # Simulate delete_location_image handler for normal.rain:
+    loc["image_slots_v2"]["normal"]["rain"] = None
+    loc["image_slots"]["rain"] = None
+    loc["primary_image_slot"] = None
+    loc["primary_image_ref"] = None
+
+    sync_location_primary_image_url_v2(loc)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] is None, "deleted URL must not migrate to normal.clear"
+    assert loc["image_url"] is None
+
+
+def test_legacy_image_url_migrates_only_when_no_v2_schema_exists():
+    """A truly legacy location (no image_slots_v2) should still migrate image_url to normal.clear."""
+    from app.games.zone_stalkers.location_images import migrate_location_images_v2
+
+    loc = {"image_url": "/media/legacy.webp"}
+    migrate_location_images_v2(loc, allow_legacy_image_url_import=True)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] == "/media/legacy.webp"
+    assert loc["primary_image_ref"] == {"group": "normal", "slot": "clear"}
+
+
+def test_explicit_empty_v2_schema_does_not_import_stale_image_url():
+    """A v2-aware location with an empty schema must not import stale image_url."""
+    from app.games.zone_stalkers.location_images import migrate_location_images_v2
+
+    loc = {
+        "image_slots_v2": {"normal": {"clear": None}},
+        "image_url": "/media/stale.webp",
+    }
+    migrate_location_images_v2(loc, allow_legacy_image_url_import=False)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] is None, "stale image_url must not fill clear when allow_legacy_image_url_import=False"
