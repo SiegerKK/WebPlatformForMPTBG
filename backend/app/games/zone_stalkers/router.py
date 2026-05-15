@@ -418,8 +418,35 @@ def delete_location_image(
 
     existing_records = query.all()
     deferred_remove_abs: list[str] = []
+    existing_record_pairs: set[tuple[str, str]] = {
+        (str(rec.group), str(rec.slot))
+        for rec in existing_records
+        if isinstance(rec.group, str) and isinstance(rec.slot, str)
+    }
 
-    if not existing_records and group is None and slot is None and not loc.get("image_url"):
+    def _append_state_slot_abs_if_missing(group_key: str, slot_key: str) -> None:
+        if (group_key, slot_key) in existing_record_pairs:
+            return
+        state_slot_url = ((loc.get("image_slots_v2") or {}).get(group_key) or {}).get(slot_key)
+        rel = _rel_path_from_media_url(state_slot_url if isinstance(state_slot_url, str) else None)
+        if rel:
+            old_abs = _abs_media_path(rel)
+            if old_abs:
+                deferred_remove_abs.append(old_abs)
+
+    def _has_any_state_slot_url() -> bool:
+        slots_v2 = loc.get("image_slots_v2")
+        if not isinstance(slots_v2, dict):
+            return False
+        for group_key, group_slots in slots_v2.items():
+            if not isinstance(group_key, str) or not isinstance(group_slots, dict):
+                continue
+            for slot_key, slot_url in group_slots.items():
+                if isinstance(slot_key, str) and isinstance(slot_url, str) and slot_url:
+                    return True
+        return False
+
+    if not existing_records and group is None and slot is None and not loc.get("image_url") and not _has_any_state_slot_url():
         raise HTTPException(status_code=404, detail="No image found for this location")
 
     for rec in existing_records:
@@ -427,6 +454,24 @@ def delete_location_image(
         if old_abs:
             deferred_remove_abs.append(old_abs)
         db.delete(rec)
+
+    if group is None and slot is None:
+        slots_v2 = loc.get("image_slots_v2")
+        if isinstance(slots_v2, dict):
+            for group_key, group_slots in slots_v2.items():
+                if not isinstance(group_key, str) or not isinstance(group_slots, dict):
+                    continue
+                for slot_key in group_slots.keys():
+                    if isinstance(slot_key, str):
+                        _append_state_slot_abs_if_missing(group_key, slot_key)
+    elif group is not None and slot is None:
+        group_slots = ((loc.get("image_slots_v2") or {}).get(group) or {})
+        if isinstance(group_slots, dict):
+            for slot_key in group_slots.keys():
+                if isinstance(slot_key, str):
+                    _append_state_slot_abs_if_missing(group, slot_key)
+    elif group is not None and slot is not None:
+        _append_state_slot_abs_if_missing(group, slot)
 
     if not existing_records and group is None and slot is None:
         rel = _rel_path_from_media_url(loc.get("image_url"))
@@ -457,14 +502,6 @@ def delete_location_image(
         _sync_loc_image_url(loc)
     else:
         assert group is not None and slot is not None
-        if not existing_records:
-            state_slot_url = ((loc.get("image_slots_v2") or {}).get(group) or {}).get(slot)
-            rel = _rel_path_from_media_url(state_slot_url if isinstance(state_slot_url, str) else None)
-            if rel:
-                old_abs = _abs_media_path(rel)
-                if old_abs:
-                    deferred_remove_abs.append(old_abs)
-
         slots_v2 = loc.setdefault("image_slots_v2", {})
         slots_v2.setdefault(group, {})[slot] = None
 
