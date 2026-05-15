@@ -250,7 +250,6 @@ def test_personal_combat_kill_confirms_goal_immediately() -> None:
     }
 
     _combat_shoot("hunter", hunter, participant, combat, state, world_turn=120, rng=random.Random(0))
-    _check_global_goal_completion("hunter", hunter, state, world_turn=121)
 
     records = v3_action_records(hunter, "target_death_confirmed")
     assert records
@@ -258,6 +257,46 @@ def test_personal_combat_kill_confirms_goal_immediately() -> None:
     assert details.get("confirmation_source") == "personal_combat_kill"
     assert details.get("directly_observed") is True
     assert details.get("killer_id") == "hunter"
+    assert hunter.get("global_goal_achieved") is True
+
+
+def test_confirm_kill_dead_target_without_local_corpse_after_personal_combat_completes_goal() -> None:
+    hunter, target, state = _build_hunter_and_target_state()
+    _kill_target_by_emission(state, target, world_turn=100)
+
+    hunter["location_id"] = "loc_a"
+    state["locations"]["loc_a"]["agents"] = ["hunter"]
+    state["locations"]["loc_b"]["agents"] = []
+
+    write_memory_event_to_v3(
+        agent_id="hunter",
+        agent=hunter,
+        legacy_entry={
+            "world_turn": 101,
+            "type": "observation",
+            "summary": "Я ликвидировал цель в бою",
+            "effects": {
+                "action_kind": "hunt_target_killed",
+                "target_id": "target",
+                "combat_id": "combat_test",
+            },
+        },
+        world_turn=101,
+    )
+
+    plan = Plan(
+        intent_kind="hunt_target",
+        steps=[PlanStep(kind=STEP_CONFIRM_KILL, payload={"target_id": "target"})],
+        created_turn=102,
+    )
+    execute_plan_step(build_agent_context("hunter", hunter, state), plan, state, 102)
+
+    records = v3_action_records(hunter, "target_death_confirmed")
+    assert records
+    details = records[-1]["details"]
+    assert details.get("confirmation_source") == "state_confirmed_after_personal_combat"
+    assert details.get("directly_observed") is False
+    assert details.get("corpse_location_id") == "loc_b"
     assert hunter.get("global_goal_achieved") is True
 
 

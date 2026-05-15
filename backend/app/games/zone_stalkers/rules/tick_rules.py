@@ -3294,6 +3294,15 @@ def _combat_shoot(
                 event_payload_extra={"killer_id": agent_id, "combat_id": cid},
                 events=events,
             )
+            if agent.get("kill_target_id") == target_id:
+                _mark_kill_stalker_goal_achieved(
+                    agent_id,
+                    agent,
+                    state,
+                    world_turn,
+                    str(target_id),
+                    confirmation_source="personal_combat_kill",
+                )
     _runtime_set_action_used(agent, True)
     return events
 
@@ -6685,6 +6694,140 @@ def _run_npc_brain_v3_decision_inner(
     return result
 
 
+def _kill_stalker_has_personal_evidence(agent: Dict[str, Any], target_id: str) -> bool:
+    """True when agent memory contains personal kill evidence for target_id."""
+    for rec in _v3_records_desc(agent):
+        details = _v3_details(rec)
+        evidence_target = str(details.get("target_id") or details.get("target") or "")
+        if evidence_target != str(target_id):
+            continue
+        if _v3_action_kind(rec) in {"target_death_confirmed", "hunt_target_killed"}:
+            return True
+    return False
+
+
+def _kill_stalker_has_direct_confirmation(agent: Dict[str, Any], target_id: str) -> bool:
+    """True when agent directly observed target death confirmation."""
+    for rec in _v3_records_desc(agent):
+        if _v3_action_kind(rec) != "target_death_confirmed":
+            continue
+        details = _v3_details(rec)
+        if str(details.get("target_id") or "") != str(target_id):
+            continue
+        if bool(details.get("directly_observed")) is True:
+            return True
+    return False
+
+
+def _recent_combat_with_target(
+    agent_id: str,
+    agent: Dict[str, Any],
+    target_id: str,
+    state: Dict[str, Any],
+    world_turn: int,
+    *,
+    max_turn_delta: int = 1_000_000,
+) -> bool:
+    """True when agent recently engaged target in combat according to memory or state."""
+    target_id_s = str(target_id)
+    for rec in _v3_records_desc(agent):
+        rec_turn = _v3_turn(rec)
+        if world_turn - rec_turn > max_turn_delta:
+            break
+        action_kind = _v3_action_kind(rec)
+        details = _v3_details(rec)
+        rec_target = str(details.get("target_id") or details.get("target") or "")
+        if action_kind in {"combat_initiated", "combat_shoot", "hunt_target_killed", "target_death_confirmed"} and rec_target == target_id_s:
+            return True
+
+    for combat in (state.get("combat_interactions") or {}).values():
+        if not isinstance(combat, dict):
+            continue
+        participants = combat.get("participants")
+        if not isinstance(participants, dict):
+            continue
+        if agent_id not in participants or target_id_s not in participants:
+            continue
+        ended_turn = combat.get("ended_turn")
+        started_turn = combat.get("started_turn")
+        if isinstance(ended_turn, (int, float)) and world_turn - int(ended_turn) <= max_turn_delta:
+            return True
+        if isinstance(started_turn, (int, float)) and world_turn - int(started_turn) <= max_turn_delta:
+            return True
+        if not combat.get("ended"):
+            return True
+    return False
+
+
+def _mark_kill_stalker_goal_achieved(
+    agent_id: str,
+    agent: Dict[str, Any],
+    state: Dict[str, Any],
+    world_turn: int,
+    target_id: str,
+    *,
+    confirmation_source: str,
+) -> None:
+    """Idempotently mark kill_stalker goal achieved and cleanup stale hunt runtime."""
+    if bool(agent.get("global_goal_achieved")):
+        return
+
+    target_agent = state.get("agents", {}).get(target_id, {})
+    target_name = target_agent.get("name", target_id) if isinstance(target_agent, dict) else target_id
+
+    agent["global_goal_achieved"] = True
+    goal_summary = f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!"
+    goal_common = {
+        "goal": "kill_stalker",
+        "global_goal": "kill_stalker",
+        "target_id": target_id,
+        "confirmation_source": confirmation_source,
+    }
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "observation",
+        f"⚔️ Цель достигнута: «{target_name}» устранён!",
+        {
+            "action_kind": "goal_achieved",
+            **goal_common,
+            "legacy_action_kind": "global_goal_completed",
+        },
+        summary=goal_summary,
+    )
+    _add_memory(
+        agent,
+        world_turn,
+        state,
+        "observation",
+        f"⚔️ Цель достигнута: «{target_name}» устранён!",
+        {
+            "action_kind": "global_goal_completed",
+            **goal_common,
+        },
+        summary=goal_summary,
+    )
+
+    active_plan = get_active_plan(agent)
+    if active_plan is not None and str(getattr(active_plan, "objective_key", "")) != "LEAVE_ZONE":
+        active_plan.abort("goal_achieved", world_turn)
+        save_active_plan(agent, active_plan)
+        clear_active_plan(agent)
+        sched = agent.get("scheduled_action")
+        if isinstance(sched, dict) and sched.get("active_plan_id") == active_plan.id:
+            agent["scheduled_action"] = None
+            agent["action_queue"] = []
+
+    invalidate_brain(
+        agent,
+        _cow_runtime(),
+        reason="global_goal_achieved",
+        priority="urgent",
+        world_turn=world_turn,
+    )
+
+
 def _check_global_goal_completion(
     agent_id: str,
     agent: Dict[str, Any],
@@ -6729,46 +6872,68 @@ def _check_global_goal_completion(
                 summary="Я нашёл секретный документ и раскрыл тайну Зоны. Пора покидать!",
             )
     elif global_goal == "kill_stalker":
-        target_id = agent.get("kill_target_id")
+        target_id = str(agent.get("kill_target_id") or "")
         if target_id:
-            target_agent = state.get("agents", {}).get(target_id, {})
-            _confirmed_record = next(
-                (
-                    rec for rec in _v3_records_desc(agent)
-                    if _v3_action_kind(rec) == "target_death_confirmed"
-                    and str(_v3_details(rec).get("target_id") or "") == str(target_id)
-                    and bool(_v3_details(rec).get("directly_observed")) is True
-                ),
-                None,
+            target_agent = state.get("agents", {}).get(target_id)
+            target_dead_in_state = (
+                isinstance(target_agent, dict)
+                and not bool(target_agent.get("is_alive", True))
             )
-            if _confirmed_record is not None:
-                agent["global_goal_achieved"] = True
-                target_name = target_agent.get("name", target_id) if target_agent else target_id
-                _goal_summary = f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!"
-                _goal_common = {
-                    "goal": "kill_stalker",
-                    "global_goal": "kill_stalker",
-                    "target_id": target_id,
-                }
+            if not target_dead_in_state:
+                return
+
+            direct_confirmation_exists = _kill_stalker_has_direct_confirmation(agent, target_id)
+            personal_kill_exists = _kill_stalker_has_personal_evidence(agent, target_id)
+            recently_engaged_this_target = _recent_combat_with_target(
+                agent_id,
+                agent,
+                target_id,
+                state,
+                world_turn,
+            )
+            if not (direct_confirmation_exists or personal_kill_exists or recently_engaged_this_target):
+                return
+
+            if direct_confirmation_exists:
+                source = "direct_confirmation"
+            elif personal_kill_exists:
+                source = "personal_kill_evidence"
+            else:
+                source = "state_confirmed_after_recent_combat"
+
+            has_target_death_confirmation = any(
+                _v3_action_kind(rec) == "target_death_confirmed"
+                and str(_v3_details(rec).get("target_id") or "") == target_id
+                for rec in _v3_records_desc(agent)
+            )
+            if not has_target_death_confirmation:
+                target_name = target_agent.get("name", target_id) if isinstance(target_agent, dict) else target_id
                 _add_memory(
-                    agent, world_turn, state, "observation",
-                    f"⚔️ Цель достигнута: «{target_name}» устранён!",
+                    agent,
+                    world_turn,
+                    state,
+                    "observation",
+                    f"✅ Подтверждена ликвидация цели «{target_name}»",
                     {
-                        "action_kind": "goal_achieved",
-                        **_goal_common,
-                        "legacy_action_kind": "global_goal_completed",
+                        "action_kind": "target_death_confirmed",
+                        "target_id": target_id,
+                        "target_name": target_name,
+                        "confirmation_source": source,
+                        "directly_observed": False,
+                        "corpse_location_id": str((target_agent or {}).get("location_id") or ""),
+                        "location_id": str(agent.get("location_id") or ""),
                     },
-                    summary=_goal_summary,
+                    summary=f"Смерть цели «{target_name}» подтверждена по состоянию мира и боевым данным.",
                 )
-                _add_memory(
-                    agent, world_turn, state, "observation",
-                    f"⚔️ Цель достигнута: «{target_name}» устранён!",
-                    {
-                        "action_kind": "global_goal_completed",
-                        **_goal_common,
-                    },
-                    summary=_goal_summary,
-                )
+
+            _mark_kill_stalker_goal_achieved(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                target_id,
+                confirmation_source=source,
+            )
 
 
 

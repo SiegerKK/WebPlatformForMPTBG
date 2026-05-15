@@ -1643,7 +1643,11 @@ def _exec_confirm_kill(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
-    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+    from app.games.zone_stalkers.rules.tick_rules import (
+        _add_memory,
+        _mark_kill_stalker_goal_achieved,
+        _recent_combat_with_target,
+    )
 
     target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
     if not target_id:
@@ -1652,9 +1656,21 @@ def _exec_confirm_kill(
 
     target = state.get("agents", {}).get(target_id)
     target_name = target.get("name", target_id) if isinstance(target, dict) else target_id
+
+    def _has_personal_kill_evidence() -> bool:
+        for rec in _v3r_ex(agent):
+            fx = _v3fx_ex(rec)
+            if str(fx.get("target_id") or fx.get("target") or "") != target_id:
+                continue
+            if _v3ak_ex(rec) in {"target_death_confirmed", "hunt_target_killed"}:
+                return True
+        return False
+
     if isinstance(target, dict) and not target.get("is_alive", True):
         current_loc = str(agent.get("location_id") or "")
+
         corpse: dict[str, Any] | None = None
+        corpse_loc_id: str | None = None
         for raw_corpse in (state.get("locations", {}).get(current_loc, {}).get("corpses") or []):
             if (
                 isinstance(raw_corpse, dict)
@@ -1662,9 +1678,35 @@ def _exec_confirm_kill(
                 and str(raw_corpse.get("agent_id") or "") == target_id
             ):
                 corpse = raw_corpse
+                corpse_loc_id = current_loc
                 break
 
-        direct_confirmation = bool(corpse)
+        if corpse is None:
+            for loc_id, loc in (state.get("locations", {}) or {}).items():
+                if not isinstance(loc, dict):
+                    continue
+                for raw_corpse in (loc.get("corpses") or []):
+                    if (
+                        isinstance(raw_corpse, dict)
+                        and bool(raw_corpse.get("visible", True))
+                        and str(raw_corpse.get("agent_id") or "") == target_id
+                    ):
+                        corpse = raw_corpse
+                        corpse_loc_id = str(loc_id)
+                        break
+                if corpse is not None:
+                    break
+
+        direct_confirmation = bool(corpse) and str(corpse_loc_id or "") == current_loc
+        has_personal_evidence = _has_personal_kill_evidence()
+        recently_engaged = _recent_combat_with_target(
+            agent_id,
+            agent,
+            target_id,
+            state,
+            world_turn,
+        )
+
         if direct_confirmation:
             _add_memory(
                 agent,
@@ -1686,6 +1728,49 @@ def _exec_confirm_kill(
                 },
                 summary=f"Лично подтвердил смерть цели «{target_name}» по телу.",
             )
+            _mark_kill_stalker_goal_achieved(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                target_id,
+                confirmation_source="self_observed_body",
+            )
+        elif corpse is not None and (has_personal_evidence or recently_engaged):
+            observed_here = str(corpse_loc_id or "") == current_loc
+            confirmation_source = "combat_result_state" if observed_here else "state_confirmed_after_personal_combat"
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                f"✅ Подтверждена ликвидация цели «{target_name}»",
+                {
+                    "action_kind": "target_death_confirmed",
+                    "target_id": target_id,
+                    "target_name": target_name,
+                    "confirmation_source": confirmation_source,
+                    "directly_observed": observed_here,
+                    "corpse_id": (corpse or {}).get("corpse_id"),
+                    "corpse_location_id": str(corpse_loc_id or ""),
+                    "target_death_cause": (corpse or {}).get("death_cause") or target.get("death_cause"),
+                    "killer_id": (corpse or {}).get("killer_id"),
+                    "location_id": current_loc,
+                },
+                summary=(
+                    f"Подтвердил смерть цели «{target_name}» по результатам боя."
+                    if observed_here
+                    else f"Подтвердил смерть цели «{target_name}» по итогам боя и обнаружению тела в другой локации."
+                ),
+            )
+            _mark_kill_stalker_goal_achieved(
+                agent_id,
+                agent,
+                state,
+                world_turn,
+                target_id,
+                confirmation_source=confirmation_source,
+            )
         else:
             _add_memory(
                 agent,
@@ -1698,7 +1783,7 @@ def _exec_confirm_kill(
                     "target_id": target_id,
                     "reason": "no_direct_confirmation",
                 },
-                summary="Цель мертва, но без прямого подтверждения на месте.",
+                summary="Цель мертва, но без подтверждения личным боевым контекстом.",
             )
     else:
         _add_memory(
@@ -1726,6 +1811,8 @@ def _exec_monitor_combat(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
+    from app.games.zone_stalkers.rules.tick_rules import _add_memory
+
     target_id = str(step.payload.get("target_id") or agent.get("kill_target_id") or "")
     if not target_id:
         step.payload["_monitor_complete"] = True
@@ -1748,7 +1835,30 @@ def _exec_monitor_combat(
             combat_active = True
             break
 
-    step.payload["_monitor_complete"] = (not combat_active) or (not target_alive)
+    monitor_complete = (not combat_active) or (not target_alive)
+    step.payload["_monitor_complete"] = monitor_complete
+
+    if monitor_complete and target_alive and not combat_active:
+        recent_same = any(
+            _v3ak_ex(rec) == "combat_ended_without_kill"
+            and str(_v3fx_ex(rec).get("target_id") or "") == target_id
+            and int(rec.get("created_turn") or 0) >= world_turn - 1
+            for rec in _v3r_ex(agent)
+        )
+        if not recent_same:
+            _add_memory(
+                agent,
+                world_turn,
+                state,
+                "observation",
+                "⚠️ Бой завершён без ликвидации цели",
+                {
+                    "action_kind": "combat_ended_without_kill",
+                    "target_id": target_id,
+                },
+                summary="Бой завершился, но цель осталась жива или ушла — требуется перепланирование.",
+            )
+
     agent["action_used"] = True
     return []
 

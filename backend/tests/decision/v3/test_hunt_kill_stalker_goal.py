@@ -730,6 +730,7 @@ class TestHuntExecutors:
             _exec_search_target,
             _exec_start_combat,
             _exec_confirm_kill,
+            _exec_monitor_combat,
         )
         from app.games.zone_stalkers.decision.models.plan import PlanStep
         step = PlanStep(kind=step_kind, payload=payload)
@@ -738,6 +739,7 @@ class TestHuntExecutors:
             STEP_SEARCH_TARGET: _exec_search_target,
             STEP_START_COMBAT: _exec_start_combat,
             STEP_CONFIRM_KILL: _exec_confirm_kill,
+            STEP_MONITOR_COMBAT: _exec_monitor_combat,
         }
         return dispatch[step_kind](agent_id, agent, step, ctx, state, state["world_turn"])
 
@@ -911,6 +913,30 @@ class TestHuntExecutors:
         memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
         assert "hunt_failed" in memory_kinds
 
+    def test_monitor_combat_end_without_kill_writes_replan_marker(self) -> None:
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
+        state = _make_state_with_target(agent=agent, target_location_id="loc_b", target_alive=True)
+        state["combat_interactions"] = {
+            "combat_1": {
+                "id": "combat_1",
+                "location_id": "loc_a",
+                "ended": True,
+                "ended_turn": state["world_turn"],
+                "participants": {
+                    "bot1": {"enemies": ["target_1"], "fled": False},
+                    "target_1": {"enemies": ["bot1"], "fled": True},
+                },
+            }
+        }
+        self._run_executor(
+            STEP_MONITOR_COMBAT,
+            {"target_id": "target_1"},
+            agent,
+            state,
+        )
+        memory_kinds = [_v3_ak(r) for r in _v3r(agent)]
+        assert "combat_ended_without_kill" in memory_kinds
+
     def test_search_target_found_writes_combat_strength_memory(self) -> None:
         agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1", location_id="loc_a")
         state = _make_state_with_target(agent=agent, target_location_id="loc_a", target_hp=60)
@@ -940,6 +966,27 @@ class TestKillStalkerGoalCompletion:
         state = _make_state_with_target(agent=agent, target_alive=False)
         _check_global_goal_completion("bot1", agent, state, state["world_turn"])
         assert agent.get("global_goal_achieved") is not True
+
+    def test_kill_target_with_personal_evidence_sets_goal_achieved_without_direct_observation(self) -> None:
+        from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion, _add_memory
+
+        agent = make_agent(global_goal="kill_stalker", kill_target_id="target_1")
+        state = _make_state_with_target(agent=agent, target_alive=False)
+        _add_memory(
+            agent,
+            state["world_turn"],
+            state,
+            "observation",
+            "🎯 Цель ликвидирована",
+            {
+                "action_kind": "hunt_target_killed",
+                "target_id": "target_1",
+                "combat_id": "combat_42",
+            },
+            summary="Я ликвидировал цель в бою.",
+        )
+        _check_global_goal_completion("bot1", agent, state, state["world_turn"])
+        assert agent.get("global_goal_achieved") is True
 
     def test_target_death_confirmed_sets_kill_goal_achieved(self) -> None:
         from app.games.zone_stalkers.rules.tick_rules import _check_global_goal_completion, _add_memory

@@ -16,6 +16,7 @@ from app.games.zone_stalkers.needs.lazy_needs import (
     _CRITICAL_SLEEPINESS_THRESHOLD,
 )
 from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain
+from app.games.zone_stalkers.rules.agent_lifecycle import kill_agent
 from app.games.zone_stalkers.rules.tick_constants import (
     CRITICAL_HUNGER_THRESHOLD,
     CRITICAL_THIRST_THRESHOLD,
@@ -295,6 +296,21 @@ def _handle_need_damage(
 
     # Re-fetch agent for updated HP
     agent = _get_agent(state, runtime, agent_id) or agent
+    if agent.get("is_alive", True) and int(agent.get("hp", 0)) <= 0:
+        death_events: list[dict[str, Any]] = []
+        cause = "dehydration" if need_key == "thirst" else "starvation"
+        kill_agent(
+            agent_id=agent_id,
+            agent=agent,
+            state=state,
+            world_turn=world_turn,
+            cause=cause,
+            location_id=str(agent.get("location_id") or ""),
+            events=death_events,
+        )
+        events.extend(death_events)
+        return events
+
     if agent.get("is_alive", True) and int(agent.get("hp", 0)) > 0:
         schedule_task(
             state,

@@ -928,6 +928,28 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             ),
         )
 
+        # Once the global objective is complete, exiting the Zone must dominate.
+        # Keep LEAVE_ZONE plus only truly critical survival blockers.
+        _allow_keys = {
+            OBJECTIVE_LEAVE_ZONE,
+            OBJECTIVE_ESCAPE_DANGER,
+            OBJECTIVE_REACH_SAFE_SHELTER,
+            OBJECTIVE_WAIT_IN_SHELTER,
+        }
+        _critical_survival = {
+            OBJECTIVE_HEAL_SELF,
+            OBJECTIVE_RESTORE_WATER,
+            OBJECTIVE_RESTORE_FOOD,
+            OBJECTIVE_REST,
+        }
+        result[:] = [
+            obj
+            for obj in result
+            if obj.key in _allow_keys
+            or (obj.key in _critical_survival and float(obj.urgency) >= 0.95)
+        ]
+        return result
+
     global_goal = str(agent.get("global_goal") or "get_rich")
     global_key = OBJECTIVE_LEAVE_ZONE if agent.get("global_goal_achieved") else _global_goal_objective(global_goal)
     global_refs, global_memory_conf = _objective_memory_refs_and_confidence(ctx, global_key)
