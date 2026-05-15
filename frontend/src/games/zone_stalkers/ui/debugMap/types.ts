@@ -236,7 +236,19 @@ export function getPrimaryLocationImageUrlV2(loc: ZoneLocation): string | null {
     if (fallback) return fallback;
   }
 
-  return loc.image_url ?? null;
+  // Only use image_url as a legacy fallback when no v2 schema has ever been written
+  // to this location. Once image_slots_v2 exists, image_url is derived output only
+  // and must not be used as a source of truth (it may be stale after a delete).
+  const hasExplicitV2Schema = Boolean(loc.image_slots_v2);
+  const hasAnyV2Image = LOCATION_IMAGE_GROUPS.some((group) => {
+    const groupSlots = loc.image_slots_v2?.[group];
+    return groupSlots != null && Object.values(groupSlots).some(Boolean);
+  });
+  if (!hasExplicitV2Schema && !hasAnyV2Image) {
+    return loc.image_url ?? null;
+  }
+
+  return null;
 }
 
 /**

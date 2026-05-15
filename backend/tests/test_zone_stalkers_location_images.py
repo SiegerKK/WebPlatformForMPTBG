@@ -915,3 +915,107 @@ def test_projection_and_delta_include_image_v2_fields():
     delta = build_zone_delta(old_state=state, new_state=new_state, events=[], mode="game")
     assert "L1" in delta["changes"]["locations"]
     assert "primary_image_ref" in delta["changes"]["locations"]["L1"]
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: image_url must not resurrect deleted v2 slots
+# ---------------------------------------------------------------------------
+
+def test_delete_last_v2_image_does_not_resurrect_image_url_into_normal_clear():
+    """After deleting the last v2 slot, sync must not re-inject stale image_url."""
+    from app.games.zone_stalkers.location_images import sync_location_primary_image_url_v2
+
+    loc = {
+        "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+        "image_slots_v2": {
+            "normal": {
+                "clear": None,
+                "fog": None,
+                "rain": "/media/locations/ctx/loc/normal/rain/img.webp",
+                "night_clear": None,
+                "night_rain": None,
+            },
+            "gloom": {},
+            "anomaly": {},
+            "psi": {},
+            "underground": {},
+        },
+        "primary_image_ref": {"group": "normal", "slot": "rain"},
+        "image_url": "/media/locations/ctx/loc/normal/rain/img.webp",
+        "image_slots": {"clear": None, "fog": None, "rain": "/media/locations/ctx/loc/normal/rain/img.webp", "night_clear": None, "night_rain": None},
+        "primary_image_slot": "rain",
+    }
+
+    # Simulate what delete_location_image handler does for a group+slot delete:
+    # clears v2 slot, legacy slot, primary_image_slot, and primary_image_ref.
+    loc["image_slots_v2"]["normal"]["rain"] = None
+    loc["image_slots"]["rain"] = None
+    loc["primary_image_slot"] = None
+    loc["primary_image_ref"] = None
+
+    sync_location_primary_image_url_v2(loc)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] is None, "normal.clear must not be re-populated from stale image_url"
+    assert loc["image_slots_v2"]["normal"]["rain"] is None
+    assert loc["primary_image_ref"] is None
+    assert loc["image_url"] is None
+    assert loc["image_slots"]["clear"] is None
+    assert loc["image_slots"]["rain"] is None
+    assert loc["primary_image_slot"] is None
+
+
+def test_delete_rain_image_does_not_move_deleted_url_to_clear():
+    """Deleting normal.rain must not cause the URL to appear in normal.clear."""
+    from app.games.zone_stalkers.location_images import sync_location_primary_image_url_v2
+
+    loc = {
+        "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+        "image_slots_v2": {
+            "normal": {
+                "clear": None,
+                "fog": None,
+                "rain": "/media/loc/rain.webp",
+                "night_clear": None,
+                "night_rain": None,
+            },
+        },
+        "primary_image_ref": {"group": "normal", "slot": "rain"},
+        "image_url": "/media/loc/rain.webp",
+        "image_slots": {"clear": None, "fog": None, "rain": "/media/loc/rain.webp", "night_clear": None, "night_rain": None},
+        "primary_image_slot": "rain",
+    }
+
+    # Simulate delete_location_image handler for normal.rain:
+    loc["image_slots_v2"]["normal"]["rain"] = None
+    loc["image_slots"]["rain"] = None
+    loc["primary_image_slot"] = None
+    loc["primary_image_ref"] = None
+
+    sync_location_primary_image_url_v2(loc)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] is None, "deleted URL must not migrate to normal.clear"
+    assert loc["image_url"] is None
+
+
+def test_legacy_image_url_migrates_only_when_no_v2_schema_exists():
+    """A truly legacy location (no image_slots_v2) should still migrate image_url to normal.clear."""
+    from app.games.zone_stalkers.location_images import migrate_location_images_v2
+
+    loc = {"image_url": "/media/legacy.webp"}
+    migrate_location_images_v2(loc, allow_legacy_image_url_import=True)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] == "/media/legacy.webp"
+    assert loc["primary_image_ref"] == {"group": "normal", "slot": "clear"}
+
+
+def test_explicit_empty_v2_schema_does_not_import_stale_image_url():
+    """A v2-aware location with an empty schema must not import stale image_url."""
+    from app.games.zone_stalkers.location_images import migrate_location_images_v2
+
+    loc = {
+        "image_slots_v2": {"normal": {"clear": None}},
+        "image_url": "/media/stale.webp",
+    }
+    migrate_location_images_v2(loc, allow_legacy_image_url_import=False)
+
+    assert loc["image_slots_v2"]["normal"]["clear"] is None, "stale image_url must not fill clear when allow_legacy_image_url_import=False"

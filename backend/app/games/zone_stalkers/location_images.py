@@ -162,7 +162,12 @@ def get_fallback_image_refs(loc: dict[str, Any]) -> list[tuple[str, str]]:
     return refs
 
 
-def _migrate_legacy_to_v2(loc: dict[str, Any]) -> None:
+def _migrate_legacy_to_v2(
+    loc: dict[str, Any],
+    *,
+    allow_legacy_image_url_import: bool,
+    has_explicit_v2_schema: bool,
+) -> None:
     slots_v2 = loc.get("image_slots_v2")
     if not isinstance(slots_v2, dict):
         slots_v2 = {}
@@ -182,13 +187,19 @@ def _migrate_legacy_to_v2(loc: dict[str, Any]) -> None:
         if not isinstance(existing_ref, dict) or existing_ref.get("group") == "normal":
             loc["primary_image_ref"] = {"group": "normal", "slot": old_primary}
 
-    legacy_url = loc.get("image_url")
-    if isinstance(legacy_url, str) and legacy_url and not any_image_in_slots_v2(slots_v2):
-        normal = _get_group_slots_dict(slots_v2, "normal")
-        if not normal.get("clear"):
-            normal["clear"] = legacy_url
-        if not isinstance(loc.get("primary_image_ref"), dict):
-            loc["primary_image_ref"] = {"group": "normal", "slot": "clear"}
+    # Import image_url → normal.clear only for truly legacy locations:
+    # • allow_legacy_image_url_import must be True (caller can disable it explicitly), AND
+    # • the location must NOT have had an explicit v2 schema before this migration
+    #   (presence of any canonical group key in image_slots_v2 means v2-aware; once a
+    #   location is v2-aware, image_url is derived output only and must not be re-injected).
+    if allow_legacy_image_url_import and not has_explicit_v2_schema:
+        legacy_url = loc.get("image_url")
+        if isinstance(legacy_url, str) and legacy_url and not any_image_in_slots_v2(slots_v2):
+            normal = _get_group_slots_dict(slots_v2, "normal")
+            if not normal.get("clear"):
+                normal["clear"] = legacy_url
+            if not isinstance(loc.get("primary_image_ref"), dict):
+                loc["primary_image_ref"] = {"group": "normal", "slot": "clear"}
 
 
 def _sync_legacy_from_v2(loc: dict[str, Any]) -> None:
@@ -239,8 +250,14 @@ def get_location_primary_image_url(loc: dict[str, Any]) -> str | None:
     if any_image_in_slots_v2(slots_v2):
         return None
 
-    # Legacy-only migration fallback: allow image_url only when v2 had no values.
-    if isinstance(pre_migrate_legacy_url, str) and pre_migrate_legacy_url and not any_image_in_slots_v2(pre_migrate_slots_v2):
+    # Legacy-only migration fallback: allow image_url only for truly legacy locations
+    # that had no v2 schema at all before this call. If pre_migrate_slots_v2 is a dict
+    # (even one with all-null slots), the location is v2-aware and image_url is stale.
+    if (
+        isinstance(pre_migrate_legacy_url, str)
+        and pre_migrate_legacy_url
+        and pre_migrate_slots_v2 is None
+    ):
         return pre_migrate_legacy_url
     return None
 
@@ -251,9 +268,25 @@ def sync_location_primary_image_url_v2(loc: dict[str, Any]) -> None:
     _sync_legacy_from_v2(loc)
 
 
-def migrate_location_images_v2(loc: dict[str, Any]) -> None:
+def migrate_location_images_v2(
+    loc: dict[str, Any],
+    *,
+    allow_legacy_image_url_import: bool = True,
+) -> None:
+    # Snapshot whether the location already has an explicit v2 schema BEFORE
+    # ensure_image_slots_v2_skeleton adds the canonical groups.  A dict that
+    # contains at least one canonical group key means the location is v2-aware
+    # and image_url must not be re-injected into slots.
+    raw_slots_v2 = loc.get("image_slots_v2")
+    has_explicit_v2_schema = isinstance(raw_slots_v2, dict) and any(
+        group in raw_slots_v2 for group in LOCATION_IMAGE_GROUPS
+    )
     ensure_image_slots_v2_skeleton(loc)
-    _migrate_legacy_to_v2(loc)
+    _migrate_legacy_to_v2(
+        loc,
+        allow_legacy_image_url_import=allow_legacy_image_url_import,
+        has_explicit_v2_schema=has_explicit_v2_schema,
+    )
 
     ref = loc.get("primary_image_ref")
     if not isinstance(ref, dict):
