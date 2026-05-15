@@ -423,13 +423,25 @@ def _exec_trade_buy(
             location_id=agent_loc,
         )]
 
-    # Bug fix: defensive guard — never buy equipment the agent already has equipped.
-    # These return [] (not a failure event) because the step is considered "done".
+    # Defensive guard: never buy equipment the agent already has equipped.
+    # Emit an explicit skipped-success event so active-plan runtime can advance.
     eq = agent.get("equipment", {})
     if category in ("weapon", "equipment") and eq.get("weapon") is not None:
-        return []   # already armed — step is a no-op, not a failure
+        return [_make_trade_buy_skipped_event(
+            agent_id=agent_id,
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+            reason="already_equipped",
+        )]
     if category == "armor" and eq.get("armor") is not None:
-        return []   # already armoured — step is a no-op, not a failure
+        return [_make_trade_buy_skipped_event(
+            agent_id=agent_id,
+            item_category=category,
+            buy_mode=buy_mode,
+            location_id=agent_loc,
+            reason="already_equipped",
+        )]
 
     if category == "ammo":
         # Only buy ammo that is compatible with the agent's equipped weapon.
@@ -592,7 +604,7 @@ def _trade_buy_succeeded(events: list[dict[str, Any]]) -> bool:
         if not isinstance(ev, dict):
             continue
         et = str(ev.get("event_type") or "")
-        if et in {"bot_bought_item", "item_bought", "trade_buy", "item_equipped"}:
+        if et in {"bot_bought_item", "item_bought", "trade_buy", "item_equipped", "trade_buy_skipped"}:
             return True
         # Legacy payload-based check
         payload = ev.get("payload") or ev
@@ -601,6 +613,26 @@ def _trade_buy_succeeded(events: list[dict[str, Any]]) -> bool:
         if isinstance(payload, dict) and int(payload.get("money_spent") or 0) > 0:
             return True
     return False
+
+
+def _make_trade_buy_skipped_event(
+    *,
+    agent_id: str,
+    item_category: str,
+    buy_mode: str | None,
+    location_id: str,
+    reason: str = "already_equipped",
+) -> dict[str, Any]:
+    return {
+        "event_type": "trade_buy_skipped",
+        "payload": {
+            "agent_id": agent_id,
+            "reason": reason,
+            "item_category": item_category,
+            "buy_mode": buy_mode,
+            "location_id": location_id,
+        },
+    }
 
 
 def _make_trade_buy_failed_event(

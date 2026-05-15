@@ -411,6 +411,14 @@ class TestTradeBuyFailureSemantics:
     def test_trade_buy_succeeded_true_for_bot_bought_item(self):
         assert _trade_buy_succeeded([{"event_type": "bot_bought_item"}]) is True
 
+    def test_trade_buy_succeeded_true_for_trade_buy_skipped(self):
+        assert _trade_buy_succeeded([
+            {
+                "event_type": "trade_buy_skipped",
+                "payload": {"reason": "already_equipped", "item_category": "weapon"},
+            }
+        ]) is True
+
     def test_trade_buy_failed_does_not_advance_active_plan(self):
         """When _exec_trade_buy returns only trade_buy_failed, plan must NOT advance."""
         agent = make_agent(agent_id="a1", money=0)
@@ -434,6 +442,29 @@ class TestTradeBuyFailureSemantics:
             f"Plan must not advance when buy fails; index: {plan_obj.current_step_index}"
         )
         assert plan_obj.steps[0].payload.get("_trade_buy_failed") is True
+
+    def test_already_equipped_weapon_buy_step_advances_with_skipped_event(self):
+        agent = make_agent(agent_id="a1", money=5000)
+        state = make_minimal_state(agent_id="a1", agent=agent)
+        ctx = build_agent_context("a1", agent, state)
+
+        plan_obj = Plan(
+            intent_kind=INTENT_RESUPPLY,
+            steps=[
+                PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": "weapon"}, interruptible=False),
+                PlanStep(STEP_TRAVEL_TO_LOCATION, {"target_id": "loc_b"}, interruptible=True),
+            ],
+            confidence=0.8,
+            created_turn=5000,
+        )
+
+        events = execute_plan_step(ctx, plan_obj, state, world_turn=5000)
+
+        assert any(
+            isinstance(event, dict) and event.get("event_type") == "trade_buy_skipped"
+            for event in events
+        )
+        assert plan_obj.current_step_index == 1
 
     def test_exec_trade_buy_min_weapon_class_no_affordable_rifle_returns_failure_event(self):
         """No affordable rifle → trade_buy_failed event returned, not empty list."""
