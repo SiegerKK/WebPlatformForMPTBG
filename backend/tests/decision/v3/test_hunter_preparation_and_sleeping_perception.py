@@ -78,7 +78,9 @@ def _make_killer(location_id="loc_a", hp=85, money=0, sleepiness=0, hunger=0, th
         thirst=thirst, global_goal="kill_stalker", kill_target_id="target_0",
         location_id=location_id, has_weapon=True, has_armor=True, has_ammo=True,
     )
-    agent["equipment"]["weapon"] = {"type": weapon_type, "value": 300}
+    # Map weapon class names to canonical item types so generators resolve correctly
+    _WEAPON_CLASS_TO_ITEM = {"rifle": "ak74", "sniper": "svu_svd", "shotgun": "shotgun", "pistol": "pistol"}
+    agent["equipment"]["weapon"] = {"type": _WEAPON_CLASS_TO_ITEM.get(weapon_type, weapon_type), "value": 300}
     if sleeping:
         agent["scheduled_action"] = {"type": "sleep", "hours": 8, "started_turn": 4990}
     if debt > 0:
@@ -95,8 +97,8 @@ def _make_target(location_id="loc_b", hp=100):
         "name": "Target",
         "id": "target_0",
         "equipment": {
-            "weapon": {"type": "rifle", "value": 800},
-            "armor": {"type": "medium_armor", "value": 600},
+            "weapon": {"type": "ak74", "value": 800},
+            "armor": {"type": "stalker_suit", "value": 600},
         },
     }
 

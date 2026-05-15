@@ -238,7 +238,7 @@ def test_kill_target_e2e_with_event_driven_actions_and_lazy_needs():
         state,
         lambda s, _events: (
             bool(s["agents"]["hunter"].get("scheduled_action"))
-            or bool(s.get("combat_interactions"))
+            or bool(s.get("combat_interactions") and len(s.get("combat_interactions", {})) > 0)
             or any_memory(s["agents"]["hunter"], "target_death_confirmed")
             or not s["agents"]["target"].get("is_alive", True)
         ),
@@ -248,7 +248,7 @@ def test_kill_target_e2e_with_event_driven_actions_and_lazy_needs():
 
     hunter = state["agents"]["hunter"]
     target = state["agents"]["target"]
-    has_combat = bool(state.get("combat_interactions"))
+    has_combat = bool(state.get("combat_interactions") and len(state.get("combat_interactions", {})) > 0)
     has_runtime_progress = (
         has_combat
         or isinstance(hunter.get("scheduled_action"), dict)

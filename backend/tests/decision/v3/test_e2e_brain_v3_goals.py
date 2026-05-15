@@ -502,7 +502,7 @@ def test_e2e_kill_stalker_target_moved_repairs_tracking_plan() -> None:
     assert any_objective_decision(hunter, "LEAVE_ZONE")
     assert hunter.get("has_left_zone") is True
 
-def test_e2e_kill_stalker_unknown_target_uses_intel_then_hunts() -> None:
+def test_e2e_kill_stalker_unknown_target_uses_intel_then_tracks_and_confirms() -> None:
     locations = {
         "loc_spawn": {
             "name": "Spawn",

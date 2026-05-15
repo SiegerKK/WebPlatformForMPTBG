@@ -24,6 +24,10 @@ from app.games.zone_stalkers.economy.debts import (
     DEBT_REPAYMENT_KEEP_SURVIVAL_RESERVE,
     DEBT_REPAYMENT_KEEP_TRAVEL_RESERVE,
 )
+from app.games.zone_stalkers.balance.items import (
+    weapon_class_for_item_type,
+    armor_class_for_item_type,
+)
 
 
 OBJECTIVE_RESTORE_WATER = "RESTORE_WATER"
@@ -252,12 +256,13 @@ def _get_weapon_class(agent: dict[str, Any]) -> str:
     equipment = agent.get("equipment") if isinstance(agent.get("equipment"), dict) else {}
     weapon = equipment.get("weapon")
     if isinstance(weapon, dict):
-        wtype = str(weapon.get("type") or weapon.get("weapon_class") or "")
-        for wc in WEAPON_CLASS_RANK:
-            if wc != "none" and wc in wtype:
-                return wc
-        if wtype:
-            return "pistol"  # default non-melee if something equipped
+        wtype = str(weapon.get("type") or "")
+        mapped = weapon_class_for_item_type(wtype)
+        if mapped != "none":
+            return mapped
+        explicit = str(weapon.get("weapon_class") or "")
+        if explicit in WEAPON_CLASS_RANK:
+            return explicit
     return "none"
 
 
@@ -266,12 +271,13 @@ def _get_armor_class(agent: dict[str, Any]) -> str:
     equipment = agent.get("equipment") if isinstance(agent.get("equipment"), dict) else {}
     armor = equipment.get("armor")
     if isinstance(armor, dict):
-        atype = str(armor.get("type") or armor.get("armor_class") or armor.get("protection_class") or "")
-        for ac in ARMOR_CLASS_RANK:
-            if ac not in {"none", "unknown"} and ac in atype:
-                return ac
-        if atype:
-            return "light"  # default if something equipped
+        atype = str(armor.get("type") or "")
+        mapped = armor_class_for_item_type(atype)
+        if mapped != "none":
+            return mapped
+        explicit = str(armor.get("armor_class") or armor.get("protection_class") or "")
+        if explicit in ARMOR_CLASS_RANK:
+            return explicit
     return "none"
 
 
