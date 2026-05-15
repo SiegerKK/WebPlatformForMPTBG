@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.games.zone_stalkers.decision.context_builder import build_agent_context
 from app.games.zone_stalkers.decision.executors import _trade_buy_succeeded, execute_plan_step
+from app.games.zone_stalkers.decision.models.intent import Intent
 from app.games.zone_stalkers.decision.models.plan import (
     Plan,
     PlanStep,
@@ -12,6 +13,8 @@ from app.games.zone_stalkers.decision.models.plan import (
 from app.games.zone_stalkers.decision.active_plan_manager import create_active_plan, get_active_plan, save_active_plan
 from app.games.zone_stalkers.decision.active_plan_runtime import process_active_plan_v3, start_or_continue_active_plan_step
 from app.games.zone_stalkers.decision.models.objective import Objective, ObjectiveDecision, ObjectiveScore
+from app.games.zone_stalkers.decision.needs import evaluate_need_result
+from app.games.zone_stalkers.decision.planner import _plan_heal_or_flee
 from app.games.zone_stalkers.balance.items import ITEM_TYPES
 from app.games.zone_stalkers.economy.debts import advance_survival_credit
 from tests.decision.conftest import make_agent, make_state_with_trader
@@ -85,7 +88,7 @@ def test_request_loan_autocorrects_too_small_medical_amount_to_required_price() 
     assert credit_events[0]["payload"]["amount"] == bandage_price
     assert credit_events[0]["payload"]["principal_needed"] == bandage_price
     assert credit_events[0]["payload"]["required_price"] == bandage_price
-    assert credit_events[0]["payload"]["expected_item_type"] == ""
+    assert credit_events[0]["payload"]["expected_item_type"] == "bandage"
     assert int(agent.get("money") or 0) == bandage_price
     assert plan.steps[0].payload["amount"] == bandage_price
     assert plan.steps[0].payload["amount_corrected_to_required_price"] is True
@@ -375,7 +378,40 @@ def test_tiny_medical_loan_payload_does_not_create_tiny_credit() -> None:
     assert len(credit_events) == 1
     assert credit_events[0]["payload"]["amount"] == bandage_price
     assert credit_events[0]["payload"]["amount"] != 10
+    assert credit_events[0]["payload"]["expected_item_type"] == "bandage"
 
+
+
+def test_injured_poor_agent_at_trader_takes_single_medical_credit_and_heals() -> None:
+    agent = make_agent(money=0, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+    plan = _plan_heal_or_flee(ctx, Intent(kind="heal_self", score=1.0), state, 100, need_result)
+
+    assert plan is not None
+    plan.steps[1].payload["reason"] = "buy_medical_survival"
+    hp_before = int(agent.get("hp") or 0)
+    bandage_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+
+    collected_events: list[dict[str, object]] = []
+    for step_offset in range(10):
+        if plan.is_complete:
+            break
+        collected_events.extend(
+            execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100 + step_offset)
+        )
+
+    assert plan.is_complete
+    survival_medical_events = [
+        ev for ev in _debt_credit_events(collected_events)
+        if isinstance(ev.get("payload"), dict) and ev["payload"].get("purpose") == "survival_medical"
+    ]
+    assert len(survival_medical_events) == 1
+    assert survival_medical_events[0]["payload"]["amount"] == bandage_price
+    assert all(ev["payload"].get("amount") != 10 for ev in survival_medical_events)
+    assert all(ev.get("event_type") != "trade_buy_failed" for ev in collected_events)
+    assert int(agent.get("hp") or 0) >= hp_before
 
 
 def test_active_plan_request_loan_failure_marks_step_failed_and_aborts_or_replans() -> None:

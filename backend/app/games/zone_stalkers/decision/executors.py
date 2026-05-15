@@ -2292,6 +2292,15 @@ def _exec_request_loan(
         or step.payload.get("expected_item_type")
         or ""
     )
+    if not expected_item_type and item_category in {"food", "drink", "medical"} and required_price > 0:
+        from .survival_credit import quote_survival_purchase
+
+        recovered_quote = quote_survival_purchase(agent=agent, category=item_category)
+        if recovered_quote is not None and int(recovered_quote.required_price) == required_price:
+            expected_item_type = str(recovered_quote.item_type)
+            step.payload["expected_item_type"] = expected_item_type
+            step.payload["survival_credit_quote_item_type"] = expected_item_type
+            step.payload["expected_item_type_recovered_from_quote"] = True
     event_payload = {
         "account_id": account["id"],
         "debtor_id": agent_id,
