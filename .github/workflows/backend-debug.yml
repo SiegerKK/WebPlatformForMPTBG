@@ -1,0 +1,38 @@
+name: Backend Debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      pytest_path:
+        description: "Pytest path or selector"
+        required: true
+        default: "backend/tests/decision"
+      timeout:
+        description: "Per-test timeout seconds"
+        required: true
+        default: "90"
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    name: Debug pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: Run selected pytest path
+        env:
+          PYTHONPATH: backend
+          MEDIA_ROOT: /tmp/media
+        run: |
+          pytest ${{ inputs.pytest_path }}             -vv             --tb=long             --durations=50             --timeout=${{ inputs.timeout }}             --timeout-method=thread
