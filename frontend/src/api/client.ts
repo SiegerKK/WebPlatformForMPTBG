@@ -132,7 +132,11 @@ export const locationsApi = {
       url: string;
       image_url?: string;
       location_id?: string;
+      group?: string;
       slot?: string;
+      primary_image_ref?: { group: string; slot: string } | null;
+      image_slots_v2?: Record<string, Record<string, string | null>>;
+      image_profile?: { is_anomalous?: boolean; is_psi?: boolean; is_underground?: boolean };
       primary_image_slot?: string;
       image_slots?: Record<string, string | null>;
       state_revision?: number;
@@ -147,15 +151,20 @@ export const locationsApi = {
   /**
    * Upload an image for a specific slot of a zone-map location.
    */
-  uploadImageSlot: (contextId: string, locationId: string, file: File, slot: string) => {
+  uploadImageSlot: (contextId: string, locationId: string, file: File, group: string, slot: string) => {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('group', group);
     formData.append('slot', slot);
     return apiClient.post<{
       url: string;
       image_url?: string;
       location_id?: string;
+      group?: string;
       slot?: string;
+      primary_image_ref?: { group: string; slot: string } | null;
+      image_slots_v2?: Record<string, Record<string, string | null>>;
+      image_profile?: { is_anomalous?: boolean; is_psi?: boolean; is_underground?: boolean };
       primary_image_slot?: string;
       image_slots?: Record<string, string | null>;
       state_revision?: number;
@@ -177,17 +186,47 @@ export const locationsApi = {
     }>(`/locations/${contextId}/${locationId}/image`),
 
   /** Delete the image for a specific slot of a location. */
-  deleteImageSlot: (contextId: string, locationId: string, slot: string) =>
+  deleteImageSlot: (contextId: string, locationId: string, group: string, slot: string) =>
     apiClient.delete<{
       status: 'deleted';
       location_id: string;
-      slot: string;
+      group?: string | null;
+      slot?: string | null;
+      image_profile?: { is_anomalous?: boolean; is_psi?: boolean; is_underground?: boolean };
+      image_slots_v2?: Record<string, Record<string, string | null>>;
+      primary_image_ref?: { group: string; slot: string } | null;
       image_url?: string | null;
       image_slots?: Record<string, string | null>;
       primary_image_slot?: string | null;
       state_revision?: number;
       map_revision?: number;
-    }>(`/locations/${contextId}/${locationId}/image`, { params: { slot } }),
+    }>(`/locations/${contextId}/${locationId}/image`, { params: { group, slot } }),
+
+  setPrimaryImage: (contextId: string, locationId: string, group: string, slot: string) =>
+    apiClient.post<{
+      location_id: string;
+      image_profile?: { is_anomalous?: boolean; is_psi?: boolean; is_underground?: boolean };
+      image_slots_v2?: Record<string, Record<string, string | null>>;
+      primary_image_ref?: { group: string; slot: string } | null;
+      image_url?: string | null;
+      image_slots?: Record<string, string | null>;
+      primary_image_slot?: string | null;
+      state_revision?: number;
+      map_revision?: number;
+    }>(`/locations/${contextId}/${locationId}/image/primary`, { group, slot }),
+
+  patchImageProfile: (contextId: string, locationId: string, data: { is_anomalous?: boolean; is_psi?: boolean; is_underground?: boolean }) =>
+    apiClient.patch<{
+      location_id: string;
+      image_profile?: { is_anomalous?: boolean; is_psi?: boolean; is_underground?: boolean };
+      image_slots_v2?: Record<string, Record<string, string | null>>;
+      primary_image_ref?: { group: string; slot: string } | null;
+      image_url?: string | null;
+      image_slots?: Record<string, string | null>;
+      primary_image_slot?: string | null;
+      state_revision?: number;
+      map_revision?: number;
+    }>(`/locations/${contextId}/${locationId}/image-profile`, data),
 };
 
 export const zoneMapApi = {

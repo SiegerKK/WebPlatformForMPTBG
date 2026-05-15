@@ -116,7 +116,6 @@ export function LocationModal({
   const buildInitialSlots = useMemo(() => {
     const slots: LocationImageSlots = {};
     for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = initialImageSlots?.[slot] ?? null;
-    if (!LOCATION_IMAGE_SLOTS.some((slot) => Boolean(slots[slot])) && initialImageUrl) slots.clear = initialImageUrl;
     return slots;
   }, [initialImageSlots, initialImageUrl]);
   const [imageSlots, setImageSlots] = useState<LocationImageSlots>(buildInitialSlots);

@@ -64,14 +64,21 @@ _MAP_BUMP_FIELDS_DEBUG_LOCATION = frozenset({
     "image_url",
     "image_slots",
     "primary_image_slot",
+    "image_profile",
+    "image_slots_v2",
+    "primary_image_ref",
 })
 
 # Image slot constants and helpers — single source of truth in location_images.py
 from app.games.zone_stalkers.location_images import (
     VALID_LOCATION_IMAGE_SLOTS as _VALID_LOCATION_IMAGE_SLOTS,
+    VALID_LOCATION_IMAGE_GROUPS as _VALID_LOCATION_IMAGE_GROUPS,
     ORDERED_LOCATION_IMAGE_SLOTS as _ORDERED_IMAGE_SLOTS_TUPLE,
+    LOCATION_IMAGE_GROUP_SLOT_MAP as _LOCATION_IMAGE_GROUP_SLOT_MAP,
+    normalize_location_image_profile as _normalize_location_image_profile,
     sync_location_primary_image_url as _sync_location_primary_image_url,
     migrate_location_images,
+    validate_image_group_slot as _validate_image_group_slot,
 )
 # Legacy alias used inside this module
 _ORDERED_IMAGE_SLOTS = list(_ORDERED_IMAGE_SLOTS_TUPLE)
@@ -299,6 +306,39 @@ def resolve_world_command(
             if slot is None or slot in _VALID_LOCATION_IMAGE_SLOTS:
                 loc["primary_image_slot"] = slot
                 _sync_location_primary_image_url(loc)
+        if "image_profile" in payload and isinstance(payload.get("image_profile"), dict):
+            profile = _normalize_location_image_profile(loc)
+            incoming_profile = payload.get("image_profile") or {}
+            for key in ("is_anomalous", "is_psi", "is_underground"):
+                if key in incoming_profile:
+                    profile[key] = bool(incoming_profile.get(key))
+            loc["image_profile"] = profile
+            migrate_location_images(loc)
+            _sync_location_primary_image_url(loc)
+        if "image_slots_v2" in payload and isinstance(payload.get("image_slots_v2"), dict):
+            incoming_v2 = payload.get("image_slots_v2") or {}
+            current_v2 = loc.setdefault("image_slots_v2", {})
+            for group, group_slots in incoming_v2.items():
+                if group not in _VALID_LOCATION_IMAGE_GROUPS or not isinstance(group_slots, dict):
+                    continue
+                current_group = current_v2.setdefault(group, {})
+                for slot, url in group_slots.items():
+                    if not _validate_image_group_slot(group, slot):
+                        continue
+                    current_group[slot] = url or None
+            migrate_location_images(loc)
+            _sync_location_primary_image_url(loc)
+        if "primary_image_ref" in payload:
+            ref = payload.get("primary_image_ref")
+            if ref is None:
+                loc["primary_image_ref"] = None
+                _sync_location_primary_image_url(loc)
+            elif isinstance(ref, dict):
+                group = ref.get("group")
+                slot = ref.get("slot")
+                if isinstance(group, str) and isinstance(slot, str) and _validate_image_group_slot(group, slot):
+                    loc["primary_image_ref"] = {"group": group, "slot": slot}
+                    _sync_location_primary_image_url(loc)
         if _needs_map_bump:
             state["map_revision"] = int(state.get("map_revision", 0)) + 1
         events.append({"event_type": "debug_location_updated", "payload": {"loc_id": loc_id}})
@@ -328,8 +368,13 @@ def resolve_world_command(
             "items": [],
             "image_slots": {slot: None for slot in _ORDERED_IMAGE_SLOTS},
             "primary_image_slot": None,
+            "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+            "image_slots_v2": {},
+            "primary_image_ref": None,
             "image_url": None,
         }
+        migrate_location_images(new_loc)
+        _sync_location_primary_image_url(new_loc)
         state["locations"][new_id] = new_loc
         # If a canvas position was provided, persist it immediately
         pos = payload.get("position")
@@ -708,20 +753,23 @@ def resolve_world_command(
     if command_type == "debug_set_location_primary_image":
         loc_id = str(payload["loc_id"])
         slot = str(payload["slot"])
+        group = str(payload.get("group") or "normal")
         if loc_id not in state.get("locations", {}):
             events.append({"event_type": "debug_error", "payload": {"error": f"Location {loc_id!r} not found"}})
             return state, events
-        if slot not in _VALID_LOCATION_IMAGE_SLOTS:
-            events.append({"event_type": "debug_error", "payload": {"error": f"Invalid slot {slot!r}"}})
+        if not _validate_image_group_slot(group, slot):
+            events.append({"event_type": "debug_error", "payload": {"error": f"Invalid image ref {group}.{slot}"}})
             return state, events
         loc = state["locations"][loc_id]
-        loc.setdefault("image_slots", {})
-        loc["primary_image_slot"] = slot
+        migrate_location_images(loc)
+        loc["primary_image_ref"] = {"group": group, "slot": slot}
+        if group == "normal" and slot in _VALID_LOCATION_IMAGE_SLOTS:
+            loc["primary_image_slot"] = slot
         _sync_location_primary_image_url(loc)
         state["map_revision"] = int(state.get("map_revision", 0)) + 1
         events.append({
             "event_type": "debug_location_primary_image_set",
-            "payload": {"loc_id": loc_id, "slot": slot},
+            "payload": {"loc_id": loc_id, "group": group, "slot": slot},
         })
         return state, events
 
@@ -825,6 +873,9 @@ def resolve_world_command(
             primary_slot = loc_data.get("primary_image_slot")
             if primary_slot is not None and primary_slot not in _VALID_LOCATION_IMAGE_SLOTS:
                 primary_slot = None
+            image_profile = loc_data.get("image_profile") if isinstance(loc_data.get("image_profile"), dict) else {}
+            image_slots_v2 = loc_data.get("image_slots_v2") if isinstance(loc_data.get("image_slots_v2"), dict) else {}
+            primary_ref = loc_data.get("primary_image_ref") if isinstance(loc_data.get("primary_image_ref"), dict) else None
             new_locations[loc_id] = {
                 "id": loc_id,
                 "name": str(loc_data.get("name", loc_id)).strip(),
@@ -845,6 +896,9 @@ def resolve_world_command(
                 "artifacts": list(loc_data.get("artifacts", [])),
                 "agents": list(old.get("agents", [])),
                 "items": list(old.get("items", [])),
+                "image_profile": image_profile,
+                "image_slots_v2": image_slots_v2,
+                "primary_image_ref": primary_ref,
                 "image_slots": image_slots,
                 "primary_image_slot": primary_slot if primary_slot in _VALID_LOCATION_IMAGE_SLOTS else None,
                 "image_url": loc_data.get("image_url") if "image_url" in loc_data else None,
@@ -1412,6 +1466,32 @@ def _validate_debug_import_full_map(payload: Dict[str, Any]) -> RuleCheckResult:
         primary = loc_data.get("primary_image_slot")
         if primary is not None and primary not in _VALID_LOCATION_IMAGE_SLOTS:
             return RuleCheckResult(valid=False, error=f"Invalid primary_image_slot '{primary}' in {loc_id}")
+
+        image_profile = loc_data.get("image_profile")
+        if image_profile is not None and not isinstance(image_profile, dict):
+            return RuleCheckResult(valid=False, error=f"image_profile for {loc_id} must be a dict")
+
+        image_slots_v2 = loc_data.get("image_slots_v2")
+        if image_slots_v2 is not None and not isinstance(image_slots_v2, dict):
+            return RuleCheckResult(valid=False, error=f"image_slots_v2 for {loc_id} must be a dict")
+        if isinstance(image_slots_v2, dict):
+            for group, slots in image_slots_v2.items():
+                if group not in _VALID_LOCATION_IMAGE_GROUPS:
+                    return RuleCheckResult(valid=False, error=f"Invalid image group '{group}' in {loc_id}")
+                if not isinstance(slots, dict):
+                    return RuleCheckResult(valid=False, error=f"image_slots_v2.{group} for {loc_id} must be a dict")
+                for slot in slots.keys():
+                    if not _validate_image_group_slot(group, slot):
+                        return RuleCheckResult(valid=False, error=f"Invalid image slot '{group}.{slot}' in {loc_id}")
+
+        primary_ref = loc_data.get("primary_image_ref")
+        if primary_ref is not None:
+            if not isinstance(primary_ref, dict):
+                return RuleCheckResult(valid=False, error=f"primary_image_ref for {loc_id} must be an object")
+            group = primary_ref.get("group")
+            slot = primary_ref.get("slot")
+            if not isinstance(group, str) or not isinstance(slot, str) or not _validate_image_group_slot(group, slot):
+                return RuleCheckResult(valid=False, error=f"Invalid primary_image_ref '{group}.{slot}' in {loc_id}")
     return RuleCheckResult(valid=True)
 
 
@@ -1462,6 +1542,49 @@ def _validate_debug_update_location(
         aa = payload["anomaly_activity"]
         if not isinstance(aa, int) or not (0 <= aa <= 10):
             return RuleCheckResult(valid=False, error="anomaly_activity must be an integer between 0 and 10")
+
+    image_slots = payload.get("image_slots")
+    if image_slots is not None:
+        if not isinstance(image_slots, dict):
+            return RuleCheckResult(valid=False, error="image_slots must be a dict")
+        for slot in image_slots.keys():
+            if slot not in _VALID_LOCATION_IMAGE_SLOTS:
+                return RuleCheckResult(valid=False, error=f"Invalid image slot '{slot}'")
+
+    primary_slot = payload.get("primary_image_slot")
+    if primary_slot is not None and primary_slot not in _VALID_LOCATION_IMAGE_SLOTS:
+        return RuleCheckResult(valid=False, error=f"Invalid primary_image_slot '{primary_slot}'")
+
+    image_profile = payload.get("image_profile")
+    if image_profile is not None:
+        if not isinstance(image_profile, dict):
+            return RuleCheckResult(valid=False, error="image_profile must be a dict")
+        for key in image_profile.keys():
+            if key not in {"is_anomalous", "is_psi", "is_underground"}:
+                return RuleCheckResult(valid=False, error=f"Unknown image_profile field '{key}'")
+
+    image_slots_v2 = payload.get("image_slots_v2")
+    if image_slots_v2 is not None:
+        if not isinstance(image_slots_v2, dict):
+            return RuleCheckResult(valid=False, error="image_slots_v2 must be a dict")
+        for group, slots in image_slots_v2.items():
+            if group not in _VALID_LOCATION_IMAGE_GROUPS:
+                return RuleCheckResult(valid=False, error=f"Invalid image group '{group}'")
+            if not isinstance(slots, dict):
+                return RuleCheckResult(valid=False, error=f"image_slots_v2.{group} must be a dict")
+            for slot in slots.keys():
+                if not _validate_image_group_slot(group, slot):
+                    return RuleCheckResult(valid=False, error=f"Invalid image slot '{group}.{slot}'")
+
+    primary_ref = payload.get("primary_image_ref")
+    if primary_ref is not None:
+        if not isinstance(primary_ref, dict):
+            return RuleCheckResult(valid=False, error="primary_image_ref must be an object")
+        group = primary_ref.get("group")
+        slot = primary_ref.get("slot")
+        if not isinstance(group, str) or not isinstance(slot, str) or not _validate_image_group_slot(group, slot):
+            return RuleCheckResult(valid=False, error=f"Invalid primary_image_ref '{group}.{slot}'")
+
     return RuleCheckResult(valid=True)
 
 
@@ -1699,9 +1822,10 @@ def _validate_debug_set_location_primary_image(
     slot = payload.get("slot")
     if not slot:
         return RuleCheckResult(valid=False, error="slot is required")
-    if slot not in _VALID_LOCATION_IMAGE_SLOTS:
+    group = payload.get("group") or "normal"
+    if not isinstance(group, str) or not _validate_image_group_slot(group, str(slot)):
         return RuleCheckResult(
             valid=False,
-            error=f"Invalid slot '{slot}'. Must be one of: {sorted(_VALID_LOCATION_IMAGE_SLOTS)}",
+            error=f"Invalid image ref '{group}.{slot}'",
         )
     return RuleCheckResult(valid=True)

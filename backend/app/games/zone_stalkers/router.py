@@ -124,11 +124,17 @@ def _rel_path_from_media_url(url: str | None) -> str | None:
     return rel
 
 
-# Image-slot constants and helpers — shared module (P1-3)
+# Image-slot constants and helpers — shared module
 from app.games.zone_stalkers.location_images import (
     VALID_LOCATION_IMAGE_SLOTS as _VALID_IMAGE_SLOTS,
+    VALID_LOCATION_IMAGE_GROUPS as _VALID_IMAGE_GROUPS,
     ORDERED_LOCATION_IMAGE_SLOTS as _ORDERED_IMAGE_SLOTS_TUPLE,
+    LOCATION_IMAGE_GROUP_SLOT_MAP as _GROUP_SLOT_MAP,
+    normalize_location_image_profile as _normalize_loc_image_profile,
     sync_location_primary_image_url as _sync_loc_image_url,
+    migrate_location_images as _migrate_loc_images,
+    validate_image_group_slot as _validate_group_slot,
+    is_group_enabled_for_location as _is_group_enabled_for_location,
 )
 _ORDERED_IMAGE_SLOTS = list(_ORDERED_IMAGE_SLOTS_TUPLE)
 
@@ -139,22 +145,41 @@ def _safe_slot_segment(slot: str) -> str:
     return slot
 
 
+def _safe_group_segment(group: str) -> str:
+    if not group or group not in _VALID_IMAGE_GROUPS:
+        raise HTTPException(status_code=400, detail=f"Invalid group '{group}'. Must be one of: {sorted(_VALID_IMAGE_GROUPS)}")
+    return group
+
+
+def _safe_group_slot(group: str, slot: str) -> tuple[str, str]:
+    _safe_group_segment(group)
+    if not _validate_group_slot(group, slot):
+        raise HTTPException(status_code=400, detail=f"Invalid slot '{slot}' for group '{group}'")
+    return group, slot
+
+
+def _legacy_slot_for_group(group: str, slot: str) -> str | None:
+    if group == "normal" and slot in _VALID_IMAGE_SLOTS:
+        return slot
+    return None
+
+
 @router.post("/locations/{context_id}/{location_id}/image")
 async def upload_location_image(
     context_id: uuid.UUID,
     location_id: str,
     file: UploadFile = File(...),
+    group: str = Form("normal"),
     slot: str = Form("clear"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Upload an image for a location slot.
 
-    The image is stored on disk under locations/<context_id>/<location_id>/<slot>/<uuid>.<ext>.
-    The slot defaults to "clear". Any previously stored image for the same
-    ``(context_id, location_id, slot)`` triple is deleted before the new file is saved.
-    The location state is updated with the new image URL in image_slots[slot] and
-    image_url is synced to the primary slot.
+    The image is stored on disk under
+    locations/<context_id>/<location_id>/<group>/<slot>/<uuid>.<ext>.
+    Defaults are group="normal", slot="clear". Existing image for the same
+    ``(context_id, location_id, group, slot)`` is replaced.
     """
     from app.core.contexts.models import GameContext
     from app.games.zone_stalkers.models import LocationImage
@@ -164,8 +189,8 @@ async def upload_location_image(
         save_context_state,
     )
 
-    # Validate slot
-    _safe_slot_segment(slot)
+    # Validate group+slot
+    group, slot = _safe_group_slot(group, slot)
 
     # Validate context exists
     ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
@@ -178,6 +203,10 @@ async def upload_location_image(
     if not isinstance(loc, dict):
         raise HTTPException(status_code=404, detail="Location not found in zone state")
     location_segment = _safe_location_segment(location_id)
+    _migrate_loc_images(loc)
+
+    if not _is_group_enabled_for_location(loc, group):
+        raise HTTPException(status_code=400, detail=f"Group '{group}' is disabled for this location profile")
 
     content_type = file.content_type or ""
     if content_type not in ALLOWED_IMAGE_TYPES:
@@ -197,7 +226,7 @@ async def upload_location_image(
 
     ext = _EXT_MAP[content_type]
     image_id = uuid.uuid4().hex
-    rel_dir = os.path.join("locations", str(context_id), location_segment, slot)
+    rel_dir = os.path.join("locations", str(context_id), location_segment, group, slot)
     rel_path = os.path.join(rel_dir, f"{image_id}{ext}")
     abs_dir = _resolve_media_path(rel_dir)
     abs_path = _resolve_media_path(rel_path)
@@ -209,6 +238,7 @@ async def upload_location_image(
         .filter(
             LocationImage.context_id == context_id,
             LocationImage.location_id == location_id,
+            LocationImage.group == group,
             LocationImage.slot == slot,
         )
         .all()
@@ -235,6 +265,7 @@ async def upload_location_image(
     record = LocationImage(
         context_id=context_id,
         location_id=location_id,
+        group=group,
         slot=slot,
         filename=file.filename or f"{image_id}{ext}",
         content_type=content_type,
@@ -244,10 +275,18 @@ async def upload_location_image(
 
     url = _normalize_media_url(rel_path)
     # Step 3: update in-memory state
-    loc.setdefault("image_slots", {s: None for s in _ORDERED_IMAGE_SLOTS})
-    loc["image_slots"][slot] = url
-    if not loc.get("primary_image_slot"):
-        loc["primary_image_slot"] = slot
+    slots_v2 = loc.setdefault("image_slots_v2", {})
+    slots_v2.setdefault(group, {})[slot] = url
+
+    legacy_slot = _legacy_slot_for_group(group, slot)
+    if legacy_slot is not None:
+        loc.setdefault("image_slots", {s: None for s in _ORDERED_IMAGE_SLOTS})
+        loc["image_slots"][legacy_slot] = url
+        if not loc.get("primary_image_slot"):
+            loc["primary_image_slot"] = legacy_slot
+
+    if not loc.get("primary_image_ref"):
+        loc["primary_image_ref"] = {"group": group, "slot": slot}
     _sync_loc_image_url(loc)
 
     state["state_revision"] = int(state.get("state_revision", 0)) + 1
@@ -287,9 +326,13 @@ async def upload_location_image(
     return {
         "url": url,
         "image_url": loc.get("image_url"),
+        "group": group,
         "slot": slot,
+        "primary_image_ref": loc.get("primary_image_ref"),
+        "image_slots_v2": loc.get("image_slots_v2"),
         "primary_image_slot": loc.get("primary_image_slot"),
         "image_slots": loc.get("image_slots"),
+        "image_profile": loc.get("image_profile"),
         "location_id": location_id,
         "state_revision": state.get("state_revision"),
         "map_revision": state.get("map_revision"),
@@ -324,15 +367,16 @@ def _cleanup_parent_dirs_deep(abs_paths: list[str]) -> None:
 def delete_location_image(
     context_id: uuid.UUID,
     location_id: str,
+    group: str | None = Query(default=None),
     slot: str | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete the image(s) attached to a location and clear from zone state.
+    """Delete location images.
 
-    Without ``slot``: deletes ALL slot images and clears all image state.
-    With ``slot``: deletes only that slot's image; primary_image_slot falls
-    back to next available slot automatically.
+    - No group/slot: delete all images for location.
+    - group only: delete all images in the group.
+    - group+slot: delete one image slot in that group.
     """
     from app.core.contexts.models import GameContext
     from app.core.state_cache.service import (
@@ -341,6 +385,16 @@ def delete_location_image(
         save_context_state,
     )
     from app.games.zone_stalkers.models import LocationImage
+
+    if slot is not None and group is None:
+        group = "normal"
+
+    if group is not None:
+        _safe_group_segment(group)
+    if slot is not None:
+        if group is None:
+            raise HTTPException(status_code=400, detail="group is required when slot is provided")
+        _safe_group_slot(group, slot)
 
     ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
     if not ctx:
@@ -351,85 +405,77 @@ def delete_location_image(
     if not isinstance(loc, dict):
         raise HTTPException(status_code=404, detail="Location not found in zone state")
     _safe_location_segment(location_id)
+    _migrate_loc_images(loc)
 
-    if slot is not None and slot not in _VALID_IMAGE_SLOTS:
-        raise HTTPException(status_code=400, detail=f"Invalid slot '{slot}'")
+    query = db.query(LocationImage).filter(
+        LocationImage.context_id == context_id,
+        LocationImage.location_id == location_id,
+    )
+    if group is not None:
+        query = query.filter(LocationImage.group == group)
+    if slot is not None:
+        query = query.filter(LocationImage.slot == slot)
 
-    # Collect abs paths for deferred file deletion (P0-4: never delete files before commit)
+    existing_records = query.all()
     deferred_remove_abs: list[str] = []
 
-    if slot is None:
-        # Delete ALL slot images
-        existing_records = (
-            db.query(LocationImage)
-            .filter(
-                LocationImage.context_id == context_id,
-                LocationImage.location_id == location_id,
-            )
-            .all()
-        )
-        has_image = bool(loc.get("image_url")) or bool(existing_records)
-        if not has_image:
-            raise HTTPException(status_code=404, detail="No image found for this location")
+    if not existing_records and group is None and slot is None and not loc.get("image_url"):
+        raise HTTPException(status_code=404, detail="No image found for this location")
 
-        # Collect abs paths and queue DB deletions
-        for rec in existing_records:
-            old_abs = _abs_media_path(rec.file_path)
+    for rec in existing_records:
+        old_abs = _abs_media_path(rec.file_path)
+        if old_abs:
+            deferred_remove_abs.append(old_abs)
+        db.delete(rec)
+
+    if not existing_records and group is None and slot is None:
+        rel = _rel_path_from_media_url(loc.get("image_url"))
+        if rel:
+            old_abs = _abs_media_path(rel)
             if old_abs:
                 deferred_remove_abs.append(old_abs)
-            db.delete(rec)
 
-        # Legacy fallback: also schedule legacy file for removal
-        if not existing_records:
-            rel = _rel_path_from_media_url(loc.get("image_url"))
-            if rel:
-                old_abs = _abs_media_path(rel)
-                if old_abs:
-                    deferred_remove_abs.append(old_abs)
-
-        loc["image_url"] = None
+    if group is None and slot is None:
+        loc["image_slots_v2"] = {}
         loc["image_slots"] = {s: None for s in _ORDERED_IMAGE_SLOTS}
+        loc["primary_image_ref"] = None
         loc["primary_image_slot"] = None
-    else:
-        # Delete only the specified slot
-        existing_records = (
-            db.query(LocationImage)
-            .filter(
-                LocationImage.context_id == context_id,
-                LocationImage.location_id == location_id,
-                LocationImage.slot == slot,
-            )
-            .all()
-        )
-        slot_url = (loc.get("image_slots") or {}).get(slot)
-        if not existing_records and not slot_url:
-            raise HTTPException(status_code=404, detail=f"No image found for slot '{slot}'")
-
-        # Collect abs paths and queue DB deletions
-        for rec in existing_records:
-            old_abs = _abs_media_path(rec.file_path)
-            if old_abs:
-                deferred_remove_abs.append(old_abs)
-            db.delete(rec)
-
-        # Fallback: if no DB record but state has URL for this slot
-        if not existing_records and slot_url:
-            rel = _rel_path_from_media_url(slot_url)
-            if rel:
-                old_abs = _abs_media_path(rel)
-                if old_abs:
-                    deferred_remove_abs.append(old_abs)
-
-        loc.setdefault("image_slots", {})
-        loc["image_slots"][slot] = None
-        if loc.get("primary_image_slot") == slot:
+        loc["image_url"] = None
+    elif group is not None and slot is None:
+        slots_v2 = loc.setdefault("image_slots_v2", {})
+        group_slots = slots_v2.get(group)
+        if isinstance(group_slots, dict):
+            for k in list(group_slots.keys()):
+                group_slots[k] = None
+        if group == "normal":
+            loc.setdefault("image_slots", {s: None for s in _ORDERED_IMAGE_SLOTS})
+            for s in _ORDERED_IMAGE_SLOTS:
+                loc["image_slots"][s] = None
             loc["primary_image_slot"] = None
+        if isinstance(loc.get("primary_image_ref"), dict) and loc["primary_image_ref"].get("group") == group:
+            loc["primary_image_ref"] = None
+        _sync_loc_image_url(loc)
+    else:
+        assert group is not None and slot is not None
+        slots_v2 = loc.setdefault("image_slots_v2", {})
+        slots_v2.setdefault(group, {})[slot] = None
+
+        legacy_slot = _legacy_slot_for_group(group, slot)
+        if legacy_slot is not None:
+            loc.setdefault("image_slots", {s: None for s in _ORDERED_IMAGE_SLOTS})
+            loc["image_slots"][legacy_slot] = None
+            if loc.get("primary_image_slot") == legacy_slot:
+                loc["primary_image_slot"] = None
+
+        if isinstance(loc.get("primary_image_ref"), dict):
+            ref = loc["primary_image_ref"]
+            if ref.get("group") == group and ref.get("slot") == slot:
+                loc["primary_image_ref"] = None
         _sync_loc_image_url(loc)
 
     state["state_revision"] = int(state.get("state_revision", 0)) + 1
     state["map_revision"] = int(state.get("map_revision", 0)) + 1
 
-    # save_context_state marks state_blob dirty, then db.commit() persists everything
     try:
         save_context_state(ctx.id, state, ctx, force_persist=True)
         db.commit()
@@ -438,23 +484,165 @@ def delete_location_image(
         invalidate_context_state(ctx.id)
         raise
 
-    # Only after successful commit+state-save: delete files from disk
     for abs_path in deferred_remove_abs:
         _safe_remove_media_file(abs_path)
     _cleanup_parent_dirs_deep(deferred_remove_abs)
 
-    result: dict = {
+    result: dict[str, object] = {
         "status": "deleted",
         "location_id": location_id,
+        "group": group,
+        "slot": slot,
+        "image_profile": loc.get("image_profile"),
+        "image_slots_v2": loc.get("image_slots_v2"),
+        "primary_image_ref": loc.get("primary_image_ref"),
         "image_url": loc.get("image_url"),
         "image_slots": loc.get("image_slots"),
         "primary_image_slot": loc.get("primary_image_slot"),
         "state_revision": state.get("state_revision"),
         "map_revision": state.get("map_revision"),
     }
-    if slot is not None:
-        result["slot"] = slot
     return result
+
+
+class LocationPrimaryImagePayload(BaseModel):
+    group: str = "normal"
+    slot: str
+
+
+@router.post("/locations/{context_id}/{location_id}/image/primary")
+def set_location_primary_image(
+    context_id: uuid.UUID,
+    location_id: str,
+    payload: LocationPrimaryImagePayload,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import (
+        invalidate_context_state,
+        load_context_state,
+        save_context_state,
+    )
+
+    group, slot = _safe_group_slot(payload.group, payload.slot)
+
+    ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    loc = state.get("locations", {}).get(location_id)
+    if not isinstance(loc, dict):
+        raise HTTPException(status_code=404, detail="Location not found in zone state")
+
+    _migrate_loc_images(loc)
+    slots_v2 = (loc.get("image_slots_v2") or {}).get(group)
+    if not isinstance(slots_v2, dict) or not slots_v2.get(slot):
+        raise HTTPException(status_code=404, detail=f"No image found for {group}.{slot}")
+
+    loc["primary_image_ref"] = {"group": group, "slot": slot}
+    legacy_slot = _legacy_slot_for_group(group, slot)
+    if legacy_slot is not None:
+        loc["primary_image_slot"] = legacy_slot
+    _sync_loc_image_url(loc)
+
+    state["state_revision"] = int(state.get("state_revision", 0)) + 1
+    state["map_revision"] = int(state.get("map_revision", 0)) + 1
+
+    try:
+        save_context_state(ctx.id, state, ctx, force_persist=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+        invalidate_context_state(ctx.id)
+        raise
+
+    return {
+        "location_id": location_id,
+        "primary_image_ref": loc.get("primary_image_ref"),
+        "image_slots_v2": loc.get("image_slots_v2"),
+        "image_profile": loc.get("image_profile"),
+        "image_url": loc.get("image_url"),
+        "image_slots": loc.get("image_slots"),
+        "primary_image_slot": loc.get("primary_image_slot"),
+        "state_revision": state.get("state_revision"),
+        "map_revision": state.get("map_revision"),
+    }
+
+
+class LocationImageProfilePatch(BaseModel):
+    is_anomalous: bool | None = None
+    is_psi: bool | None = None
+    is_underground: bool | None = None
+
+
+@router.patch("/locations/{context_id}/{location_id}/image-profile")
+def patch_location_image_profile(
+    context_id: uuid.UUID,
+    location_id: str,
+    payload: LocationImageProfilePatch,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.core.contexts.models import GameContext
+    from app.core.state_cache.service import (
+        invalidate_context_state,
+        load_context_state,
+        save_context_state,
+    )
+
+    ctx = db.query(GameContext).filter(GameContext.id == context_id).first()
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Context not found")
+
+    state = load_context_state(ctx.id, ctx)
+    loc = state.get("locations", {}).get(location_id)
+    if not isinstance(loc, dict):
+        raise HTTPException(status_code=404, detail="Location not found in zone state")
+
+    _migrate_loc_images(loc)
+    profile = _normalize_loc_image_profile(loc)
+
+    if payload.is_anomalous is not None:
+        profile["is_anomalous"] = payload.is_anomalous
+    if payload.is_psi is not None:
+        profile["is_psi"] = payload.is_psi
+    if payload.is_underground is not None:
+        profile["is_underground"] = payload.is_underground
+
+    loc["image_profile"] = profile
+    _migrate_loc_images(loc)
+
+    if isinstance(loc.get("primary_image_ref"), dict):
+        current_group = str(loc["primary_image_ref"].get("group") or "")
+        if not _is_group_enabled_for_location(loc, current_group):
+            loc["primary_image_ref"] = None
+
+    _sync_loc_image_url(loc)
+
+    state["state_revision"] = int(state.get("state_revision", 0)) + 1
+    state["map_revision"] = int(state.get("map_revision", 0)) + 1
+
+    try:
+        save_context_state(ctx.id, state, ctx, force_persist=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+        invalidate_context_state(ctx.id)
+        raise
+
+    return {
+        "location_id": location_id,
+        "image_profile": loc.get("image_profile"),
+        "image_slots_v2": loc.get("image_slots_v2"),
+        "primary_image_ref": loc.get("primary_image_ref"),
+        "image_url": loc.get("image_url"),
+        "image_slots": loc.get("image_slots"),
+        "primary_image_slot": loc.get("primary_image_slot"),
+        "state_revision": state.get("state_revision"),
+        "map_revision": state.get("map_revision"),
+    }
 
 
 class ZoneEventCreate(BaseModel):
@@ -662,6 +850,9 @@ def get_zone_map_static(
             "terrain_type": loc.get("terrain_type"),
             "connections": loc.get("connections"),
             "debug_layout": loc.get("debug_layout"),
+            "image_profile": loc.get("image_profile"),
+            "image_slots_v2": loc.get("image_slots_v2"),
+            "primary_image_ref": loc.get("primary_image_ref"),
             "image_url": loc.get("image_url"),
             "image_slots": loc.get("image_slots"),
             "primary_image_slot": loc.get("primary_image_slot"),

@@ -60,7 +60,6 @@ function normalizeLocationConnections(loc?: Partial<ZoneLocation> | null): Locat
 function normalizeImageSlots(loc: ZoneLocation): LocationImageSlots {
   const slots: LocationImageSlots = {};
   for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = loc.image_slots?.[slot] ?? null;
-  if (!LOCATION_IMAGE_SLOTS.some((slot) => Boolean(slots[slot])) && loc.image_url) slots.clear = loc.image_url;
   return slots;
 }
 
@@ -942,7 +941,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                   const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
                   const mime = mimeMap[ext] ?? 'application/octet-stream';
                   const imgFile = new File([imgBuf], `${locId}_${slot}.${ext || 'jpg'}`, { type: mime });
-                  const upload = await locationsApi.uploadImageSlot(contextId, locId, imgFile, slot as LocationImageSlot);
+                  const upload = await locationsApi.uploadImageSlot(contextId, locId, imgFile, "normal", slot as LocationImageSlot);
                   setLocalImageSlotsByLoc((prev) => ({
                     ...prev,
                     [locId]: upload.data.image_slots as LocationImageSlots,
@@ -959,7 +958,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
               const requestedPrimary = locData.primary_image_slot as LocationImageSlot | undefined;
               if (requestedPrimary && LOCATION_IMAGE_SLOTS.includes(requestedPrimary)) {
                 try {
-                  await sendCommand('debug_set_location_primary_image', { loc_id: locId, slot: requestedPrimary });
+                  await sendCommand('debug_set_location_primary_image', { loc_id: locId, group: 'normal', slot: requestedPrimary });
                   setLocalPrimaryImageSlotByLoc((prev) => ({ ...prev, [locId]: requestedPrimary }));
                 } catch {
                   failedImageLocs.push(`${locId}/primary`);
@@ -1168,9 +1167,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
 
 
   const handleUploadLocationImageSlot = useCallback(
-    async (locId: string, slot: LocationImageSlot, file: File) => {
+    async (locId: string, slot: LocationImageSlot, file: File, group = "normal") => {
       if (!contextId) return undefined;
-      const resp = await locationsApi.uploadImageSlot(contextId, locId, file, slot);
+      const resp = await locationsApi.uploadImageSlot(contextId, locId, file, group, slot);
       const imageSlots = (resp.data.image_slots ?? {}) as LocationImageSlots;
       const primary = (resp.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null;
       setLocalImageSlotsByLoc((prev) => ({
@@ -1190,9 +1189,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   );
 
   const handleDeleteLocationImageSlot = useCallback(
-    async (locId: string, slot: LocationImageSlot) => {
+    async (locId: string, slot: LocationImageSlot, group = "normal") => {
       if (!contextId) return undefined;
-      const resp = await locationsApi.deleteImageSlot(contextId, locId, slot);
+      const resp = await locationsApi.deleteImageSlot(contextId, locId, group, slot);
       const imageSlots = (resp.data.image_slots ?? {}) as LocationImageSlots;
       const primary = (resp.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null;
       setLocalImageSlotsByLoc((prev) => ({
@@ -1216,7 +1215,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
       const prev = zoneState.locations[locId]?.primary_image_slot ?? null;
       setLocalPrimaryImageSlotByLoc((curr) => ({ ...curr, [locId]: slot }));
       try {
-        await sendCommand('debug_set_location_primary_image', { loc_id: locId, slot });
+        await sendCommand('debug_set_location_primary_image', { loc_id: locId, group: 'normal', slot });
       } catch (error) {
         setLocalPrimaryImageSlotByLoc((curr) => ({ ...curr, [locId]: prev }));
         throw error;

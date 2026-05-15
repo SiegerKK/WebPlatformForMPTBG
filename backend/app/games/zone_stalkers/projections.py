@@ -617,7 +617,12 @@ def _project_locations_game(locations: dict[str, Any]) -> dict[str, Any]:
             "artifacts": loc.get("artifacts"),
             "items": loc.get("items"),
             "region": loc.get("region"),
+            "image_profile": loc.get("image_profile"),
+            "image_slots_v2": loc.get("image_slots_v2"),
+            "primary_image_ref": loc.get("primary_image_ref"),
             "image_url": loc.get("image_url"),
+            "image_slots": loc.get("image_slots"),
+            "primary_image_slot": loc.get("primary_image_slot"),
             "debug_layout": loc.get("debug_layout"),
         }
     return result
