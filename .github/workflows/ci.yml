@@ -13,6 +13,7 @@ jobs:
   backend-core:
     name: Backend core tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,11 +36,13 @@ jobs:
             --ignore=backend/tests/test_zone_stalkers_tick.py \
             --ignore=backend/tests/test_zone_stalkers_copy_on_write_runtime.py \
             --ignore=backend/tests/test_zone_stalkers_location_images.py \
-            --ignore=backend/tests/test_memory_merge.py
+            --ignore=backend/tests/test_memory_merge.py \
+            --durations=25
 
   backend-zone-stalkers-core:
     name: Zone Stalkers core tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -60,11 +63,13 @@ jobs:
             backend/tests/test_zone_stalkers_tick.py \
             backend/tests/test_zone_stalkers_copy_on_write_runtime.py \
             backend/tests/test_zone_stalkers_location_images.py \
-            -q
+            -q \
+            --durations=25
 
   backend-decision-core:
     name: Decision core tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -83,11 +88,13 @@ jobs:
           pytest \
             backend/tests/decision \
             -q \
-            --ignore=backend/tests/decision/v3/test_e2e_brain_v3_goals.py
+            --ignore=backend/tests/decision/v3/test_e2e_brain_v3_goals.py \
+            --durations=25
 
   backend-memory-pr5:
     name: Memory v3 / PR5 tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -109,11 +116,13 @@ jobs:
             backend/tests/decision/v3/test_memory_retrieval_fast_path.py \
             backend/tests/decision/v3/test_memory_v3_only_runtime.py \
             backend/tests/decision/test_context_builder_memory_v3.py \
-            -q
+            -q \
+            --durations=25
 
   backend-brain-v3-e2e:
     name: Brain v3 E2E tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -136,11 +145,12 @@ jobs:
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
-        run: pytest ${{ matrix.test_file }} -q
+        run: pytest ${{ matrix.test_file }} -q --durations=25
 
   backend-full-sentinel:
     name: Backend full non-e2e sentinel
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -155,11 +165,12 @@ jobs:
         env:
           PYTHONPATH: backend
           MEDIA_ROOT: /tmp/media
-        run: pytest backend/tests -k "not e2e" -q
+        run: pytest backend/tests -k "not e2e" -q --durations=25
 
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     defaults:
       run:
