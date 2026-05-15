@@ -211,6 +211,11 @@ def _sync_legacy_from_v2(loc: dict[str, Any]) -> None:
 
 
 def get_location_primary_image_url(loc: dict[str, Any]) -> str | None:
+    # Keep a snapshot of pre-migration data so legacy-only fallback stays possible
+    # when there are truly no v2 slot URLs.
+    pre_migrate_slots_v2 = loc.get("image_slots_v2") if isinstance(loc.get("image_slots_v2"), dict) else None
+    pre_migrate_legacy_url = loc.get("image_url")
+
     migrate_location_images_v2(loc)
     slots_v2 = loc.get("image_slots_v2") if isinstance(loc.get("image_slots_v2"), dict) else {}
     ref = loc.get("primary_image_ref")
@@ -229,8 +234,15 @@ def get_location_primary_image_url(loc: dict[str, Any]) -> str | None:
             loc["primary_image_ref"] = {"group": group, "slot": slot}
             return url
 
-    legacy_url = loc.get("image_url")
-    return legacy_url if isinstance(legacy_url, str) and legacy_url else None
+    # Strict rule for v2: do not fallback to stale image_url when v2 already has
+    # any slot URL (including disabled groups preserved in state).
+    if any_image_in_slots_v2(slots_v2):
+        return None
+
+    # Legacy-only migration fallback: allow image_url only when v2 had no values.
+    if isinstance(pre_migrate_legacy_url, str) and pre_migrate_legacy_url and not any_image_in_slots_v2(pre_migrate_slots_v2):
+        return pre_migrate_legacy_url
+    return None
 
 
 def sync_location_primary_image_url_v2(loc: dict[str, Any]) -> None:

@@ -457,6 +457,14 @@ def delete_location_image(
         _sync_loc_image_url(loc)
     else:
         assert group is not None and slot is not None
+        if not existing_records:
+            state_slot_url = ((loc.get("image_slots_v2") or {}).get(group) or {}).get(slot)
+            rel = _rel_path_from_media_url(state_slot_url if isinstance(state_slot_url, str) else None)
+            if rel:
+                old_abs = _abs_media_path(rel)
+                if old_abs:
+                    deferred_remove_abs.append(old_abs)
+
         slots_v2 = loc.setdefault("image_slots_v2", {})
         slots_v2.setdefault(group, {})[slot] = None
 
@@ -537,6 +545,9 @@ def set_location_primary_image(
         raise HTTPException(status_code=404, detail="Location not found in zone state")
 
     _migrate_loc_images(loc)
+    if not _is_group_enabled_for_location(loc, group):
+        raise HTTPException(status_code=400, detail=f"Group '{group}' is disabled for this location profile")
+
     slots_v2 = (loc.get("image_slots_v2") or {}).get(group)
     if not isinstance(slots_v2, dict) or not slots_v2.get(slot):
         raise HTTPException(status_code=404, detail=f"No image found for {group}.{slot}")

@@ -79,6 +79,7 @@ from app.games.zone_stalkers.location_images import (
     sync_location_primary_image_url as _sync_location_primary_image_url,
     migrate_location_images,
     validate_image_group_slot as _validate_image_group_slot,
+    is_group_enabled_for_location as _is_group_enabled_for_location,
 )
 # Legacy alias used inside this module
 _ORDERED_IMAGE_SLOTS = list(_ORDERED_IMAGE_SLOTS_TUPLE)
@@ -354,6 +355,7 @@ def resolve_world_command(
             n += 1
             new_id = f"loc_debug_{n}"
         region_val = payload.get("region")
+        payload_profile = payload.get("image_profile") if isinstance(payload.get("image_profile"), dict) else {}
         new_loc = {
             "id": new_id,
             "name": str(payload["name"]).strip(),
@@ -368,7 +370,11 @@ def resolve_world_command(
             "items": [],
             "image_slots": {slot: None for slot in _ORDERED_IMAGE_SLOTS},
             "primary_image_slot": None,
-            "image_profile": {"is_anomalous": False, "is_psi": False, "is_underground": False},
+            "image_profile": {
+                "is_anomalous": bool(payload_profile.get("is_anomalous", False)),
+                "is_psi": bool(payload_profile.get("is_psi", False)),
+                "is_underground": bool(payload_profile.get("is_underground", False)),
+            },
             "image_slots_v2": {},
             "primary_image_ref": None,
             "image_url": None,
@@ -762,6 +768,14 @@ def resolve_world_command(
             return state, events
         loc = state["locations"][loc_id]
         migrate_location_images(loc)
+        if not _is_group_enabled_for_location(loc, group):
+            events.append({"event_type": "debug_error", "payload": {"error": f"Image group '{group}' is disabled for this location"}})
+            return state, events
+        slot_url = (loc.get("image_slots_v2", {}).get(group, {}) or {}).get(slot)
+        if not isinstance(slot_url, str) or not slot_url:
+            events.append({"event_type": "debug_error", "payload": {"error": f"No image found for {group}.{slot}"}})
+            return state, events
+
         loc["primary_image_ref"] = {"group": group, "slot": slot}
         if group == "normal" and slot in _VALID_LOCATION_IMAGE_SLOTS:
             loc["primary_image_slot"] = slot
@@ -1594,6 +1608,11 @@ def _validate_debug_create_location(
     name = str(payload.get("name", "")).strip()
     if not name:
         return RuleCheckResult(valid=False, error="name must be non-empty")
+
+    image_profile = payload.get("image_profile")
+    if image_profile is not None and not isinstance(image_profile, dict):
+        return RuleCheckResult(valid=False, error="image_profile must be an object")
+
     return RuleCheckResult(valid=True)
 
 
@@ -1828,4 +1847,17 @@ def _validate_debug_set_location_primary_image(
             valid=False,
             error=f"Invalid image ref '{group}.{slot}'",
         )
+
+    loc = state.get("locations", {}).get(loc_id)
+    if not isinstance(loc, dict):
+        return RuleCheckResult(valid=False, error=f"Location not found: {loc_id}")
+    migrate_location_images(loc)
+
+    if not _is_group_enabled_for_location(loc, group):
+        return RuleCheckResult(valid=False, error=f"Image group '{group}' is disabled for this location")
+
+    slot_url = (loc.get("image_slots_v2", {}).get(group, {}) or {}).get(str(slot))
+    if not isinstance(slot_url, str) or not slot_url:
+        return RuleCheckResult(valid=False, error=f"No image found for '{group}.{slot}'")
+
     return RuleCheckResult(valid=True)

@@ -98,6 +98,7 @@ export function LocationModal({
   initialPrimaryImageRef = null,
   initialImageProfile,
   initialImageUrl = null,
+  allowInitialImageUrlFallback = false,
   regions,
   locId,
   onUploadImageSlot,
@@ -118,6 +119,7 @@ export function LocationModal({
   initialPrimaryImageRef?: LocationImageRef | null;
   initialImageProfile?: LocationImageProfile;
   initialImageUrl?: string | null;
+  allowInitialImageUrlFallback?: boolean;
   regions?: Record<string, { name: string; colorIndex: number }>;
   locId?: string;
   onUploadImageSlot?: (group: LocationImageGroup, slot: string, file: File) => Promise<{
@@ -191,14 +193,21 @@ export function LocationModal({
   const primaryImageUrl = useMemo(() => {
     const direct = getImageSlotUrl(imageSlotsV2, primaryImageRef);
     if (direct) return direct;
-    for (const group of enabledGroups) {
+
+    let hasAnyV2Image = false;
+    for (const group of Object.keys(LOCATION_IMAGE_GROUP_SLOT_MAP) as LocationImageGroup[]) {
       for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
         const url = (imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
-        if (url) return url;
+        if (url) {
+          hasAnyV2Image = true;
+          if (enabledGroups.includes(group)) return url;
+        }
       }
     }
-    return initialImageUrl;
-  }, [enabledGroups, imageSlotsV2, initialImageUrl, primaryImageRef]);
+
+    if (allowInitialImageUrlFallback && !hasAnyV2Image) return initialImageUrl;
+    return null;
+  }, [allowInitialImageUrlFallback, enabledGroups, imageSlotsV2, initialImageUrl, primaryImageRef]);
 
   const applyServerImageState = (next?: {
     image_slots_v2?: LocationImageSlotsV2;

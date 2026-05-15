@@ -7,6 +7,10 @@ from typing import Any, Literal
 
 from app.games.zone_stalkers.memory.memory_events import get_memory_metrics
 from app.games.zone_stalkers.memory.store import get_tag_metrics
+from app.games.zone_stalkers.location_images import (
+    migrate_location_images,
+    sync_location_primary_image_url,
+)
 
 ProjectionMode = Literal["zone-lite", "game", "debug-map", "debug-map-lite", "full"]
 
@@ -605,25 +609,30 @@ def _project_locations_game(locations: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(loc, dict):
             result[loc_id] = loc
             continue
+
+        projected_loc = copy.deepcopy(loc)
+        migrate_location_images(projected_loc)
+        sync_location_primary_image_url(projected_loc)
+
         result[loc_id] = {
-            "id": loc.get("id"),
-            "name": loc.get("name"),
-            "terrain_type": loc.get("terrain_type"),
-            "anomaly_activity": loc.get("anomaly_activity"),
-            "dominant_anomaly_type": loc.get("dominant_anomaly_type"),
-            "connections": loc.get("connections"),
-            "agents": loc.get("agents"),
-            "exit_zone": loc.get("exit_zone"),
-            "artifacts": loc.get("artifacts"),
-            "items": loc.get("items"),
-            "region": loc.get("region"),
-            "image_profile": loc.get("image_profile"),
-            "image_slots_v2": loc.get("image_slots_v2"),
-            "primary_image_ref": loc.get("primary_image_ref"),
-            "image_url": loc.get("image_url"),
-            "image_slots": loc.get("image_slots"),
-            "primary_image_slot": loc.get("primary_image_slot"),
-            "debug_layout": loc.get("debug_layout"),
+            "id": projected_loc.get("id"),
+            "name": projected_loc.get("name"),
+            "terrain_type": projected_loc.get("terrain_type"),
+            "anomaly_activity": projected_loc.get("anomaly_activity"),
+            "dominant_anomaly_type": projected_loc.get("dominant_anomaly_type"),
+            "connections": projected_loc.get("connections"),
+            "agents": projected_loc.get("agents"),
+            "exit_zone": projected_loc.get("exit_zone"),
+            "artifacts": projected_loc.get("artifacts"),
+            "items": projected_loc.get("items"),
+            "region": projected_loc.get("region"),
+            "image_profile": projected_loc.get("image_profile"),
+            "image_slots_v2": projected_loc.get("image_slots_v2"),
+            "primary_image_ref": projected_loc.get("primary_image_ref"),
+            "image_url": projected_loc.get("image_url"),
+            "image_slots": projected_loc.get("image_slots"),
+            "primary_image_slot": projected_loc.get("primary_image_slot"),
+            "debug_layout": projected_loc.get("debug_layout"),
         }
     return result
 

@@ -819,7 +819,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     }
 
     const exportData = {
-      schema_version: 3,
+      schema_version: 4,
       exported_at: new Date().toISOString(),
       locations: locationsForExport,
       debug_layout: {
@@ -1359,6 +1359,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
         exit_zone: data.exitZone,
+        image_profile: data.imageProfile,
         position: pos,
       });
     },
@@ -2290,6 +2291,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           initialRegion={zoneState.locations[editingLocId].region ?? ''}
           initialExitZone={zoneState.locations[editingLocId].exit_zone ?? false}
           initialImageUrl={zoneState.locations[editingLocId].image_url ?? null}
+          allowInitialImageUrlFallback={
+            !zoneState.locations[editingLocId].image_slots_v2 && Boolean(zoneState.locations[editingLocId].image_url)
+          }
           initialImageProfile={
             Object.prototype.hasOwnProperty.call(localImageProfileByLoc, editingLocId)
               ? localImageProfileByLoc[editingLocId]
