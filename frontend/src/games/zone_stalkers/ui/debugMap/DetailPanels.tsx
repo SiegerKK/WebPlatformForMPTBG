@@ -4,12 +4,22 @@
  */
 import React, { useState } from 'react';
 import { AgentCreateModal } from '../AgentProfileModal';
-import type { ZoneLocation, ZoneMapState, LocationConn, LocationImageSlot } from './types';
+import type {
+  ZoneLocation,
+  ZoneMapState,
+  LocationConn,
+  LocationImageRef,
+  LocationImageSlotsV2,
+  LocationImageProfile,
+} from './types';
 import {
-  LOCATION_IMAGE_SLOTS,
-  LOCATION_IMAGE_SLOT_LABELS,
-  LOCATION_IMAGE_SLOT_ICONS,
+  LOCATION_IMAGE_GROUP_LABELS,
+  LOCATION_IMAGE_GROUP_SLOT_MAP,
+  getEnabledImageGroups,
+  getImageSlotIcon,
+  getImageSlotLabel,
   getPrimaryLocationImageUrl,
+  normalizeImageSlotsV2,
 } from './types';
 import { TERRAIN_TYPE_LABELS, REGION_COLOR_PALETTE } from './constants';
 import { s } from './styles';
@@ -61,47 +71,55 @@ const LocationPrimaryImagePreview = React.memo(function LocationPrimaryImagePrev
 });
 
 const LocationPrimaryImageSelector = React.memo(function LocationPrimaryImageSelector({
-  imageSlots,
-  primaryImageSlot,
-  hasLegacyImageUrl,
-  onSetPrimaryImageSlot,
+  imageSlotsV2,
+  profile,
+  primaryImageRef,
+  onSetPrimaryImageRef,
 }: {
-  imageSlots?: Partial<Record<LocationImageSlot, string | null>>;
-  primaryImageSlot?: LocationImageSlot | null;
-  hasLegacyImageUrl: boolean;
-  onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
+  imageSlotsV2: LocationImageSlotsV2;
+  profile?: LocationImageProfile;
+  primaryImageRef?: LocationImageRef | null;
+  onSetPrimaryImageRef?: (ref: LocationImageRef) => Promise<void>;
 }) {
+  const groups = getEnabledImageGroups(profile);
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
-      {LOCATION_IMAGE_SLOTS.map((slot) => {
-        const hasImage = Boolean(imageSlots?.[slot]);
-        const isPrimary = primaryImageSlot === slot || (!primaryImageSlot && slot === 'clear' && hasLegacyImageUrl);
-        return (
-          <button
-            key={slot}
-            onClick={() => {
-              if (hasImage && onSetPrimaryImageSlot) void onSetPrimaryImageSlot(slot);
-            }}
-            disabled={!hasImage || !onSetPrimaryImageSlot}
-            title={hasImage ? 'Сделать приоритетной' : 'Нет изображения в этом слоте'}
-            style={{
-              padding: '2px 7px',
-              fontSize: '0.68rem',
-              cursor: hasImage && onSetPrimaryImageSlot ? 'pointer' : 'default',
-              background: isPrimary ? '#1d4ed8' : (hasImage ? '#1e293b' : '#0f172a'),
-              color: isPrimary ? '#bfdbfe' : (hasImage ? '#94a3b8' : '#334155'),
-              borderTop: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
-              borderRight: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
-              borderBottom: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
-              borderLeft: `3px solid ${isPrimary ? '#60a5fa' : (hasImage ? '#334155' : '#1e293b')}`,
-              borderRadius: 4,
-              transition: 'background 0.15s',
-            }}
-          >
-            {LOCATION_IMAGE_SLOT_ICONS[slot]} {isPrimary ? '★ ' : ''}{LOCATION_IMAGE_SLOT_LABELS[slot]}
-          </button>
-        );
-      })}
+    <div style={{ display: 'grid', gap: 8, marginTop: 6 }}>
+      {groups.map((group) => (
+        <div key={group}>
+          <div style={{ color: '#94a3b8', fontSize: '0.68rem', marginBottom: 4 }}>{LOCATION_IMAGE_GROUP_LABELS[group]}</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {LOCATION_IMAGE_GROUP_SLOT_MAP[group].map((slot) => {
+              const hasImage = Boolean((imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot]);
+              const isPrimary = primaryImageRef?.group === group && primaryImageRef?.slot === slot;
+              return (
+                <button
+                  key={`${group}:${slot}`}
+                  onClick={() => {
+                    if (hasImage && onSetPrimaryImageRef) void onSetPrimaryImageRef({ group, slot });
+                  }}
+                  disabled={!hasImage || !onSetPrimaryImageRef}
+                  title={hasImage ? 'Сделать приоритетной' : 'Нет изображения в этом слоте'}
+                  style={{
+                    padding: '2px 7px',
+                    fontSize: '0.68rem',
+                    cursor: hasImage && onSetPrimaryImageRef ? 'pointer' : 'default',
+                    background: isPrimary ? '#1d4ed8' : (hasImage ? '#1e293b' : '#0f172a'),
+                    color: isPrimary ? '#bfdbfe' : (hasImage ? '#94a3b8' : '#334155'),
+                    borderTop: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+                    borderRight: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+                    borderBottom: `1px solid ${isPrimary ? '#3b82f6' : (hasImage ? '#334155' : '#1e293b')}`,
+                    borderLeft: `3px solid ${isPrimary ? '#60a5fa' : (hasImage ? '#334155' : '#1e293b')}`,
+                    borderRadius: 4,
+                    transition: 'background 0.15s',
+                  }}
+                >
+                  {getImageSlotIcon(group, slot)} {isPrimary ? '★ ' : ''}{getImageSlotLabel(group, slot)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 });
@@ -126,7 +144,7 @@ export function LocationDetailPanel({
   onAgentClick,
   onTraderClick,
   onDeleteLoc,
-  onSetPrimaryImageSlot,
+  onSetPrimaryImageRef,
 }: {
   loc: ZoneLocation;
   conns: LocationConn[];
@@ -153,8 +171,8 @@ export function LocationDetailPanel({
   onTraderClick?: (traderId: string) => void;
   /** Called when the user wants to delete this location entirely. */
   onDeleteLoc?: () => void;
-  /** Set the primary image slot. */
-  onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
+  /** Set the primary image slot (group+slot). */
+  onSetPrimaryImageRef?: (ref: LocationImageRef) => Promise<void>;
 }) {
   const [showSpawnModal, setShowSpawnModal] = useState<'stalker' | 'trader' | 'mutant' | 'artifact' | 'item' | null>(null);
 
@@ -261,10 +279,10 @@ export function LocationDetailPanel({
       <Section label="🖼 Изображения локации">
         <LocationPrimaryImagePreview url={primaryImageUrl} name={loc.name} />
         <LocationPrimaryImageSelector
-          imageSlots={loc.image_slots}
-          primaryImageSlot={loc.primary_image_slot}
-          hasLegacyImageUrl={Boolean(loc.image_url) && !loc.image_slots}
-          onSetPrimaryImageSlot={onSetPrimaryImageSlot}
+          imageSlotsV2={normalizeImageSlotsV2(loc)}
+          profile={loc.image_profile}
+          primaryImageRef={loc.primary_image_ref}
+          onSetPrimaryImageRef={onSetPrimaryImageRef}
         />
       </Section>
 

@@ -63,6 +63,14 @@ export const LOCATION_IMAGE_GROUP_SLOT_MAP: Record<LocationImageGroup, readonly 
   underground: UNDERGROUND_IMAGE_SLOTS,
 };
 
+export const LOCATION_IMAGE_GROUP_LABELS: Record<LocationImageGroup, string> = {
+  normal: 'Обычная',
+  gloom: 'Мрачная',
+  anomaly: 'Аномальная',
+  psi: 'Пси',
+  underground: 'Подземная',
+};
+
 export const LOCATION_IMAGE_SLOTS: LocationImageSlot[] = [...WEATHER_IMAGE_SLOTS];
 
 export const LOCATION_IMAGE_SLOT_LABELS: Record<LocationImageSlot, string> = {
@@ -80,6 +88,60 @@ export const LOCATION_IMAGE_SLOT_ICONS: Record<LocationImageSlot, string> = {
   night_clear: '🌙',
   night_rain: '🌧️🌙',
 };
+
+const PSI_IMAGE_SLOT_LABELS: Record<PsiSlot, string> = {
+  low: 'Низкая',
+  medium: 'Средняя',
+  high: 'Высокая',
+  critical: 'Критическая',
+  max: 'Максимум',
+};
+
+const PSI_IMAGE_SLOT_ICONS: Record<PsiSlot, string> = {
+  low: '🧠',
+  medium: '🧠',
+  high: '🧠',
+  critical: '🧠',
+  max: '🧠',
+};
+
+const UNDERGROUND_IMAGE_SLOT_LABELS: Record<UndergroundSlot, string> = {
+  default: 'Обычный',
+  dark: 'Тёмный',
+  emergency_light: 'Аварийный свет',
+  power_failure: 'Без света',
+  flooded: 'Затоплен',
+  toxic: 'Токсично',
+  anomaly: 'Аномалии',
+  psi_low: 'Пси слабый',
+  psi_high: 'Пси сильный',
+  combat: 'Бой',
+};
+
+const UNDERGROUND_IMAGE_SLOT_ICONS: Record<UndergroundSlot, string> = {
+  default: '🕳️',
+  dark: '🌑',
+  emergency_light: '🚨',
+  power_failure: '⚡',
+  flooded: '🌊',
+  toxic: '☣️',
+  anomaly: '⚠️',
+  psi_low: '🧠',
+  psi_high: '🧠',
+  combat: '⚔️',
+};
+
+export function getImageSlotLabel(group: LocationImageGroup, slot: string): string {
+  if (group === 'psi') return PSI_IMAGE_SLOT_LABELS[slot as PsiSlot] ?? slot;
+  if (group === 'underground') return UNDERGROUND_IMAGE_SLOT_LABELS[slot as UndergroundSlot] ?? slot;
+  return LOCATION_IMAGE_SLOT_LABELS[slot as LocationImageSlot] ?? slot;
+}
+
+export function getImageSlotIcon(group: LocationImageGroup, slot: string): string {
+  if (group === 'psi') return PSI_IMAGE_SLOT_ICONS[slot as PsiSlot] ?? '🖼️';
+  if (group === 'underground') return UNDERGROUND_IMAGE_SLOT_ICONS[slot as UndergroundSlot] ?? '🕳️';
+  return LOCATION_IMAGE_SLOT_ICONS[slot as LocationImageSlot] ?? '🖼️';
+}
 
 export function getEnabledImageGroups(profile?: LocationImageProfile): LocationImageGroup[] {
   if (profile?.is_underground) {

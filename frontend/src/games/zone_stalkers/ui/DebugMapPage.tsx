@@ -13,14 +13,29 @@
  */
 import React, { useMemo, useState, useRef, useCallback, useEffect } from 'react';
 
-import type { DebugMapPageProps, LocationConn, ZoneLocation, LocationImageSlot, LocationImageSlots } from './debugMap/types';
+import type {
+  DebugMapPageProps,
+  LocationConn,
+  ZoneLocation,
+  LocationImageGroup,
+  LocationImageProfile,
+  LocationImageRef,
+  LocationImageSlotsV2,
+} from './debugMap/types';
 import {
   CARD_W, CARD_H, CANVAS_PAD, MAX_CANVAS_COORD, REGION_PAD,
   computeBfsLayout,
   TERRAIN_TYPE_COLOR, TERRAIN_TYPE_LABELS,
   REGION_LABELS, REGION_BG_COLOR, REGION_BORDER_COLOR, REGION_COLOR_PALETTE,
 } from './debugMap/constants';
-import { LOCATION_IMAGE_SLOTS, getPrimaryLocationImageUrl } from './debugMap/types';
+import {
+  LOCATION_IMAGE_GROUPS,
+  LOCATION_IMAGE_GROUP_SLOT_MAP,
+  LOCATION_IMAGE_SLOTS,
+  getEnabledImageGroups,
+  getPrimaryLocationImageUrl,
+  normalizeImageSlotsV2,
+} from './debugMap/types';
 import { s } from './debugMap/styles';
 import { Badge, LocationDetailPanel, RegionDetailPanel, EmptyDetailHint } from './debugMap/DetailPanels';
 import { LocationModal } from './debugMap/Modals';
@@ -57,21 +72,12 @@ function normalizeLocationConnections(loc?: Partial<ZoneLocation> | null): Locat
   return Array.isArray(loc?.connections) ? (loc.connections as LocationConn[]) : [];
 }
 
-function normalizeImageSlots(loc: ZoneLocation): LocationImageSlots {
-  const slots: LocationImageSlots = {};
-  for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = loc.image_slots?.[slot] ?? null;
-  return slots;
-}
-
-function emptyImageSlots(): LocationImageSlots {
-  const slots: LocationImageSlots = {};
-  for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = null;
-  return slots;
-}
-
-function safeNormalizeImageSlots(loc?: ZoneLocation | null): LocationImageSlots {
-  if (!loc) return emptyImageSlots();
-  return normalizeImageSlots(loc);
+function normalizeImageProfile(profile?: LocationImageProfile): LocationImageProfile {
+  return {
+    is_anomalous: Boolean(profile?.is_anomalous),
+    is_psi: Boolean(profile?.is_psi),
+    is_underground: Boolean(profile?.is_underground),
+  };
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -119,8 +125,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   // ── Location edit / create modals ─────────────────────────────────────────
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [creatingLoc, setCreatingLoc] = useState(false);
-  const [localImageSlotsByLoc, setLocalImageSlotsByLoc] = useState<Record<string, LocationImageSlots>>({});
-  const [localPrimaryImageSlotByLoc, setLocalPrimaryImageSlotByLoc] = useState<Record<string, LocationImageSlot | null>>({});
+  const [localImageSlotsV2ByLoc, setLocalImageSlotsV2ByLoc] = useState<Record<string, LocationImageSlotsV2>>({});
+  const [localPrimaryImageRefByLoc, setLocalPrimaryImageRefByLoc] = useState<Record<string, LocationImageRef | null>>({});
+  const [localImageProfileByLoc, setLocalImageProfileByLoc] = useState<Record<string, LocationImageProfile>>({});
 
   // ── Viewport persistence (pan + zoom saved per-match in localStorage) ────────
   const _vpKey = `zs_viewport_${matchId}`;
@@ -734,36 +741,58 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
     const zip = new JSZip();
     const locationsForExport: Record<string, Record<string, unknown>> = {};
     for (const [id, loc] of Object.entries(zoneState.locations)) {
-      const exportedSlots: LocationImageSlots = {};
-      for (const slot of LOCATION_IMAGE_SLOTS) exportedSlots[slot] = null;
-      const normalizedSlots = normalizeImageSlots(loc);
-      let primarySlot = loc.primary_image_slot ?? null;
-      let exportedPrimaryPath: string | null = null;
-
-      for (const slot of LOCATION_IMAGE_SLOTS) {
-        const imageUrl = normalizedSlots[slot];
-        if (!imageUrl) continue;
-        try {
-          const resp = await fetch(imageUrl, { credentials: 'include' });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const blob = await resp.blob();
-          const ext = detectImageExtension(imageUrl, blob.type);
-          const zipPath = `images/${id}/${slot}${ext}`;
-          zip.file(zipPath, blob);
-          exportedSlots[slot] = zipPath;
-          if (primarySlot === slot) exportedPrimaryPath = zipPath;
-        } catch (error) {
-          console.warn(`Failed to export image ${id}/${slot}`, error);
-          exportedSlots[slot] = null;
+      const normalizedSlotsV2 = normalizeImageSlotsV2(loc);
+      const exportedSlotsV2: Record<string, Record<string, string | null>> = {};
+      for (const group of LOCATION_IMAGE_GROUPS) {
+        exportedSlotsV2[group] = {};
+        for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+          exportedSlotsV2[group][slot] = null;
         }
       }
 
-      if (!primarySlot || !exportedSlots[primarySlot]) {
-        primarySlot = LOCATION_IMAGE_SLOTS.find((slot) => Boolean(exportedSlots[slot])) ?? null;
+      let primaryRef: LocationImageRef | null = loc.primary_image_ref ?? null;
+      let exportedPrimaryPath: string | null = null;
+
+      for (const group of LOCATION_IMAGE_GROUPS) {
+        for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+          const imageUrl = (normalizedSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+          if (!imageUrl) continue;
+          try {
+            const resp = await fetch(imageUrl, { credentials: 'include' });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const ext = detectImageExtension(imageUrl, blob.type);
+            const zipPath = `images/${id}/${group}/${slot}${ext}`;
+            zip.file(zipPath, blob);
+            exportedSlotsV2[group][slot] = zipPath;
+            if (primaryRef?.group === group && primaryRef?.slot === slot) exportedPrimaryPath = zipPath;
+          } catch (error) {
+            console.warn(`Failed to export image ${id}/${group}/${slot}`, error);
+            exportedSlotsV2[group][slot] = null;
+          }
+        }
       }
-      if (primarySlot && exportedSlots[primarySlot]) {
-        exportedPrimaryPath = exportedSlots[primarySlot] ?? null;
+
+      if (!primaryRef || !exportedSlotsV2[primaryRef.group]?.[primaryRef.slot]) {
+        primaryRef = null;
+        const groupsByPriority = getEnabledImageGroups(loc.image_profile);
+        for (const group of groupsByPriority) {
+          const slot = LOCATION_IMAGE_GROUP_SLOT_MAP[group].find((s) => Boolean(exportedSlotsV2[group]?.[s]));
+          if (slot) {
+            primaryRef = { group, slot };
+            break;
+          }
+        }
       }
+      if (primaryRef && exportedSlotsV2[primaryRef.group]?.[primaryRef.slot]) {
+        exportedPrimaryPath = exportedSlotsV2[primaryRef.group][primaryRef.slot];
+      }
+
+      const legacySlots: Record<string, string | null> = {};
+      for (const slot of LOCATION_IMAGE_SLOTS) {
+        legacySlots[slot] = exportedSlotsV2.normal?.[slot] ?? null;
+      }
+      const legacyPrimary = (primaryRef?.group === 'normal' ? primaryRef.slot : null) ?? (legacySlots.clear ? 'clear' : null);
 
       locationsForExport[id] = {
         id,
@@ -780,14 +809,17 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           closed: c.closed ?? false,
         })),
         artifacts: loc.artifacts ?? [],
-        image_slots: exportedSlots,
-        primary_image_slot: primarySlot,
+        image_profile: normalizeImageProfile(loc.image_profile),
+        image_slots_v2: exportedSlotsV2,
+        primary_image_ref: primaryRef,
+        image_slots: legacySlots,
+        primary_image_slot: legacyPrimary,
         image_url: exportedPrimaryPath,
       };
     }
 
     const exportData = {
-      schema_version: 2,
+      schema_version: 3,
       exported_at: new Date().toISOString(),
       locations: locationsForExport,
       debug_layout: {
@@ -878,25 +910,65 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           const schemaVersion = Number(parsed.schema_version ?? 1);
           const finalLocs: Record<string, Record<string, unknown>> = {};
           for (const [locId, locData] of Object.entries(locsData)) {
-            const incomingSlots = (locData.image_slots && typeof locData.image_slots === 'object' && !Array.isArray(locData.image_slots))
-              ? locData.image_slots as Record<string, string | null>
-              : {};
-            const normalizedSlots: Record<string, string | null> = Object.fromEntries(
-              LOCATION_IMAGE_SLOTS.map((slot) => [slot, null]),
-            );
-            if (schemaVersion >= 2) {
-              for (const slot of LOCATION_IMAGE_SLOTS) {
-                normalizedSlots[slot] = incomingSlots[slot] ?? null;
+            const normalizedSlotsV2: Record<string, Record<string, string | null>> = {};
+            for (const group of LOCATION_IMAGE_GROUPS) {
+              normalizedSlotsV2[group] = {};
+              for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+                normalizedSlotsV2[group][slot] = null;
+              }
+            }
+
+            const incomingSlotsV2 = (
+              locData.image_slots_v2 &&
+              typeof locData.image_slots_v2 === 'object' &&
+              !Array.isArray(locData.image_slots_v2)
+            ) ? locData.image_slots_v2 as Record<string, Record<string, string | null>> : null;
+
+            if (incomingSlotsV2) {
+              for (const group of LOCATION_IMAGE_GROUPS) {
+                for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+                  normalizedSlotsV2[group][slot] = incomingSlotsV2[group]?.[slot] ?? null;
+                }
               }
             } else {
-              const legacyPath = typeof locData.image_url === 'string' ? locData.image_url : null;
-              if (legacyPath) normalizedSlots.clear = legacyPath;
+              const incomingLegacySlots = (locData.image_slots && typeof locData.image_slots === 'object' && !Array.isArray(locData.image_slots))
+                ? locData.image_slots as Record<string, string | null>
+                : {};
+              for (const slot of LOCATION_IMAGE_SLOTS) {
+                normalizedSlotsV2.normal[slot] = incomingLegacySlots[slot] ?? null;
+              }
+              if (schemaVersion < 2) {
+                const legacyPath = typeof locData.image_url === 'string' ? locData.image_url : null;
+                if (legacyPath) normalizedSlotsV2.normal.clear = legacyPath;
+              }
+            }
+
+            const incomingProfile = normalizeImageProfile(
+              (locData.image_profile && typeof locData.image_profile === 'object' && !Array.isArray(locData.image_profile))
+                ? locData.image_profile as LocationImageProfile
+                : undefined,
+            );
+
+            const rawPrimaryRef = (locData.primary_image_ref && typeof locData.primary_image_ref === 'object')
+              ? locData.primary_image_ref as { group?: string; slot?: string }
+              : null;
+            const primaryRef: LocationImageRef | null =
+              rawPrimaryRef?.group && rawPrimaryRef?.slot
+                ? { group: rawPrimaryRef.group as LocationImageGroup, slot: rawPrimaryRef.slot }
+                : (typeof locData.primary_image_slot === 'string' ? { group: 'normal', slot: locData.primary_image_slot } : null);
+
+            const legacySlots: Record<string, string | null> = {};
+            for (const slot of LOCATION_IMAGE_SLOTS) {
+              legacySlots[slot] = normalizedSlotsV2.normal?.[slot] ?? null;
             }
 
             finalLocs[locId] = {
               ...locData,
-              image_slots: normalizedSlots,
-              primary_image_slot: (locData.primary_image_slot as string | undefined) ?? (normalizedSlots.clear ? 'clear' : null),
+              image_profile: incomingProfile,
+              image_slots_v2: normalizedSlotsV2,
+              primary_image_ref: primaryRef,
+              image_slots: legacySlots,
+              primary_image_slot: (primaryRef?.group === 'normal' ? primaryRef.slot : null) ?? (legacySlots.clear ? 'clear' : null),
               image_url: null,
             };
           }
@@ -916,50 +988,48 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
 
           const failedImageLocs: string[] = [];
           if (contextId) {
-            for (const [locId, locData] of Object.entries(locsData)) {
-              const slotPaths: Record<string, string | null> = {};
-              if (schemaVersion >= 2 && locData.image_slots && typeof locData.image_slots === 'object' && !Array.isArray(locData.image_slots)) {
-                for (const slot of LOCATION_IMAGE_SLOTS) {
-                  const p = (locData.image_slots as Record<string, string | null>)[slot];
-                  slotPaths[slot] = typeof p === 'string' ? p : null;
-                }
-              } else {
-                const legacy = typeof locData.image_url === 'string'
-                  ? locData.image_url
-                  : (typeof locData.image_file === 'string' ? locData.image_file : null);
-                slotPaths.clear = legacy;
-              }
-
-              for (const slot of LOCATION_IMAGE_SLOTS) {
-                const imageFilePath = slotPaths[slot];
-                if (!imageFilePath) continue;
-                const zipEntry = zip.file(imageFilePath);
-                if (!zipEntry) continue;
-                try {
-                  const imgBuf = await zipEntry.async('arraybuffer');
-                  const ext = imageFilePath.split('.').pop()?.toLowerCase() ?? '';
-                  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
-                  const mime = mimeMap[ext] ?? 'application/octet-stream';
-                  const imgFile = new File([imgBuf], `${locId}_${slot}.${ext || 'jpg'}`, { type: mime });
-                  const upload = await locationsApi.uploadImageSlot(contextId, locId, imgFile, "normal", slot as LocationImageSlot);
-                  setLocalImageSlotsByLoc((prev) => ({
-                    ...prev,
-                    [locId]: upload.data.image_slots as LocationImageSlots,
-                  }));
-                  setLocalPrimaryImageSlotByLoc((prev) => ({
-                    ...prev,
-                    [locId]: (upload.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null,
-                  }));
-                } catch {
-                  failedImageLocs.push(`${locId}/${slot}`);
+            for (const [locId, locData] of Object.entries(finalLocs)) {
+              const slotsV2 = (locData.image_slots_v2 && typeof locData.image_slots_v2 === 'object' && !Array.isArray(locData.image_slots_v2))
+                ? locData.image_slots_v2 as Record<string, Record<string, string | null>>
+                : {};
+              for (const group of LOCATION_IMAGE_GROUPS) {
+                for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+                  const imageFilePath = slotsV2[group]?.[slot] ?? null;
+                  if (!imageFilePath) continue;
+                  const zipEntry = zip.file(imageFilePath);
+                  if (!zipEntry) continue;
+                  try {
+                    const imgBuf = await zipEntry.async('arraybuffer');
+                    const ext = imageFilePath.split('.').pop()?.toLowerCase() ?? '';
+                    const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+                    const mime = mimeMap[ext] ?? 'application/octet-stream';
+                    const imgFile = new File([imgBuf], `${locId}_${group}_${slot}.${ext || 'jpg'}`, { type: mime });
+                    const upload = await locationsApi.uploadImageSlot(contextId, locId, imgFile, group, slot);
+                    applyLocalImageResponse(locId, {
+                      image_slots_v2: upload.data.image_slots_v2 as LocationImageSlotsV2 | undefined,
+                      primary_image_ref: upload.data.primary_image_ref as LocationImageRef | null | undefined,
+                      image_profile: upload.data.image_profile as LocationImageProfile | undefined,
+                    });
+                  } catch {
+                    failedImageLocs.push(`${locId}/${group}/${slot}`);
+                  }
                 }
               }
 
-              const requestedPrimary = locData.primary_image_slot as LocationImageSlot | undefined;
-              if (requestedPrimary && LOCATION_IMAGE_SLOTS.includes(requestedPrimary)) {
+              const requestedPrimary = (locData.primary_image_ref && typeof locData.primary_image_ref === 'object')
+                ? locData.primary_image_ref as { group?: string; slot?: string }
+                : null;
+              if (requestedPrimary?.group && requestedPrimary?.slot) {
                 try {
-                  await sendCommand('debug_set_location_primary_image', { loc_id: locId, group: 'normal', slot: requestedPrimary });
-                  setLocalPrimaryImageSlotByLoc((prev) => ({ ...prev, [locId]: requestedPrimary }));
+                  await sendCommand('debug_set_location_primary_image', {
+                    loc_id: locId,
+                    group: requestedPrimary.group,
+                    slot: requestedPrimary.slot,
+                  });
+                  setLocalPrimaryImageRefByLoc((prev) => ({
+                    ...prev,
+                    [locId]: { group: requestedPrimary.group as LocationImageGroup, slot: requestedPrimary.slot as string },
+                  }));
                 } catch {
                   failedImageLocs.push(`${locId}/primary`);
                 }
@@ -1153,6 +1223,9 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
                 anomaly_activity: locData.anomaly_activity,
                 dominant_anomaly_type: locData.dominant_anomaly_type,
                 region: locData.region,
+                image_profile: (locData as Record<string, unknown>).image_profile,
+                image_slots_v2: (locData as Record<string, unknown>).image_slots_v2,
+                primary_image_ref: (locData as Record<string, unknown>).primary_image_ref,
               });
             }
           }
@@ -1166,58 +1239,81 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   );
 
 
+  const applyLocalImageResponse = useCallback(
+    (
+      locId: string,
+      payload: {
+        image_slots_v2?: LocationImageSlotsV2;
+        primary_image_ref?: LocationImageRef | null;
+        image_profile?: LocationImageProfile;
+      },
+    ) => {
+      if (payload.image_slots_v2) {
+        setLocalImageSlotsV2ByLoc((prev) => ({ ...prev, [locId]: payload.image_slots_v2 as LocationImageSlotsV2 }));
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'primary_image_ref')) {
+        setLocalPrimaryImageRefByLoc((prev) => ({ ...prev, [locId]: payload.primary_image_ref ?? null }));
+      }
+      if (payload.image_profile) {
+        setLocalImageProfileByLoc((prev) => ({ ...prev, [locId]: normalizeImageProfile(payload.image_profile) }));
+      }
+    },
+    [],
+  );
+
   const handleUploadLocationImageSlot = useCallback(
-    async (locId: string, slot: LocationImageSlot, file: File, group = "normal") => {
+    async (locId: string, group: LocationImageGroup, slot: string, file: File) => {
       if (!contextId) return undefined;
       const resp = await locationsApi.uploadImageSlot(contextId, locId, file, group, slot);
-      const imageSlots = (resp.data.image_slots ?? {}) as LocationImageSlots;
-      const primary = (resp.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null;
-      setLocalImageSlotsByLoc((prev) => ({
-        ...prev,
-        [locId]: {
-          ...safeNormalizeImageSlots(zoneState.locations[locId]),
-          ...imageSlots,
-        },
-      }));
-      setLocalPrimaryImageSlotByLoc((prev) => ({
-        ...prev,
-        [locId]: primary,
-      }));
-      return { image_slots: imageSlots, primary_image_slot: primary };
+      const payload = {
+        image_slots_v2: resp.data.image_slots_v2 as LocationImageSlotsV2 | undefined,
+        primary_image_ref: (resp.data.primary_image_ref as LocationImageRef | null | undefined) ?? null,
+        image_profile: resp.data.image_profile as LocationImageProfile | undefined,
+      };
+      applyLocalImageResponse(locId, payload);
+      return payload;
     },
-    [contextId, zoneState.locations],
+    [applyLocalImageResponse, contextId],
   );
 
   const handleDeleteLocationImageSlot = useCallback(
-    async (locId: string, slot: LocationImageSlot, group = "normal") => {
+    async (locId: string, group: LocationImageGroup, slot: string) => {
       if (!contextId) return undefined;
       const resp = await locationsApi.deleteImageSlot(contextId, locId, group, slot);
-      const imageSlots = (resp.data.image_slots ?? {}) as LocationImageSlots;
-      const primary = (resp.data.primary_image_slot as LocationImageSlot | null | undefined) ?? null;
-      setLocalImageSlotsByLoc((prev) => ({
-        ...prev,
-        [locId]: {
-          ...safeNormalizeImageSlots(zoneState.locations[locId]),
-          ...imageSlots,
-        },
-      }));
-      setLocalPrimaryImageSlotByLoc((prev) => ({
-        ...prev,
-        [locId]: primary,
-      }));
-      return { image_slots: imageSlots, primary_image_slot: primary };
+      const payload = {
+        image_slots_v2: resp.data.image_slots_v2 as LocationImageSlotsV2 | undefined,
+        primary_image_ref: (resp.data.primary_image_ref as LocationImageRef | null | undefined) ?? null,
+        image_profile: resp.data.image_profile as LocationImageProfile | undefined,
+      };
+      applyLocalImageResponse(locId, payload);
+      return payload;
     },
-    [contextId, zoneState.locations],
+    [applyLocalImageResponse, contextId],
   );
 
-  const handleSetLocationPrimaryImageSlot = useCallback(
-    async (locId: string, slot: LocationImageSlot) => {
-      const prev = zoneState.locations[locId]?.primary_image_slot ?? null;
-      setLocalPrimaryImageSlotByLoc((curr) => ({ ...curr, [locId]: slot }));
+  const handlePatchLocationImageProfile = useCallback(
+    async (locId: string, profile: LocationImageProfile) => {
+      if (!contextId) return undefined;
+      const resp = await locationsApi.patchImageProfile(contextId, locId, profile);
+      const payload = {
+        image_slots_v2: resp.data.image_slots_v2 as LocationImageSlotsV2 | undefined,
+        primary_image_ref: (resp.data.primary_image_ref as LocationImageRef | null | undefined) ?? null,
+        image_profile: resp.data.image_profile as LocationImageProfile | undefined,
+      };
+      applyLocalImageResponse(locId, payload);
+      return payload;
+    },
+    [applyLocalImageResponse, contextId],
+  );
+
+  const handleSetLocationPrimaryImageRef = useCallback(
+    async (locId: string, ref: LocationImageRef) => {
+      const prev = zoneState.locations[locId]?.primary_image_ref ?? null;
+      setLocalPrimaryImageRefByLoc((curr) => ({ ...curr, [locId]: ref }));
       try {
-        await sendCommand('debug_set_location_primary_image', { loc_id: locId, group: 'normal', slot });
+        await sendCommand('debug_set_location_primary_image', { loc_id: locId, group: ref.group, slot: ref.slot });
       } catch (error) {
-        setLocalPrimaryImageSlotByLoc((curr) => ({ ...curr, [locId]: prev }));
+        setLocalPrimaryImageRefByLoc((curr) => ({ ...curr, [locId]: prev }));
         throw error;
       }
     },
@@ -1225,7 +1321,7 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   );
 
   const handleSaveEdit = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean; imageProfile: LocationImageProfile }) => {
       if (!editingLocId) return;
 
       await sendCommand('debug_update_location', {
@@ -1236,13 +1332,14 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
         dominant_anomaly_type: data.dominantAnomalyType || null,
         region: data.region || null,
         exit_zone: data.exitZone,
+        image_profile: data.imageProfile,
       });
     },
     [editingLocId, sendCommand],
   );
 
   const handleSaveCreate = useCallback(
-    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean }) => {
+    async (data: { name: string; terrainType: string; anomalyActivity: number; dominantAnomalyType: string; region: string; exitZone: boolean; imageProfile: LocationImageProfile }) => {
       // Place the new card at the center of the currently visible viewport area.
       // The canvas transform is: translate(panOffset.x, panOffset.y) scale(zoom)
       // So the visible center in canvas-space is:
@@ -1289,24 +1386,28 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
   const detailLoc = selectedLocId ? zoneState.locations[selectedLocId] : null;
   const detailLocEffective = useMemo(() => {
     if (!detailLoc) return null;
-    const localSlots = localImageSlotsByLoc[detailLoc.id];
-    const localPrimary = Object.prototype.hasOwnProperty.call(localPrimaryImageSlotByLoc, detailLoc.id)
-      ? localPrimaryImageSlotByLoc[detailLoc.id]
+    const localSlotsV2 = localImageSlotsV2ByLoc[detailLoc.id];
+    const localPrimaryRef = Object.prototype.hasOwnProperty.call(localPrimaryImageRefByLoc, detailLoc.id)
+      ? localPrimaryImageRefByLoc[detailLoc.id]
+      : undefined;
+    const localProfile = Object.prototype.hasOwnProperty.call(localImageProfileByLoc, detailLoc.id)
+      ? localImageProfileByLoc[detailLoc.id]
       : undefined;
     const merged: ZoneLocation = {
       ...detailLoc,
-      image_slots: localSlots ?? detailLoc.image_slots,
-      primary_image_slot: localPrimary !== undefined ? localPrimary : detailLoc.primary_image_slot,
+      image_slots_v2: localSlotsV2 ?? detailLoc.image_slots_v2,
+      primary_image_ref: localPrimaryRef !== undefined ? localPrimaryRef : detailLoc.primary_image_ref,
+      image_profile: localProfile ?? detailLoc.image_profile,
     };
     merged.image_url = getPrimaryLocationImageUrl(merged);
     return merged;
-  }, [detailLoc, localImageSlotsByLoc, localPrimaryImageSlotByLoc]);
+  }, [detailLoc, localImageProfileByLoc, localImageSlotsV2ByLoc, localPrimaryImageRefByLoc]);
   const detailConns = selectedLocId
     ? (localConns[selectedLocId] ?? normalizeLocationConnections(zoneState.locations[selectedLocId]))
     : [];
 
   useEffect(() => {
-    setLocalImageSlotsByLoc((prev) => {
+    setLocalImageSlotsV2ByLoc((prev) => {
       const next = { ...prev };
       for (const [locId, slots] of Object.entries(prev)) {
         const server = zoneState.locations[locId];
@@ -1314,24 +1415,45 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           delete next[locId];
           continue;
         }
+        const serverSlots = normalizeImageSlotsV2(server);
         let matches = true;
-        for (const slot of LOCATION_IMAGE_SLOTS) {
-          if ((slots[slot] ?? null) !== (server.image_slots?.[slot] ?? null)) {
-            matches = false;
-            break;
+        for (const group of LOCATION_IMAGE_GROUPS) {
+          for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+            const localVal = (slots[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+            const serverVal = (serverSlots[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+            if (localVal !== serverVal) {
+              matches = false;
+              break;
+            }
           }
+          if (!matches) break;
         }
         if (matches) delete next[locId];
       }
       return next;
     });
-    setLocalPrimaryImageSlotByLoc((prev) => {
+
+    setLocalPrimaryImageRefByLoc((prev) => {
       const next = { ...prev };
-      for (const [locId, slot] of Object.entries(prev)) {
+      for (const [locId, ref] of Object.entries(prev)) {
         const server = zoneState.locations[locId];
-        if (!server || (server.primary_image_slot ?? null) === (slot ?? null)) {
-          delete next[locId];
-        }
+        const serverRef = server?.primary_image_ref ?? null;
+        const same = (!ref && !serverRef) || (ref?.group === serverRef?.group && ref?.slot === serverRef?.slot);
+        if (!server || same) delete next[locId];
+      }
+      return next;
+    });
+
+    setLocalImageProfileByLoc((prev) => {
+      const next = { ...prev };
+      for (const [locId, profile] of Object.entries(prev)) {
+        const server = zoneState.locations[locId];
+        const serverProfile = normalizeImageProfile(server?.image_profile);
+        const same =
+          Boolean(profile.is_anomalous) === Boolean(serverProfile.is_anomalous) &&
+          Boolean(profile.is_psi) === Boolean(serverProfile.is_psi) &&
+          Boolean(profile.is_underground) === Boolean(serverProfile.is_underground);
+        if (!server || same) delete next[locId];
       }
       return next;
     });
@@ -2137,8 +2259,8 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
             onAgentClick={(agentId) => setProfileAgentId(agentId)}
             onTraderClick={(traderId) => setProfileTraderId(traderId)}
             onDeleteLoc={() => handleDeleteLoc(selectedLocId!)}
-            onSetPrimaryImageSlot={async (slot: LocationImageSlot) => {
-              await handleSetLocationPrimaryImageSlot(selectedLocId!, slot);
+            onSetPrimaryImageRef={async (ref) => {
+              await handleSetLocationPrimaryImageRef(selectedLocId!, ref);
             }}
           />
         ) : selectedRegionId && localRegions[selectedRegionId] ? (
@@ -2168,17 +2290,23 @@ export default function DebugMapPage({ matchId, zoneState, currentLocId, sendCom
           initialRegion={zoneState.locations[editingLocId].region ?? ''}
           initialExitZone={zoneState.locations[editingLocId].exit_zone ?? false}
           initialImageUrl={zoneState.locations[editingLocId].image_url ?? null}
-          initialImageSlots={localImageSlotsByLoc[editingLocId] ?? zoneState.locations[editingLocId].image_slots}
-          initialPrimaryImageSlot={
-            Object.prototype.hasOwnProperty.call(localPrimaryImageSlotByLoc, editingLocId)
-              ? localPrimaryImageSlotByLoc[editingLocId]
-              : zoneState.locations[editingLocId].primary_image_slot
+          initialImageProfile={
+            Object.prototype.hasOwnProperty.call(localImageProfileByLoc, editingLocId)
+              ? localImageProfileByLoc[editingLocId]
+              : zoneState.locations[editingLocId].image_profile
+          }
+          initialImageSlotsV2={localImageSlotsV2ByLoc[editingLocId] ?? normalizeImageSlotsV2(zoneState.locations[editingLocId])}
+          initialPrimaryImageRef={
+            Object.prototype.hasOwnProperty.call(localPrimaryImageRefByLoc, editingLocId)
+              ? localPrimaryImageRefByLoc[editingLocId]
+              : zoneState.locations[editingLocId].primary_image_ref
           }
           regions={localRegions}
           locId={editingLocId}
-          onUploadImageSlot={contextId ? async (slot, file) => handleUploadLocationImageSlot(editingLocId, slot, file) : undefined}
-          onDeleteImageSlot={contextId ? async (slot) => handleDeleteLocationImageSlot(editingLocId, slot) : undefined}
-          onSetPrimaryImageSlot={async (slot) => handleSetLocationPrimaryImageSlot(editingLocId, slot)}
+          onUploadImageSlot={contextId ? async (group, slot, file) => handleUploadLocationImageSlot(editingLocId, group, slot, file) : undefined}
+          onDeleteImageSlot={contextId ? async (group, slot) => handleDeleteLocationImageSlot(editingLocId, group, slot) : undefined}
+          onSetPrimaryImageRef={async (ref) => handleSetLocationPrimaryImageRef(editingLocId, ref)}
+          onPatchImageProfile={contextId ? async (profile) => handlePatchLocationImageProfile(editingLocId, profile) : undefined}
           onClose={() => setEditingLocId(null)}
           onSave={handleSaveEdit}
         />

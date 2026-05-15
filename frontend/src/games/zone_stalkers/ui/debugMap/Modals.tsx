@@ -4,11 +4,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { s } from './styles';
 import {
-  LOCATION_IMAGE_SLOTS,
-  LOCATION_IMAGE_SLOT_ICONS,
-  LOCATION_IMAGE_SLOT_LABELS,
-  type LocationImageSlot,
-  type LocationImageSlots,
+  LOCATION_IMAGE_GROUP_LABELS,
+  LOCATION_IMAGE_GROUP_SLOT_MAP,
+  getEnabledImageGroups,
+  getImageSlotIcon,
+  getImageSlotLabel,
+  getImageSlotUrl,
+  type LocationImageGroup,
+  type LocationImageProfile,
+  type LocationImageRef,
+  type LocationImageSlotsV2,
 } from './types';
 
 // ─── Terrain type options ─────────────────────────────────────────────────────
@@ -64,7 +69,22 @@ export interface LocationSaveData {
   dominantAnomalyType: string;
   region: string;
   exitZone: boolean;
+  imageProfile: LocationImageProfile;
 }
+
+function buildFullSlotsV2(initial?: LocationImageSlotsV2): LocationImageSlotsV2 {
+  const out: LocationImageSlotsV2 = {};
+  for (const group of Object.keys(LOCATION_IMAGE_GROUP_SLOT_MAP) as LocationImageGroup[]) {
+    const groupOut: Record<string, string | null> = {};
+    for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+      groupOut[slot] = (initial?.[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+    }
+    (out as Record<string, Record<string, string | null>>)[group] = groupOut;
+  }
+  return out;
+}
+
+// ─── LocationModal ────────────────────────────────────────────────────────────
 
 export function LocationModal({
   mode,
@@ -74,14 +94,16 @@ export function LocationModal({
   initialDominantAnomalyType = '',
   initialRegion = '',
   initialExitZone = false,
-  initialImageSlots,
-  initialPrimaryImageSlot = null,
+  initialImageSlotsV2,
+  initialPrimaryImageRef = null,
+  initialImageProfile,
   initialImageUrl = null,
   regions,
   locId,
   onUploadImageSlot,
   onDeleteImageSlot,
-  onSetPrimaryImageSlot,
+  onSetPrimaryImageRef,
+  onPatchImageProfile,
   onClose,
   onSave,
 }: {
@@ -92,14 +114,28 @@ export function LocationModal({
   initialDominantAnomalyType?: string;
   initialRegion?: string;
   initialExitZone?: boolean;
-  initialImageSlots?: LocationImageSlots;
-  initialPrimaryImageSlot?: LocationImageSlot | null;
+  initialImageSlotsV2?: LocationImageSlotsV2;
+  initialPrimaryImageRef?: LocationImageRef | null;
+  initialImageProfile?: LocationImageProfile;
   initialImageUrl?: string | null;
   regions?: Record<string, { name: string; colorIndex: number }>;
   locId?: string;
-  onUploadImageSlot?: (slot: LocationImageSlot, file: File) => Promise<{ image_slots?: LocationImageSlots; primary_image_slot?: LocationImageSlot | null } | void>;
-  onDeleteImageSlot?: (slot: LocationImageSlot) => Promise<{ image_slots?: LocationImageSlots; primary_image_slot?: LocationImageSlot | null } | void>;
-  onSetPrimaryImageSlot?: (slot: LocationImageSlot) => Promise<void>;
+  onUploadImageSlot?: (group: LocationImageGroup, slot: string, file: File) => Promise<{
+    image_slots_v2?: LocationImageSlotsV2;
+    primary_image_ref?: LocationImageRef | null;
+    image_profile?: LocationImageProfile;
+  } | void>;
+  onDeleteImageSlot?: (group: LocationImageGroup, slot: string) => Promise<{
+    image_slots_v2?: LocationImageSlotsV2;
+    primary_image_ref?: LocationImageRef | null;
+    image_profile?: LocationImageProfile;
+  } | void>;
+  onSetPrimaryImageRef?: (ref: LocationImageRef) => Promise<void>;
+  onPatchImageProfile?: (profile: LocationImageProfile) => Promise<{
+    image_slots_v2?: LocationImageSlotsV2;
+    primary_image_ref?: LocationImageRef | null;
+    image_profile?: LocationImageProfile;
+  } | void>;
   onClose: () => void;
   onSave: (data: LocationSaveData) => Promise<void>;
 }) {
@@ -111,107 +147,167 @@ export function LocationModal({
   const [exitZone, setExitZone] = useState(initialExitZone);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [slotBusy, setSlotBusy] = useState<Partial<Record<LocationImageSlot, boolean>>>({});
+  const [slotBusy, setSlotBusy] = useState<Record<string, boolean>>({});
   const canEditImages = mode === 'edit' && !!locId;
-  const buildInitialSlots = useMemo(() => {
-    const slots: LocationImageSlots = {};
-    for (const slot of LOCATION_IMAGE_SLOTS) slots[slot] = initialImageSlots?.[slot] ?? null;
-    return slots;
-  }, [initialImageSlots, initialImageUrl]);
-  const [imageSlots, setImageSlots] = useState<LocationImageSlots>(buildInitialSlots);
-  const [primaryImageSlot, setPrimaryImageSlot] = useState<LocationImageSlot | null>(
-    initialPrimaryImageSlot ?? (buildInitialSlots.clear ? 'clear' : null),
-  );
-  useEffect(() => {
-    setImageSlots(buildInitialSlots);
-    setPrimaryImageSlot(initialPrimaryImageSlot ?? (buildInitialSlots.clear ? 'clear' : null));
-    setSlotBusy({});
-  }, [buildInitialSlots, initialPrimaryImageSlot, locId]);
-  const primaryImageUrl = primaryImageSlot ? imageSlots[primaryImageSlot] ?? null : null;
 
-  const applyServerImageState = (next?: { image_slots?: LocationImageSlots; primary_image_slot?: LocationImageSlot | null } | void) => {
+  const [imageProfile, setImageProfile] = useState<LocationImageProfile>({
+    is_anomalous: Boolean(initialImageProfile?.is_anomalous),
+    is_psi: Boolean(initialImageProfile?.is_psi),
+    is_underground: Boolean(initialImageProfile?.is_underground),
+  });
+  const [imageSlotsV2, setImageSlotsV2] = useState<LocationImageSlotsV2>(buildFullSlotsV2(initialImageSlotsV2));
+  const [primaryImageRef, setPrimaryImageRef] = useState<LocationImageRef | null>(initialPrimaryImageRef ?? null);
+
+  useEffect(() => {
+    setName(initialName);
+    setTerrainType(initialTerrainType);
+    setAnomalyActivity(initialAnomalyActivity);
+    setDominantAnomalyType(initialDominantAnomalyType);
+    setRegion(initialRegion);
+    setExitZone(initialExitZone);
+    setImageProfile({
+      is_anomalous: Boolean(initialImageProfile?.is_anomalous),
+      is_psi: Boolean(initialImageProfile?.is_psi),
+      is_underground: Boolean(initialImageProfile?.is_underground),
+    });
+    setImageSlotsV2(buildFullSlotsV2(initialImageSlotsV2));
+    setPrimaryImageRef(initialPrimaryImageRef ?? null);
+    setSlotBusy({});
+  }, [
+    initialName,
+    initialTerrainType,
+    initialAnomalyActivity,
+    initialDominantAnomalyType,
+    initialRegion,
+    initialExitZone,
+    initialImageProfile,
+    initialImageSlotsV2,
+    initialPrimaryImageRef,
+    locId,
+  ]);
+
+  const enabledGroups = getEnabledImageGroups(imageProfile);
+
+  const primaryImageUrl = useMemo(() => {
+    const direct = getImageSlotUrl(imageSlotsV2, primaryImageRef);
+    if (direct) return direct;
+    for (const group of enabledGroups) {
+      for (const slot of LOCATION_IMAGE_GROUP_SLOT_MAP[group]) {
+        const url = (imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+        if (url) return url;
+      }
+    }
+    return initialImageUrl;
+  }, [enabledGroups, imageSlotsV2, initialImageUrl, primaryImageRef]);
+
+  const applyServerImageState = (next?: {
+    image_slots_v2?: LocationImageSlotsV2;
+    primary_image_ref?: LocationImageRef | null;
+    image_profile?: LocationImageProfile;
+  } | void) => {
     if (!next) return;
-    if (next.image_slots) {
-      setImageSlots((prev) => {
-        const merged: LocationImageSlots = { ...prev };
-        for (const slot of LOCATION_IMAGE_SLOTS) merged[slot] = next.image_slots?.[slot] ?? null;
-        return merged;
+    if (next.image_slots_v2) setImageSlotsV2(buildFullSlotsV2(next.image_slots_v2));
+    if (Object.prototype.hasOwnProperty.call(next, 'primary_image_ref')) setPrimaryImageRef(next.primary_image_ref ?? null);
+    if (next.image_profile) {
+      setImageProfile({
+        is_anomalous: Boolean(next.image_profile.is_anomalous),
+        is_psi: Boolean(next.image_profile.is_psi),
+        is_underground: Boolean(next.image_profile.is_underground),
       });
     }
-    if (Object.prototype.hasOwnProperty.call(next, 'primary_image_slot')) {
-      setPrimaryImageSlot(next.primary_image_slot ?? null);
+  };
+
+  const withSlotBusy = async (key: string, action: () => Promise<void>) => {
+    setSlotBusy((prev) => ({ ...prev, [key]: true }));
+    setErr(null);
+    try {
+      await action();
+    } finally {
+      setSlotBusy((prev) => ({ ...prev, [key]: false }));
     }
   };
 
-  const handleUploadSlot = async (slot: LocationImageSlot, file: File) => {
+  const handleUploadSlot = async (group: LocationImageGroup, slot: string, file: File) => {
     if (!canEditImages || !onUploadImageSlot) return;
-    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
-    setErr(null);
+    const key = `${group}:${slot}`;
     try {
-      const next = await onUploadImageSlot(slot, file);
-      applyServerImageState(next);
+      await withSlotBusy(key, async () => {
+        const next = await onUploadImageSlot(group, slot, file);
+        applyServerImageState(next);
+      });
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Upload failed');
-    } finally {
-      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
     }
   };
 
-  const handleDeleteSlot = async (slot: LocationImageSlot) => {
-    if (!canEditImages || !onDeleteImageSlot || !imageSlots[slot]) return;
-    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
-    setErr(null);
+  const handleDeleteSlot = async (group: LocationImageGroup, slot: string) => {
+    if (!canEditImages || !onDeleteImageSlot) return;
+    const key = `${group}:${slot}`;
+    const url = (imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+    if (!url) return;
     try {
-      const next = await onDeleteImageSlot(slot);
-      applyServerImageState(next);
+      await withSlotBusy(key, async () => {
+        const next = await onDeleteImageSlot(group, slot);
+        applyServerImageState(next);
+      });
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Delete failed');
-    } finally {
-      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
     }
   };
 
-  const handleSetPrimarySlot = async (slot: LocationImageSlot) => {
-    if (!canEditImages || !onSetPrimaryImageSlot || !imageSlots[slot] || primaryImageSlot === slot) return;
-    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
-    setErr(null);
+  const handleSetPrimary = async (group: LocationImageGroup, slot: string) => {
+    if (!canEditImages || !onSetPrimaryImageRef) return;
+    const url = (imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+    if (!url) return;
+    const key = `${group}:${slot}`;
     try {
-      await onSetPrimaryImageSlot(slot);
-      setPrimaryImageSlot(slot);
+      await withSlotBusy(key, async () => {
+        await onSetPrimaryImageRef({ group, slot });
+        setPrimaryImageRef({ group, slot });
+      });
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Set primary failed');
-    } finally {
-      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
     }
   };
 
-  const handleDownloadSlot = async (slot: LocationImageSlot) => {
-    const url = imageSlots[slot];
+  const handleDownloadSlot = async (group: LocationImageGroup, slot: string) => {
+    const url = (imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
     if (!url) return;
-    setSlotBusy((prev) => ({ ...prev, [slot]: true }));
-    setErr(null);
+    const key = `${group}:${slot}`;
     try {
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
-      const blob = await res.blob();
-      const extFromType = blob.type === 'image/png' ? '.png'
-        : blob.type === 'image/webp' ? '.webp'
-          : blob.type === 'image/gif' ? '.gif'
-            : '.jpg';
-      const extFromUrlMatch = url.match(/\.(jpg|jpeg|png|webp|gif)(?:$|\?)/i);
-      const ext = extFromUrlMatch ? `.${extFromUrlMatch[1].toLowerCase() === 'jpeg' ? 'jpg' : extFromUrlMatch[1].toLowerCase()}` : extFromType;
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = `${locId ?? 'location'}_${slot}${ext}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(objectUrl);
+      await withSlotBusy(key, async () => {
+        const res = await fetch(url, { credentials: 'include' });
+        if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
+        const blob = await res.blob();
+        const extFromType = blob.type === 'image/png' ? '.png'
+          : blob.type === 'image/webp' ? '.webp'
+            : blob.type === 'image/gif' ? '.gif'
+              : '.jpg';
+        const extFromUrlMatch = url.match(/\.(jpg|jpeg|png|webp|gif)(?:$|\?)/i);
+        const ext = extFromUrlMatch ? `.${extFromUrlMatch[1].toLowerCase() === 'jpeg' ? 'jpg' : extFromUrlMatch[1].toLowerCase()}` : extFromType;
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = `${locId ?? 'location'}_${group}_${slot}${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(objectUrl);
+      });
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Download failed');
-    } finally {
-      setSlotBusy((prev) => ({ ...prev, [slot]: false }));
+    }
+  };
+
+  const handleProfileToggle = async (key: keyof LocationImageProfile, checked: boolean) => {
+    const nextProfile: LocationImageProfile = { ...imageProfile, [key]: checked };
+    setImageProfile(nextProfile);
+    if (!canEditImages || !onPatchImageProfile) return;
+    try {
+      const next = await onPatchImageProfile(nextProfile);
+      applyServerImageState(next);
+    } catch (e: unknown) {
+      setErr((e as { message?: string })?.message ?? 'Profile patch failed');
     }
   };
 
@@ -220,7 +316,15 @@ export function LocationModal({
     if (!trimmed) { setErr('Name cannot be empty'); return; }
     setSaving(true); setErr(null);
     try {
-      await onSave({ name: trimmed, terrainType, anomalyActivity, dominantAnomalyType, region, exitZone });
+      await onSave({
+        name: trimmed,
+        terrainType,
+        anomalyActivity,
+        dominantAnomalyType,
+        region,
+        exitZone,
+        imageProfile,
+      });
       onClose();
     } catch (e: unknown) {
       setErr((e as { message?: string })?.message ?? 'Save failed');
@@ -307,9 +411,30 @@ export function LocationModal({
           🚪 Выход из Зоны
         </label>
 
-        {/* ── Image slots editor ───────────────────────────────────── */}
+        <div style={{ marginTop: 8, borderTop: '1px solid #1e293b', paddingTop: 10 }}>
+          <label style={{ ...s.modalLabel, marginBottom: 6, display: 'block' }}>🧬 Профиль изображений</label>
+          <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'repeat(3, minmax(120px, 1fr))' }}>
+            {[
+              { key: 'is_anomalous' as const, label: 'is_anomalous' },
+              { key: 'is_psi' as const, label: 'is_psi' },
+              { key: 'is_underground' as const, label: 'is_underground' },
+            ].map((item) => (
+              <label key={item.key} style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#cbd5e1', fontSize: '0.75rem' }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(imageProfile[item.key])}
+                  onChange={(e) => void handleProfileToggle(item.key, e.target.checked)}
+                  style={{ accentColor: '#60a5fa' }}
+                />
+                {item.label}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Grouped image slots editor ───────────────────────────────────── */}
         <div style={{ marginTop: 12 }}>
-          <label style={s.modalLabel}>🖼 Изображения локации</label>
+          <label style={s.modalLabel}>🖼 Изображения локации (v2)</label>
           {mode === 'create' && (
             <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: 8 }}>
               Сначала создайте локацию, затем добавьте изображения в режиме редактирования.
@@ -336,78 +461,86 @@ export function LocationModal({
                   'Нет изображения'
                 )}
               </div>
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(5, minmax(120px, 1fr))' }}>
-                  {LOCATION_IMAGE_SLOTS.map((slot) => {
-                    const url = imageSlots[slot] ?? null;
-                    const isPrimary = primaryImageSlot === slot;
-                    const busy = Boolean(slotBusy[slot]);
-                    return (
-                      <div key={slot} style={{ border: '1px solid #1e293b', borderRadius: 6, padding: 8, background: '#0b1220' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginBottom: 6, color: '#cbd5e1', fontSize: '0.7rem' }}>
-                          <span>{LOCATION_IMAGE_SLOT_ICONS[slot]} {LOCATION_IMAGE_SLOT_LABELS[slot]}</span>
-                          <span style={{ color: isPrimary ? '#60a5fa' : '#475569' }}>{isPrimary ? '★ primary' : ''}</span>
-                        </div>
-                        <div style={{
-                          width: '100%',
-                          height: 80,
-                          borderRadius: 6,
-                          border: '1px solid #1e3a5f',
-                          background: '#020617',
-                          marginBottom: 6,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          overflow: 'hidden',
-                          color: '#334155',
-                          fontSize: '0.68rem',
-                        }}>
-                          {url ? <img src={url} alt={`${slot}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : 'пусто'}
-                        </div>
-                        <div style={{ display: 'grid', gap: 4 }}>
-                          <label style={{ ...s.spawnBtn, cursor: canEditImages && !busy ? 'pointer' : 'default', opacity: canEditImages && !busy ? 1 : 0.6 }}>
-                            📤 Загрузить
-                            <input
-                              type="file"
-                              accept="image/jpeg,image/png,image/webp,image/gif"
-                              style={{ display: 'none' }}
-                              disabled={!canEditImages || busy}
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (file) void handleUploadSlot(slot, file);
-                                e.currentTarget.value = '';
-                              }}
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            style={s.spawnBtn}
-                            disabled={!url || busy}
-                            onClick={() => void handleDownloadSlot(slot)}
-                          >
-                            ⬇ Скачать картинку
-                          </button>
-                          <button
-                            type="button"
-                            style={{ ...s.spawnBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
-                            disabled={!canEditImages || !url || busy}
-                            onClick={() => void handleDeleteSlot(slot)}
-                          >
-                            🗑 Удалить
-                          </button>
-                          <button
-                            type="button"
-                            style={{ ...s.spawnBtn, color: '#93c5fd', borderColor: '#1d4ed8' }}
-                            disabled={!canEditImages || !url || isPrimary || busy}
-                            onClick={() => void handleSetPrimarySlot(slot)}
-                          >
-                            ★ Сделать приоритетной
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+
+              <div style={{ display: 'grid', gap: 12 }}>
+                {enabledGroups.map((group) => (
+                  <div key={group}>
+                    <div style={{ color: '#93c5fd', fontSize: '0.74rem', marginBottom: 6 }}>
+                      {LOCATION_IMAGE_GROUP_LABELS[group]} · {group}
+                    </div>
+                    <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))' }}>
+                      {LOCATION_IMAGE_GROUP_SLOT_MAP[group].map((slot) => {
+                        const url = (imageSlotsV2[group] as Record<string, string | null | undefined> | undefined)?.[slot] ?? null;
+                        const isPrimary = primaryImageRef?.group === group && primaryImageRef?.slot === slot;
+                        const busy = Boolean(slotBusy[`${group}:${slot}`]);
+                        return (
+                          <div key={`${group}:${slot}`} style={{ border: '1px solid #1e293b', borderRadius: 6, padding: 8, background: '#0b1220' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, marginBottom: 6, color: '#cbd5e1', fontSize: '0.7rem' }}>
+                              <span>{getImageSlotIcon(group, slot)} {getImageSlotLabel(group, slot)}</span>
+                              <span style={{ color: isPrimary ? '#60a5fa' : '#475569' }}>{isPrimary ? '★ primary' : ''}</span>
+                            </div>
+                            <div style={{
+                              width: '100%',
+                              height: 80,
+                              borderRadius: 6,
+                              border: '1px solid #1e3a5f',
+                              background: '#020617',
+                              marginBottom: 6,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              overflow: 'hidden',
+                              color: '#334155',
+                              fontSize: '0.68rem',
+                            }}>
+                              {url ? <img src={url} alt={`${group}:${slot}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : 'пусто'}
+                            </div>
+                            <div style={{ display: 'grid', gap: 4 }}>
+                              <label style={{ ...s.spawnBtn, cursor: canEditImages && !busy ? 'pointer' : 'default', opacity: canEditImages && !busy ? 1 : 0.6 }}>
+                                📤 Загрузить
+                                <input
+                                  type="file"
+                                  accept="image/jpeg,image/png,image/webp,image/gif"
+                                  style={{ display: 'none' }}
+                                  disabled={!canEditImages || busy}
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) void handleUploadSlot(group, slot, file);
+                                    e.currentTarget.value = '';
+                                  }}
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                style={s.spawnBtn}
+                                disabled={!url || busy}
+                                onClick={() => void handleDownloadSlot(group, slot)}
+                              >
+                                ⬇ Скачать
+                              </button>
+                              <button
+                                type="button"
+                                style={{ ...s.spawnBtn, color: '#ef4444', borderColor: '#7f1d1d' }}
+                                disabled={!canEditImages || !url || busy}
+                                onClick={() => void handleDeleteSlot(group, slot)}
+                              >
+                                🗑 Удалить
+                              </button>
+                              <button
+                                type="button"
+                                style={{ ...s.spawnBtn, color: '#93c5fd', borderColor: '#1d4ed8' }}
+                                disabled={!canEditImages || !url || isPrimary || busy}
+                                onClick={() => void handleSetPrimary(group, slot)}
+                              >
+                                ★ Primary
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             </>
           )}
