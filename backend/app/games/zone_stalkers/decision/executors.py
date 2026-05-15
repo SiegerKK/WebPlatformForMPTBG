@@ -470,10 +470,15 @@ def _exec_trade_buy(
 
     # PR2 survival mode: force cheapest affordable viable item.
     compatible_item_types = step.payload.get("compatible_item_types")
+    compatible_item_types_list: list[str] = []
     if isinstance(compatible_item_types, list) and compatible_item_types:
-        item_types = frozenset(str(t) for t in compatible_item_types)
+        compatible_item_types_list = [str(t) for t in compatible_item_types]
+        item_types = frozenset(compatible_item_types_list)
 
     required_price_from_payload = step.payload.get("required_price")
+    expected_item_type = str(step.payload.get("expected_item_type") or "")
+    previous_step_was_survival_credit = bool(step.payload.get("previous_step_was_survival_credit"))
+    agent_money = int(agent.get("money") or 0)
 
     if buy_mode == "survival_cheapest":
         from app.games.zone_stalkers.balance.items import ITEM_TYPES
@@ -493,6 +498,10 @@ def _exec_trade_buy(
                 buy_mode=buy_mode,
                 location_id=agent_loc,
                 required_price=required_price_from_payload,
+                agent_money=agent_money,
+                compatible_item_types=compatible_item_types_list,
+                expected_item_type=expected_item_type,
+                previous_step_was_survival_credit=previous_step_was_survival_credit,
             )]
         item_types = frozenset([affordable[0]])
     elif buy_mode == "reserve_basic":
@@ -516,6 +525,10 @@ def _exec_trade_buy(
                 buy_mode=buy_mode,
                 location_id=agent_loc,
                 required_price=required_price_from_payload,
+                agent_money=agent_money,
+                compatible_item_types=compatible_item_types_list,
+                expected_item_type=expected_item_type,
+                previous_step_was_survival_credit=previous_step_was_survival_credit,
             )]
         item_types = frozenset([affordable[0]])
 
@@ -555,6 +568,10 @@ def _exec_trade_buy(
             buy_mode=buy_mode,
             location_id=agent_loc,
             required_price=required_price_from_payload,
+            agent_money=agent_money,
+            compatible_item_types=compatible_item_types_list,
+            expected_item_type=expected_item_type,
+            previous_step_was_survival_credit=previous_step_was_survival_credit,
         ))
     return events
 
@@ -643,6 +660,10 @@ def _make_trade_buy_failed_event(
     buy_mode: str | None,
     location_id: str,
     required_price: int | None = None,
+    agent_money: int | None = None,
+    compatible_item_types: list[str] | None = None,
+    expected_item_type: str | None = None,
+    previous_step_was_survival_credit: bool | None = None,
 ) -> dict[str, Any]:
     return {
         "event_type": "trade_buy_failed",
@@ -653,6 +674,10 @@ def _make_trade_buy_failed_event(
             "buy_mode": buy_mode,
             "location_id": location_id,
             "required_price": required_price,
+            "agent_money": agent_money,
+            "compatible_item_types": list(compatible_item_types or []),
+            "expected_item_type": expected_item_type,
+            "previous_step_was_survival_credit": previous_step_was_survival_credit,
         },
     }
 
@@ -2218,7 +2243,10 @@ def _exec_request_loan(
 
     item_category = str(step.payload.get("item_category") or "")
     required_price = int(step.payload.get("required_price") or 0)
+    current_money = int(agent.get("money") or 0)
+    principal_needed = max(0, required_price - current_money)
     amount = int(step.payload.get("amount") or 0)
+    step.payload["principal_needed"] = principal_needed
     ok, reason = can_request_survival_credit(
         state=state,
         debtor=agent,
@@ -2232,11 +2260,16 @@ def _exec_request_loan(
         step.payload["_failure_reason"] = reason
         return []
 
-    amount = max(0, min(amount, int(required_price - int(agent.get("money") or 0))))
+    if amount < principal_needed:
+        amount = principal_needed
+        step.payload["amount_corrected_to_required_price"] = True
+    amount = max(0, min(amount, principal_needed))
+    step.payload["amount"] = amount
     if amount <= 0:
         step.payload["_failure_reason"] = "amount_not_needed"
         return []
 
+    money_before = current_money
     account = advance_survival_credit(
         state=state,
         debtor_id=agent_id,
@@ -2248,9 +2281,35 @@ def _exec_request_loan(
         world_turn=world_turn,
     )
 
-    agent["money"] = int(agent.get("money") or 0) + amount
+    agent["money"] = money_before + amount
+    money_after = int(agent.get("money") or 0)
     if creditor_type == "trader":
         creditor["accounts_receivable"] = int(creditor.get("accounts_receivable") or 0) + amount
+
+    purpose = str(step.payload.get("purpose") or "survival_credit")
+    expected_item_type = str(
+        step.payload.get("survival_credit_quote_item_type")
+        or step.payload.get("expected_item_type")
+        or ""
+    )
+    event_payload = {
+        "account_id": account["id"],
+        "debtor_id": agent_id,
+        "creditor_id": creditor_id,
+        "creditor_type": creditor_type,
+        "principal": amount,
+        "amount": amount,
+        "purpose": purpose,
+        "item_category": item_category,
+        "required_price": required_price,
+        "principal_needed": principal_needed,
+        "agent_money_before": money_before,
+        "agent_money_after": money_after,
+        "expected_item_type": expected_item_type,
+        "credit_sized_to_purchase": True,
+        "new_total": int(account.get("outstanding_total") or 0),
+        "location_id": agent.get("location_id"),
+    }
 
     from app.games.zone_stalkers.rules.tick_rules import _add_memory
     _add_memory(
@@ -2261,14 +2320,7 @@ def _exec_request_loan(
         "Получил кредит на выживание",
         {
             "action_kind": "debt_credit_advanced",
-            "account_id": account["id"],
-            "debtor_id": agent_id,
-            "creditor_id": creditor_id,
-            "creditor_type": creditor_type,
-            "principal": amount,
-            "purpose": str(step.payload.get("purpose") or "survival_credit"),
-            "new_total": int(account.get("outstanding_total") or 0),
-            "location_id": agent.get("location_id"),
+            **event_payload,
         },
         summary=f"Взял кредит {amount} у {creditor_id}",
         agent_id=agent_id,
@@ -2276,14 +2328,5 @@ def _exec_request_loan(
 
     return [{
         "event_type": "debt_credit_advanced",
-        "payload": {
-            "account_id": account["id"],
-            "debtor_id": agent_id,
-            "creditor_id": creditor_id,
-            "creditor_type": creditor_type,
-            "principal": amount,
-            "purpose": str(step.payload.get("purpose") or "survival_credit"),
-            "new_total": int(account.get("outstanding_total") or 0),
-            "location_id": agent.get("location_id"),
-        },
+        "payload": event_payload,
     }]

@@ -25,6 +25,7 @@ from typing import Any, Optional
 from .economic_phase import is_item_need_actionable
 from .item_needs import choose_dominant_item_need, evaluate_item_needs
 from .liquidity import evaluate_affordability, find_liquidity_options
+from .survival_credit import quote_survival_purchase
 from .models.agent_context import AgentContext
 from .models.intent import (
     Intent,
@@ -80,7 +81,6 @@ from app.games.zone_stalkers.economy.debts import (
     ensure_debt_ledger,
     SURVIVAL_LOAN_DAILY_INTEREST_RATE,
     SURVIVAL_LOAN_DUE_TURNS,
-    SURVIVAL_LOAN_MAX_PRINCIPAL,
     SURVIVAL_LOAN_PURPOSE_BY_CATEGORY,
     can_request_survival_loan,
 )
@@ -473,16 +473,15 @@ def _plan_heal_or_flee(
             )
         # Nothing to sell at all — try survival credit from trader.
         trader_npc = _find_trader_npc_at_location(trader_loc, state)
-        required_price = int(afford.required_price or 0)
-        loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
-        if trader_npc is not None and loan_amount > 0:
+        quote = quote_survival_purchase(agent=agent, category="medical")
+        if trader_npc is not None and quote is not None and quote.principal_needed > 0:
             ok_loan, _ = can_request_survival_loan(
                 state=state,
                 debtor=agent,
                 creditor=trader_npc,
                 creditor_type="trader",
                 item_category="medical",
-                required_price=required_price,
+                required_price=quote.required_price,
                 world_turn=world_turn,
             )
             if ok_loan:
@@ -490,8 +489,9 @@ def _plan_heal_or_flee(
                     agent=agent,
                     trader_npc=trader_npc,
                     item_category="medical",
-                    required_price=required_price,
-                    amount=loan_amount,
+                    required_price=quote.required_price,
+                    amount=quote.principal_needed,
+                    item_type=quote.item_type,
                 )
                 return Plan(
                     intent_kind=intent.kind,
@@ -504,13 +504,17 @@ def _plan_heal_or_flee(
                         ),
                         PlanStep(
                             kind=STEP_TRADE_BUY_ITEM,
-                            payload={"item_category": "medical", "reason": "buy_medical_heal_loan"},
+                            payload=_build_survival_buy_payload(
+                                category="medical",
+                                quote=quote,
+                                reason="buy_medical_heal_loan",
+                            ),
                             interruptible=False,
                             expected_duration_ticks=1,
                         ),
                         PlanStep(
                             kind=STEP_CONSUME_ITEM,
-                            payload={"item_type": afford.cheapest_viable_item_type, "reason": "emergency_heal"},
+                            payload={"item_type": quote.item_type, "reason": "emergency_heal"},
                             interruptible=False,
                             expected_duration_ticks=1,
                         ),
@@ -530,16 +534,15 @@ def _plan_heal_or_flee(
             safe_local = next((o for o in liquidity_options if o.safety == "safe"), None)
             if safe_local is None:
                 trader_npc = _find_trader_npc_at_location(trader_loc, state)
-                required_price = int(afford.required_price or 0)
-                loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
-                if trader_npc is not None and loan_amount > 0:
+                quote = quote_survival_purchase(agent=agent, category="medical")
+                if trader_npc is not None and quote is not None and quote.principal_needed > 0:
                     ok_loan, _ = can_request_survival_loan(
                         state=state,
                         debtor=agent,
                         creditor=trader_npc,
                         creditor_type="trader",
                         item_category="medical",
-                        required_price=required_price,
+                        required_price=quote.required_price,
                         world_turn=world_turn,
                     )
                     if ok_loan:
@@ -547,8 +550,9 @@ def _plan_heal_or_flee(
                             agent=agent,
                             trader_npc=trader_npc,
                             item_category="medical",
-                            required_price=required_price,
-                            amount=loan_amount,
+                            required_price=quote.required_price,
+                            amount=quote.principal_needed,
+                            item_type=quote.item_type,
                         )
                         return Plan(
                             intent_kind=intent.kind,
@@ -567,13 +571,17 @@ def _plan_heal_or_flee(
                                 ),
                                 PlanStep(
                                     kind=STEP_TRADE_BUY_ITEM,
-                                    payload={"item_category": "medical", "reason": "buy_medical_heal_loan"},
+                                    payload=_build_survival_buy_payload(
+                                        category="medical",
+                                        quote=quote,
+                                        reason="buy_medical_heal_loan",
+                                    ),
                                     interruptible=False,
                                     expected_duration_ticks=1,
                                 ),
                                 PlanStep(
                                     kind=STEP_CONSUME_ITEM,
-                                    payload={"item_type": afford.cheapest_viable_item_type, "reason": "emergency_heal"},
+                                    payload={"item_type": quote.item_type, "reason": "emergency_heal"},
                                     interruptible=False,
                                     expected_duration_ticks=1,
                                 ),
@@ -835,16 +843,19 @@ def _plan_seek_consumable(
 
             # No sellable item — try survival credit from the trader.
             trader_npc = _find_trader_npc_at_location(trader_loc, state)
-            required_price = int(afford.required_price or 0)
-            loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
-            if trader_npc is not None and loan_amount > 0:
+            quote = quote_survival_purchase(
+                agent=agent,
+                category=category,
+                compatible_item_types=compatible_types,
+            )
+            if trader_npc is not None and quote is not None and quote.principal_needed > 0:
                 ok_loan, _ = can_request_survival_loan(
                     state=state,
                     debtor=agent,
                     creditor=trader_npc,
                     creditor_type="trader",
                     item_category=category,
-                    required_price=required_price,
+                    required_price=quote.required_price,
                     world_turn=world_turn,
                 )
                 if ok_loan:
@@ -852,8 +863,9 @@ def _plan_seek_consumable(
                         agent=agent,
                         trader_npc=trader_npc,
                         item_category=category,
-                        required_price=required_price,
-                        amount=loan_amount,
+                        required_price=quote.required_price,
+                        amount=quote.principal_needed,
+                        item_type=quote.item_type,
                     )
                     steps = [
                         PlanStep(
@@ -863,19 +875,17 @@ def _plan_seek_consumable(
                         ),
                         PlanStep(
                             STEP_TRADE_BUY_ITEM,
-                            {
-                                "item_category": category,
-                                "reason": f"buy_{category}_survival",
-                                "buy_mode": "survival_cheapest",
-                                "compatible_item_types": sorted(compatible_types),
-                                "required_price": required_price,
-                            },
+                            _build_survival_buy_payload(
+                                category=category,
+                                quote=quote,
+                                reason=f"buy_{category}_survival",
+                            ),
                             interruptible=False,
                         ),
                         PlanStep(
                             STEP_CONSUME_ITEM,
                             {
-                                "item_type": afford.cheapest_viable_item_type,
+                                "item_type": quote.item_type,
                                 "reason": f"emergency_{category}",
                             },
                             interruptible=False,
@@ -910,16 +920,19 @@ def _plan_seek_consumable(
                 safe_local = next((o for o in local_liq if o.safety in ("safe", "emergency_only")), None)
                 if safe_local is None:
                     trader_npc = _find_trader_npc_at_location(trader_loc, state)
-                    required_price = int(remote_afford.required_price or 0)
-                    loan_amount = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price - int(agent.get("money") or 0)))
-                    if trader_npc is not None and loan_amount > 0:
+                    quote = quote_survival_purchase(
+                        agent=agent,
+                        category=category,
+                        compatible_item_types=compatible_types,
+                    )
+                    if trader_npc is not None and quote is not None and quote.principal_needed > 0:
                         ok_loan, _ = can_request_survival_loan(
                             state=state,
                             debtor=agent,
                             creditor=trader_npc,
                             creditor_type="trader",
                             item_category=category,
-                            required_price=required_price,
+                            required_price=quote.required_price,
                             world_turn=world_turn,
                         )
                         if ok_loan:
@@ -927,8 +940,9 @@ def _plan_seek_consumable(
                                 agent=agent,
                                 trader_npc=trader_npc,
                                 item_category=category,
-                                required_price=required_price,
-                                amount=loan_amount,
+                                required_price=quote.required_price,
+                                amount=quote.principal_needed,
+                                item_type=quote.item_type,
                             )
                             steps = [
                                 PlanStep(STEP_TRAVEL_TO_LOCATION,
@@ -936,17 +950,15 @@ def _plan_seek_consumable(
                                          expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
                                 PlanStep(STEP_REQUEST_LOAN, loan_step, interruptible=False),
                                 PlanStep(STEP_TRADE_BUY_ITEM,
-                                         {
-                                             "item_category": category,
-                                             "reason": f"buy_{category}_survival",
-                                             "buy_mode": "survival_cheapest",
-                                             "compatible_item_types": sorted(compatible_types),
-                                             "required_price": required_price,
-                                         },
+                                         _build_survival_buy_payload(
+                                             category=category,
+                                             quote=quote,
+                                             reason=f"buy_{category}_survival",
+                                         ),
                                          interruptible=False),
                                 PlanStep(STEP_CONSUME_ITEM,
                                          {
-                                             "item_type": remote_afford.cheapest_viable_item_type,
+                                             "item_type": quote.item_type,
                                              "reason": f"emergency_{category}",
                                          },
                                          interruptible=False),
@@ -1065,16 +1077,19 @@ def _plan_seek_consumable(
         # No sellable — try survival credit only for immediate survival needs
         if category in ("food", "drink", "medical"):
             trader_npc_soft = _find_trader_npc_at_location(trader_loc, state)
-            required_price_soft = int(afford_soft.required_price or 0)
-            loan_amt_soft = max(0, min(SURVIVAL_LOAN_MAX_PRINCIPAL, required_price_soft - int(agent.get("money") or 0)))
-            if trader_npc_soft is not None and loan_amt_soft > 0:
+            quote_soft = quote_survival_purchase(
+                agent=agent,
+                category=category,
+                compatible_item_types=compatible_types_for_afford,
+            )
+            if trader_npc_soft is not None and quote_soft is not None and quote_soft.principal_needed > 0:
                 ok_loan_soft, _ = can_request_survival_loan(
                     state=state,
                     debtor=agent,
                     creditor=trader_npc_soft,
                     creditor_type="trader",
                     item_category=category,
-                    required_price=required_price_soft,
+                    required_price=quote_soft.required_price,
                     world_turn=world_turn,
                 )
                 if ok_loan_soft:
@@ -1082,22 +1097,27 @@ def _plan_seek_consumable(
                         agent=agent,
                         trader_npc=trader_npc_soft,
                         item_category=category,
-                        required_price=required_price_soft,
-                        amount=loan_amt_soft,
+                        required_price=quote_soft.required_price,
+                        amount=quote_soft.principal_needed,
+                        item_type=quote_soft.item_type,
                     )
-                    consume_type = afford_soft.cheapest_viable_item_type
                     steps_soft = [
                         PlanStep(STEP_REQUEST_LOAN, loan_step_soft, interruptible=False),
-                        PlanStep(STEP_TRADE_BUY_ITEM,
-                                 {**buy_payload, "reason": f"buy_{category}_survival_credit"},
-                                 interruptible=False),
-                    ]
-                    if consume_type:
-                        steps_soft.append(PlanStep(
-                            STEP_CONSUME_ITEM,
-                            {"item_type": consume_type, "reason": f"need_{category}"},
+                        PlanStep(
+                            STEP_TRADE_BUY_ITEM,
+                            _build_survival_buy_payload(
+                                category=category,
+                                quote=quote_soft,
+                                reason=f"buy_{category}_survival_credit",
+                            ),
                             interruptible=False,
-                        ))
+                        ),
+                    ]
+                    steps_soft.append(PlanStep(
+                        STEP_CONSUME_ITEM,
+                        {"item_type": quote_soft.item_type, "reason": f"need_{category}"},
+                        interruptible=False,
+                    ))
                     return Plan(
                         intent_kind=intent.kind,
                         steps=steps_soft,
@@ -3098,6 +3118,24 @@ def _has_sellable_inventory(agent: dict[str, Any], *, item_category: str) -> boo
     return has_sellable_inventory(agent, item_category=item_category)
 
 
+def _build_survival_buy_payload(
+    *,
+    category: str,
+    quote: Any,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "item_category": category,
+        "reason": reason,
+        "buy_mode": "survival_cheapest",
+        "compatible_item_types": list(quote.compatible_item_types),
+        "required_price": int(quote.required_price),
+        "expected_item_type": quote.item_type,
+        "previous_step_was_survival_credit": True,
+    }
+
+
+
 def _build_survival_loan_payload(
     *,
     agent: dict[str, Any],
@@ -3105,15 +3143,21 @@ def _build_survival_loan_payload(
     item_category: str,
     required_price: int,
     amount: int,
+    item_type: str,
 ) -> dict[str, Any]:
     trader_id = str(trader_npc.get("id") or "")
+    principal_needed = max(0, int(required_price) - int(agent.get("money") or 0))
+    corrected_amount = max(int(amount), principal_needed)
     return {
         "creditor_id": trader_id,
         "creditor_type": "trader",
-        "amount": int(amount),
+        "amount": corrected_amount,
         "purpose": SURVIVAL_LOAN_PURPOSE_BY_CATEGORY.get(item_category, "survival_generic"),
         "item_category": item_category,
         "required_price": int(required_price),
+        "principal_needed": principal_needed,
+        "survival_credit_quote_item_type": item_type,
+        "survival_credit_sized_to_purchase": True,
         "daily_interest_rate": SURVIVAL_LOAN_DAILY_INTEREST_RATE,
         "due_turns": SURVIVAL_LOAN_DUE_TURNS,
         "reason": f"survival_credit_{item_category}",

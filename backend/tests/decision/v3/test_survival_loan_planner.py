@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from app.games.zone_stalkers.balance.items import ITEM_TYPES
 from app.games.zone_stalkers.decision.context_builder import build_agent_context
 from app.games.zone_stalkers.decision.models.intent import Intent
 from app.games.zone_stalkers.decision.models.plan import (
@@ -21,6 +24,36 @@ def _prepare_state(agent: dict) -> dict:
     state["traders"]["trader_1"]["money"] = 0
     state["traders"]["trader_1"]["accounts_receivable"] = 0
     return state
+
+
+def _assert_survival_purchase_sized_plan(
+    plan,
+    *,
+    category: str,
+    expected_item_type: str,
+    expected_price: int,
+    expected_amount: int,
+) -> None:
+    request_loan, trade_buy, consume = plan.steps[:3]
+    assert request_loan.kind == STEP_REQUEST_LOAN
+    assert trade_buy.kind == STEP_TRADE_BUY_ITEM
+    assert consume.kind == STEP_CONSUME_ITEM
+
+    assert request_loan.payload["item_category"] == category
+    assert request_loan.payload["required_price"] == expected_price
+    assert request_loan.payload["principal_needed"] == expected_amount
+    assert request_loan.payload["amount"] == expected_amount
+    assert request_loan.payload["survival_credit_quote_item_type"] == expected_item_type
+    assert request_loan.payload["survival_credit_sized_to_purchase"] is True
+
+    assert trade_buy.payload["item_category"] == category
+    assert trade_buy.payload["buy_mode"] == "survival_cheapest"
+    assert trade_buy.payload["required_price"] == expected_price
+    assert trade_buy.payload["expected_item_type"] == expected_item_type
+    assert expected_item_type in trade_buy.payload["compatible_item_types"]
+    assert trade_buy.payload["previous_step_was_survival_credit"] is True
+
+    assert consume.payload["item_type"] == expected_item_type
 
 
 def test_poor_thirsty_agent_at_trader_gets_loan_plan_not_sell_plan() -> None:
@@ -77,6 +110,74 @@ def test_poor_injured_agent_at_trader_gets_loan_buy_heal_consume_plan() -> None:
     assert plan is not None
     kinds = [step.kind for step in plan.steps]
     assert kinds[:3] == [STEP_REQUEST_LOAN, STEP_TRADE_BUY_ITEM, STEP_CONSUME_ITEM]
+
+
+def test_medical_survival_loan_amount_covers_cheapest_medical_buy_price() -> None:
+    agent = make_agent(
+        hp=40,
+        money=0,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+    )
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+
+    plan = _plan_heal_or_flee(ctx, Intent(kind="heal_self", score=1.0), state, 100, need_result)
+
+    assert plan is not None
+    expected_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+    _assert_survival_purchase_sized_plan(
+        plan,
+        category="medical",
+        expected_item_type="bandage",
+        expected_price=expected_price,
+        expected_amount=expected_price,
+    )
+
+
+@pytest.mark.parametrize(
+    ("intent_kind", "agent_overrides", "category", "expected_item_type"),
+    [
+        ("seek_water", {"thirst": 100}, "drink", "water"),
+        ("seek_food", {"hunger": 100}, "food", "bread"),
+        ("heal_self", {"hp": 40}, "medical", "bandage"),
+    ],
+)
+def test_survival_loan_amount_is_missing_money_not_constant(
+    intent_kind: str,
+    agent_overrides: dict[str, int],
+    category: str,
+    expected_item_type: str,
+) -> None:
+    agent = make_agent(
+        money=25,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+        **agent_overrides,
+    )
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+
+    if intent_kind == "heal_self":
+        plan = _plan_heal_or_flee(ctx, Intent(kind=intent_kind, score=1.0), state, 100, need_result)
+    else:
+        plan = _plan_seek_consumable(ctx, Intent(kind=intent_kind, score=1.0), state, 100, need_result)
+
+    assert plan is not None
+    expected_price = int(ITEM_TYPES[expected_item_type]["value"] * 1.5)
+    _assert_survival_purchase_sized_plan(
+        plan,
+        category=category,
+        expected_item_type=expected_item_type,
+        expected_price=expected_price,
+        expected_amount=expected_price - 25,
+    )
 
 
 def test_agent_with_safe_sellable_item_sells_before_taking_loan() -> None:
