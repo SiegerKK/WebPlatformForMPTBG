@@ -10,7 +10,7 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_TRADE_SELL_ITEM,
 )
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
-from app.games.zone_stalkers.decision.planner import _plan_heal_or_flee, _plan_repay_debt, _plan_seek_consumable
+from app.games.zone_stalkers.decision.planner import _plan_get_rich, _plan_heal_or_flee, _plan_repay_debt, _plan_resupply, _plan_seek_consumable
 from app.games.zone_stalkers.economy.debts import advance_survival_credit
 from tests.decision.conftest import make_agent, make_state_with_trader
 
@@ -96,16 +96,117 @@ def test_agent_with_safe_sellable_item_sells_before_taking_loan() -> None:
     assert plan.steps[0].kind == STEP_TRADE_SELL_ITEM
 
 
-def test_no_loan_for_ammo_weapon_armor_or_get_rich() -> None:
-    agent = make_agent(money=0, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+def test_generic_resupply_for_survival_drink_can_use_loan() -> None:
+    """resupply with a thirsty penniless agent at a trader resolves via survival drink loan.
+
+    Since PR debt/credit rules: survival credits are allowed for food/drink/medical.
+    _plan_seek_consumable with Intent(kind='resupply') for such an agent MUST produce
+    a loan plan (request_loan -> trade_buy_item -> consume_item).
+    """
+    agent = make_agent(
+        money=0,
+        thirst=100,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+    )
     state = _prepare_state(agent)
     ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
     plan = _plan_seek_consumable(
         ctx,
         Intent(kind="resupply", score=1.0),
         state,
         100,
-        evaluate_need_result(ctx, state),
+        need_result,
+    )
+    assert plan is not None
+    kinds = [step.kind for step in plan.steps]
+    assert kinds[:3] == [STEP_REQUEST_LOAN, STEP_TRADE_BUY_ITEM, STEP_CONSUME_ITEM]
+    assert plan.steps[0].payload["item_category"] in {"drink", "food", "medical"}
+
+
+def test_no_survival_loan_for_ammo_resupply() -> None:
+    """_plan_resupply for an agent that needs ammo must NOT add STEP_REQUEST_LOAN.
+
+    Agents with a weapon but no ammo use _plan_resupply which only produces
+    a direct STEP_TRADE_BUY_ITEM (or travel) plan - no survival credit.
+    """
+    # Default inventory includes 2 food + 2 drink, so food/drink needs are satisfied.
+    # has_armor=True so armor is covered. has_ammo=False triggers ammo resupply.
+    agent = make_agent(
+        money=0,
+        has_weapon=True,
+        has_armor=True,
+        has_ammo=False,
+    )
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    plan = _plan_resupply(
+        ctx,
+        Intent(kind="resupply", score=1.0),
+        state,
+        100,
+        None,
+    )
+    assert plan is None or all(step.kind != STEP_REQUEST_LOAN for step in plan.steps)
+
+
+def test_no_survival_loan_for_weapon_resupply() -> None:
+    """_plan_resupply for an agent that needs a weapon must NOT add STEP_REQUEST_LOAN."""
+    # Default inventory: food/drink covered. has_armor=True covers armor.
+    # has_weapon=False triggers weapon resupply path.
+    agent = make_agent(
+        money=0,
+        has_weapon=False,
+        has_armor=True,
+        has_ammo=False,
+    )
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    plan = _plan_resupply(
+        ctx,
+        Intent(kind="resupply", score=1.0),
+        state,
+        100,
+        None,
+    )
+    assert plan is None or all(step.kind != STEP_REQUEST_LOAN for step in plan.steps)
+
+
+def test_no_survival_loan_for_armor_resupply() -> None:
+    """_plan_resupply for an agent that needs armor must NOT add STEP_REQUEST_LOAN."""
+    # Default inventory: food/drink covered. has_armor=False triggers armor path.
+    agent = make_agent(
+        money=0,
+        has_weapon=True,
+        has_armor=False,
+        has_ammo=False,
+    )
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    plan = _plan_resupply(
+        ctx,
+        Intent(kind="resupply", score=1.0),
+        state,
+        100,
+        None,
+    )
+    assert plan is None or all(step.kind != STEP_REQUEST_LOAN for step in plan.steps)
+
+
+def test_no_survival_loan_for_get_rich() -> None:
+    """_plan_get_rich must never include STEP_REQUEST_LOAN."""
+    agent = make_agent(money=0, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    plan = _plan_get_rich(
+        ctx,
+        Intent(kind="get_rich", score=0.5),
+        state,
+        100,
+        None,
     )
     assert plan is None or all(step.kind != STEP_REQUEST_LOAN for step in plan.steps)
 
