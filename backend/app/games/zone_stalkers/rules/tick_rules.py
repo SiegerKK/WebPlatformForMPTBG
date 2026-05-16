@@ -5931,6 +5931,8 @@ def _update_current_goal_from_intent(
         "leave_zone":           "leave_zone",
         "upgrade_equipment":    "upgrade_equipment",
         "explore":              "explore",
+        "explore_frontier":     "explore",
+        "gather_location_intel": "explore",
         "idle":                 "idle",
     }
     if intent.kind == "resupply":

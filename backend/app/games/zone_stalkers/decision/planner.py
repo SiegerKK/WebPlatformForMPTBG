@@ -51,6 +51,9 @@ from .models.intent import (
     INTENT_ASSIST_ALLY,
 )
 from .constants import DESIRED_AMMO_COUNT
+from app.games.zone_stalkers.knowledge.known_graph import (
+    TRADER_SEARCH_MAX_CANDIDATES,
+)
 from .models.immediate_need import ImmediateNeed
 from .models.need_evaluation import NeedEvaluationResult
 from .models.plan import (
@@ -2708,6 +2711,36 @@ def _plan_explore(
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     loc_id = ctx.self_state.get("location_id", "")
+    agent = ctx.self_state
+    objective_key = str((intent.metadata or {}).get("objective_key") or "")
+
+    # EXPLORE_FRONTIER: try to find and travel to a frontier (known_exists) location
+    if objective_key in {"EXPLORE_FRONTIER", "GATHER_LOCATION_INTEL"}:
+        try:
+            from app.games.zone_stalkers.knowledge.known_graph import find_frontier_locations  # noqa: PLC0415
+            frontiers = find_frontier_locations(agent, from_location_id=loc_id, limit=5)
+            if frontiers:
+                target_frontier = str(frontiers[0].get("location_id") or "")
+                if target_frontier and target_frontier != loc_id:
+                    return Plan(
+                        intent_kind=intent.kind,
+                        steps=[
+                            PlanStep(
+                                STEP_TRAVEL_TO_LOCATION,
+                                {"target_id": target_frontier, "reason": "explore_frontier"},
+                                expected_duration_ticks=5,
+                            ),
+                            PlanStep(
+                                STEP_EXPLORE_LOCATION,
+                                {"target_id": target_frontier, "reason": "explore_frontier"},
+                                expected_duration_ticks=30,
+                            ),
+                        ],
+                        confidence=0.7, created_turn=world_turn,
+                    )
+        except Exception:
+            pass
+
     return Plan(
         intent_kind=intent.kind,
         steps=[PlanStep(STEP_EXPLORE_LOCATION,
@@ -2802,6 +2835,24 @@ def _nearest_trader_location(
     if hint and hint.get("location_id"):
         _record_memory_used(agent, hint, used_for=used_for)
         return str(hint["location_id"])
+
+    # Use known graph trader locations first (knowledge-first routing)
+    try:
+        from app.games.zone_stalkers.knowledge.known_graph import (  # noqa: PLC0415
+            get_nearest_known_location_with_feature,
+        )
+        agent_loc = agent.get("location_id", "")
+        known_trader_loc = get_nearest_known_location_with_feature(
+            agent,
+            "has_trader",
+            from_location_id=agent_loc,
+            min_confidence=0.5,
+            max_candidates=TRADER_SEARCH_MAX_CANDIDATES,
+        )
+        if known_trader_loc:
+            return known_trader_loc
+    except Exception:
+        pass
 
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
     agent_loc = agent.get("location_id", "")
