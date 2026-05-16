@@ -6250,9 +6250,12 @@ def _run_npc_brain_v3_decision_inner(
     # ── Pre-decision: phase-independent equipment maintenance ─────────────
     # Equip / pick-up / seek from memory happen before the needs pipeline so
     # that Phase-1 resource-gathering is not blocked by reload_or_rearm=1.0.
-    _eq_evs = _pre_decision_equipment_maintenance(agent_id, agent, state, world_turn)
-    if _eq_evs is not None:
-        return _eq_evs
+    exit_mode = agent.get("exit_zone_mode")
+    exit_mode_active = isinstance(exit_mode, dict) and bool(exit_mode.get("active"))
+    if not exit_mode_active and not bool(agent.get("global_goal_achieved")) and not bool(agent.get("debt_escape_pending")):
+        _eq_evs = _pre_decision_equipment_maintenance(agent_id, agent, state, world_turn)
+        if _eq_evs is not None:
+            return _eq_evs
 
     # ── V2 pipeline ────────────────────────────────────────────────────────
     ctx = build_agent_context(agent_id, agent, state)
