@@ -871,53 +871,68 @@ def upsert_known_location(
     agent: dict[str, Any],
     *,
     location_id: str,
-    name: str | None,
     world_turn: int,
+    name: str | None = None,
     safe_shelter: bool = False,
     confidence: float = 1.0,
     extra: dict[str, Any] | None = None,
-) -> None:
-    knowledge = ensure_knowledge_v1(agent)
-    known_locations: dict[str, Any] = knowledge["known_locations"]
-
-    existing = known_locations.get(location_id)
-    changed_major = False
-    changed_minor = False
-
-    if existing is None:
-        entry: dict[str, Any] = {
-            "location_id": location_id,
-            "name": name or location_id,
-            "last_visited_turn": world_turn,
-            "safe_shelter": safe_shelter,
-            "confidence": confidence,
-        }
-        if extra:
-            entry.update(extra)
-        known_locations[location_id] = entry
-        changed_major = True
-    else:
-        old_loc = (existing.get("name"), bool(existing.get("safe_shelter", False)))
-        if name:
-            existing["name"] = name
-        if world_turn > int(existing.get("last_visited_turn", 0) or 0):
-            existing["last_visited_turn"] = world_turn
-            changed_minor = True
-        existing["confidence"] = max(float(existing.get("confidence", 0.5)), confidence)
-        if safe_shelter:
-            existing["safe_shelter"] = True
-        if extra:
-            existing.update(extra)
-        new_loc = (existing.get("name"), bool(existing.get("safe_shelter", False)))
-        changed_major = old_loc != new_loc
-
-    _refresh_stats(knowledge, world_turn)
-    _apply_revision_update(
-        knowledge,
-        world_turn,
-        changed_major=changed_major,
-        changed_minor=changed_minor or changed_major,
+) -> dict[str, Any]:
+    from app.games.zone_stalkers.knowledge.location_knowledge import (  # noqa: PLC0415
+        LOCATION_KNOWLEDGE_VISITED,
+        ensure_location_knowledge_v1,
+        upsert_known_location as _upsert_known_location_v1,
     )
+
+    location_knowledge_level = str((extra or {}).get("knowledge_level") or LOCATION_KNOWLEDGE_VISITED)
+    source = str((extra or {}).get("source") or "direct_visit")
+    source_agent_id = (extra or {}).get("source_agent_id")
+    snapshot = (extra or {}).get("snapshot") if isinstance((extra or {}).get("snapshot"), dict) else None
+    edges = (extra or {}).get("edges") if isinstance((extra or {}).get("edges"), dict) else None
+    observed_turn = (extra or {}).get("observed_turn")
+    received_turn = (extra or {}).get("received_turn")
+
+    if safe_shelter:
+        snapshot = dict(snapshot or {})
+        snapshot["has_shelter"] = True
+    if name:
+        snapshot = dict(snapshot or {})
+        snapshot.setdefault("name", name)
+
+    entry = _upsert_known_location_v1(
+        agent,
+        location_id=location_id,
+        world_turn=world_turn,
+        knowledge_level=location_knowledge_level,
+        source=source,
+        confidence=confidence,
+        source_agent_id=str(source_agent_id) if source_agent_id else None,
+        snapshot=snapshot,
+        edges=edges,
+        observed_turn=int(observed_turn) if observed_turn is not None else None,
+        received_turn=int(received_turn) if received_turn is not None else None,
+    )
+
+    if name:
+        entry["name"] = name
+    if safe_shelter:
+        entry["safe_shelter"] = True
+    if extra:
+        for key, value in extra.items():
+            if key in {
+                "knowledge_level",
+                "source",
+                "source_agent_id",
+                "snapshot",
+                "edges",
+                "observed_turn",
+                "received_turn",
+            }:
+                continue
+            entry[key] = value
+
+    knowledge = ensure_location_knowledge_v1(agent)
+    _refresh_stats(knowledge, world_turn)
+    return entry
 
 
 def upsert_known_trader(

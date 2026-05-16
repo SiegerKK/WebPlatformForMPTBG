@@ -147,6 +147,26 @@ def _is_routine_scheduled_action_continuation(agent: Dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return True
 
+
+def _ensure_agent_current_location_knowledge(agent: Dict[str, Any], state: Dict[str, Any], world_turn: int) -> None:
+    try:
+        from app.games.zone_stalkers.knowledge.location_knowledge import (  # noqa: PLC0415
+            get_known_location,
+            mark_location_visited,
+            mark_neighbor_locations_known,
+        )
+    except Exception:
+        return
+
+    location_id = str(agent.get("location_id") or "")
+    if not location_id:
+        return
+
+    known = get_known_location(agent, location_id)
+    if not isinstance(known, dict) or not bool(known.get("visited")):
+        mark_location_visited(agent, state=state, location_id=location_id, world_turn=world_turn)
+        mark_neighbor_locations_known(agent, state=state, location_id=location_id, world_turn=world_turn)
+
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
     "escape_danger":        "Бегство (крит. HP)",
@@ -1062,6 +1082,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             continue
         if agent.get("has_left_zone"):
             continue
+        _ensure_agent_current_location_knowledge(agent, state, world_turn)
         if _lazy_needs_enabled(state):
             agent = _runtime_agent(agent_id, agent)
             _rt_needs = _cow_runtime()
@@ -2214,6 +2235,7 @@ def _process_scheduled_action(
                 old_agents.remove(agent_id)
             _runtime_set_agent_field(agent_id, "location_id", destination, agent)
             agent = _runtime_agent(agent_id, agent)
+            _ensure_agent_current_location_knowledge(agent, state, world_turn)
             # PR1: mark agent + locations dirty via module-level current-tick runtime
             try:
                 from app.games.zone_stalkers.rules.tick_rules import _current_tick_runtime as _ctr
