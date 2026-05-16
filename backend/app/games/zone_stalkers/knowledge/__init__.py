@@ -30,6 +30,9 @@ from .location_knowledge import (
     mark_neighbor_locations_known,
     get_known_neighbor_ids,
     summarize_location_knowledge,
+    ensure_location_indexes,
+    get_location_indexes,
+    build_location_knowledge_debug_summary,
 )
 from .known_graph import (
     KnownGraphView,
@@ -84,6 +87,9 @@ __all__ = [
     "mark_neighbor_locations_known",
     "get_known_neighbor_ids",
     "summarize_location_knowledge",
+    "ensure_location_indexes",
+    "get_location_indexes",
+    "build_location_knowledge_debug_summary",
     "KnownGraphView",
     "build_known_graph_view",
     "is_location_known",

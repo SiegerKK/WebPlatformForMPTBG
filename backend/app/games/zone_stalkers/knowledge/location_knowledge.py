@@ -369,6 +369,7 @@ def upsert_known_location(
     _enforce_location_knowledge_caps(knowledge, world_turn)
     if changed:
         _touch_location_revision(knowledge, world_turn)
+        _update_location_indexes_incremental(knowledge, location_id, existing)
     return existing
 
 
@@ -614,6 +615,207 @@ def summarize_location_knowledge(agent: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+# ── Indexes ───────────────────────────────────────────────────────────────────
+
+def ensure_location_indexes(knowledge: dict) -> dict:
+    """Return (and initialise if missing) the location_indexes sub-dict."""
+    indexes = knowledge.get("location_indexes")
+    if not isinstance(indexes, dict):
+        indexes = {
+            "revision": -1,
+            "visited_ids": [],
+            "frontier_ids": [],
+            "known_trader_location_ids": [],
+            "known_shelter_location_ids": [],
+            "known_exit_location_ids": [],
+            "known_anomaly_location_ids": [],
+            "recently_updated_ids": [],
+        }
+        knowledge["location_indexes"] = indexes
+    return indexes
+
+
+def _update_location_indexes_incremental(
+    knowledge: dict,
+    location_id: str,
+    entry: dict,
+) -> None:
+    """Update location_indexes incrementally for a single upserted entry.
+
+    Called after every upsert_known_location so indexes stay current without
+    scanning the full known_locations table.
+    """
+    indexes = ensure_location_indexes(knowledge)
+    level = str(entry.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
+    visited = bool(entry.get("visited") or level == LOCATION_KNOWLEDGE_VISITED)
+    snapshot = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
+
+    # visited_ids
+    if visited:
+        if location_id not in indexes["visited_ids"]:
+            indexes["visited_ids"].append(location_id)
+    else:
+        if location_id in indexes["visited_ids"]:
+            indexes["visited_ids"].remove(location_id)
+
+    # frontier_ids: known but not visited
+    if not visited and entry.get("known_exists"):
+        if location_id not in indexes["frontier_ids"]:
+            indexes["frontier_ids"].append(location_id)
+    else:
+        if location_id in indexes["frontier_ids"]:
+            indexes["frontier_ids"].remove(location_id)
+
+    # known_trader_location_ids
+    has_trader = bool((snapshot or {}).get("has_trader") or entry.get("has_trader"))
+    if has_trader:
+        if location_id not in indexes["known_trader_location_ids"]:
+            indexes["known_trader_location_ids"].append(location_id)
+    else:
+        if location_id in indexes["known_trader_location_ids"]:
+            indexes["known_trader_location_ids"].remove(location_id)
+
+    # known_shelter_location_ids
+    has_shelter = bool((snapshot or {}).get("has_shelter") or entry.get("safe_shelter"))
+    if has_shelter:
+        if location_id not in indexes["known_shelter_location_ids"]:
+            indexes["known_shelter_location_ids"].append(location_id)
+    else:
+        if location_id in indexes["known_shelter_location_ids"]:
+            indexes["known_shelter_location_ids"].remove(location_id)
+
+    # known_exit_location_ids
+    has_exit = bool((snapshot or {}).get("has_exit") or entry.get("has_exit"))
+    if has_exit:
+        if location_id not in indexes["known_exit_location_ids"]:
+            indexes["known_exit_location_ids"].append(location_id)
+    else:
+        if location_id in indexes["known_exit_location_ids"]:
+            indexes["known_exit_location_ids"].remove(location_id)
+
+    # known_anomaly_location_ids
+    anomaly_risk = (snapshot or {}).get("anomaly_risk_estimate")
+    has_anomaly = bool(
+        (anomaly_risk is not None and float(anomaly_risk) > 0.0)
+        or int(entry.get("anomaly_activity", 0) or 0) > 0
+    )
+    if has_anomaly:
+        if location_id not in indexes["known_anomaly_location_ids"]:
+            indexes["known_anomaly_location_ids"].append(location_id)
+    else:
+        if location_id in indexes["known_anomaly_location_ids"]:
+            indexes["known_anomaly_location_ids"].remove(location_id)
+
+    # recently_updated_ids: keep last 50
+    ru = indexes["recently_updated_ids"]
+    if location_id in ru:
+        ru.remove(location_id)
+    ru.insert(0, location_id)
+    if len(ru) > 50:
+        indexes["recently_updated_ids"] = ru[:50]
+
+    indexes["revision"] = int(knowledge.get("stats", {}).get("known_locations_revision", 0) or 0)
+
+
+def get_location_indexes(agent: dict) -> dict:
+    """Return the location_indexes dict for *agent* (read-only view).
+
+    If indexes are stale (revision mismatch), rebuilds them from scratch.
+    """
+    knowledge = ensure_location_knowledge_v1(agent)
+    indexes = ensure_location_indexes(knowledge)
+    stats = knowledge.get("stats") if isinstance(knowledge.get("stats"), dict) else {}
+    current_rev = int((stats or {}).get("known_locations_revision", 0) or 0)
+    if indexes.get("revision") == current_rev:
+        return indexes
+    # Rebuild from scratch (only happens once per revision change)
+    _rebuild_location_indexes(knowledge)
+    return knowledge["location_indexes"]
+
+
+def _rebuild_location_indexes(knowledge: dict) -> None:
+    """Full rebuild of location_indexes from known_locations.  O(N) but rare."""
+    known_locations = knowledge.get("known_locations") or {}
+    indexes: dict = {
+        "revision": -1,
+        "visited_ids": [],
+        "frontier_ids": [],
+        "known_trader_location_ids": [],
+        "known_shelter_location_ids": [],
+        "known_exit_location_ids": [],
+        "known_anomaly_location_ids": [],
+        "recently_updated_ids": [],
+    }
+    for loc_id, entry in known_locations.items():
+        if not isinstance(entry, dict):
+            continue
+        level = str(entry.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
+        visited = bool(entry.get("visited") or level == LOCATION_KNOWLEDGE_VISITED)
+        snapshot = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
+        if visited:
+            indexes["visited_ids"].append(loc_id)
+        elif entry.get("known_exists"):
+            indexes["frontier_ids"].append(loc_id)
+        if (snapshot or {}).get("has_trader") or entry.get("has_trader"):
+            indexes["known_trader_location_ids"].append(loc_id)
+        if (snapshot or {}).get("has_shelter") or entry.get("safe_shelter"):
+            indexes["known_shelter_location_ids"].append(loc_id)
+        if (snapshot or {}).get("has_exit") or entry.get("has_exit"):
+            indexes["known_exit_location_ids"].append(loc_id)
+        anomaly_risk = (snapshot or {}).get("anomaly_risk_estimate")
+        if (anomaly_risk is not None and float(anomaly_risk) > 0.0) or int(entry.get("anomaly_activity", 0) or 0) > 0:
+            indexes["known_anomaly_location_ids"].append(loc_id)
+
+    stats = knowledge.get("stats") if isinstance(knowledge.get("stats"), dict) else {}
+    indexes["revision"] = int((stats or {}).get("known_locations_revision", 0) or 0)
+    knowledge["location_indexes"] = indexes
+
+
+def build_location_knowledge_debug_summary(agent: dict) -> dict:
+    """Return a compact debug projection of agent location knowledge.
+
+    Safe to send to frontend / debug endpoints: does NOT include full table.
+    """
+    knowledge = ensure_location_knowledge_v1(agent)
+    indexes = get_location_indexes(agent)
+    stats = knowledge.get("stats") if isinstance(knowledge.get("stats"), dict) else {}
+    path_cache = agent.get("known_graph_path_cache") if isinstance(agent.get("known_graph_path_cache"), dict) else {}
+    exchange_stats = (stats or {}).get("exchange") if isinstance((stats or {}).get("exchange"), dict) else {}
+
+    return {
+        "known_locations": int((stats or {}).get("known_locations_count", 0) or len(knowledge.get("known_locations") or {})),
+        "visited_locations": len(indexes.get("visited_ids") or []),
+        "frontiers": len(indexes.get("frontier_ids") or []),
+        "known_traders": len(indexes.get("known_trader_location_ids") or []),
+        "known_shelters": len(indexes.get("known_shelter_location_ids") or []),
+        "known_exits": len(indexes.get("known_exit_location_ids") or []),
+        "known_anomalies": len(indexes.get("known_anomaly_location_ids") or []),
+        "stale_locations": _count_stale_locations(knowledge, stats),
+        "last_update_turn": int((stats or {}).get("last_location_knowledge_update_turn", 0) or 0),
+        "revision": int((stats or {}).get("known_locations_revision", 0) or 0),
+        "path_cache_hits": int((path_cache or {}).get("hits", 0)),
+        "path_cache_misses": int((path_cache or {}).get("misses", 0)),
+        "path_cache_entries": len((path_cache or {}).get("paths") or {}),
+        "exchange_received_count": int((exchange_stats or {}).get("received_count", 0)),
+        "exchange_sent_count": int((exchange_stats or {}).get("sent_count", 0)),
+    }
+
+
+def _count_stale_locations(knowledge: dict, stats: dict) -> int:
+    now_turn = int((stats or {}).get("last_update_turn", 0) or 0)
+    if now_turn == 0:
+        return 0
+    known_locations = knowledge.get("known_locations") or {}
+    count = 0
+    for entry in known_locations.values():
+        if not isinstance(entry, dict):
+            continue
+        stale_after = entry.get("stale_after_turn")
+        if isinstance(stale_after, (int, float)) and now_turn >= int(stale_after):
+            count += 1
+    return count
+
 __all__ = [
     "LOCATION_KNOWLEDGE_UNKNOWN",
     "LOCATION_KNOWLEDGE_EXISTS",
@@ -632,4 +834,7 @@ __all__ = [
     "mark_neighbor_locations_known",
     "get_known_neighbor_ids",
     "summarize_location_knowledge",
+    "ensure_location_indexes",
+    "get_location_indexes",
+    "build_location_knowledge_debug_summary",
 ]

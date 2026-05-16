@@ -153,16 +153,16 @@ def find_known_path(agent, *, start_location_id, target_location_id, max_nodes=N
 
 
 def find_frontier_locations(agent, *, from_location_id, limit=10):
+    from app.games.zone_stalkers.knowledge.location_knowledge import get_location_indexes  # noqa: PLC0415
     knowledge = ensure_location_knowledge_v1(agent)
     known_locations = knowledge.get("known_locations") or {}
-    frontiers = []
-    for loc_id, entry in known_locations.items():
-        if not isinstance(entry, dict):
-            continue
-        level = str(entry.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
-        if level == LOCATION_KNOWLEDGE_VISITED:
-            continue
-        frontiers.append(entry)
+    indexes = get_location_indexes(agent)
+    frontier_ids = indexes.get("frontier_ids") or []
+    frontiers = [
+        known_locations[fid]
+        for fid in frontier_ids
+        if fid in known_locations and isinstance(known_locations[fid], dict)
+    ]
     if not frontiers:
         return []
     view = build_known_graph_view(agent)
@@ -200,10 +200,29 @@ _LEVEL_ORDER = {
 def known_locations_with_feature(agent, feature, *, min_confidence=0.4, include_stale=False, world_turn=0):
     if feature not in KNOWN_FEATURES:
         return []
+    from app.games.zone_stalkers.knowledge.location_knowledge import get_location_indexes  # noqa: PLC0415
     knowledge = ensure_location_knowledge_v1(agent)
     known_locations = knowledge.get("known_locations") or {}
+    # Use index for O(K) candidate selection instead of O(N) full scan
+    indexes = get_location_indexes(agent)
+    _FEATURE_INDEX = {
+        "has_trader": "known_trader_location_ids",
+        "has_shelter": "known_shelter_location_ids",
+        "has_exit": "known_exit_location_ids",
+        "has_anomaly": "known_anomaly_location_ids",
+        "has_artifacts": "known_anomaly_location_ids",  # reuse anomaly index as proxy
+    }
+    candidate_ids = list(indexes.get(_FEATURE_INDEX.get(feature, ""), []))
+    if feature == "has_artifacts":
+        # For artifacts, filter candidates further after index pre-filter
+        candidate_locs = {cid: known_locations[cid] for cid in candidate_ids if cid in known_locations}
+    else:
+        candidate_locs = {cid: known_locations[cid] for cid in candidate_ids if cid in known_locations}
+    # Fall back to full scan only when no index hit (e.g. old agent without indexes)
+    if not candidate_locs and known_locations:
+        candidate_locs = known_locations
     result = []
-    for loc_id, entry in known_locations.items():
+    for loc_id, entry in candidate_locs.items():
         if not isinstance(entry, dict):
             continue
         confidence = float(entry.get("confidence", 0.0) or 0.0)
