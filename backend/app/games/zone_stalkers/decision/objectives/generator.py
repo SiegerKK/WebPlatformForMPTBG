@@ -931,7 +931,11 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             result,
             Objective(
                 key=OBJECTIVE_LEAVE_ZONE,
-                source="global_goal_completed" if agent.get("global_goal_achieved") else "exit_zone_mode",
+                source=(
+                    "global_goal_completed"
+                    if agent.get("global_goal_achieved")
+                    else ("debt_escape" if exit_reason == "debt_escape" else "exit_zone_mode")
+                ),
                 urgency=max(0.9, float(need_result.scores.leave_zone)),
                 expected_value=1.0,
                 risk=0.2,

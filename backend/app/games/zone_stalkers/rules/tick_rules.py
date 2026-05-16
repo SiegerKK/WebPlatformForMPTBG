@@ -1794,9 +1794,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
     try:
         from app.games.zone_stalkers.economy.debts import (
             DEBT_ESCAPE_THRESHOLD,
-            DEBT_STATUS_ESCAPED,
             apply_due_rollovers_with_affected_debtors,
-            freeze_debtor_accounts,
             get_debtor_debt_total,
             refresh_debtor_economic_states,
         )  # noqa: PLC0415
@@ -1820,22 +1818,12 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             if debt_total < int(DEBT_ESCAPE_THRESHOLD):
                 continue
             _agent["_debt_escape_triggered"] = True
-            _agent["escaped_due_to_debt"] = True
-            _agent["debt_escape_completed"] = True
+            _agent["debt_escape_pending"] = True
             _agent.setdefault("exit_zone_mode", {
                 "active": True,
                 "started_turn": current_turn,
                 "reason": "debt_escape",
             })
-            events.extend(
-                freeze_debtor_accounts(
-                    state=state,
-                    debtor_id=str(_agent_id),
-                    world_turn=current_turn,
-                    status=DEBT_STATUS_ESCAPED,
-                    reason="debt_escape",
-                )
-            )
             events.append({
                 "event_type": "debt_escape_triggered",
                 "payload": {
@@ -7092,14 +7080,22 @@ def _execute_leave_zone(
     try:
         from app.games.zone_stalkers.economy.debts import (  # noqa: PLC0415
             DEBT_STATUS_DEBTOR_LEFT_ZONE,
+            DEBT_STATUS_ESCAPED,
             freeze_debtor_accounts,
         )
+        debt_escape_leave = bool(agent.get("debt_escape_pending")) or bool(agent.get("_debt_escape_triggered"))
+        freeze_status = DEBT_STATUS_ESCAPED if debt_escape_leave else DEBT_STATUS_DEBTOR_LEFT_ZONE
+        freeze_reason = "debt_escape" if debt_escape_leave else "left_zone"
+        if debt_escape_leave:
+            agent["debt_escape_pending"] = False
+            agent["escaped_due_to_debt"] = True
+            agent["debt_escape_completed"] = True
         _frozen_events = freeze_debtor_accounts(
             state=state,
             debtor_id=agent_id,
             world_turn=world_turn,
-            status=DEBT_STATUS_DEBTOR_LEFT_ZONE,
-            reason="left_zone",
+            status=freeze_status,
+            reason=freeze_reason,
         )
     except Exception:
         _frozen_events = []
