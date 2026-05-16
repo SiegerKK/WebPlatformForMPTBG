@@ -6223,6 +6223,55 @@ def _build_objective_memory_used_payload(
     return ordered[:5]
 
 
+def _passive_location_knowledge_exchange(
+    agent_id: str,
+    agent: "Dict[str, Any]",
+    state: "Dict[str, Any]",
+    world_turn: int,
+) -> int:
+    """Passive bounded location knowledge exchange with one co-located stalker.
+
+    Returns the count of location entries updated on this agent.
+    O(K) where K <= MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION.
+    """
+    try:
+        from app.games.zone_stalkers.knowledge.location_knowledge_exchange import (  # noqa: PLC0415
+            build_location_knowledge_share_packets,
+            receive_location_knowledge_packets,
+        )
+    except Exception:
+        return 0
+
+    loc_id = agent.get("location_id", "")
+    agents = state.get("agents", {})
+    if not loc_id or not agents:
+        return 0
+
+    for other_id, other in agents.items():
+        if other_id == agent_id:
+            continue
+        if not other.get("is_alive", True):
+            continue
+        if other.get("location_id") != loc_id:
+            continue
+        if other.get("archetype") not in {"stalker_agent"}:
+            continue
+        try:
+            packets = build_location_knowledge_share_packets(
+                other,
+                world_turn=world_turn,
+                target_needs_shelter=True,
+                target_needs_trader=True,
+                target_needs_artifacts=True,
+            )
+            if packets:
+                return receive_location_knowledge_packets(agent, packets, world_turn=world_turn)
+        except Exception:
+            pass
+        break
+    return 0
+
+
 def _run_npc_brain_v3_decision_inner(
     agent_id: str,
     agent: Dict[str, Any],
@@ -6254,6 +6303,14 @@ def _run_npc_brain_v3_decision_inner(
     sell_evs = _bot_sell_on_arrival(agent_id, agent, state, world_turn)
     if sell_evs:
         return sell_evs
+
+    # ── Passive location knowledge exchange with co-located agents ──────────
+    # Bounded top-K: at most MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION per tick.
+    _passive_location_exchange_result = _passive_location_knowledge_exchange(
+        agent_id, agent, state, world_turn
+    )
+    # This is fire-and-forget: even if exchange updates knowledge, we continue
+    # the normal decision pipeline (no early return).
 
     # ── Check and handle global goal completion ────────────────────────────
     if not agent.get("has_left_zone") and agent.get("is_alive", True) and not agent.get("global_goal_achieved"):

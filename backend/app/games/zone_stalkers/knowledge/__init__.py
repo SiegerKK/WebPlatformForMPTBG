@@ -43,6 +43,17 @@ from .known_graph import (
     invalidate_known_path_cache,
     get_known_path_cache_stats,
 )
+from .location_knowledge_exchange import (
+    MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION,
+    MAX_LOCATION_EDGES_SHARED_PER_LOCATION,
+    LOCATION_KNOWLEDGE_SHARED_CONFIDENCE_MULTIPLIER,
+    LOCATION_KNOWLEDGE_RUMOR_CONFIDENCE_MULTIPLIER,
+    build_share_packet,
+    build_trader_intel_packet,
+    select_location_knowledge_to_share,
+    build_location_knowledge_share_packets,
+    receive_location_knowledge_packets,
+)
 from .knowledge_hunt_builder import (
     build_hunt_leads_from_knowledge,
     build_recent_target_contact_from_knowledge,
@@ -83,6 +94,15 @@ __all__ = [
     "get_nearest_known_location_with_feature",
     "invalidate_known_path_cache",
     "get_known_path_cache_stats",
+    "MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION",
+    "MAX_LOCATION_EDGES_SHARED_PER_LOCATION",
+    "LOCATION_KNOWLEDGE_SHARED_CONFIDENCE_MULTIPLIER",
+    "LOCATION_KNOWLEDGE_RUMOR_CONFIDENCE_MULTIPLIER",
+    "build_share_packet",
+    "build_trader_intel_packet",
+    "select_location_knowledge_to_share",
+    "build_location_knowledge_share_packets",
+    "receive_location_knowledge_packets",
     "build_hunt_leads_from_knowledge",
     "build_recent_target_contact_from_knowledge",
     "build_equipment_belief_from_knowledge",
