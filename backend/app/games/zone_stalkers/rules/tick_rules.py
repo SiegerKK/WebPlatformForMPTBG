@@ -1819,11 +1819,11 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
                 continue
             _agent["_debt_escape_triggered"] = True
             _agent["debt_escape_pending"] = True
-            _agent.setdefault("exit_zone_mode", {
-                "active": True,
-                "started_turn": current_turn,
-                "reason": "debt_escape",
-            })
+            _ensure_exit_zone_mode(
+                _agent,
+                reason="debt_escape",
+                world_turn=current_turn,
+            )
             events.append({
                 "event_type": "debt_escape_triggered",
                 "payload": {
@@ -6238,13 +6238,11 @@ def _run_npc_brain_v3_decision_inner(
     # If goal is complete and agent is already at exit, leave immediately.
     # Otherwise route selection goes through objective pipeline (LEAVE_ZONE).
     if not agent.get("has_left_zone") and agent.get("is_alive", True) and agent.get("global_goal_achieved"):
-        exit_mode = agent.get("exit_zone_mode")
-        if not isinstance(exit_mode, dict) or not bool(exit_mode.get("active")):
-            agent["exit_zone_mode"] = {
-                "active": True,
-                "started_turn": world_turn,
-                "reason": "global_goal_completed",
-            }
+        _ensure_exit_zone_mode(
+            agent,
+            reason="global_goal_completed",
+            world_turn=world_turn,
+        )
         loc = state.get("locations", {}).get(agent.get("location_id", ""), {})
         if loc.get("exit_zone"):
             return _execute_leave_zone(agent_id, agent, state, world_turn)
@@ -6779,6 +6777,30 @@ def _recent_combat_with_target(
     return False
 
 
+
+def _ensure_exit_zone_mode(
+    agent: Dict[str, Any],
+    *,
+    reason: str,
+    world_turn: int,
+) -> Dict[str, Any]:
+    exit_mode = agent.get("exit_zone_mode")
+    if isinstance(exit_mode, dict):
+        if not bool(exit_mode.get("active")):
+            exit_mode["active"] = True
+            if "started_turn" not in exit_mode:
+                exit_mode["started_turn"] = int(world_turn)
+        exit_mode["reason"] = str(reason)
+        return exit_mode
+    exit_mode = {
+        "active": True,
+        "started_turn": int(world_turn),
+        "reason": str(reason),
+    }
+    agent["exit_zone_mode"] = exit_mode
+    return exit_mode
+
+
 def _mark_kill_stalker_goal_achieved(
     agent_id: str,
     agent: Dict[str, Any],
@@ -6796,6 +6818,11 @@ def _mark_kill_stalker_goal_achieved(
     target_name = target_agent.get("name", target_id) if isinstance(target_agent, dict) else target_id
 
     agent["global_goal_achieved"] = True
+    _ensure_exit_zone_mode(
+        agent,
+        reason="global_goal_completed",
+        world_turn=world_turn,
+    )
     goal_summary = f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!"
     goal_common = {
         "goal": "kill_stalker",
@@ -6864,6 +6891,11 @@ def _check_global_goal_completion(
         target = agent.get("wealth_goal_target", GET_RICH_COMPLETION_MIN)
         if wealth >= target:
             agent["global_goal_achieved"] = True
+            _ensure_exit_zone_mode(
+                agent,
+                reason="global_goal_completed",
+                world_turn=world_turn,
+            )
             _add_memory(
                 agent, world_turn, state, "observation",
                 "💰 Цель достигнута: разбогател!",
@@ -6885,6 +6917,11 @@ def _check_global_goal_completion(
         )
         if has_doc:
             agent["global_goal_achieved"] = True
+            _ensure_exit_zone_mode(
+                agent,
+                reason="global_goal_completed",
+                world_turn=world_turn,
+            )
             _add_memory(
                 agent, world_turn, state, "observation",
                 "🔍 Цель достигнута: тайна раскрыта!",

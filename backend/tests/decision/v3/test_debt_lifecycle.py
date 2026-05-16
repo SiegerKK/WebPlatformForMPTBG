@@ -123,3 +123,23 @@ def test_can_request_survival_credit_rejects_terminal_debtor_states() -> None:
     )
     assert ok is False
     assert reason == "debtor_escaped"
+
+
+def test_can_request_survival_credit_rejects_debt_escape_pending() -> None:
+    state = _state()
+    debtor = state["agents"]["bot1"]
+    creditor = state["traders"]["trader_1"]
+    debtor["debt_escape_pending"] = True
+
+    ok, reason = can_request_survival_credit(
+        state=state,
+        debtor=debtor,
+        creditor=creditor,
+        creditor_type="trader",
+        item_category="food",
+        required_price=60,
+        world_turn=100,
+    )
+
+    assert ok is False
+    assert reason == "debtor_escape_pending"

@@ -381,3 +381,27 @@ def test_pending_survival_purchase_prefers_buy_consume_without_new_loan() -> Non
     assert plan is not None
     assert [step.kind for step in plan.steps[:2]] == [STEP_TRADE_BUY_ITEM, STEP_CONSUME_ITEM]
     assert all(step.kind != STEP_REQUEST_LOAN for step in plan.steps)
+
+
+def test_survival_loan_chain_payloads_share_episode_id() -> None:
+    agent = make_agent(
+        money=0,
+        thirst=100,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+    )
+    agent["id"] = "bot1"
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+
+    plan = _plan_seek_consumable(ctx, Intent(kind="seek_water", score=1.0), state, 100, need_result)
+
+    assert plan is not None
+    assert [step.kind for step in plan.steps[:3]] == [STEP_REQUEST_LOAN, STEP_TRADE_BUY_ITEM, STEP_CONSUME_ITEM]
+    episode_id = str(plan.steps[0].payload.get("survival_episode_id") or "")
+    assert episode_id.startswith("survival_drink_100_")
+    assert plan.steps[1].payload.get("survival_episode_id") == episode_id
+    assert plan.steps[2].payload.get("survival_episode_id") == episode_id

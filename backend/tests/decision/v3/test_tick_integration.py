@@ -786,3 +786,22 @@ def test_get_rich_liquid_wealth_completion_generates_leave_zone_objective() -> N
     assert decision_events[-1].get("active_objective", {}).get("key") == "LEAVE_ZONE"
     active_plan = new_bot.get("active_plan_v3") or {}
     assert active_plan.get("objective_key") == "LEAVE_ZONE"
+
+
+def test_global_goal_completion_sets_exit_zone_mode() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["global_goal"] = "get_rich"
+    bot["global_goal_achieved"] = True
+    bot["exit_zone_mode"] = None
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    updated = new_state["agents"]["bot1"]
+    exit_mode = updated.get("exit_zone_mode") or {}
+    assert bool(exit_mode.get("active")) is True
+    assert str(exit_mode.get("reason") or "") == "global_goal_completed"

@@ -93,6 +93,7 @@ def _begin_survival_episode(
     expected_item_type: str,
     required_price: int,
     world_turn: int,
+    survival_episode_id: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     state = agent.get("survival_episode_state")
     if not isinstance(state, dict):
@@ -105,7 +106,7 @@ def _begin_survival_episode(
     if same_category_active:
         return state, False
 
-    episode_id = str(state.get("last_episode_id") or "")
+    episode_id = str(survival_episode_id or state.get("last_episode_id") or "")
     if not episode_id or str(state.get("category") or "") != str(category):
         episode_id = f"survival_{category}_{int(world_turn)}_{agent_id}"
     state = {
@@ -636,9 +637,11 @@ def _exec_trade_buy(
     events.extend(buy_events)
 
     if buy_events:
+        step_episode_id = str(step.payload.get("survival_episode_id") or "")
         episode = agent.get("survival_episode_state")
         if isinstance(episode, dict) and str(episode.get("status") or "") in {"started", "loaned"}:
-            if str(episode.get("category") or "") == str(category):
+            same_episode = (not step_episode_id) or step_episode_id == str(episode.get("last_episode_id") or "")
+            if same_episode and str(episode.get("category") or "") == str(category):
                 episode["buy_turn"] = int(world_turn)
                 episode["status"] = "bought"
                 episode["failure_reason"] = None
@@ -1059,10 +1062,12 @@ def _exec_consume(
             action_kind = "consume_heal"
     consume_events = _bot_consume(agent_id, agent, item, world_turn, state, action_kind) or []
     if consume_events:
+        step_episode_id = str(step.payload.get("survival_episode_id") or "")
         episode = agent.get("survival_episode_state")
         if isinstance(episode, dict) and str(episode.get("status") or "") in {"started", "loaned", "bought"}:
+            same_episode = (not step_episode_id) or step_episode_id == str(episode.get("last_episode_id") or "")
             expected_item_type = str(episode.get("expected_item_type") or "")
-            if not expected_item_type or expected_item_type == str(item_type or ""):
+            if same_episode and (not expected_item_type or expected_item_type == str(item_type or "")):
                 episode["consume_turn"] = int(world_turn)
                 episode["status"] = "completed"
                 episode["failure_reason"] = None
@@ -2361,6 +2366,7 @@ def _exec_request_loan(
     )
     episode_events: list[dict[str, Any]] = []
     episode_state: dict[str, Any] | None = None
+    planner_episode_id = str(step.payload.get("survival_episode_id") or "")
     if item_category in {"drink", "food", "medical"}:
         episode_state, can_start_episode = _begin_survival_episode(
             agent_id=agent_id,
@@ -2369,18 +2375,23 @@ def _exec_request_loan(
             expected_item_type=expected_item_type,
             required_price=required_price,
             world_turn=world_turn,
+            survival_episode_id=planner_episode_id,
         )
         if not can_start_episode:
             step.payload["_failure_reason"] = "survival_episode_in_progress"
-            failed = _mark_survival_episode_failed(
-                agent=agent,
-                reason="reloan_blocked_same_category_window",
-                world_turn=world_turn,
-            )
-            if failed is not None:
-                episode_events.append(_survival_episode_event("survival_purchase_episode_failed", failed, world_turn))
+            blocked_payload = {
+                "event_type": "survival_purchase_episode_reloan_blocked",
+                "payload": {
+                    "survival_episode_id": str(episode_state.get("last_episode_id") or planner_episode_id),
+                    "survival_episode_category": item_category,
+                    "reason": "reloan_blocked_same_category_window",
+                    "world_turn": int(world_turn),
+                    "has_pending_survival_purchase": isinstance(agent.get("pending_survival_purchase"), dict),
+                },
+            }
+            episode_events.append(blocked_payload)
             return episode_events
-        step.payload["survival_episode_id"] = str(episode_state.get("last_episode_id") or "")
+        step.payload["survival_episode_id"] = str(episode_state.get("last_episode_id") or planner_episode_id)
         step.payload["survival_episode_category"] = item_category
         episode_events.append(_survival_episode_event("survival_purchase_episode_started", episode_state, world_turn))
 

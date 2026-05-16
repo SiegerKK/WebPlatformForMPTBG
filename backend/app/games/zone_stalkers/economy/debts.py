@@ -704,6 +704,8 @@ def can_request_survival_credit(
         return False, "debtor_not_alive"
     if bool(debtor.get("has_left_zone")):
         return False, "debtor_left_zone"
+    if bool(debtor.get("debt_escape_pending")):
+        return False, "debtor_escape_pending"
     if bool(debtor.get("debt_escape_completed")) or bool(debtor.get("escaped_due_to_debt")):
         return False, "debtor_escaped"
     if not isinstance(creditor, dict):
