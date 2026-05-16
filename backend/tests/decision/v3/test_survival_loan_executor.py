@@ -526,3 +526,73 @@ def test_debtor_with_enough_money_repays_on_trader_interaction_agent39_regressio
     assert int(account.get("outstanding_total") or 0) == 0
     assert str(account.get("status") or "") == "repaid"
     assert int(agent.get("money") or 0) < before_money
+
+
+def test_request_loan_blocks_same_category_episode_reentry_window() -> None:
+    agent = make_agent(money=0, thirst=100, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    agent["survival_episode_state"] = {
+        "last_episode_id": "survival_drink_100_bot1",
+        "category": "drink",
+        "expected_item_type": "water",
+        "required_price": 45,
+        "started_turn": 100,
+        "loan_turn": 100,
+        "status": "loaned",
+    }
+    state = _state(agent)
+    plan = Plan(
+        intent_kind="seek_water",
+        steps=[PlanStep(
+            kind=STEP_REQUEST_LOAN,
+            payload={
+                "creditor_id": "trader_1",
+                "creditor_type": "trader",
+                "amount": 45,
+                "purpose": "survival_drink",
+                "item_category": "drink",
+                "required_price": 45,
+            },
+            interruptible=False,
+        )],
+    )
+
+    events = execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 105)
+
+    assert plan.current_step_index == 0
+    assert plan.steps[0].payload.get("_loan_failed") is True
+    assert plan.steps[0].payload.get("_failure_reason") == "survival_episode_in_progress"
+    assert any(ev.get("event_type") == "survival_purchase_episode_failed" for ev in events if isinstance(ev, dict))
+
+
+def test_survival_episode_marks_completed_after_loan_buy_consume_cycle() -> None:
+    agent = make_agent(money=0, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    bandage_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+    plan = Plan(
+        intent_kind="heal_self",
+        steps=[
+            PlanStep(
+                kind=STEP_REQUEST_LOAN,
+                payload={
+                    "creditor_id": "trader_1",
+                    "creditor_type": "trader",
+                    "amount": bandage_price,
+                    "purpose": "survival_medical",
+                    "item_category": "medical",
+                    "required_price": bandage_price,
+                },
+                interruptible=False,
+            ),
+            PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "medical", "buy_mode": "survival_cheapest", "reason": "buy_medical_survival"}, interruptible=False),
+            PlanStep(kind=STEP_CONSUME_ITEM, payload={"item_type": "bandage", "reason": "emergency_heal"}, interruptible=False),
+        ],
+    )
+
+    _run_plan_until_complete(agent, state, plan)
+
+    episode = agent.get("survival_episode_state") or {}
+    assert episode.get("status") == "completed"
+    assert episode.get("loan_turn") is not None
+    assert episode.get("buy_turn") is not None
+    assert episode.get("consume_turn") is not None
+    assert agent.get("pending_survival_purchase") is None

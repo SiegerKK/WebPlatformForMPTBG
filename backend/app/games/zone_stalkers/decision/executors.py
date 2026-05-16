@@ -82,6 +82,76 @@ _SEARCH_LOCATION_HUB_COOLDOWN_TURNS = 90
 # Fix 6 — cooldown turns after exhausting a witness source at a location
 WITNESS_SOURCE_COOLDOWN_TURNS = 180
 TRADE_FAIL_TRADER_NO_MONEY = "trader_no_money"
+_SURVIVAL_EPISODE_WINDOW_TURNS = 30
+
+
+def _begin_survival_episode(
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+    category: str,
+    expected_item_type: str,
+    required_price: int,
+    world_turn: int,
+) -> tuple[dict[str, Any], bool]:
+    state = agent.get("survival_episode_state")
+    if not isinstance(state, dict):
+        state = {}
+    same_category_active = (
+        str(state.get("category") or "") == str(category)
+        and str(state.get("status") or "") in {"started", "loaned"}
+        and int(world_turn) - int(state.get("started_turn") or 0) < _SURVIVAL_EPISODE_WINDOW_TURNS
+    )
+    if same_category_active:
+        return state, False
+
+    episode_id = str(state.get("last_episode_id") or "")
+    if not episode_id or str(state.get("category") or "") != str(category):
+        episode_id = f"survival_{category}_{int(world_turn)}_{agent_id}"
+    state = {
+        "last_episode_id": episode_id,
+        "category": str(category),
+        "expected_item_type": str(expected_item_type or ""),
+        "required_price": int(required_price or 0),
+        "started_turn": int(world_turn),
+        "loan_turn": None,
+        "buy_turn": None,
+        "consume_turn": None,
+        "status": "started",
+        "failure_reason": None,
+    }
+    agent["survival_episode_state"] = state
+    return state, True
+
+
+def _mark_survival_episode_failed(
+    *,
+    agent: dict[str, Any],
+    reason: str,
+    world_turn: int,
+) -> dict[str, Any] | None:
+    episode = agent.get("survival_episode_state")
+    if not isinstance(episode, dict):
+        return None
+    episode["status"] = "failed"
+    episode["failure_reason"] = str(reason)
+    episode["failed_turn"] = int(world_turn)
+    return episode
+
+
+def _survival_episode_event(event_type: str, episode: dict[str, Any], world_turn: int) -> dict[str, Any]:
+    return {
+        "event_type": event_type,
+        "payload": {
+            "survival_episode_id": str(episode.get("last_episode_id") or ""),
+            "survival_episode_category": str(episode.get("category") or ""),
+            "expected_item_type": str(episode.get("expected_item_type") or ""),
+            "required_price": int(episode.get("required_price") or 0),
+            "status": str(episode.get("status") or ""),
+            "failure_reason": episode.get("failure_reason"),
+            "world_turn": int(world_turn),
+        },
+    }
 
 
 def execute_plan_step(
@@ -538,6 +608,11 @@ def _exec_trade_buy(
         category in {"drink", "food", "medical"}
         and ("survival" in reason_lower or "emergency" in reason_lower)
     )
+    pending_purchase = agent.get("pending_survival_purchase")
+    if isinstance(pending_purchase, dict) and int(pending_purchase.get("expires_turn") or 0) < int(world_turn):
+        agent["pending_survival_purchase"] = None
+        pending_purchase = None
+
     trader = None
     for trader_id, trader_obj in (state.get("traders") or {}).items():
         if not isinstance(trader_obj, dict):
@@ -559,20 +634,39 @@ def _exec_trade_buy(
     buy_events = _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                       purchase_reason=reason) or []
     events.extend(buy_events)
+
+    if buy_events:
+        episode = agent.get("survival_episode_state")
+        if isinstance(episode, dict) and str(episode.get("status") or "") in {"started", "loaned"}:
+            if str(episode.get("category") or "") == str(category):
+                episode["buy_turn"] = int(world_turn)
+                episode["status"] = "bought"
+                episode["failure_reason"] = None
+                events.append(_survival_episode_event("survival_purchase_episode_bought", episode, world_turn))
+        return events
+
     # If no purchase happened, emit a failure event so the plan step is not silently skipped.
-    if not buy_events:
-        events.append(_make_trade_buy_failed_event(
-            agent_id=agent_id,
-            reason="not_enough_money",
-            item_category=category,
-            buy_mode=buy_mode,
-            location_id=agent_loc,
-            required_price=required_price_from_payload,
-            agent_money=agent_money,
-            compatible_item_types=compatible_item_types_list,
-            expected_item_type=expected_item_type,
-            previous_step_was_survival_credit=previous_step_was_survival_credit,
-        ))
+    events.append(_make_trade_buy_failed_event(
+        agent_id=agent_id,
+        reason="not_enough_money",
+        item_category=category,
+        buy_mode=buy_mode,
+        location_id=agent_loc,
+        required_price=required_price_from_payload,
+        agent_money=agent_money,
+        compatible_item_types=compatible_item_types_list,
+        expected_item_type=expected_item_type,
+        previous_step_was_survival_credit=previous_step_was_survival_credit,
+    ))
+    if previous_step_was_survival_credit or isinstance(pending_purchase, dict):
+        failed = _mark_survival_episode_failed(
+            agent=agent,
+            reason="trade_buy_failed",
+            world_turn=world_turn,
+        )
+        agent["pending_survival_purchase"] = None
+        if failed is not None:
+            events.append(_survival_episode_event("survival_purchase_episode_failed", failed, world_turn))
     return events
 
 
@@ -963,7 +1057,18 @@ def _exec_consume(
             action_kind = "consume_drink"
         else:
             action_kind = "consume_heal"
-    return _bot_consume(agent_id, agent, item, world_turn, state, action_kind) or []
+    consume_events = _bot_consume(agent_id, agent, item, world_turn, state, action_kind) or []
+    if consume_events:
+        episode = agent.get("survival_episode_state")
+        if isinstance(episode, dict) and str(episode.get("status") or "") in {"started", "loaned", "bought"}:
+            expected_item_type = str(episode.get("expected_item_type") or "")
+            if not expected_item_type or expected_item_type == str(item_type or ""):
+                episode["consume_turn"] = int(world_turn)
+                episode["status"] = "completed"
+                episode["failure_reason"] = None
+                agent["pending_survival_purchase"] = None
+                consume_events.append(_survival_episode_event("survival_purchase_episode_consumed", episode, world_turn))
+    return consume_events
 
 
 def _exec_equip(
@@ -2231,6 +2336,7 @@ def _exec_request_loan(
     state: dict[str, Any],
     world_turn: int,
 ) -> list[dict[str, Any]]:
+    del ctx
     creditor_id = str(step.payload.get("creditor_id") or "")
     creditor_type = str(step.payload.get("creditor_type") or "trader")
     creditors = state.get("traders") if creditor_type == "trader" else state.get("agents")
@@ -2247,6 +2353,37 @@ def _exec_request_loan(
     principal_needed = max(0, required_price - current_money)
     amount = int(step.payload.get("amount") or 0)
     step.payload["principal_needed"] = principal_needed
+
+    expected_item_type = str(
+        step.payload.get("survival_credit_quote_item_type")
+        or step.payload.get("expected_item_type")
+        or ""
+    )
+    episode_events: list[dict[str, Any]] = []
+    episode_state: dict[str, Any] | None = None
+    if item_category in {"drink", "food", "medical"}:
+        episode_state, can_start_episode = _begin_survival_episode(
+            agent_id=agent_id,
+            agent=agent,
+            category=item_category,
+            expected_item_type=expected_item_type,
+            required_price=required_price,
+            world_turn=world_turn,
+        )
+        if not can_start_episode:
+            step.payload["_failure_reason"] = "survival_episode_in_progress"
+            failed = _mark_survival_episode_failed(
+                agent=agent,
+                reason="reloan_blocked_same_category_window",
+                world_turn=world_turn,
+            )
+            if failed is not None:
+                episode_events.append(_survival_episode_event("survival_purchase_episode_failed", failed, world_turn))
+            return episode_events
+        step.payload["survival_episode_id"] = str(episode_state.get("last_episode_id") or "")
+        step.payload["survival_episode_category"] = item_category
+        episode_events.append(_survival_episode_event("survival_purchase_episode_started", episode_state, world_turn))
+
     ok, reason = can_request_survival_credit(
         state=state,
         debtor=agent,
@@ -2258,7 +2395,10 @@ def _exec_request_loan(
     )
     if not ok:
         step.payload["_failure_reason"] = reason
-        return []
+        failed = _mark_survival_episode_failed(agent=agent, reason=reason, world_turn=world_turn)
+        if failed is not None:
+            episode_events.append(_survival_episode_event("survival_purchase_episode_failed", failed, world_turn))
+        return episode_events
 
     if amount < principal_needed:
         amount = principal_needed
@@ -2267,7 +2407,10 @@ def _exec_request_loan(
     step.payload["amount"] = amount
     if amount <= 0:
         step.payload["_failure_reason"] = "amount_not_needed"
-        return []
+        failed = _mark_survival_episode_failed(agent=agent, reason="amount_not_needed", world_turn=world_turn)
+        if failed is not None:
+            episode_events.append(_survival_episode_event("survival_purchase_episode_failed", failed, world_turn))
+        return episode_events
 
     money_before = current_money
     account = advance_survival_credit(
@@ -2287,11 +2430,6 @@ def _exec_request_loan(
         creditor["accounts_receivable"] = int(creditor.get("accounts_receivable") or 0) + amount
 
     purpose = str(step.payload.get("purpose") or "survival_credit")
-    expected_item_type = str(
-        step.payload.get("survival_credit_quote_item_type")
-        or step.payload.get("expected_item_type")
-        or ""
-    )
     if not expected_item_type and item_category in {"food", "drink", "medical"} and required_price > 0:
         from .survival_credit import quote_survival_purchase
 
@@ -2301,6 +2439,23 @@ def _exec_request_loan(
             step.payload["expected_item_type"] = expected_item_type
             step.payload["survival_credit_quote_item_type"] = expected_item_type
             step.payload["expected_item_type_recovered_from_quote"] = True
+
+    if isinstance(episode_state, dict):
+        episode_state["expected_item_type"] = expected_item_type
+        episode_state["required_price"] = required_price
+        episode_state["loan_turn"] = int(world_turn)
+        episode_state["status"] = "loaned"
+        episode_state["failure_reason"] = None
+        agent["pending_survival_purchase"] = {
+            "survival_episode_id": str(episode_state.get("last_episode_id") or ""),
+            "category": item_category,
+            "expected_item_type": expected_item_type,
+            "required_price": int(required_price),
+            "loan_turn": int(world_turn),
+            "expires_turn": int(world_turn) + _SURVIVAL_EPISODE_WINDOW_TURNS,
+        }
+        episode_events.append(_survival_episode_event("survival_purchase_episode_loaned", episode_state, world_turn))
+
     event_payload = {
         "account_id": account["id"],
         "debtor_id": agent_id,
@@ -2335,7 +2490,10 @@ def _exec_request_loan(
         agent_id=agent_id,
     )
 
-    return [{
-        "event_type": "debt_credit_advanced",
-        "payload": event_payload,
-    }]
+    return [
+        {
+            "event_type": "debt_credit_advanced",
+            "payload": event_payload,
+        },
+        *episode_events,
+    ]

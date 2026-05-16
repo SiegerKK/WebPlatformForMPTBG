@@ -913,13 +913,25 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             ),
         )
 
-    if agent.get("global_goal_achieved") and not agent.get("has_left_zone"):
+    exit_mode = agent.get("exit_zone_mode")
+    exit_mode_active = isinstance(exit_mode, dict) and bool(exit_mode.get("active"))
+    if (agent.get("global_goal_achieved") or exit_mode_active) and not agent.get("has_left_zone"):
         leave_refs, leave_mem_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_LEAVE_ZONE)
+        exit_reason = (
+            "global_goal_completed"
+            if agent.get("global_goal_achieved")
+            else str((exit_mode or {}).get("reason") or "exit_zone_mode")
+        )
+        leave_reason_text = (
+            "Глобальная цель выполнена — пора покинуть Зону"
+            if agent.get("global_goal_achieved")
+            else "Нужно срочно покинуть Зону"
+        )
         _append_unique(
             result,
             Objective(
                 key=OBJECTIVE_LEAVE_ZONE,
-                source="global_goal_completed",
+                source="global_goal_completed" if agent.get("global_goal_achieved") else "exit_zone_mode",
                 urgency=max(0.9, float(need_result.scores.leave_zone)),
                 expected_value=1.0,
                 risk=0.2,
@@ -928,9 +940,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 confidence=0.95,
                 goal_alignment=1.0,
                 memory_confidence=leave_mem_conf,
-                reasons=("Глобальная цель выполнена — пора покинуть Зону",),
-                source_refs=(f"global_goal_completed:{agent.get('global_goal')}",) + leave_refs,
-                metadata={"is_blocking": False, "completed_global_goal": agent.get("global_goal")},
+                reasons=(leave_reason_text,),
+                source_refs=(f"exit_reason:{exit_reason}",) + leave_refs,
+                metadata={"is_blocking": False, "completed_global_goal": agent.get("global_goal"), "exit_reason": exit_reason},
             ),
         )
 

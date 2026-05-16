@@ -201,6 +201,11 @@ def _is_location_exhausted_for_money(
     objective_key: str,
     world_turn: int,
 ) -> bool:
+    location_cooldowns = agent.get("location_search_cooldowns")
+    if isinstance(location_cooldowns, dict):
+        cooldown_until = location_cooldowns.get(str(location_id))
+        if isinstance(cooldown_until, (int, float)) and int(cooldown_until) > int(world_turn):
+            return True
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
     for rec in records.values():
@@ -354,6 +359,14 @@ def _plan_heal_or_flee(
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     agent = ctx.self_state
+    pending_plan = _plan_pending_survival_purchase(
+        agent=agent,
+        intent=intent,
+        category="medical",
+        world_turn=world_turn,
+    )
+    if pending_plan is not None:
+        return pending_plan
     inventory = agent.get("inventory", [])
 
     from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES
@@ -627,10 +640,18 @@ def _plan_seek_consumable(
     from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
 
     agent = ctx.self_state
-    inventory = agent.get("inventory", [])
     is_food = intent.kind == INTENT_SEEK_FOOD
-    item_types = FOOD_ITEM_TYPES if is_food else DRINK_ITEM_TYPES
     category = "food" if is_food else "drink"
+    pending_plan = _plan_pending_survival_purchase(
+        agent=agent,
+        intent=intent,
+        category=category,
+        world_turn=world_turn,
+    )
+    if pending_plan is not None:
+        return pending_plan
+    inventory = agent.get("inventory", [])
+    item_types = FOOD_ITEM_TYPES if is_food else DRINK_ITEM_TYPES
 
     # Legacy compatibility path (used by existing tests / v2 callers):
     # keep opportunistic consume and sell-before-buy behavior from PR1.
@@ -3116,6 +3137,57 @@ def _has_sellable_inventory(agent: dict[str, Any], *, item_category: str) -> boo
     from app.games.zone_stalkers.decision.executors import has_sellable_inventory  # noqa: PLC0415
 
     return has_sellable_inventory(agent, item_category=item_category)
+
+
+def _plan_pending_survival_purchase(
+    *,
+    agent: dict[str, Any],
+    intent: Intent,
+    category: str,
+    world_turn: int,
+) -> Optional[Plan]:
+    pending = agent.get("pending_survival_purchase")
+    if not isinstance(pending, dict):
+        return None
+    if str(pending.get("category") or "") != str(category):
+        return None
+    if int(pending.get("expires_turn") or 0) < int(world_turn):
+        return None
+    required_price = int(pending.get("required_price") or 0)
+    if int(agent.get("money") or 0) < required_price:
+        return None
+    item_type = str(pending.get("expected_item_type") or "")
+    if not item_type:
+        return None
+
+    buy_payload = {
+        "item_category": category,
+        "reason": f"buy_{category}_survival_pending",
+        "buy_mode": "survival_cheapest",
+        "required_price": required_price,
+        "expected_item_type": item_type,
+        "previous_step_was_survival_credit": True,
+    }
+    return Plan(
+        intent_kind=intent.kind,
+        steps=[
+            PlanStep(
+                kind=STEP_TRADE_BUY_ITEM,
+                payload=buy_payload,
+                interruptible=False,
+                expected_duration_ticks=1,
+            ),
+            PlanStep(
+                kind=STEP_CONSUME_ITEM,
+                payload={"item_type": item_type, "reason": f"emergency_{category}"},
+                interruptible=False,
+                expected_duration_ticks=1,
+            ),
+        ],
+        interruptible=False,
+        confidence=0.95,
+        created_turn=world_turn,
+    )
 
 
 def _build_survival_buy_payload(

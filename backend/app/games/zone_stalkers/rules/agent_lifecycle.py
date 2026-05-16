@@ -69,6 +69,24 @@ def kill_agent(
     agent["action_queue"] = []
     agent["current_goal"] = "dead"
 
+    try:
+        from app.games.zone_stalkers.economy.debts import (  # noqa: PLC0415
+            DEBT_STATUS_DEBTOR_DEAD,
+            freeze_debtor_accounts,
+        )
+
+        frozen_events = freeze_debtor_accounts(
+            state=state,
+            debtor_id=agent_id,
+            world_turn=world_turn,
+            status=DEBT_STATUS_DEBTOR_DEAD,
+            reason="agent_death",
+        )
+        if emit_event and events is not None and frozen_events:
+            events.extend(frozen_events)
+    except Exception:
+        pass
+
     # 2. Active plan cleanup
     active_plan = get_active_plan(agent)
     if active_plan is not None:

@@ -47,3 +47,40 @@ def test_leave_zone_executor_marks_agent_left_zone() -> None:
     assert agent.get("scheduled_action") is None
     assert agent.get("action_queue") == []
     assert any(event.get("event_type") == "agent_left_zone" for event in events)
+
+
+def test_leave_zone_freezes_active_debt_accounts() -> None:
+    from app.games.zone_stalkers.economy.debts import advance_survival_credit
+
+    agent = make_agent(global_goal="get_rich", global_goal_achieved=True, location_id="loc_b", money=0)
+    state = make_minimal_state(agent=agent)
+    state["agents"]["bot1"] = agent
+    state["traders"] = {
+        "trader_1": {"id": "trader_1", "is_alive": True, "money": 1000, "accounts_receivable": 0, "location_id": "loc_b"}
+    }
+    state["locations"]["loc_a"]["agents"] = []
+    state["locations"]["loc_b"]["agents"] = ["bot1"]
+    state["locations"]["loc_b"]["exit_zone"] = True
+
+    account = advance_survival_credit(
+        state=state,
+        debtor_id="bot1",
+        creditor_id="trader_1",
+        creditor_type="trader",
+        amount=100,
+        purpose="survival_food",
+        location_id="loc_b",
+        world_turn=state["world_turn"],
+    )
+
+    plan = Plan(
+        intent_kind=INTENT_LEAVE_ZONE,
+        steps=[PlanStep(kind=STEP_LEAVE_ZONE, payload={"reason": "leave_zone"})],
+        created_turn=state["world_turn"],
+    )
+    ctx = build_agent_context("bot1", agent, state)
+    events = execute_plan_step(ctx, plan, state, state["world_turn"])
+
+    assert agent.get("has_left_zone") is True
+    assert str(account.get("status") or "") == "debtor_left_zone"
+    assert any(event.get("event_type") == "debt_account_frozen" for event in events)
