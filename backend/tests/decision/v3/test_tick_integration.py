@@ -786,3 +786,71 @@ def test_get_rich_liquid_wealth_completion_generates_leave_zone_objective() -> N
     assert decision_events[-1].get("active_objective", {}).get("key") == "LEAVE_ZONE"
     active_plan = new_bot.get("active_plan_v3") or {}
     assert active_plan.get("objective_key") == "LEAVE_ZONE"
+
+
+def test_global_goal_completion_sets_exit_zone_mode() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["global_goal"] = "get_rich"
+    bot["global_goal_achieved"] = True
+    bot["exit_zone_mode"] = None
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+
+    new_state, _ = tick_zone_map(state)
+
+    updated = new_state["agents"]["bot1"]
+    exit_mode = updated.get("exit_zone_mode") or {}
+    assert bool(exit_mode.get("active")) is True
+    assert str(exit_mode.get("reason") or "") == "global_goal_completed"
+
+
+def test_exit_mode_skips_pre_decision_equipment_maintenance_and_routes_to_exit() -> None:
+    state = _make_base_state()
+    bot = _bot_agent()
+    bot["id"] = "bot1"
+    bot["global_goal"] = "get_rich"
+    bot["global_goal_achieved"] = True
+    bot["exit_zone_mode"] = {"active": True, "started_turn": 100, "reason": "global_goal_completed"}
+    bot["scheduled_action"] = None
+    bot["action_queue"] = []
+    bot["equipment"] = {}
+    bot["inventory"] = []
+    bot["thirst"] = 5
+    bot["hunger"] = 5
+    bot["sleepiness"] = 5
+    bot["hp"] = 95
+    bot["radiation"] = 0
+    state["agents"]["bot1"] = bot
+    state["locations"]["loc_a"]["agents"] = ["bot1"]
+    state["locations"]["loc_b"]["exit_zone"] = True
+
+    from app.games.zone_stalkers.memory.store import ensure_memory_v3  # noqa: PLC0415
+    from app.games.zone_stalkers.memory.memory_events import write_memory_event_to_v3  # noqa: PLC0415
+
+    ensure_memory_v3(bot)
+    write_memory_event_to_v3(
+        agent_id="bot1",
+        agent=bot,
+        legacy_entry={
+            "world_turn": 99,
+            "type": "observation",
+            "title": "remember weapon",
+            "effects": {
+                "action_kind": "item_seen",
+                "location_id": "loc_b",
+                "item_type": "pistol",
+                "name": "ПМ",
+            },
+        },
+        world_turn=99,
+    )
+
+    new_state, _ = tick_zone_map(state)
+    updated = new_state["agents"]["bot1"]
+
+    assert updated.get("current_goal") == "leave_zone"
+    assert updated.get("scheduled_action", {}).get("target_id") == "loc_b"
+    assert (updated.get("active_plan_v3") or {}).get("objective_key") == "LEAVE_ZONE"

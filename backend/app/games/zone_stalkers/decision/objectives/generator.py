@@ -714,6 +714,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
 
     sleep_score = float(need_result.scores.sleep)
     sleepiness = int(agent.get("sleepiness") or 0)
+    movement_impossible = bool(agent.get("movement_impossible")) or bool(agent.get("unconscious")) or bool(agent.get("incapacitated"))
     hp = int(agent.get("hp") or 100)
     radiation = int(agent.get("radiation") or 0)
     current_terrain = str(ctx.belief_state.current_location.get("terrain_type") or "")
@@ -734,6 +735,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 "critical": True,
                 "soft_threshold": SOFT_REST_THRESHOLD,
                 "critical_threshold": CRITICAL_REST_THRESHOLD,
+                "movement_impossible": movement_impossible,
             }
         elif is_recovery_rest:
             rest_source = "recovery_need"
@@ -750,6 +752,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 "recovery_need": True,
                 "recovery_hp": hp,
                 "recovery_radiation": radiation,
+                "movement_impossible": movement_impossible,
             }
         else:
             rest_source = "soft_need"
@@ -761,6 +764,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 "critical": False,
                 "soft_threshold": SOFT_REST_THRESHOLD,
                 "critical_threshold": CRITICAL_REST_THRESHOLD,
+                "movement_impossible": movement_impossible,
             }
         _append_unique(
             result,
@@ -913,13 +917,29 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             ),
         )
 
-    if agent.get("global_goal_achieved") and not agent.get("has_left_zone"):
+    exit_mode = agent.get("exit_zone_mode")
+    exit_mode_active = isinstance(exit_mode, dict) and bool(exit_mode.get("active"))
+    if (agent.get("global_goal_achieved") or exit_mode_active) and not agent.get("has_left_zone"):
         leave_refs, leave_mem_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_LEAVE_ZONE)
+        exit_reason = (
+            "global_goal_completed"
+            if agent.get("global_goal_achieved")
+            else str((exit_mode or {}).get("reason") or "exit_zone_mode")
+        )
+        leave_reason_text = (
+            "Глобальная цель выполнена — пора покинуть Зону"
+            if agent.get("global_goal_achieved")
+            else "Нужно срочно покинуть Зону"
+        )
         _append_unique(
             result,
             Objective(
                 key=OBJECTIVE_LEAVE_ZONE,
-                source="global_goal_completed",
+                source=(
+                    "global_goal_completed"
+                    if agent.get("global_goal_achieved")
+                    else ("debt_escape" if exit_reason == "debt_escape" else "exit_zone_mode")
+                ),
                 urgency=max(0.9, float(need_result.scores.leave_zone)),
                 expected_value=1.0,
                 risk=0.2,
@@ -928,9 +948,9 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 confidence=0.95,
                 goal_alignment=1.0,
                 memory_confidence=leave_mem_conf,
-                reasons=("Глобальная цель выполнена — пора покинуть Зону",),
-                source_refs=(f"global_goal_completed:{agent.get('global_goal')}",) + leave_refs,
-                metadata={"is_blocking": False, "completed_global_goal": agent.get("global_goal")},
+                reasons=(leave_reason_text,),
+                source_refs=(f"exit_reason:{exit_reason}",) + leave_refs,
+                metadata={"is_blocking": False, "completed_global_goal": agent.get("global_goal"), "exit_reason": exit_reason},
             ),
         )
 
@@ -946,13 +966,13 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
             OBJECTIVE_HEAL_SELF,
             OBJECTIVE_RESTORE_WATER,
             OBJECTIVE_RESTORE_FOOD,
-            OBJECTIVE_REST,
         }
         result[:] = [
             obj
             for obj in result
             if obj.key in _allow_keys
             or (obj.key in _critical_survival and float(obj.urgency) >= 0.95)
+            or (obj.key == OBJECTIVE_REST and bool((obj.metadata or {}).get("movement_impossible")))
         ]
         return result
 

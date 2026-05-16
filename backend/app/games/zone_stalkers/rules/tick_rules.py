@@ -1810,12 +1810,20 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
         for _agent_id, _agent in (state.get("agents") or {}).items():
             if not isinstance(_agent, dict):
                 continue
+            if not bool(_agent.get("is_alive", True)) or bool(_agent.get("has_left_zone")):
+                continue
             if bool(_agent.get("_debt_escape_triggered")):
                 continue
             debt_total = int(get_debtor_debt_total(state, str(_agent_id), world_turn=current_turn))
             if debt_total < int(DEBT_ESCAPE_THRESHOLD):
                 continue
             _agent["_debt_escape_triggered"] = True
+            _agent["debt_escape_pending"] = True
+            _ensure_exit_zone_mode(
+                _agent,
+                reason="debt_escape",
+                world_turn=current_turn,
+            )
             events.append({
                 "event_type": "debt_escape_triggered",
                 "payload": {
@@ -2556,12 +2564,17 @@ def _resolve_exploration(
                 and str(_v3_details(rec).get("objective_key") or objective_key or "") == objective_key
             )
             _cooldown_until_turn = world_turn + 180
+            location_cooldowns = agent.get("location_search_cooldowns")
+            if not isinstance(location_cooldowns, dict):
+                location_cooldowns = {}
+                agent["location_search_cooldowns"] = location_cooldowns
+            location_cooldowns[str(loc_id)] = int(_cooldown_until_turn)
             _add_memory(
                 agent,
                 world_turn,
                 state,
                 "observation",
-                "🚫 Источник денег исчерпан",
+                "�� Источник денег исчерпан",
                 {
                     "action_kind": "anomaly_search_exhausted",
                     "objective_key": objective_key,
@@ -6225,6 +6238,11 @@ def _run_npc_brain_v3_decision_inner(
     # If goal is complete and agent is already at exit, leave immediately.
     # Otherwise route selection goes through objective pipeline (LEAVE_ZONE).
     if not agent.get("has_left_zone") and agent.get("is_alive", True) and agent.get("global_goal_achieved"):
+        _ensure_exit_zone_mode(
+            agent,
+            reason="global_goal_completed",
+            world_turn=world_turn,
+        )
         loc = state.get("locations", {}).get(agent.get("location_id", ""), {})
         if loc.get("exit_zone"):
             return _execute_leave_zone(agent_id, agent, state, world_turn)
@@ -6232,9 +6250,12 @@ def _run_npc_brain_v3_decision_inner(
     # ── Pre-decision: phase-independent equipment maintenance ─────────────
     # Equip / pick-up / seek from memory happen before the needs pipeline so
     # that Phase-1 resource-gathering is not blocked by reload_or_rearm=1.0.
-    _eq_evs = _pre_decision_equipment_maintenance(agent_id, agent, state, world_turn)
-    if _eq_evs is not None:
-        return _eq_evs
+    exit_mode = agent.get("exit_zone_mode")
+    exit_mode_active = isinstance(exit_mode, dict) and bool(exit_mode.get("active"))
+    if not exit_mode_active and not bool(agent.get("global_goal_achieved")) and not bool(agent.get("debt_escape_pending")):
+        _eq_evs = _pre_decision_equipment_maintenance(agent_id, agent, state, world_turn)
+        if _eq_evs is not None:
+            return _eq_evs
 
     # ── V2 pipeline ────────────────────────────────────────────────────────
     ctx = build_agent_context(agent_id, agent, state)
@@ -6759,6 +6780,30 @@ def _recent_combat_with_target(
     return False
 
 
+
+def _ensure_exit_zone_mode(
+    agent: Dict[str, Any],
+    *,
+    reason: str,
+    world_turn: int,
+) -> Dict[str, Any]:
+    exit_mode = agent.get("exit_zone_mode")
+    if isinstance(exit_mode, dict):
+        if not bool(exit_mode.get("active")):
+            exit_mode["active"] = True
+            if "started_turn" not in exit_mode:
+                exit_mode["started_turn"] = int(world_turn)
+        exit_mode["reason"] = str(reason)
+        return exit_mode
+    exit_mode = {
+        "active": True,
+        "started_turn": int(world_turn),
+        "reason": str(reason),
+    }
+    agent["exit_zone_mode"] = exit_mode
+    return exit_mode
+
+
 def _mark_kill_stalker_goal_achieved(
     agent_id: str,
     agent: Dict[str, Any],
@@ -6776,6 +6821,11 @@ def _mark_kill_stalker_goal_achieved(
     target_name = target_agent.get("name", target_id) if isinstance(target_agent, dict) else target_id
 
     agent["global_goal_achieved"] = True
+    _ensure_exit_zone_mode(
+        agent,
+        reason="global_goal_completed",
+        world_turn=world_turn,
+    )
     goal_summary = f"Я выполнил задание — устранил «{target_name}». Пора покидать Зону!"
     goal_common = {
         "goal": "kill_stalker",
@@ -6844,6 +6894,11 @@ def _check_global_goal_completion(
         target = agent.get("wealth_goal_target", GET_RICH_COMPLETION_MIN)
         if wealth >= target:
             agent["global_goal_achieved"] = True
+            _ensure_exit_zone_mode(
+                agent,
+                reason="global_goal_completed",
+                world_turn=world_turn,
+            )
             _add_memory(
                 agent, world_turn, state, "observation",
                 "💰 Цель достигнута: разбогател!",
@@ -6865,6 +6920,11 @@ def _check_global_goal_completion(
         )
         if has_doc:
             agent["global_goal_achieved"] = True
+            _ensure_exit_zone_mode(
+                agent,
+                reason="global_goal_completed",
+                world_turn=world_turn,
+            )
             _add_memory(
                 agent, world_turn, state, "observation",
                 "🔍 Цель достигнута: тайна раскрыта!",
@@ -7045,6 +7105,40 @@ def _execute_leave_zone(
     loc = locations.get(loc_id, {})
     exit_name = loc.get("name", loc_id)
     agent["has_left_zone"] = True
+    exit_mode = agent.get("exit_zone_mode")
+    if isinstance(exit_mode, dict):
+        exit_mode["active"] = False
+        exit_mode["completed_turn"] = world_turn
+        exit_mode.setdefault("reason", "left_zone")
+    else:
+        agent["exit_zone_mode"] = {
+            "active": False,
+            "started_turn": world_turn,
+            "completed_turn": world_turn,
+            "reason": "left_zone",
+        }
+    try:
+        from app.games.zone_stalkers.economy.debts import (  # noqa: PLC0415
+            DEBT_STATUS_DEBTOR_LEFT_ZONE,
+            DEBT_STATUS_ESCAPED,
+            freeze_debtor_accounts,
+        )
+        debt_escape_leave = bool(agent.get("debt_escape_pending")) or bool(agent.get("_debt_escape_triggered"))
+        freeze_status = DEBT_STATUS_ESCAPED if debt_escape_leave else DEBT_STATUS_DEBTOR_LEFT_ZONE
+        freeze_reason = "debt_escape" if debt_escape_leave else "left_zone"
+        if debt_escape_leave:
+            agent["debt_escape_pending"] = False
+            agent["escaped_due_to_debt"] = True
+            agent["debt_escape_completed"] = True
+        _frozen_events = freeze_debtor_accounts(
+            state=state,
+            debtor_id=agent_id,
+            world_turn=world_turn,
+            status=freeze_status,
+            reason=freeze_reason,
+        )
+    except Exception:
+        _frozen_events = []
     active_plan = get_active_plan(agent)
     if active_plan is not None:
         active_plan.abort("left_zone", world_turn)
@@ -7080,8 +7174,10 @@ def _execute_leave_zone(
         {"action_kind": "left_zone", "exit_location": loc_id, "exit_name": exit_name},
         summary=f"Я покинул Зону через «{exit_name}»",
     )
-    return [{"event_type": "agent_left_zone",
-             "payload": {"agent_id": agent_id, "exit_location": loc_id}}]
+    return [
+        *list(_frozen_events),
+        {"event_type": "agent_left_zone", "payload": {"agent_id": agent_id, "exit_location": loc_id}},
+    ]
 
 # ─── Backwards-compatibility aliases (legacy → NPC Brain v3 migration) ───────
 #

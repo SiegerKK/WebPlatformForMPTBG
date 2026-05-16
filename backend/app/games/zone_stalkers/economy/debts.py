@@ -37,6 +37,26 @@ SURVIVAL_LOAN_ALLOWED_CATEGORIES = SURVIVAL_CREDIT_ALLOWED_CATEGORIES
 SURVIVAL_LOAN_PURPOSE_BY_CATEGORY = SURVIVAL_CREDIT_PURPOSE_BY_CATEGORY
 
 _ACTIVE_ACCOUNT_STATUSES = frozenset({"active"})
+DEBT_STATUS_ACTIVE = "active"
+DEBT_STATUS_REPAID = "repaid"
+DEBT_STATUS_ESCAPED = "escaped"
+DEBT_STATUS_DEBTOR_DEAD = "debtor_dead"
+DEBT_STATUS_DEBTOR_LEFT_ZONE = "debtor_left_zone"
+DEBT_STATUS_UNCOLLECTABLE = "uncollectable"
+
+_TERMINAL_ACCOUNT_STATUSES = frozenset({
+    DEBT_STATUS_REPAID,
+    DEBT_STATUS_ESCAPED,
+    DEBT_STATUS_DEBTOR_DEAD,
+    DEBT_STATUS_DEBTOR_LEFT_ZONE,
+    DEBT_STATUS_UNCOLLECTABLE,
+})
+_NON_REOPENABLE_ACCOUNT_STATUSES = frozenset({
+    DEBT_STATUS_ESCAPED,
+    DEBT_STATUS_DEBTOR_DEAD,
+    DEBT_STATUS_DEBTOR_LEFT_ZONE,
+    DEBT_STATUS_UNCOLLECTABLE,
+})
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -62,14 +82,16 @@ def _normalize_account(account: dict[str, Any], *, world_turn: int) -> dict[str,
     account["last_advanced_turn"] = _safe_int(account.get("last_advanced_turn"), world_turn)
     account["last_payment_turn"] = account.get("last_payment_turn")
     account["last_rollover_turn"] = account.get("last_rollover_turn")
+    account["closed_turn"] = account.get("closed_turn")
+    account["closure_reason"] = account.get("closure_reason")
     next_due_turn = account.get("next_due_turn")
     account["next_due_turn"] = _safe_int(next_due_turn, world_turn + SURVIVAL_CREDIT_ROLLOVER_TURNS) if next_due_turn is not None else world_turn + SURVIVAL_CREDIT_ROLLOVER_TURNS
     account["rollover_count"] = max(0, _safe_int(account.get("rollover_count"), 0))
     if account["outstanding_total"] <= 0:
-        account["status"] = "repaid"
+        account["status"] = DEBT_STATUS_REPAID
     else:
-        status = str(account.get("status") or "active")
-        account["status"] = status if status in {"active", "repaid", "escaped"} else "active"
+        status = str(account.get("status") or DEBT_STATUS_ACTIVE)
+        account["status"] = status if status in (_ACTIVE_ACCOUNT_STATUSES | _TERMINAL_ACCOUNT_STATUSES) else DEBT_STATUS_ACTIVE
     purposes = account.get("purposes")
     account["purposes"] = dict(purposes) if isinstance(purposes, dict) else {}
     account["created_location_id"] = str(account.get("created_location_id") or "")
@@ -77,6 +99,61 @@ def _normalize_account(account: dict[str, Any], *, world_turn: int) -> dict[str,
     notes = account.get("notes")
     account["notes"] = dict(notes) if isinstance(notes, dict) else {}
     return account
+
+
+def _freeze_account(
+    *,
+    account: dict[str, Any],
+    world_turn: int,
+    status: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    if str(account.get("status") or "") not in _ACTIVE_ACCOUNT_STATUSES:
+        return None
+    account["status"] = str(status)
+    account["closed_turn"] = int(world_turn)
+    account["closure_reason"] = str(reason)
+    account["next_due_turn"] = None
+    return {
+        "event_type": "debt_account_frozen",
+        "payload": {
+            "account_id": str(account.get("id") or ""),
+            "debtor_id": str(account.get("debtor_id") or ""),
+            "creditor_id": str(account.get("creditor_id") or ""),
+            "status": str(status),
+            "reason": str(reason),
+            "outstanding_total": _safe_int(account.get("outstanding_total"), 0),
+            "world_turn": int(world_turn),
+        },
+    }
+
+
+def freeze_debtor_accounts(
+    *,
+    state: dict[str, Any],
+    debtor_id: str,
+    world_turn: int,
+    status: str,
+    reason: str,
+) -> list[dict[str, Any]]:
+    ledger = ensure_debt_ledger(state, world_turn=world_turn)
+    account_ids = (ledger.get("by_debtor") or {}).get(str(debtor_id), []) or []
+    events: list[dict[str, Any]] = []
+    for account_id in account_ids:
+        account = (ledger.get("accounts") or {}).get(str(account_id))
+        if not isinstance(account, dict):
+            continue
+        event = _freeze_account(
+            account=account,
+            world_turn=int(world_turn),
+            status=str(status),
+            reason=str(reason),
+        )
+        if event is not None:
+            events.append(event)
+    if debtor_id:
+        _update_debtor_summary(state, str(debtor_id), world_turn=int(world_turn))
+    return events
 
 
 def _rebuild_indexes(ledger: dict[str, Any]) -> None:
@@ -234,10 +311,13 @@ def get_or_create_debt_account(
     accounts = ledger.get("accounts") or {}
     account = accounts.get(account_id) if isinstance(accounts, dict) else None
     if isinstance(account, dict):
-        if str(account.get("status") or "") in {"repaid", "escaped"}:
-            account["status"] = "active"
+        account_status = str(account.get("status") or "")
+        if account_status == DEBT_STATUS_REPAID:
+            account["status"] = DEBT_STATUS_ACTIVE
             if account.get("next_due_turn") is None:
                 account["next_due_turn"] = int(world_turn) + SURVIVAL_CREDIT_ROLLOVER_TURNS
+        elif account_status in _NON_REOPENABLE_ACCOUNT_STATUSES:
+            return account
         return account
 
     account_id = f"debt_account_{uuid.uuid4().hex[:12]}"
@@ -285,9 +365,50 @@ def apply_due_rollovers_with_affected_debtors(
         if str(account.get("status") or "") not in _ACTIVE_ACCOUNT_STATUSES:
             continue
         if _safe_int(account.get("outstanding_total"), 0) <= 0:
-            account["status"] = "repaid"
+            account["status"] = DEBT_STATUS_REPAID
             continue
         debtor_id = str(account.get("debtor_id") or "")
+        debtor = (state.get("agents") or {}).get(debtor_id)
+        if not isinstance(debtor, dict):
+            frozen_event = _freeze_account(
+                account=account,
+                world_turn=world_turn,
+                status=DEBT_STATUS_UNCOLLECTABLE,
+                reason="debtor_missing",
+            )
+            if frozen_event is not None:
+                events.append(frozen_event)
+            continue
+        if not bool(debtor.get("is_alive", True)):
+            frozen_event = _freeze_account(
+                account=account,
+                world_turn=world_turn,
+                status=DEBT_STATUS_DEBTOR_DEAD,
+                reason="debtor_dead_rollover_guard",
+            )
+            if frozen_event is not None:
+                events.append(frozen_event)
+            continue
+        if bool(debtor.get("has_left_zone")):
+            frozen_event = _freeze_account(
+                account=account,
+                world_turn=world_turn,
+                status=DEBT_STATUS_DEBTOR_LEFT_ZONE,
+                reason="debtor_left_zone_rollover_guard",
+            )
+            if frozen_event is not None:
+                events.append(frozen_event)
+            continue
+        if bool(debtor.get("debt_escape_completed")) or bool(debtor.get("escaped_due_to_debt")):
+            frozen_event = _freeze_account(
+                account=account,
+                world_turn=world_turn,
+                status=DEBT_STATUS_ESCAPED,
+                reason="debtor_escaped_rollover_guard",
+            )
+            if frozen_event is not None:
+                events.append(frozen_event)
+            continue
         next_due_turn = account.get("next_due_turn")
         if next_due_turn is None:
             account["next_due_turn"] = int(world_turn) + SURVIVAL_CREDIT_ROLLOVER_TURNS
@@ -354,6 +475,8 @@ def advance_survival_credit(
         world_turn=int(world_turn),
     )
     amount_int = max(0, _safe_int(amount, 0))
+    if str(account.get("status") or "") in _NON_REOPENABLE_ACCOUNT_STATUSES:
+        return account
     account["outstanding_total"] = _safe_int(account.get("outstanding_total"), 0) + amount_int
     account["principal_advanced_total"] = _safe_int(account.get("principal_advanced_total"), 0) + amount_int
     if amount_int > 0:
@@ -367,7 +490,7 @@ def advance_survival_credit(
         account["purposes"] = purposes
     if purpose:
         purposes[str(purpose)] = _safe_int(purposes.get(str(purpose)), 0) + 1
-    account["status"] = "active" if _safe_int(account.get("outstanding_total"), 0) > 0 else "repaid"
+    account["status"] = DEBT_STATUS_ACTIVE if _safe_int(account.get("outstanding_total"), 0) > 0 else DEBT_STATUS_REPAID
     _update_debtor_summary(state, str(debtor_id), world_turn=int(world_turn))
     return account
 
@@ -396,7 +519,7 @@ def repay_debt_account(
 
     outstanding = _safe_int(account.get("outstanding_total"), 0)
     if outstanding <= 0:
-        account["status"] = "repaid"
+        account["status"] = DEBT_STATUS_REPAID
         return {"status": "already_repaid", "paid": 0, "account_id": account_id, "remaining_total": 0, "fully_repaid": True}
 
     debtor_money = _safe_int(debtor.get("money"), 0)
@@ -415,7 +538,7 @@ def repay_debt_account(
     account["last_payment_turn"] = int(world_turn)
     if _safe_int(account.get("outstanding_total"), 0) <= 0:
         account["outstanding_total"] = 0
-        account["status"] = "repaid"
+        account["status"] = DEBT_STATUS_REPAID
 
     debtor_id = str(account.get("debtor_id") or debtor.get("id") or debtor.get("agent_id") or "")
     if debtor_id:
@@ -579,6 +702,12 @@ def can_request_survival_credit(
         return False, "unsupported_item_category"
     if not bool(debtor.get("is_alive", True)):
         return False, "debtor_not_alive"
+    if bool(debtor.get("has_left_zone")):
+        return False, "debtor_left_zone"
+    if bool(debtor.get("debt_escape_pending")):
+        return False, "debtor_escape_pending"
+    if bool(debtor.get("debt_escape_completed")) or bool(debtor.get("escaped_due_to_debt")):
+        return False, "debtor_escaped"
     if not isinstance(creditor, dict):
         return False, "creditor_not_found"
     if creditor_type in {"trader", "agent"} and not bool(creditor.get("is_alive", True)):

@@ -353,3 +353,55 @@ def test_repay_debt_plan_travels_to_creditor_when_not_colocated() -> None:
     assert len(plan.steps) >= 2
     assert plan.steps[0].kind == "travel_to_location"
     assert plan.steps[-1].kind == STEP_REPAY_DEBT
+
+
+def test_pending_survival_purchase_prefers_buy_consume_without_new_loan() -> None:
+    agent = make_agent(
+        money=int(ITEM_TYPES["bandage"]["value"] * 1.5),
+        hp=40,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+    )
+    agent["pending_survival_purchase"] = {
+        "survival_episode_id": "survival_medical_100_bot1",
+        "category": "medical",
+        "expected_item_type": "bandage",
+        "required_price": int(ITEM_TYPES["bandage"]["value"] * 1.5),
+        "loan_turn": 100,
+        "expires_turn": 120,
+    }
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+
+    plan = _plan_heal_or_flee(ctx, Intent(kind="heal_self", score=1.0), state, 101, need_result)
+
+    assert plan is not None
+    assert [step.kind for step in plan.steps[:2]] == [STEP_TRADE_BUY_ITEM, STEP_CONSUME_ITEM]
+    assert all(step.kind != STEP_REQUEST_LOAN for step in plan.steps)
+
+
+def test_survival_loan_chain_payloads_share_episode_id() -> None:
+    agent = make_agent(
+        money=0,
+        thirst=100,
+        inventory=[],
+        has_weapon=False,
+        has_armor=False,
+        has_ammo=False,
+    )
+    agent["id"] = "bot1"
+    state = _prepare_state(agent)
+    ctx = build_agent_context("bot1", agent, state)
+    need_result = evaluate_need_result(ctx, state)
+
+    plan = _plan_seek_consumable(ctx, Intent(kind="seek_water", score=1.0), state, 100, need_result)
+
+    assert plan is not None
+    assert [step.kind for step in plan.steps[:3]] == [STEP_REQUEST_LOAN, STEP_TRADE_BUY_ITEM, STEP_CONSUME_ITEM]
+    episode_id = str(plan.steps[0].payload.get("survival_episode_id") or "")
+    assert episode_id.startswith("survival_drink_100_")
+    assert plan.steps[1].payload.get("survival_episode_id") == episode_id
+    assert plan.steps[2].payload.get("survival_episode_id") == episode_id

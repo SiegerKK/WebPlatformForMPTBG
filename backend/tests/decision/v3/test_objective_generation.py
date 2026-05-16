@@ -389,3 +389,36 @@ def test_ready_hunter_not_marked_weapon_inferior_due_to_ak74_mapping() -> None:
             assert "equipment_disadvantage" not in reasons, (
                 f"ak74 wrongly flagged as equipment_disadvantage: {reasons}"
             )
+
+
+def test_exit_mode_suppresses_rest_when_movement_is_possible() -> None:
+    agent = make_agent(
+        sleepiness=98,
+        global_goal="get_rich",
+        global_goal_achieved=True,
+    )
+    agent["exit_zone_mode"] = {"active": True, "started_turn": 100, "reason": "global_goal_completed"}
+    state = make_minimal_state(agent=agent, loc_terrain="buildings")
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+
+    assert OBJECTIVE_LEAVE_ZONE in keys
+    assert OBJECTIVE_REST not in keys
+
+
+def test_exit_mode_allows_rest_when_movement_is_impossible() -> None:
+    agent = make_agent(
+        sleepiness=98,
+        global_goal="get_rich",
+        global_goal_achieved=True,
+    )
+    agent["movement_impossible"] = True
+    agent["exit_zone_mode"] = {"active": True, "started_turn": 100, "reason": "global_goal_completed"}
+    state = make_minimal_state(agent=agent, loc_terrain="buildings")
+
+    objectives = generate_objectives(_make_ctx(agent, state))
+    keys = {obj.key for obj in objectives}
+
+    assert OBJECTIVE_LEAVE_ZONE in keys
+    assert OBJECTIVE_REST in keys

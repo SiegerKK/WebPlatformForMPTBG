@@ -201,6 +201,11 @@ def _is_location_exhausted_for_money(
     objective_key: str,
     world_turn: int,
 ) -> bool:
+    location_cooldowns = agent.get("location_search_cooldowns")
+    if isinstance(location_cooldowns, dict):
+        cooldown_until = location_cooldowns.get(str(location_id))
+        if isinstance(cooldown_until, (int, float)) and int(cooldown_until) > int(world_turn):
+            return True
     memory_v3 = agent.get("memory_v3")
     records = memory_v3.get("records", {}) if isinstance(memory_v3, dict) else {}
     for rec in records.values():
@@ -354,6 +359,14 @@ def _plan_heal_or_flee(
     need_result: NeedEvaluationResult | None = None
 ) -> Optional[Plan]:
     agent = ctx.self_state
+    pending_plan = _plan_pending_survival_purchase(
+        agent=agent,
+        intent=intent,
+        category="medical",
+        world_turn=world_turn,
+    )
+    if pending_plan is not None:
+        return pending_plan
     inventory = agent.get("inventory", [])
 
     from app.games.zone_stalkers.balance.items import HEAL_ITEM_TYPES
@@ -492,7 +505,9 @@ def _plan_heal_or_flee(
                     required_price=quote.required_price,
                     amount=quote.principal_needed,
                     item_type=quote.item_type,
+                    world_turn=world_turn,
                 )
+                episode_id = str(loan_step_dict.get("survival_episode_id") or "")
                 return Plan(
                     intent_kind=intent.kind,
                     steps=[
@@ -508,13 +523,19 @@ def _plan_heal_or_flee(
                                 category="medical",
                                 quote=quote,
                                 reason="buy_medical_heal_loan",
+                                survival_episode_id=episode_id,
                             ),
                             interruptible=False,
                             expected_duration_ticks=1,
                         ),
                         PlanStep(
                             kind=STEP_CONSUME_ITEM,
-                            payload={"item_type": quote.item_type, "reason": "emergency_heal"},
+                            payload={
+                                "item_type": quote.item_type,
+                                "reason": "emergency_heal",
+                                "survival_episode_id": episode_id,
+                                "survival_episode_category": "medical",
+                            },
                             interruptible=False,
                             expected_duration_ticks=1,
                         ),
@@ -553,7 +574,9 @@ def _plan_heal_or_flee(
                             required_price=quote.required_price,
                             amount=quote.principal_needed,
                             item_type=quote.item_type,
+                            world_turn=world_turn,
                         )
+                        episode_id = str(loan_step.get("survival_episode_id") or "")
                         return Plan(
                             intent_kind=intent.kind,
                             steps=[
@@ -575,13 +598,19 @@ def _plan_heal_or_flee(
                                         category="medical",
                                         quote=quote,
                                         reason="buy_medical_heal_loan",
+                                        survival_episode_id=episode_id,
                                     ),
                                     interruptible=False,
                                     expected_duration_ticks=1,
                                 ),
                                 PlanStep(
                                     kind=STEP_CONSUME_ITEM,
-                                    payload={"item_type": quote.item_type, "reason": "emergency_heal"},
+                                    payload={
+                                        "item_type": quote.item_type,
+                                        "reason": "emergency_heal",
+                                        "survival_episode_id": episode_id,
+                                        "survival_episode_category": "medical",
+                                    },
                                     interruptible=False,
                                     expected_duration_ticks=1,
                                 ),
@@ -627,10 +656,18 @@ def _plan_seek_consumable(
     from app.games.zone_stalkers.balance.items import FOOD_ITEM_TYPES, DRINK_ITEM_TYPES
 
     agent = ctx.self_state
-    inventory = agent.get("inventory", [])
     is_food = intent.kind == INTENT_SEEK_FOOD
-    item_types = FOOD_ITEM_TYPES if is_food else DRINK_ITEM_TYPES
     category = "food" if is_food else "drink"
+    pending_plan = _plan_pending_survival_purchase(
+        agent=agent,
+        intent=intent,
+        category=category,
+        world_turn=world_turn,
+    )
+    if pending_plan is not None:
+        return pending_plan
+    inventory = agent.get("inventory", [])
+    item_types = FOOD_ITEM_TYPES if is_food else DRINK_ITEM_TYPES
 
     # Legacy compatibility path (used by existing tests / v2 callers):
     # keep opportunistic consume and sell-before-buy behavior from PR1.
@@ -866,7 +903,9 @@ def _plan_seek_consumable(
                         required_price=quote.required_price,
                         amount=quote.principal_needed,
                         item_type=quote.item_type,
+                        world_turn=world_turn,
                     )
+                    episode_id = str(loan_step_dict.get("survival_episode_id") or "")
                     steps = [
                         PlanStep(
                             STEP_REQUEST_LOAN,
@@ -879,6 +918,7 @@ def _plan_seek_consumable(
                                 category=category,
                                 quote=quote,
                                 reason=f"buy_{category}_survival",
+                                survival_episode_id=episode_id,
                             ),
                             interruptible=False,
                         ),
@@ -887,6 +927,8 @@ def _plan_seek_consumable(
                             {
                                 "item_type": quote.item_type,
                                 "reason": f"emergency_{category}",
+                                "survival_episode_id": episode_id,
+                                "survival_episode_category": category,
                             },
                             interruptible=False,
                         ),
@@ -943,7 +985,9 @@ def _plan_seek_consumable(
                                 required_price=quote.required_price,
                                 amount=quote.principal_needed,
                                 item_type=quote.item_type,
+                                world_turn=world_turn,
                             )
+                            episode_id = str(loan_step.get("survival_episode_id") or "")
                             steps = [
                                 PlanStep(STEP_TRAVEL_TO_LOCATION,
                                          {"target_id": trader_loc, "reason": f"buy_{category}_survival"},
@@ -954,12 +998,15 @@ def _plan_seek_consumable(
                                              category=category,
                                              quote=quote,
                                              reason=f"buy_{category}_survival",
+                                             survival_episode_id=episode_id,
                                          ),
                                          interruptible=False),
                                 PlanStep(STEP_CONSUME_ITEM,
                                          {
                                              "item_type": quote.item_type,
                                              "reason": f"emergency_{category}",
+                                             "survival_episode_id": episode_id,
+                                             "survival_episode_category": category,
                                          },
                                          interruptible=False),
                             ]
@@ -1100,7 +1147,9 @@ def _plan_seek_consumable(
                         required_price=quote_soft.required_price,
                         amount=quote_soft.principal_needed,
                         item_type=quote_soft.item_type,
+                        world_turn=world_turn,
                     )
+                    episode_id = str(loan_step_soft.get("survival_episode_id") or "")
                     steps_soft = [
                         PlanStep(STEP_REQUEST_LOAN, loan_step_soft, interruptible=False),
                         PlanStep(
@@ -1109,13 +1158,19 @@ def _plan_seek_consumable(
                                 category=category,
                                 quote=quote_soft,
                                 reason=f"buy_{category}_survival_credit",
+                                survival_episode_id=episode_id,
                             ),
                             interruptible=False,
                         ),
                     ]
                     steps_soft.append(PlanStep(
                         STEP_CONSUME_ITEM,
-                        {"item_type": quote_soft.item_type, "reason": f"need_{category}"},
+                        {
+                            "item_type": quote_soft.item_type,
+                            "reason": f"need_{category}",
+                            "survival_episode_id": episode_id,
+                            "survival_episode_category": category,
+                        },
                         interruptible=False,
                     ))
                     return Plan(
@@ -3118,11 +3173,71 @@ def _has_sellable_inventory(agent: dict[str, Any], *, item_category: str) -> boo
     return has_sellable_inventory(agent, item_category=item_category)
 
 
+def _plan_pending_survival_purchase(
+    *,
+    agent: dict[str, Any],
+    intent: Intent,
+    category: str,
+    world_turn: int,
+) -> Optional[Plan]:
+    pending = agent.get("pending_survival_purchase")
+    if not isinstance(pending, dict):
+        return None
+    if str(pending.get("category") or "") != str(category):
+        return None
+    if int(pending.get("expires_turn") or 0) < int(world_turn):
+        return None
+    required_price = int(pending.get("required_price") or 0)
+    if int(agent.get("money") or 0) < required_price:
+        return None
+    item_type = str(pending.get("expected_item_type") or "")
+    if not item_type:
+        return None
+
+    survival_episode_id = str(pending.get("survival_episode_id") or "")
+    buy_payload = {
+        "item_category": category,
+        "reason": f"buy_{category}_survival_pending",
+        "buy_mode": "survival_cheapest",
+        "required_price": required_price,
+        "expected_item_type": item_type,
+        "previous_step_was_survival_credit": True,
+        "survival_episode_id": survival_episode_id,
+        "survival_episode_category": category,
+    }
+    return Plan(
+        intent_kind=intent.kind,
+        steps=[
+            PlanStep(
+                kind=STEP_TRADE_BUY_ITEM,
+                payload=buy_payload,
+                interruptible=False,
+                expected_duration_ticks=1,
+            ),
+            PlanStep(
+                kind=STEP_CONSUME_ITEM,
+                payload={
+                    "item_type": item_type,
+                    "reason": f"emergency_{category}",
+                    "survival_episode_id": survival_episode_id,
+                    "survival_episode_category": category,
+                },
+                interruptible=False,
+                expected_duration_ticks=1,
+            ),
+        ],
+        interruptible=False,
+        confidence=0.95,
+        created_turn=world_turn,
+    )
+
+
 def _build_survival_buy_payload(
     *,
     category: str,
     quote: Any,
     reason: str,
+    survival_episode_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "item_category": category,
@@ -3132,6 +3247,8 @@ def _build_survival_buy_payload(
         "required_price": int(quote.required_price),
         "expected_item_type": quote.item_type,
         "previous_step_was_survival_credit": True,
+        "survival_episode_id": str(survival_episode_id or ""),
+        "survival_episode_category": category,
     }
 
 
@@ -3144,10 +3261,16 @@ def _build_survival_loan_payload(
     required_price: int,
     amount: int,
     item_type: str,
+    world_turn: int,
+    survival_episode_id: str | None = None,
 ) -> dict[str, Any]:
     trader_id = str(trader_npc.get("id") or "")
     principal_needed = max(0, int(required_price) - int(agent.get("money") or 0))
     corrected_amount = max(int(amount), principal_needed)
+    episode_id = str(
+        survival_episode_id
+        or f"survival_{item_category}_{int(world_turn)}_{str(agent.get('id') or agent.get('name') or 'agent')}"
+    )
     return {
         "creditor_id": trader_id,
         "creditor_type": "trader",
@@ -3162,6 +3285,9 @@ def _build_survival_loan_payload(
         "due_turns": SURVIVAL_LOAN_DUE_TURNS,
         "reason": f"survival_credit_{item_category}",
         "location_id": str(agent.get("location_id") or ""),
+        "survival_episode_id": episode_id,
+        "survival_episode_category": item_category,
+        "expected_item_type": item_type,
     }
 
 def _find_trader_npc_at_location(
