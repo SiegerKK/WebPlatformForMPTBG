@@ -392,14 +392,12 @@ def upsert_known_location(
         knowledge_stats["known_locations_count"] = int(knowledge_stats.get("known_locations_count", 0) or 0) + 1
     new_edges_count = len(existing.get("edges")) if isinstance(existing.get("edges"), dict) else 0
     new_is_detailed = 1 if isinstance(existing.get("snapshot"), dict) else 0
-    knowledge_stats["known_location_edges_count"] = int(
-        int(knowledge_stats.get("known_location_edges_count", 0) or 0)
-        + (new_edges_count - prev_edges_count)
+    knowledge_stats["known_location_edges_count"] = int(knowledge_stats.get("known_location_edges_count", 0) or 0) + (
+        new_edges_count - prev_edges_count
     )
     knowledge_stats["detailed_known_locations_count"] = int(
-        int(knowledge_stats.get("detailed_known_locations_count", 0) or 0)
-        + (new_is_detailed - prev_is_detailed)
-    )
+        knowledge_stats.get("detailed_known_locations_count", 0) or 0
+    ) + (new_is_detailed - prev_is_detailed)
     if (
         len(known_locations) > MAX_KNOWN_LOCATIONS_PER_AGENT
         or int(knowledge_stats.get("detailed_known_locations_count", 0) or 0) > MAX_DETAILED_KNOWN_LOCATIONS_PER_AGENT
