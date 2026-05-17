@@ -213,37 +213,23 @@ def select_location_knowledge_to_share(
     pool_size = max(max_entries * _SHARE_CANDIDATE_POOL_MULTIPLIER, _SHARE_CANDIDATE_POOL_MIN)
     candidate_ids: set[str] = set()
 
-    # Feature-relevant candidates first (highest potential score boost)
-    if target_needs_shelter:
-        candidate_ids.update(indexes.get("known_shelter_location_ids") or [])
-    if target_needs_trader:
-        candidate_ids.update(indexes.get("known_trader_location_ids") or [])
-    if target_needs_exit:
-        candidate_ids.update(indexes.get("known_exit_location_ids") or [])
-    if target_needs_artifacts:
-        candidate_ids.update(indexes.get("known_anomaly_location_ids") or [])
-
-    # All feature indexes (even when target has no explicit need — they may be
-    # useful to the receiver anyway)
+    # Build candidate pool from all feature indexes plus visited and recently-updated.
+    # Each index is included unconditionally so that the receiver always gets
+    # feature-rich locations regardless of whether a specific need flag is set.
+    # The target_needs flags only affect scoring (boost), not pool construction.
+    # Using a set prevents duplicate processing even when multiple flags are True.
     for feat_key in (
-        "known_trader_location_ids",
         "known_shelter_location_ids",
+        "known_trader_location_ids",
         "known_exit_location_ids",
         "known_anomaly_location_ids",
+        "visited_ids",
+        "recently_updated_ids",
     ):
-        candidate_ids.update(indexes.get(feat_key) or [])
-        if len(candidate_ids) >= pool_size:
-            break
-
-    # High-quality visited locations
-    for loc_id in (indexes.get("visited_ids") or []):
-        candidate_ids.add(loc_id)
-        if len(candidate_ids) >= pool_size:
-            break
-
-    # Recently updated (fresh rumor / exchange entries)
-    for loc_id in (indexes.get("recently_updated_ids") or []):
-        candidate_ids.add(loc_id)
+        for loc_id in (indexes.get(feat_key) or []):
+            candidate_ids.add(loc_id)
+            if len(candidate_ids) >= pool_size:
+                break
         if len(candidate_ids) >= pool_size:
             break
 

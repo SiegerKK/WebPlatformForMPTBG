@@ -88,14 +88,21 @@ def _populate_agent_with_n_known_locations(agent: dict, n: int) -> None:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 def test_upsert_known_location_600_entries_fast():
-    """Inserting 600 entries should correctly enforce caps and update indexes."""
+    """Inserting 600 entries should correctly enforce caps and update indexes.
+
+    _populate_agent_with_n_known_locations creates entries where every 3rd entry
+    (i % 3 == 0) uses LOCATION_KNOWLEDGE_VISITED with direct_visit source, and
+    every 10th entry (i % 10 == 0) has has_trader=True in its snapshot.
+    Tests below rely on this distribution.
+    """
     agent = _agent()
     _populate_agent_with_n_known_locations(agent, 600)
 
     knowledge = ensure_location_knowledge_v1(agent)
     # Caps should be respected
     assert len(knowledge["known_locations"]) <= MAX_KNOWN_LOCATIONS_PER_AGENT
-    # Indexes should be populated correctly
+    # Indexes should be populated correctly (visited: every 3rd → ~200 of 600;
+    # trader: every 10th → ~60 of 600, so at least some survive the cap)
     indexes = get_location_indexes(agent)
     assert isinstance(indexes.get("visited_ids"), list)
     assert isinstance(indexes.get("frontier_ids"), list)

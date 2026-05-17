@@ -697,17 +697,33 @@ def _update_location_indexes_incremental(
     # of O(N).  Removal from the *list* is still O(N) (unavoidable for plain
     # lists), but eliminating the redundant membership pre-check halves the
     # list scan work for the "remove" path.
-    _index_names = (
-        "visited_ids",
-        "frontier_ids",
+    #
+    # We determine which index lists will be touched based on entry properties,
+    # then build only those sets — avoiding unnecessary O(K) work for lists
+    # that will not be modified.
+    has_trader = bool((snapshot or {}).get("has_trader") or entry.get("has_trader"))
+    has_shelter = bool((snapshot or {}).get("has_shelter") or entry.get("safe_shelter"))
+    has_exit = bool((snapshot or {}).get("has_exit") or entry.get("has_exit"))
+    anomaly_risk = (snapshot or {}).get("anomaly_risk_estimate")
+    has_anomaly = bool(
+        (anomaly_risk is not None and float(anomaly_risk) > 0.0)
+        or int(entry.get("anomaly_activity", 0) or 0) > 0
+    )
+
+    # Always-touched indexes
+    _needed = ["visited_ids", "frontier_ids", "recently_updated_ids"]
+    # Feature indexes are needed only when the feature flag is True (add path)
+    # OR when the entry may already be in the index (remove path).  We always
+    # build them to handle the remove case correctly.
+    _needed.extend([
         "known_trader_location_ids",
         "known_shelter_location_ids",
         "known_exit_location_ids",
         "known_anomaly_location_ids",
-        "recently_updated_ids",
-    )
+    ])
+
     _sets: dict[str, set[str]] = {}
-    for _n in _index_names:
+    for _n in _needed:
         lst = indexes.get(_n)
         _sets[_n] = set(lst) if isinstance(lst, list) else set()
 
@@ -737,32 +753,24 @@ def _update_location_indexes_incremental(
         _idx_remove("frontier_ids", location_id)
 
     # known_trader_location_ids
-    has_trader = bool((snapshot or {}).get("has_trader") or entry.get("has_trader"))
     if has_trader:
         _idx_add("known_trader_location_ids", location_id)
     else:
         _idx_remove("known_trader_location_ids", location_id)
 
     # known_shelter_location_ids
-    has_shelter = bool((snapshot or {}).get("has_shelter") or entry.get("safe_shelter"))
     if has_shelter:
         _idx_add("known_shelter_location_ids", location_id)
     else:
         _idx_remove("known_shelter_location_ids", location_id)
 
     # known_exit_location_ids
-    has_exit = bool((snapshot or {}).get("has_exit") or entry.get("has_exit"))
     if has_exit:
         _idx_add("known_exit_location_ids", location_id)
     else:
         _idx_remove("known_exit_location_ids", location_id)
 
     # known_anomaly_location_ids
-    anomaly_risk = (snapshot or {}).get("anomaly_risk_estimate")
-    has_anomaly = bool(
-        (anomaly_risk is not None and float(anomaly_risk) > 0.0)
-        or int(entry.get("anomaly_activity", 0) or 0) > 0
-    )
     if has_anomaly:
         _idx_add("known_anomaly_location_ids", location_id)
     else:
