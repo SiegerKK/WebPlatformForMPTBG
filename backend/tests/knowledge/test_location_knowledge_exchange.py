@@ -25,6 +25,8 @@ from app.games.zone_stalkers.knowledge.location_knowledge import (
 )
 from app.games.zone_stalkers.rules.tick_rules import _passive_location_knowledge_exchange
 
+NEVER_EXCHANGED_TURN = -10**9
+
 
 def _agent(agent_id: str = "bot_1", loc_id: str = "loc_a") -> dict[str, Any]:
     return {"id": agent_id, "location_id": loc_id}
@@ -375,4 +377,4 @@ def test_passive_exchange_does_not_bump_revision_when_no_useful_packet():
 
     assert updated == 0
     assert after_revision == before_revision
-    assert int(runtime.get("last_any_exchange_turn", -10**9) or -10**9) < 120
+    assert int(runtime.get("last_any_exchange_turn", NEVER_EXCHANGED_TURN) or NEVER_EXCHANGED_TURN) < 120

@@ -266,10 +266,10 @@ def test_upsert_known_location_under_caps_does_not_scan_all_edges():
 
     original_edges_count = location_knowledge_module._edges_count
 
-    def _fail_if_called(*args, **kwargs):
+    def _fail_edges_count_call(*args, **kwargs):
         raise AssertionError("_edges_count should not be called under cap limits")
 
-    location_knowledge_module._edges_count = _fail_if_called
+    location_knowledge_module._edges_count = _fail_edges_count_call
     try:
         upsert_known_location(
             agent,

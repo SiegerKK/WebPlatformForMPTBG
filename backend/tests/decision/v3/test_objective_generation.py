@@ -260,11 +260,11 @@ def test_objective_generation_uses_location_indexes_not_full_known_location_scan
             "revision": 1,
         }
 
-    def _fail_feature_query(*args, **kwargs):
+    def _fail_known_locations_with_feature_call(*args, **kwargs):
         raise AssertionError("known_locations_with_feature should not be called by objective generation")
 
     known_graph_module.get_location_knowledge_planning_summary = _fake_summary
-    known_graph_module.known_locations_with_feature = _fail_feature_query
+    known_graph_module.known_locations_with_feature = _fail_known_locations_with_feature_call
     try:
         objectives = generate_objectives(_make_ctx(agent, state))
     finally:
