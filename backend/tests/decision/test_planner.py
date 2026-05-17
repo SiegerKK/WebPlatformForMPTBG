@@ -21,7 +21,12 @@ from app.games.zone_stalkers.decision.models.plan import (
     STEP_WAIT,
 )
 from app.games.zone_stalkers.decision.planner import build_plan
-from tests.decision.conftest import make_agent, make_minimal_state, make_state_with_trader
+from tests.decision.conftest import (
+    make_agent,
+    make_minimal_state,
+    make_state_with_trader,
+    seed_known_trader_route,
+)
 
 
 def _make_intent(kind, score=0.5):
@@ -99,6 +104,7 @@ class TestHealSelfPlan:
         """heal_self + no heal item + trader exists → STEP_TRAVEL_TO_LOCATION."""
         agent = make_agent(hp=20, inventory=[])  # empty inventory: no heal items
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_HEAL_SELF)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
         assert plan.steps[0].payload["target_id"] == "loc_b"
@@ -247,6 +253,7 @@ class TestSeekConsumablePlan:
         """seek_water + no water + no food → travel + buy (no prepend)."""
         agent = make_agent(thirst=80, hunger=50, inventory=[])  # empty: no water or food
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
         assert plan.steps[0].payload["target_id"] == "loc_b"
@@ -255,6 +262,7 @@ class TestSeekConsumablePlan:
         """Bug fix: seek_water + no water + food in inventory + hunger ≥ 25 → eat food first."""
         agent = make_agent(thirst=80, hunger=50, inventory=[{"type": "bread", "value": 10}])
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         # First step: eat the food; remaining: travel + buy water
         assert plan.steps[0].kind == STEP_CONSUME_ITEM
@@ -267,6 +275,7 @@ class TestSeekConsumablePlan:
         """seek_water + no water + food in inventory + hunger < 25 → no opportunistic eat."""
         agent = make_agent(thirst=80, hunger=10, inventory=[{"type": "bread", "value": 10}])
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
         assert len(plan.steps) == 2
@@ -286,6 +295,7 @@ class TestSeekConsumablePlan:
         """seek_food + no food + water in inventory + thirst ≥ 25 → drink water first."""
         agent = make_agent(hunger=80, thirst=60, inventory=[{"type": "water", "value": 10}])
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_FOOD)
         assert plan.steps[0].kind == STEP_CONSUME_ITEM
         assert plan.steps[0].payload["item_type"] == "water"
@@ -297,9 +307,28 @@ class TestSeekConsumablePlan:
         """seek_food + no food + water in inventory + thirst < 25 → no opportunistic drink."""
         agent = make_agent(hunger=80, thirst=5, inventory=[{"type": "water", "value": 10}])
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_FOOD)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
         assert len(plan.steps) == 2
+
+    def test_seek_water_no_known_trader_but_food_hungry_consumes_food_first(self):
+        """Without trader knowledge, seek_water still consumes critical food from inventory first."""
+        agent = make_agent(thirst=80, hunger=50, inventory=[{"type": "bread", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
+        assert plan.steps[0].kind == STEP_CONSUME_ITEM
+        assert plan.steps[0].payload["item_type"] == "bread"
+        assert plan.steps[0].payload["reason"] == "opportunistic_food"
+
+    def test_seek_food_no_known_trader_but_water_thirsty_consumes_water_first(self):
+        """Without trader knowledge, seek_food still consumes critical water from inventory first."""
+        agent = make_agent(hunger=80, thirst=60, inventory=[{"type": "water", "value": 10}])
+        state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_FOOD)
+        assert plan.steps[0].kind == STEP_CONSUME_ITEM
+        assert plan.steps[0].payload["item_type"] == "water"
+        assert plan.steps[0].payload["reason"] == "opportunistic_drink"
 
 
 # ── Bug 1: sell artifact before buying consumable when money == 0 ─────────────
@@ -357,6 +386,7 @@ class TestSeekConsumableSellFirst:
         """money=0 but no artifact → no sell step (just travel+buy as before)."""
         agent = make_agent(money=0, thirst=80, inventory=[])  # empty: no artifact, no water
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         # No artifact to sell → falls through to travel+buy
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
@@ -366,6 +396,7 @@ class TestSeekConsumableSellFirst:
         from app.games.zone_stalkers.decision.models.plan import STEP_TRADE_BUY_ITEM
         agent = self._artifact_agent(thirst=80)
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_SEEK_WATER)
         # First step: travel to trader
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
@@ -390,6 +421,7 @@ class TestSeekConsumableSellFirst:
             inventory=[{"id": "art1", "type": artifact_type, "value": 500}],
         )
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
         plan = _plan_for(agent=agent, state=state, intent_kind=INTENT_HEAL_SELF)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
         sell_step = next((s for s in plan.steps if s.kind == STEP_TRADE_SELL_ITEM), None)

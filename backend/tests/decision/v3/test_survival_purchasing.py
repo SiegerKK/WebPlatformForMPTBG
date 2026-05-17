@@ -16,12 +16,38 @@ from app.games.zone_stalkers.decision.planner import _plan_seek_consumable, buil
 from tests.decision.conftest import make_agent, make_state_with_trader
 
 
-def _execute_entire_plan(agent: dict, state: dict, plan: Plan, start_turn: int = 100) -> None:
+def _execute_entire_plan(
+    agent: dict,
+    state: dict,
+    plan: Plan,
+    start_turn: int = 100,
+    *,
+    max_steps: int = 10,
+) -> list[dict]:
+    collected_events: list[dict] = []
     turn = start_turn
-    while not plan.is_complete:
+    for _ in range(max_steps):
+        if plan.is_complete:
+            return collected_events
         ctx = build_agent_context("bot1", agent, state)
-        execute_plan_step(ctx, plan, state, turn)
+        events = execute_plan_step(ctx, plan, state, turn) or []
+        collected_events.extend(events)
         turn += 1
+
+    current_step = (
+        plan.steps[plan.current_step_index]
+        if plan.current_step_index < len(plan.steps)
+        else None
+    )
+    raise AssertionError({
+        "reason": "plan did not complete",
+        "current_step_index": plan.current_step_index,
+        "current_step": current_step.kind if current_step else None,
+        "step_payload": current_step.payload if current_step else None,
+        "agent_money": agent.get("money"),
+        "inventory": agent.get("inventory"),
+        "events_tail": collected_events[-10:],
+    })
 
 
 def test_survival_buy_food_prefers_cheapest_affordable_item() -> None:

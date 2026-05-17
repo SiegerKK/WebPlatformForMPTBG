@@ -688,13 +688,29 @@ def _plan_seek_consumable(
                 interruptible=False, confidence=1.0, created_turn=world_turn,
             )
 
+        # Cross-critical survival consume should happen before any trader lookup.
+        _OPPORTUNISTIC_THRESHOLD = 25
+        other_types = DRINK_ITEM_TYPES if is_food else FOOD_ITEM_TYPES
+        other_attr = "thirst" if is_food else "hunger"
+        other_item = next((i for i in inventory if i.get("type") in other_types), None)
+        cross_consume_step: PlanStep | None = None
+        if other_item and int(agent.get(other_attr, 0) or 0) >= _OPPORTUNISTIC_THRESHOLD:
+            other_category = "drink" if is_food else "food"
+            cross_consume_step = PlanStep(
+                kind=STEP_CONSUME_ITEM,
+                payload={"item_type": other_item.get("type"), "reason": f"opportunistic_{other_category}"},
+                interruptible=False,
+                expected_duration_ticks=1,
+            )
+
         trader_loc = _nearest_trader_location(ctx, state)
         agent_loc = agent.get("location_id")
         if trader_loc and trader_loc == agent_loc:
+            prefix_steps = [cross_consume_step] if cross_consume_step is not None else []
             if agent.get("money", 0) == 0 and _has_sellable_items(agent):
                 return Plan(
                     intent_kind=intent.kind,
-                    steps=[
+                    steps=prefix_steps + [
                         PlanStep(STEP_TRADE_SELL_ITEM,
                                  {"item_category": "any_sellable", "reason": "fund_consumable"},
                                  interruptible=False),
@@ -704,7 +720,7 @@ def _plan_seek_consumable(
                 )
             return Plan(
                 intent_kind=intent.kind,
-                steps=[PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category}, interruptible=False)],
+                steps=prefix_steps + [PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category}, interruptible=False)],
                 interruptible=False, confidence=1.0, created_turn=world_turn,
             )
 
@@ -714,24 +730,22 @@ def _plan_seek_consumable(
                          {"target_id": trader_loc, "reason": f"buy_{category}"},
                          expected_duration_ticks=_estimate_travel_ticks(ctx, trader_loc, state)),
             ]
-            _OPPORTUNISTIC_THRESHOLD = 25
-            other_types = DRINK_ITEM_TYPES if is_food else FOOD_ITEM_TYPES
-            other_attr = "thirst" if is_food else "hunger"
-            other_item = next((i for i in inventory if i.get("type") in other_types), None)
-            if other_item and agent.get(other_attr, 0) >= _OPPORTUNISTIC_THRESHOLD:
-                other_category = "drink" if is_food else "food"
-                steps.insert(0, PlanStep(
-                    kind=STEP_CONSUME_ITEM,
-                    payload={"item_type": other_item.get("type"), "reason": f"opportunistic_{other_category}"},
-                    interruptible=False,
-                    expected_duration_ticks=1,
-                ))
+            if cross_consume_step is not None:
+                steps.insert(0, cross_consume_step)
             if agent.get("money", 0) == 0 and _has_sellable_items(agent):
                 steps.append(PlanStep(STEP_TRADE_SELL_ITEM,
                                       {"item_category": "any_sellable", "reason": "fund_consumable"},
                                       interruptible=False))
             steps.append(PlanStep(STEP_TRADE_BUY_ITEM, {"item_category": category}, interruptible=False))
             return Plan(intent_kind=intent.kind, steps=steps, confidence=0.7, created_turn=world_turn)
+        if cross_consume_step is not None:
+            return Plan(
+                intent_kind=intent.kind,
+                steps=[cross_consume_step],
+                interruptible=False,
+                confidence=0.8,
+                created_turn=world_turn,
+            )
         return None
 
     immediate_key = "eat_now" if is_food else "drink_now"
@@ -785,6 +799,29 @@ def _plan_seek_consumable(
             )
         # Non-critical/low need: avoid spending inventory consumables.
         return None
+
+    # Cross-critical survival consume should happen before trader lookup.
+    if need_result is not None:
+        other_key = "drink_now" if is_food else "eat_now"
+        other_need = _find_immediate_need(need_result, other_key)
+        is_other_critical = bool(other_need and other_need.trigger_context in ("survival", "healing"))
+        if is_other_critical:
+            other_types = DRINK_ITEM_TYPES if is_food else FOOD_ITEM_TYPES
+            other_item = next((i for i in inventory if i.get("type") in other_types), None)
+            if other_item:
+                other_category = "drink" if is_food else "food"
+                return Plan(
+                    intent_kind=intent.kind,
+                    steps=[PlanStep(
+                        kind=STEP_CONSUME_ITEM,
+                        payload={"item_type": other_item.get("type"), "reason": f"opportunistic_{other_category}"},
+                        interruptible=False,
+                        expected_duration_ticks=1,
+                    )],
+                    interruptible=False,
+                    confidence=0.95,
+                    created_turn=world_turn,
+                )
 
     loot_step = _build_local_corpse_loot_step(
         agent=agent,

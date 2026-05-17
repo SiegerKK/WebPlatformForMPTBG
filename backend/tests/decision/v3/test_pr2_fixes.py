@@ -38,7 +38,12 @@ from app.games.zone_stalkers.decision.models.plan import (
 )
 from app.games.zone_stalkers.decision.needs import evaluate_need_result
 from app.games.zone_stalkers.decision.planner import build_plan
-from tests.decision.conftest import make_agent, make_minimal_state, make_state_with_trader
+from tests.decision.conftest import (
+    make_agent,
+    make_minimal_state,
+    make_state_with_trader,
+    seed_known_trader_route,
+)
 from tests.decision.v3.memory_assertions import v3_action_records
 
 
@@ -239,6 +244,7 @@ def test_critical_food_remote_trader_unaffordable_with_safe_liquidity_builds_sel
         inventory=[{"id": "art0", "type": artifact_type, "value": 500}],
     )
     state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
     intent = _make_intent(INTENT_SEEK_FOOD)
@@ -901,6 +907,7 @@ def test_soft_resupply_drink_below_material_threshold_falls_back_to_get_rich_exp
     )
     agent["material_threshold"] = 5477
     state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
     state["locations"]["loc_a"]["anomaly_activity"] = 5
     ctx = build_agent_context("bot1", agent, state)
     need_result = evaluate_need_result(ctx, state)
@@ -956,6 +963,7 @@ def test_resupply_to_get_rich_fallback_visible_in_brain_debug_context() -> None:
     )
     agent["material_threshold"] = 5477
     state = make_state_with_trader(agent=agent, trader_at="loc_b")
+    seed_known_trader_route(agent, current_loc="loc_a", trader_loc="loc_b", trader_id="trader_1", world_turn=100)
     state["agents"]["bot1"] = agent
     state["locations"]["loc_a"]["anomaly_activity"] = 5
 
