@@ -15,6 +15,7 @@ from app.games.zone_stalkers.knowledge.location_knowledge import (
     LOCATION_KNOWLEDGE_VISITED,
     ensure_location_knowledge_v1,
     upsert_known_location,
+    get_location_indexes,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -23,6 +24,13 @@ MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION: int = 5
 MAX_LOCATION_EDGES_SHARED_PER_LOCATION: int = 4
 LOCATION_KNOWLEDGE_SHARED_CONFIDENCE_MULTIPLIER: float = 0.75
 LOCATION_KNOWLEDGE_RUMOR_CONFIDENCE_MULTIPLIER: float = 0.55
+
+# Multiplier for candidate pool size relative to max_entries.  The pool must
+# be large enough to cover all feature indexes plus visited + recently-updated
+# candidates, yet small enough to keep scoring O(K) not O(N).
+_SHARE_CANDIDATE_POOL_MULTIPLIER: int = 12
+# Absolute minimum pool size when max_entries is very small (e.g., 1–2).
+_SHARE_CANDIDATE_POOL_MIN: int = 60
 
 _SHAREABLE_LEVELS = frozenset({
     LOCATION_KNOWLEDGE_VISITED,
@@ -194,17 +202,15 @@ def select_location_knowledge_to_share(
 
     Uses location indexes to build a bounded candidate pool instead of scanning
     the full known_locations table.  Candidate pool size is capped at
-    _SHARE_CANDIDATE_POOL_SIZE.
+    max_entries * _SHARE_CANDIDATE_POOL_MULTIPLIER (min _SHARE_CANDIDATE_POOL_MIN).
     """
-    from app.games.zone_stalkers.knowledge.location_knowledge import get_location_indexes  # noqa: PLC0415
-
     knowledge = ensure_location_knowledge_v1(source_agent)
     known_locations: dict[str, Any] = knowledge.get("known_locations") or {}
     indexes = get_location_indexes(source_agent)
 
     # ── Build a bounded candidate pool from indexes ────────────────────────────
     # Complexity: O(K) where K = total index entries, not O(N=all known_locations)
-    _SHARE_CANDIDATE_POOL_SIZE = max(max_entries * 12, 60)
+    pool_size = max(max_entries * _SHARE_CANDIDATE_POOL_MULTIPLIER, _SHARE_CANDIDATE_POOL_MIN)
     candidate_ids: set[str] = set()
 
     # Feature-relevant candidates first (highest potential score boost)
@@ -226,19 +232,19 @@ def select_location_knowledge_to_share(
         "known_anomaly_location_ids",
     ):
         candidate_ids.update(indexes.get(feat_key) or [])
-        if len(candidate_ids) >= _SHARE_CANDIDATE_POOL_SIZE:
+        if len(candidate_ids) >= pool_size:
             break
 
     # High-quality visited locations
     for loc_id in (indexes.get("visited_ids") or []):
         candidate_ids.add(loc_id)
-        if len(candidate_ids) >= _SHARE_CANDIDATE_POOL_SIZE:
+        if len(candidate_ids) >= pool_size:
             break
 
     # Recently updated (fresh rumor / exchange entries)
     for loc_id in (indexes.get("recently_updated_ids") or []):
         candidate_ids.add(loc_id)
-        if len(candidate_ids) >= _SHARE_CANDIDATE_POOL_SIZE:
+        if len(candidate_ids) >= pool_size:
             break
 
     # ── Score candidates ───────────────────────────────────────────────────────

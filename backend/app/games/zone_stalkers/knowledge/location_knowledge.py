@@ -704,6 +704,7 @@ def _update_location_indexes_incremental(
         "known_shelter_location_ids",
         "known_exit_location_ids",
         "known_anomaly_location_ids",
+        "recently_updated_ids",
     )
     _sets: dict[str, set[str]] = {}
     for _n in _index_names:
@@ -767,14 +768,22 @@ def _update_location_indexes_incremental(
     else:
         _idx_remove("known_anomaly_location_ids", location_id)
 
-    # recently_updated_ids: keep last 50 (bounded to 50, O(50) remove is trivial)
+    # recently_updated_ids: keep last 50 (bounded to 50).  Use set cache for
+    # O(1) membership check; list.remove() on a 50-entry list is O(50) ≈ O(1).
     ru = indexes["recently_updated_ids"]
-    try:
-        ru.remove(location_id)
-    except ValueError:
-        pass
+    ru_set = _sets["recently_updated_ids"]
+    if location_id in ru_set:
+        ru_set.discard(location_id)
+        try:
+            ru.remove(location_id)
+        except ValueError:
+            pass
+    ru_set.add(location_id)
     ru.insert(0, location_id)
     if len(ru) > 50:
+        # Trim excess entries; also drop them from the set to keep in sync
+        for _evicted in ru[50:]:
+            ru_set.discard(_evicted)
         indexes["recently_updated_ids"] = ru[:50]
 
     indexes["revision"] = int(knowledge.get("stats", {}).get("known_locations_revision", 0) or 0)
