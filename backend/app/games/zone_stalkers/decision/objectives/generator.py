@@ -56,6 +56,8 @@ OBJECTIVE_REPAY_DEBT = "REPAY_DEBT"
 OBJECTIVE_IDLE = "IDLE"
 
 OBJECTIVE_CONTINUE_CURRENT_PLAN = "CONTINUE_CURRENT_PLAN"
+OBJECTIVE_EXPLORE_FRONTIER = "EXPLORE_FRONTIER"
+OBJECTIVE_GATHER_LOCATION_INTEL = "GATHER_LOCATION_INTEL"
 
 # Reserved hunt decomposition keys (pre-PR5 prerequisite).
 OBJECTIVE_GATHER_INTEL = "GATHER_INTEL"
@@ -1728,6 +1730,59 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                     metadata={"is_blocking": False, "debt_total": debt_total, "creditors": debt_creditors},
                 ),
             )
+
+
+    # ── EXPLORE_FRONTIER: add when known graph lacks critical features ────────
+    # This is a low-urgency "expand what I know" objective added whenever the
+    # agent has alive frontier (known_exists but not yet visited) locations or
+    # lacks a known trader/shelter/anomaly in their known_locations table.
+    # This provides a meaningful fallback so agents don't idle forever.
+    _explore_frontier_eligible = True
+    try:
+        from app.games.zone_stalkers.knowledge.known_graph import (  # noqa: PLC0415
+            get_location_knowledge_planning_summary,
+        )
+        _agent_obj = ctx.personality
+        _lk_summary = get_location_knowledge_planning_summary(_agent_obj)
+        _frontier_count = int(_lk_summary.get("frontier_count", 0) or 0)
+        _has_frontiers = _frontier_count > 0
+        _has_known_trader = int(_lk_summary.get("known_trader_count", 0) or 0) > 0
+        _has_known_shelter = int(_lk_summary.get("known_shelter_count", 0) or 0) > 0
+        _has_known_anomaly = int(_lk_summary.get("known_anomaly_count", 0) or 0) > 0
+        _knowledge_incomplete = not (_has_known_trader and _has_known_shelter and _has_known_anomaly)
+        _explore_frontier_eligible = _has_frontiers and _knowledge_incomplete
+    except Exception:
+        _explore_frontier_eligible = False
+
+    if _explore_frontier_eligible:
+        _frontier_urgency = 0.25
+        _frontier_reasons: list[str] = []
+        if not _has_known_trader:  # type: ignore[name-defined]
+            _frontier_reasons.append("Нет известного торговца")
+        if not _has_known_shelter:  # type: ignore[name-defined]
+            _frontier_reasons.append("Нет известного укрытия")
+        if not _has_known_anomaly:  # type: ignore[name-defined]
+            _frontier_reasons.append("Нет известной аномальной зоны")
+        if not _frontier_reasons:
+            _frontier_reasons.append("Есть неисследованные соседние локации")
+        _append_unique(
+            result,
+            Objective(
+                key=OBJECTIVE_EXPLORE_FRONTIER,
+                source="knowledge_gap",
+                urgency=_frontier_urgency,
+                expected_value=0.5,
+                risk=0.2,
+                time_cost=0.4,
+                resource_cost=0.05,
+                confidence=0.7,
+                goal_alignment=0.5,
+                memory_confidence=0.0,
+                reasons=tuple(_frontier_reasons),
+                source_refs=("knowledge_gap:frontier",),
+                metadata={"is_blocking": False, "frontier_count": int(_frontier_count)},  # type: ignore[name-defined]
+            ),
+        )
 
     if ctx.active_plan_summary:
         continue_refs, continue_memory_conf = _objective_memory_refs_and_confidence(ctx, OBJECTIVE_CONTINUE_CURRENT_PLAN)

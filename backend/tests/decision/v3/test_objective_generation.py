@@ -243,6 +243,38 @@ def test_critical_sleepiness_selects_rest() -> None:
     assert rest.metadata.get("critical") is True
 
 
+def test_objective_generation_uses_location_indexes_not_full_known_location_scan() -> None:
+    import app.games.zone_stalkers.knowledge.known_graph as known_graph_module
+
+    agent = make_agent(global_goal="get_rich")
+    state = make_minimal_state(agent=agent)
+    original_summary = known_graph_module.get_location_knowledge_planning_summary
+    original_feature_query = known_graph_module.known_locations_with_feature
+
+    def _fake_summary(_agent):
+        return {
+            "frontier_count": 1,
+            "known_trader_count": 0,
+            "known_shelter_count": 0,
+            "known_anomaly_count": 0,
+            "revision": 1,
+        }
+
+    def _fail_known_locations_with_feature_call(*args, **kwargs):
+        raise AssertionError("known_locations_with_feature should not be called by objective generation")
+
+    known_graph_module.get_location_knowledge_planning_summary = _fake_summary
+    known_graph_module.known_locations_with_feature = _fail_known_locations_with_feature_call
+    try:
+        objectives = generate_objectives(_make_ctx(agent, state))
+    finally:
+        known_graph_module.get_location_knowledge_planning_summary = original_summary
+        known_graph_module.known_locations_with_feature = original_feature_query
+
+    keys = {obj.key for obj in objectives}
+    assert "EXPLORE_FRONTIER" in keys
+
+
 def test_recovery_rest_uses_recovery_need_source() -> None:
     agent = make_agent(
         hp=40,

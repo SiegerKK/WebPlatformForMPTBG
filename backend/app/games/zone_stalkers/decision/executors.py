@@ -624,14 +624,19 @@ def _exec_trade_buy(
         trader.setdefault("id", str(trader_id))
         break
     events: list[dict[str, Any]] = []
+    skip_debt_repayment_before_buy = (
+        buy_mode == "survival_cheapest"
+        and isinstance(pending_purchase, dict)
+    )
     if isinstance(trader, dict):
-        events.extend(repay_debts_to_creditor_if_useful(
-            state=state,
-            debtor=agent,
-            creditor=trader,
-            world_turn=world_turn,
-            critical_needs=critical_needs,
-        ))
+        if not skip_debt_repayment_before_buy:
+            events.extend(repay_debts_to_creditor_if_useful(
+                state=state,
+                debtor=agent,
+                creditor=trader,
+                world_turn=world_turn,
+                critical_needs=critical_needs,
+            ))
     buy_events = _bot_buy_from_trader(agent_id, agent, item_types, state, world_turn,
                                       purchase_reason=reason) or []
     events.extend(buy_events)
@@ -2249,6 +2254,13 @@ def _exec_repay_debt(
     world_turn: int,
 ) -> list[dict[str, Any]]:
     del ctx
+    pending_purchase = agent.get("pending_survival_purchase")
+    if isinstance(pending_purchase, dict):
+        expires_turn = int(pending_purchase.get("expires_turn") or 0)
+        required_price = int(pending_purchase.get("required_price") or 0)
+        if world_turn <= expires_turn and required_price > 0 and int(agent.get("money") or 0) >= required_price:
+            step.payload["_failure_reason"] = "survival_purchase_pending"
+            return []
     creditor_id = str(step.payload.get("creditor_id") or "")
     creditor_type = str(step.payload.get("creditor_type") or "trader")
     account_id = str(step.payload.get("account_id") or "")

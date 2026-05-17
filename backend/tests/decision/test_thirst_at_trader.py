@@ -28,7 +28,7 @@ from app.games.zone_stalkers.decision.models.intent import (
     INTENT_SEEK_FOOD,
     INTENT_HEAL_SELF,
 )
-from tests.decision.conftest import make_agent, make_state_with_trader
+from tests.decision.conftest import make_agent, make_state_with_trader, seed_known_trader_route
 
 
 def _make_intent(kind: str, score: float = 0.95) -> Intent:
@@ -75,6 +75,13 @@ class TestSeekWaterAtTrader:
         """Sanity: trader at *different* location → plan still starts with travel."""
         agent = make_agent(thirst=80, money=500, location_id="loc_a", inventory=[])
         state = make_state_with_trader(agent=agent, trader_at="loc_b")
+        seed_known_trader_route(
+            agent,
+            current_loc="loc_a",
+            trader_loc="loc_b",
+            trader_id="trader_1",
+            world_turn=100,
+        )
         plan = _build_plan(agent, state, INTENT_SEEK_WATER)
         assert plan.steps[0].kind == STEP_TRAVEL_TO_LOCATION
 

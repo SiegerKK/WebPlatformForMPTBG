@@ -147,6 +147,26 @@ def _is_routine_scheduled_action_continuation(agent: Dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return True
 
+
+def _ensure_agent_current_location_knowledge(agent: Dict[str, Any], state: Dict[str, Any], world_turn: int) -> None:
+    try:
+        from app.games.zone_stalkers.knowledge.location_knowledge import (  # noqa: PLC0415
+            get_known_location,
+            mark_location_visited,
+            mark_neighbor_locations_known,
+        )
+    except Exception:
+        return
+
+    location_id = str(agent.get("location_id") or "")
+    if not location_id:
+        return
+
+    known = get_known_location(agent, location_id)
+    if not isinstance(known, dict) or not bool(known.get("visited")):
+        mark_location_visited(agent, state=state, location_id=location_id, world_turn=world_turn)
+        mark_neighbor_locations_known(agent, state=state, location_id=location_id, world_turn=world_turn)
+
 # ── Human-readable Russian labels for intent kinds (used in decision memory entries) ──
 _INTENT_LABEL_RU: dict = {
     "escape_danger":        "Бегство (крит. HP)",
@@ -484,7 +504,7 @@ def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent
                     runtime.mark_agent_dirty(agent_id)
                 return
             except Exception:
-                return
+                _runtime_inc_counter("cow_mutation_fallback_errors")
     fallback_agent[key] = value
 
 
@@ -1062,6 +1082,7 @@ def tick_zone_map(state: Dict[str, Any], *, copy_state: bool = True) -> Tuple[Di
             continue
         if agent.get("has_left_zone"):
             continue
+        _ensure_agent_current_location_knowledge(agent, state, world_turn)
         if _lazy_needs_enabled(state):
             agent = _runtime_agent(agent_id, agent)
             _rt_needs = _cow_runtime()
@@ -2214,6 +2235,7 @@ def _process_scheduled_action(
                 old_agents.remove(agent_id)
             _runtime_set_agent_field(agent_id, "location_id", destination, agent)
             agent = _runtime_agent(agent_id, agent)
+            _ensure_agent_current_location_knowledge(agent, state, world_turn)
             # PR1: mark agent + locations dirty via module-level current-tick runtime
             try:
                 from app.games.zone_stalkers.rules.tick_rules import _current_tick_runtime as _ctr
@@ -2736,9 +2758,15 @@ def _resolve_sleep(
         )
         hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
 
+    raw_max_hp = agent.get("max_hp")
+    max_hp = int(raw_max_hp if raw_max_hp is not None else 100)
+    hp = int(agent.get("hp", max_hp))
+    agent.setdefault("max_hp", max_hp)
+    agent["hp"] = hp
+
     # Heal HP / reduce radiation by actual slept time (not planned full duration).
-    hp_regen = min(int(15 * hours_slept), agent["max_hp"] - agent["hp"])
-    agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
+    hp_regen = min(int(15 * hours_slept), max_hp - hp)
+    agent["hp"] = min(max_hp, hp + hp_regen)
     rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
     # Reset sleepiness to 0 on sleep completion when the agent slept for at least
@@ -4547,7 +4575,11 @@ def _bot_buy_from_trader(
             "value": base_value,
         }
         if _rt_bt is not None:
-            _rt_bt.mutable_agent_inventory(agent_id).append(new_item)
+            try:
+                _rt_bt.mutable_agent_inventory(agent_id).append(new_item)
+            except Exception:
+                _runtime_inc_counter("cow_mutation_fallback_errors")
+                agent.setdefault("inventory", []).append(new_item)
         else:
             agent.setdefault("inventory", []).append(new_item)
         _runtime_set_action_used(agent, True)
@@ -5909,6 +5941,8 @@ def _update_current_goal_from_intent(
         "leave_zone":           "leave_zone",
         "upgrade_equipment":    "upgrade_equipment",
         "explore":              "explore",
+        "explore_frontier":     "explore",
+        "gather_location_intel": "explore",
         "idle":                 "idle",
     }
     if intent.kind == "resupply":
@@ -6199,6 +6233,122 @@ def _build_objective_memory_used_payload(
     return ordered[:5]
 
 
+LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS = 60
+LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS = 20
+LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN = -10**9
+
+
+def _passive_location_knowledge_exchange(
+    agent_id: str,
+    agent: "Dict[str, Any]",
+    state: "Dict[str, Any]",
+    world_turn: int,
+) -> int:
+    """Passive bounded location knowledge exchange with one co-located stalker.
+
+    Returns the count of location entries updated on this agent.
+    O(K) where K <= MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION.
+    """
+    try:
+        from app.games.zone_stalkers.knowledge.location_knowledge_exchange import (  # noqa: PLC0415
+            build_location_knowledge_share_packets,
+            receive_location_knowledge_packets,
+        )
+        from app.games.zone_stalkers.knowledge.location_knowledge import (  # noqa: PLC0415
+            LOCATION_KNOWLEDGE_EXISTS,
+            LOCATION_KNOWLEDGE_ROUTE_ONLY,
+            LOCATION_KNOWLEDGE_SNAPSHOT,
+            LOCATION_KNOWLEDGE_VISITED,
+            get_known_location,
+        )
+    except Exception:
+        return 0
+
+    _LEVEL_RANK = {
+        LOCATION_KNOWLEDGE_EXISTS: 1,
+        LOCATION_KNOWLEDGE_ROUTE_ONLY: 2,
+        LOCATION_KNOWLEDGE_SNAPSHOT: 3,
+        LOCATION_KNOWLEDGE_VISITED: 4,
+    }
+
+    def _packet_would_improve(packet: dict[str, Any]) -> bool:
+        loc_id = str(packet.get("location_id") or "")
+        if not loc_id:
+            return False
+        existing = get_known_location(agent, loc_id)
+        if not isinstance(existing, dict):
+            return True
+        packet_level = str(packet.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
+        existing_level = str(existing.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
+        if _LEVEL_RANK.get(packet_level, 0) > _LEVEL_RANK.get(existing_level, 0):
+            return True
+        packet_conf = float(packet.get("confidence", 0.0) or 0.0)
+        existing_conf = float(existing.get("confidence", 0.0) or 0.0)
+        if packet_conf > existing_conf + 0.05:
+            return True
+        packet_observed = int(packet.get("observed_turn") or 0)
+        existing_observed = int(existing.get("observed_turn") or 0)
+        if packet_observed > existing_observed and packet_conf >= max(0.0, existing_conf - 0.15):
+            return True
+        if isinstance(packet.get("snapshot"), dict) and not isinstance(existing.get("snapshot"), dict):
+            return True
+        if isinstance(packet.get("edges"), dict):
+            existing_edges = existing.get("edges") if isinstance(existing.get("edges"), dict) else {}
+            if len(packet.get("edges") or {}) > len(existing_edges or {}):
+                return True
+        return False
+
+    loc_id = agent.get("location_id", "")
+    agents = state.get("agents", {})
+    if not loc_id or not agents:
+        return 0
+
+    exchange_runtime = agent.get("location_knowledge_exchange_runtime")
+    if not isinstance(exchange_runtime, dict):
+        exchange_runtime = {"last_any_exchange_turn": LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN, "last_by_source_agent": {}}
+        agent["location_knowledge_exchange_runtime"] = exchange_runtime
+    last_any_exchange_turn = int(
+        exchange_runtime.get("last_any_exchange_turn") or LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN
+    )
+    if world_turn - last_any_exchange_turn < LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS:
+        return 0
+    last_by_source = exchange_runtime.get("last_by_source_agent")
+    if not isinstance(last_by_source, dict):
+        last_by_source = {}
+        exchange_runtime["last_by_source_agent"] = last_by_source
+
+    for other_id, other in agents.items():
+        if other_id == agent_id:
+            continue
+        if not other.get("is_alive", True):
+            continue
+        if other.get("location_id") != loc_id:
+            continue
+        if other.get("archetype") not in {"stalker_agent"}:
+            continue
+        pair_last_turn = int(last_by_source.get(other_id) or LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN)
+        if world_turn - pair_last_turn < LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS:
+            continue
+        try:
+            packets = build_location_knowledge_share_packets(
+                other,
+                world_turn=world_turn,
+                target_needs_shelter=True,
+                target_needs_trader=True,
+                target_needs_artifacts=True,
+            )
+            useful_packets = [packet for packet in (packets or []) if isinstance(packet, dict) and _packet_would_improve(packet)]
+            if useful_packets:
+                updated_count = receive_location_knowledge_packets(agent, useful_packets, world_turn=world_turn)
+                if updated_count > 0:
+                    exchange_runtime["last_any_exchange_turn"] = int(world_turn)
+                    last_by_source[other_id] = int(world_turn)
+                    return int(updated_count)
+        except Exception:
+            pass
+    return 0
+
+
 def _run_npc_brain_v3_decision_inner(
     agent_id: str,
     agent: Dict[str, Any],
@@ -6230,6 +6380,14 @@ def _run_npc_brain_v3_decision_inner(
     sell_evs = _bot_sell_on_arrival(agent_id, agent, state, world_turn)
     if sell_evs:
         return sell_evs
+
+    # ── Passive location knowledge exchange with co-located agents ──────────
+    # Bounded top-K: at most MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION per tick.
+    _passive_location_exchange_result = _passive_location_knowledge_exchange(
+        agent_id, agent, state, world_turn
+    )
+    # This is fire-and-forget: even if exchange updates knowledge, we continue
+    # the normal decision pipeline (no early return).
 
     # ── Check and handle global goal completion ────────────────────────────
     if not agent.get("has_left_zone") and agent.get("is_alive", True) and not agent.get("global_goal_achieved"):

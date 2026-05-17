@@ -76,20 +76,25 @@ def build_known_locations_from_knowledge(
         live_loc: dict[str, Any] = {}
         if locations:
             live_loc = locations.get(loc_id) or {}
-        has_trader = False
+        snapshot = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
+
+        has_trader = bool(snapshot.get("has_trader") or entry.get("has_trader"))
         if traders:
-            has_trader = any(
+            has_trader = has_trader or any(
                 t.get("location_id") == loc_id
                 for t in traders.values()
                 if isinstance(t, dict)
             )
+
         result.append({
             "location_id": loc_id,
-            "name": live_loc.get("name") or entry.get("name", loc_id),
-            "terrain_type": live_loc.get("terrain_type") or entry.get("terrain_type"),
+            "name": snapshot.get("name") or live_loc.get("name") or entry.get("name", loc_id),
+            "terrain_type": snapshot.get("terrain_type") or live_loc.get("terrain_type") or entry.get("terrain_type"),
             "anomaly_activity": live_loc.get("anomaly_activity") or entry.get("anomaly_activity", 0),
-            "has_trader": has_trader or bool(entry.get("has_trader")),
-            "memory_turn": int(entry.get("last_visited_turn", 0) or 0),
+            "has_trader": has_trader,
+            "safe_shelter": bool(snapshot.get("has_shelter") or entry.get("safe_shelter")),
+            "knowledge_level": str(entry.get("knowledge_level") or "known_exists"),
+            "memory_turn": int(entry.get("last_visited_turn", entry.get("observed_turn", 0)) or 0),
             "confidence": float(entry.get("confidence", 1.0)),
             "source": "knowledge_v1",
         })

@@ -151,3 +151,63 @@ def make_state_with_trader(
     }
     state["locations"][trader_at]["agents"] = ["trader_1"]
     return state
+
+
+def seed_known_trader_route(
+    agent: dict[str, Any],
+    *,
+    current_loc: str = "loc_a",
+    trader_loc: str = "loc_b",
+    trader_id: str = "trader_1",
+    world_turn: int = 1,
+) -> None:
+    """Seed minimal location knowledge so planner can route to a known trader."""
+    from app.games.zone_stalkers.knowledge.location_knowledge import (
+        LOCATION_KNOWLEDGE_VISITED,
+        LOCATION_KNOWLEDGE_SNAPSHOT,
+        upsert_known_location,
+    )
+
+    upsert_known_location(
+        agent,
+        location_id=current_loc,
+        world_turn=world_turn,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"known_neighbor_ids": [trader_loc]},
+        edges={
+            trader_loc: {
+                "target_location_id": trader_loc,
+                "known_exists": True,
+                "confirmed": True,
+                "source": "test_seed",
+                "confidence": 1.0,
+                "observed_turn": world_turn,
+            }
+        },
+    )
+
+    upsert_known_location(
+        agent,
+        location_id=trader_loc,
+        world_turn=world_turn,
+        knowledge_level=LOCATION_KNOWLEDGE_SNAPSHOT,
+        source="trader_intel",
+        confidence=0.95,
+        snapshot={
+            "has_trader": True,
+            "known_trader_id": trader_id,
+            "known_neighbor_ids": [current_loc],
+        },
+        edges={
+            current_loc: {
+                "target_location_id": current_loc,
+                "known_exists": True,
+                "confirmed": True,
+                "source": "test_seed",
+                "confidence": 1.0,
+                "observed_turn": world_turn,
+            }
+        },
+    )

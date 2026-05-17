@@ -1,5 +1,6 @@
 """Tests for tick rules, scheduled actions, and zone events."""
 import pytest
+from tests.decision.conftest import seed_known_trader_route
 
 
 
@@ -1776,6 +1777,13 @@ class TestEquipmentMaintenance:
             }
             state.setdefault("traders", {})["tr_distant"] = trader
             state["locations"][trader_loc]["agents"].append("tr_distant")
+            seed_known_trader_route(
+                state["agents"][sid],
+                current_loc=loc_id,
+                trader_loc=trader_loc,
+                trader_id="tr_distant",
+                world_turn=state.get("world_turn", 1),
+            )
 
             new_state, events = self._tick(state)
             agent = new_state["agents"][sid]
@@ -2943,6 +2951,13 @@ class TestEmergencyTravelMemory:
             "is_alive": True,
         }
         state["locations"]["B"]["agents"] = [trader_id]
+        seed_known_trader_route(
+            agent,
+            current_loc="A",
+            trader_loc="B",
+            trader_id=trader_id,
+            world_turn=state.get("world_turn", 1),
+        )
         return state
 
     def _run_tick(self, state):

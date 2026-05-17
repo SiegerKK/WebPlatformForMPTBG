@@ -634,3 +634,285 @@ def test_request_loan_uses_planner_provided_survival_episode_id() -> None:
     assert any(ev.get("event_type") == "debt_credit_advanced" for ev in events if isinstance(ev, dict))
     assert agent.get("survival_episode_state", {}).get("last_episode_id") == episode_id
     assert plan.steps[0].payload.get("survival_episode_id") == episode_id
+
+
+def test_active_plan_trade_buy_failed_marks_step_failed_not_infinite_running() -> None:
+    agent = make_agent(money=0, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    agent["pending_survival_purchase"] = {
+        "survival_episode_id": "survival_medical_100_bot1",
+        "category": "medical",
+        "expected_item_type": "bandage",
+        "required_price": 75,
+        "loan_turn": 100,
+        "expires_turn": 130,
+    }
+    agent["survival_episode_state"] = {
+        "last_episode_id": "survival_medical_100_bot1",
+        "category": "medical",
+        "expected_item_type": "bandage",
+        "required_price": 75,
+        "started_turn": 100,
+        "status": "loaned",
+    }
+    state = _state(agent)
+
+    objective = Objective(
+        key="HEAL_SELF",
+        source="test",
+        urgency=1.0,
+        expected_value=1.0,
+        risk=0.1,
+        time_cost=0.1,
+        resource_cost=0.1,
+        confidence=1.0,
+        goal_alignment=1.0,
+        memory_confidence=1.0,
+    )
+    decision = ObjectiveDecision(
+        selected=objective,
+        selected_score=ObjectiveScore(
+            objective_key="HEAL_SELF",
+            raw_score=1.0,
+            final_score=1.0,
+            factors=(),
+            penalties=(),
+        ),
+        alternatives=(),
+    )
+    active_plan = create_active_plan(
+        decision,
+        world_turn=100,
+        plan=Plan(
+            intent_kind="heal_self",
+            steps=[
+                PlanStep(
+                    kind=STEP_TRADE_BUY_ITEM,
+                    payload={
+                        "item_category": "medical",
+                        "buy_mode": "survival_cheapest",
+                        "required_price": 75,
+                        "expected_item_type": "bandage",
+                        "previous_step_was_survival_credit": True,
+                    },
+                    interruptible=False,
+                ),
+            ],
+        ),
+    )
+    save_active_plan(agent, active_plan)
+
+    _ = start_or_continue_active_plan_step(
+        "bot1",
+        agent,
+        active_plan,
+        state,
+        100,
+        add_memory=lambda *args, **kwargs: None,
+    )
+
+    failed_plan = get_active_plan(agent)
+    assert failed_plan is not None
+    assert failed_plan.current_step is not None
+    assert failed_plan.current_step.status == "failed"
+    assert str(failed_plan.current_step.failure_reason or "").startswith("trade_buy_failed:")
+    assert agent.get("pending_survival_purchase") is None
+    assert agent.get("survival_episode_state", {}).get("status") == "failed"
+
+
+def test_active_plan_trade_buy_failed_invalidates_brain_for_replan() -> None:
+    agent = make_agent(money=0, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    objective = Objective(
+        key="HEAL_SELF",
+        source="test",
+        urgency=1.0,
+        expected_value=1.0,
+        risk=0.1,
+        time_cost=0.1,
+        resource_cost=0.1,
+        confidence=1.0,
+        goal_alignment=1.0,
+        memory_confidence=1.0,
+    )
+    decision = ObjectiveDecision(
+        selected=objective,
+        selected_score=ObjectiveScore(
+            objective_key="HEAL_SELF",
+            raw_score=1.0,
+            final_score=1.0,
+            factors=(),
+            penalties=(),
+        ),
+        alternatives=(),
+    )
+    active_plan = create_active_plan(
+        decision,
+        world_turn=100,
+        plan=Plan(
+            intent_kind="heal_self",
+            steps=[PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "medical", "buy_mode": "survival_cheapest"}, interruptible=False)],
+        ),
+    )
+    save_active_plan(agent, active_plan)
+
+    start_or_continue_active_plan_step(
+        "bot1",
+        agent,
+        active_plan,
+        state,
+        100,
+        add_memory=lambda *args, **kwargs: None,
+    )
+    invalidators = ((agent.get("brain_runtime") or {}).get("invalidators") or [])
+    assert any(
+        isinstance(inv, dict) and str(inv.get("reason") or "") == "trade_buy_failed"
+        for inv in invalidators
+    )
+
+
+def test_running_active_plan_step_started_turn_is_not_reset_each_tick() -> None:
+    from app.games.zone_stalkers.decision.models.active_plan import ActivePlanStep, ActivePlanV3, STEP_STATUS_RUNNING
+
+    agent = make_agent(money=100, hp=100, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    running_step = ActivePlanStep(
+        kind="repay_debt",
+        payload={"creditor_id": "", "account_id": ""},
+        status=STEP_STATUS_RUNNING,
+        started_turn=50,
+    )
+    active_plan = ActivePlanV3(
+        objective_key="HEAL_SELF",
+        created_turn=40,
+        updated_turn=40,
+        steps=[running_step],
+        current_step_index=0,
+    )
+    save_active_plan(agent, active_plan)
+
+    start_or_continue_active_plan_step(
+        "bot1",
+        agent,
+        active_plan,
+        state,
+        100,
+        add_memory=lambda *args, **kwargs: None,
+    )
+    refreshed = get_active_plan(agent)
+    assert refreshed is not None
+    assert refreshed.current_step is not None
+    assert refreshed.current_step.started_turn == 50
+
+
+def test_stuck_running_active_plan_step_times_out_after_grace_window() -> None:
+    from app.games.zone_stalkers.decision.models.active_plan import ActivePlanStep, ActivePlanV3, STEP_STATUS_RUNNING
+    from app.games.zone_stalkers.decision.models.plan import STEP_EXPLORE_LOCATION
+
+    agent = make_agent(money=100, hp=100, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    active_plan = ActivePlanV3(
+        objective_key="EXPLORE",
+        created_turn=1,
+        updated_turn=1,
+        steps=[ActivePlanStep(kind=STEP_EXPLORE_LOCATION, payload={"location_id": "loc_a"}, status=STEP_STATUS_RUNNING, started_turn=1)],
+        current_step_index=0,
+    )
+    save_active_plan(agent, active_plan)
+
+    handled, _events = process_active_plan_v3(
+        "bot1",
+        agent,
+        state,
+        1000,
+        add_memory=lambda *args, **kwargs: None,
+    )
+    assert handled is False
+    invalidators = ((agent.get("brain_runtime") or {}).get("invalidators") or [])
+    assert any(
+        isinstance(inv, dict) and str(inv.get("reason") or "").startswith("active_plan_timeout:")
+        for inv in invalidators
+    )
+
+
+def test_pending_survival_purchase_money_not_repaid_before_buy() -> None:
+    agent = make_agent(money=75, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    account = advance_survival_credit(
+        state=state,
+        debtor_id="bot1",
+        creditor_id="trader_1",
+        creditor_type="trader",
+        amount=60,
+        purpose="survival_medical",
+        location_id="loc_a",
+        world_turn=99,
+    )
+    agent["pending_survival_purchase"] = {
+        "survival_episode_id": "survival_medical_99_bot1",
+        "category": "medical",
+        "expected_item_type": "bandage",
+        "required_price": 75,
+        "loan_turn": 99,
+        "expires_turn": 129,
+    }
+    plan = Plan(
+        intent_kind="heal_self",
+        steps=[PlanStep(kind=STEP_TRADE_BUY_ITEM, payload={"item_category": "medical", "buy_mode": "survival_cheapest"}, interruptible=False)],
+    )
+
+    events = execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100)
+    event_types = [str((ev or {}).get("event_type") or "") for ev in events if isinstance(ev, dict)]
+    assert "bot_bought_item" in event_types
+    assert "debt_payment" not in event_types
+    assert int(account.get("outstanding_total") or 0) > 0
+
+
+def test_medical_topup_65_to_75_buys_bandage_then_consumes_no_second_loan() -> None:
+    agent = make_agent(money=65, hp=40, inventory=[], has_weapon=False, has_armor=False, has_ammo=False)
+    state = _state(agent)
+    bandage_price = int(ITEM_TYPES["bandage"]["value"] * 1.5)
+    plan = Plan(
+        intent_kind="heal_self",
+        steps=[
+            PlanStep(
+                kind=STEP_REQUEST_LOAN,
+                payload={
+                    "creditor_id": "trader_1",
+                    "creditor_type": "trader",
+                    "amount": 10,
+                    "purpose": "survival_medical",
+                    "item_category": "medical",
+                    "required_price": bandage_price,
+                    "daily_interest_rate": 0.05,
+                },
+                interruptible=False,
+            ),
+            PlanStep(
+                kind=STEP_TRADE_BUY_ITEM,
+                payload={
+                    "item_category": "medical",
+                    "buy_mode": "survival_cheapest",
+                    "required_price": bandage_price,
+                    "expected_item_type": "bandage",
+                    "previous_step_was_survival_credit": True,
+                },
+                interruptible=False,
+            ),
+            PlanStep(kind=STEP_CONSUME_ITEM, payload={"item_type": "bandage", "reason": "emergency_heal"}, interruptible=False),
+        ],
+        current_step_index=0,
+    )
+
+    all_events: list[dict[str, object]] = []
+    for step_offset in range(6):
+        if plan.is_complete:
+            break
+        all_events.extend(
+            execute_plan_step(build_agent_context("bot1", agent, state), plan, state, 100 + step_offset)
+        )
+
+    debt_events = _debt_credit_events(all_events)
+    assert len(debt_events) == 1
+    assert int(debt_events[0]["payload"]["amount"]) == 10
+    assert sum(1 for ev in all_events if isinstance(ev, dict) and ev.get("event_type") == "debt_credit_advanced") == 1
+    assert plan.is_complete
