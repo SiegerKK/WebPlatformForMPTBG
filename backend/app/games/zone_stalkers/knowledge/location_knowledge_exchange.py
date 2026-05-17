@@ -6,6 +6,7 @@ MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION entries per interaction.
 """
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 from app.games.zone_stalkers.knowledge.location_knowledge import (
@@ -214,22 +215,19 @@ def select_location_knowledge_to_share(
     candidate_ids: set[str] = set()
 
     # Build candidate pool from all feature indexes plus visited and recently-updated.
-    # Each index is included unconditionally so that the receiver always gets
-    # feature-rich locations regardless of whether a specific need flag is set.
-    # The target_needs flags only affect scoring (boost), not pool construction.
-    # Using a set prevents duplicate processing even when multiple flags are True.
-    for feat_key in (
-        "known_shelter_location_ids",
-        "known_trader_location_ids",
-        "known_exit_location_ids",
-        "known_anomaly_location_ids",
-        "visited_ids",
-        "recently_updated_ids",
+    # Each index is included so that the receiver always gets feature-rich locations
+    # regardless of target_needs flags (the flags only affect scoring).
+    # itertools.chain flattens all index lists into a single iteration so the
+    # pool_size cap can be applied in one place without nested break logic.
+    for loc_id in itertools.chain(
+        indexes.get("known_shelter_location_ids") or [],
+        indexes.get("known_trader_location_ids") or [],
+        indexes.get("known_exit_location_ids") or [],
+        indexes.get("known_anomaly_location_ids") or [],
+        indexes.get("visited_ids") or [],
+        indexes.get("recently_updated_ids") or [],
     ):
-        for loc_id in (indexes.get(feat_key) or []):
-            candidate_ids.add(loc_id)
-            if len(candidate_ids) >= pool_size:
-                break
+        candidate_ids.add(loc_id)
         if len(candidate_ids) >= pool_size:
             break
 

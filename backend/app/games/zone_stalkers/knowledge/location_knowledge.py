@@ -698,9 +698,12 @@ def _update_location_indexes_incremental(
     # lists), but eliminating the redundant membership pre-check halves the
     # list scan work for the "remove" path.
     #
-    # We determine which index lists will be touched based on entry properties,
-    # then build only those sets — avoiding unnecessary O(K) work for lists
-    # that will not be modified.
+    # We determine which index lists will be touched based on entry properties:
+    # - visited_ids, frontier_ids, recently_updated_ids are always touched.
+    # - Feature index sets are built only when the feature flag is True (add path).
+    #   For the remove path (feature=False), we call list.remove() directly —
+    #   these lists are small (typically ≤100 entries) so O(K) is negligible,
+    #   and most entries will not be in the list at all (ValueError → no-op).
     has_trader = bool((snapshot or {}).get("has_trader") or entry.get("has_trader"))
     has_shelter = bool((snapshot or {}).get("has_shelter") or entry.get("safe_shelter"))
     has_exit = bool((snapshot or {}).get("has_exit") or entry.get("has_exit"))
@@ -710,71 +713,84 @@ def _update_location_indexes_incremental(
         or int(entry.get("anomaly_activity", 0) or 0) > 0
     )
 
-    # Always-touched indexes
-    _needed = ["visited_ids", "frontier_ids", "recently_updated_ids"]
-    # Feature indexes are needed only when the feature flag is True (add path)
-    # OR when the entry may already be in the index (remove path).  We always
-    # build them to handle the remove case correctly.
-    _needed.extend([
-        "known_trader_location_ids",
-        "known_shelter_location_ids",
-        "known_exit_location_ids",
-        "known_anomaly_location_ids",
-    ])
+    # Always-touched indexes (build sets unconditionally)
+    _needed_always = ("visited_ids", "frontier_ids", "recently_updated_ids")
+    _sets: dict[str, set[str]] = {
+        name: set(indexes[name]) if isinstance(indexes.get(name), list) else set()
+        for name in _needed_always
+    }
 
-    _sets: dict[str, set[str]] = {}
-    for _n in _needed:
-        lst = indexes.get(_n)
-        _sets[_n] = set(lst) if isinstance(lst, list) else set()
+    # Feature index sets: build only when the feature is True so that most
+    # common-case upserts (no features) avoid building 4 extra sets.
+    _feature_flags = {
+        "known_trader_location_ids": has_trader,
+        "known_shelter_location_ids": has_shelter,
+        "known_exit_location_ids": has_exit,
+        "known_anomaly_location_ids": has_anomaly,
+    }
+    for _fname, _flag in _feature_flags.items():
+        if _flag:
+            lst = indexes.get(_fname)
+            _sets[_fname] = set(lst) if isinstance(lst, list) else set()
 
     def _idx_add(name: str, lid: str) -> None:
         if lid not in _sets[name]:
             _sets[name].add(lid)
             indexes[name].append(lid)
 
-    def _idx_remove(name: str, lid: str) -> None:
+    def _idx_remove_via_set(name: str, lid: str) -> None:
+        """Remove using set cache — used for always-built indexes."""
         if lid in _sets[name]:
             _sets[name].discard(lid)
             try:
                 indexes[name].remove(lid)
             except ValueError:
+                # Defensive: set and list fell out of sync (e.g., after JSON
+                # round-trip that lost the transient cache).  Log-less no-op.
                 pass
+
+    def _idx_remove_direct(name: str, lid: str) -> None:
+        """Remove by direct list.remove() — used when set cache was not built."""
+        try:
+            indexes[name].remove(lid)
+        except ValueError:
+            pass  # Entry not in index — expected for most feature=False upserts.
 
     # visited_ids
     if visited:
         _idx_add("visited_ids", location_id)
     else:
-        _idx_remove("visited_ids", location_id)
+        _idx_remove_via_set("visited_ids", location_id)
 
     # frontier_ids: known but not visited
     if not visited and entry.get("known_exists"):
         _idx_add("frontier_ids", location_id)
     else:
-        _idx_remove("frontier_ids", location_id)
+        _idx_remove_via_set("frontier_ids", location_id)
 
     # known_trader_location_ids
     if has_trader:
         _idx_add("known_trader_location_ids", location_id)
     else:
-        _idx_remove("known_trader_location_ids", location_id)
+        _idx_remove_direct("known_trader_location_ids", location_id)
 
     # known_shelter_location_ids
     if has_shelter:
         _idx_add("known_shelter_location_ids", location_id)
     else:
-        _idx_remove("known_shelter_location_ids", location_id)
+        _idx_remove_direct("known_shelter_location_ids", location_id)
 
     # known_exit_location_ids
     if has_exit:
         _idx_add("known_exit_location_ids", location_id)
     else:
-        _idx_remove("known_exit_location_ids", location_id)
+        _idx_remove_direct("known_exit_location_ids", location_id)
 
     # known_anomaly_location_ids
     if has_anomaly:
         _idx_add("known_anomaly_location_ids", location_id)
     else:
-        _idx_remove("known_anomaly_location_ids", location_id)
+        _idx_remove_direct("known_anomaly_location_ids", location_id)
 
     # recently_updated_ids: keep last 50 (bounded to 50).  Use set cache for
     # O(1) membership check; list.remove() on a 50-entry list is O(50) ≈ O(1).
