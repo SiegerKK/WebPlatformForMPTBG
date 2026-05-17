@@ -484,6 +484,8 @@ def start_or_continue_active_plan_step(
         current_step.status = STEP_STATUS_RUNNING
         current_step.started_turn = world_turn
     elif current_step.started_turn is None:
+        # Defensive recovery for legacy/corrupt runtime payloads where a running
+        # step can exist without a start timestamp.
         current_step.started_turn = world_turn
     active_plan.updated_turn = world_turn
     save_active_plan(agent, active_plan)

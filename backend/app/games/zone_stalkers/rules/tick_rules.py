@@ -6223,6 +6223,11 @@ def _build_objective_memory_used_payload(
     return ordered[:5]
 
 
+LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS = 60
+LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS = 20
+LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN = -10**9
+
+
 def _passive_location_knowledge_exchange(
     agent_id: str,
     agent: "Dict[str, Any]",
@@ -6249,8 +6254,6 @@ def _passive_location_knowledge_exchange(
     except Exception:
         return 0
 
-    LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS = 60
-    LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS = 20
     _LEVEL_RANK = {
         LOCATION_KNOWLEDGE_EXISTS: 1,
         LOCATION_KNOWLEDGE_ROUTE_ONLY: 2,
@@ -6292,9 +6295,11 @@ def _passive_location_knowledge_exchange(
 
     exchange_runtime = agent.get("location_knowledge_exchange_runtime")
     if not isinstance(exchange_runtime, dict):
-        exchange_runtime = {"last_any_exchange_turn": -10**9, "last_by_source_agent": {}}
+        exchange_runtime = {"last_any_exchange_turn": LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN, "last_by_source_agent": {}}
         agent["location_knowledge_exchange_runtime"] = exchange_runtime
-    last_any_exchange_turn = int(exchange_runtime.get("last_any_exchange_turn", -10**9) or -10**9)
+    last_any_exchange_turn = int(
+        exchange_runtime.get("last_any_exchange_turn") or LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN
+    )
     if world_turn - last_any_exchange_turn < LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS:
         return 0
     last_by_source = exchange_runtime.get("last_by_source_agent")
@@ -6311,7 +6316,7 @@ def _passive_location_knowledge_exchange(
             continue
         if other.get("archetype") not in {"stalker_agent"}:
             continue
-        pair_last_turn = int(last_by_source.get(other_id, -10**9) or -10**9)
+        pair_last_turn = int(last_by_source.get(other_id) or LOCATION_KNOWLEDGE_EXCHANGE_NEVER_TURN)
         if world_turn - pair_last_turn < LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS:
             continue
         try:
