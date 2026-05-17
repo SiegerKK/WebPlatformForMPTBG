@@ -20,6 +20,8 @@ from app.games.zone_stalkers.decision.objectives.generator import (
     OBJECTIVE_EXPLORE_FRONTIER,
     OBJECTIVE_GATHER_LOCATION_INTEL,
 )
+from app.games.zone_stalkers.decision.models.agent_context import AgentContext
+from app.games.zone_stalkers.decision.planner import _nearest_trader_location
 
 
 def _agent(loc_id: str = "loc_a") -> dict[str, Any]:
@@ -205,4 +207,21 @@ def test_nearest_known_trader_respects_known_graph_not_world_graph():
         min_confidence=0.4,
     )
     # Because no known path exists, it should return None (no reachable known trader)
+    assert nearest is None
+
+
+def test_no_known_trader_does_not_use_world_state_trader_fallback():
+    agent = _agent("loc_a")
+    state = _state(
+        traders={"trader_1": {"id": "trader_1", "location_id": "loc_b", "is_alive": True}},
+    )
+    state["settings"] = {"location_knowledge_enabled": True}
+    ctx = AgentContext(
+        agent_id="bot_1",
+        self_state=agent,
+        location_state=state["locations"]["loc_a"],
+        world_context={"world_turn": 100},
+    )
+
+    nearest = _nearest_trader_location(ctx, state)
     assert nearest is None

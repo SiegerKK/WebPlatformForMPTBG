@@ -91,6 +91,13 @@ class KnownGraphView:
 def build_known_graph_view(agent):
     knowledge = ensure_location_knowledge_v1(agent)
     known_locations = knowledge.get("known_locations") or {}
+    revision = _get_known_locations_revision(agent)
+    cache = agent.get("known_graph_view_cache")
+    if isinstance(cache, dict) and int(cache.get("revision", -1) or -1) == revision:
+        cached_adj = cache.get("adj")
+        if isinstance(cached_adj, dict):
+            return KnownGraphView(adj=cached_adj, entries=known_locations)
+
     adj = {}
     for loc_id, entry in known_locations.items():
         if not isinstance(entry, dict):
@@ -106,7 +113,12 @@ def build_known_graph_view(agent):
             if nbr_s and nbr_s not in neighbors:
                 neighbors.append(nbr_s)
         adj[loc_id] = neighbors
-    return KnownGraphView(adj=adj, entries=dict(known_locations))
+    agent["known_graph_view_cache"] = {
+        "revision": revision,
+        "adj": adj,
+        "created_turn": int((knowledge.get("stats") or {}).get("last_location_knowledge_update_turn", 0) or 0),
+    }
+    return KnownGraphView(adj=adj, entries=known_locations)
 
 
 def is_location_known(agent, location_id):
@@ -203,8 +215,16 @@ def known_locations_with_feature(agent, feature, *, min_confidence=0.4, include_
     from app.games.zone_stalkers.knowledge.location_knowledge import get_location_indexes  # noqa: PLC0415
     knowledge = ensure_location_knowledge_v1(agent)
     known_locations = knowledge.get("known_locations") or {}
-    # Use index for O(K) candidate selection instead of O(N) full scan
-    indexes = get_location_indexes(agent)
+    stats = knowledge.get("stats") if isinstance(knowledge.get("stats"), dict) else {}
+    current_revision = int((stats or {}).get("known_locations_revision", 0) or 0)
+    indexes_raw = knowledge.get("location_indexes")
+    if (
+        not isinstance(indexes_raw, dict)
+        or int(indexes_raw.get("revision", -1) or -1) != current_revision
+    ):
+        indexes = get_location_indexes(agent)
+    else:
+        indexes = indexes_raw
     _FEATURE_INDEX = {
         "has_trader": "known_trader_location_ids",
         "has_shelter": "known_shelter_location_ids",
@@ -212,15 +232,22 @@ def known_locations_with_feature(agent, feature, *, min_confidence=0.4, include_
         "has_anomaly": "known_anomaly_location_ids",
         "has_artifacts": "known_anomaly_location_ids",  # reuse anomaly index as proxy
     }
-    candidate_ids = list(indexes.get(_FEATURE_INDEX.get(feature, ""), []))
+    feature_key = _FEATURE_INDEX.get(feature, "")
+    candidate_ids_value = indexes.get(feature_key)
+    if not isinstance(candidate_ids_value, list):
+        # Corrupt index payload: rebuild once and retry.
+        if isinstance(indexes, dict):
+            indexes["revision"] = -1
+        indexes = get_location_indexes(agent)
+        candidate_ids_value = indexes.get(feature_key)
+    candidate_ids = list(candidate_ids_value) if isinstance(candidate_ids_value, list) else []
+    if not candidate_ids:
+        return []
     if feature == "has_artifacts":
         # For artifacts, filter candidates further after index pre-filter
         candidate_locs = {cid: known_locations[cid] for cid in candidate_ids if cid in known_locations}
     else:
         candidate_locs = {cid: known_locations[cid] for cid in candidate_ids if cid in known_locations}
-    # Fall back to full scan only when no index hit (e.g. old agent without indexes)
-    if not candidate_locs and known_locations:
-        candidate_locs = known_locations
     result = []
     for loc_id, entry in candidate_locs.items():
         if not isinstance(entry, dict):
@@ -278,6 +305,19 @@ def get_nearest_known_location_with_feature(agent, feature, *, from_location_id,
     return best_loc
 
 
+def get_location_knowledge_planning_summary(agent) -> dict[str, int]:
+    from app.games.zone_stalkers.knowledge.location_knowledge import get_location_indexes  # noqa: PLC0415
+
+    indexes = get_location_indexes(agent)
+    return {
+        "frontier_count": len(indexes.get("frontier_ids") or []),
+        "known_trader_count": len(indexes.get("known_trader_location_ids") or []),
+        "known_shelter_count": len(indexes.get("known_shelter_location_ids") or []),
+        "known_anomaly_count": len(indexes.get("known_anomaly_location_ids") or []),
+        "revision": int(indexes.get("revision", 0) or 0),
+    }
+
+
 def invalidate_known_path_cache(agent):
     cache = agent.get("known_graph_path_cache")
     if isinstance(cache, dict):
@@ -310,6 +350,7 @@ __all__ = [
     "find_frontier_locations",
     "known_locations_with_feature",
     "get_nearest_known_location_with_feature",
+    "get_location_knowledge_planning_summary",
     "invalidate_known_path_cache",
     "get_known_path_cache_stats",
 ]

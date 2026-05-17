@@ -39,6 +39,7 @@ from app.games.zone_stalkers.knowledge.location_knowledge_exchange import (
     build_location_knowledge_share_packets,
     receive_location_knowledge_packets,
 )
+from app.games.zone_stalkers.rules.tick_rules import _passive_location_knowledge_exchange
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -256,3 +257,58 @@ def test_known_locations_with_feature_uses_trader_index():
     traders = known_locations_with_feature(agent, "has_trader", min_confidence=0.3)
     assert any(t.get("location_id") == "loc_t" for t in traders)
     assert not any(t.get("location_id") == "loc_no_t" for t in traders)
+
+
+def test_40_agents_600_known_locations_debug_summary_does_not_copy_full_tables():
+    agents = [_agent(f"bot_{i}") for i in range(40)]
+    for ag in agents:
+        _populate_agent_with_n_known_locations(ag, 600)
+    summaries = [build_location_knowledge_debug_summary(ag) for ag in agents]
+    assert all("known_locations" in s and isinstance(s["known_locations"], int) for s in summaries)
+    assert all("loc_0" not in s for s in summaries)
+
+
+def test_40_agents_600_known_locations_exchange_respects_top_k_and_cooldown():
+    receiver = _agent("receiver")
+    receiver.update({"archetype": "stalker_agent", "is_alive": True, "location_id": "loc_0"})
+    sources = []
+    for idx in range(40):
+        src = _agent(f"src_{idx}")
+        src.update({"archetype": "stalker_agent", "is_alive": True, "location_id": "loc_0"})
+        _populate_agent_with_n_known_locations(src, 600)
+        sources.append(src)
+    state = {"agents": {"receiver": receiver, **{s["id"]: s for s in sources}}}
+
+    updated_first = _passive_location_knowledge_exchange("receiver", receiver, state, 100)
+    rev_first = int((ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0))
+    updated_second = _passive_location_knowledge_exchange("receiver", receiver, state, 101)
+    rev_second = int((ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0))
+    assert updated_first <= MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION
+    assert updated_second == 0
+    assert rev_second == rev_first
+
+
+def test_600_known_locations_known_feature_query_uses_index():
+    agent = _agent()
+    _populate_agent_with_n_known_locations(agent, 600)
+    indexes = get_location_indexes(agent)
+    indexes["known_trader_location_ids"] = []
+    indexes["revision"] = int((ensure_location_knowledge_v1(agent).get("stats") or {}).get("known_locations_revision", 0))
+    assert known_locations_with_feature(agent, "has_trader", min_confidence=0.3) == []
+
+
+def test_600_known_locations_path_cache_hit_avoids_bfs_rebuild():
+    agent = _agent()
+    _populate_agent_with_n_known_locations(agent, 600)
+    for i in range(600):
+        entry = ensure_location_knowledge_v1(agent)["known_locations"].get(f"loc_{i}")
+        if isinstance(entry, dict):
+            entry["snapshot"] = entry.get("snapshot") or {}
+            entry["snapshot"]["known_neighbor_ids"] = [f"loc_{i+1}"] if i < 599 else []
+
+    with patch("app.games.zone_stalkers.knowledge.known_graph.KnownGraphView.bfs_path") as bfs_mock:
+        bfs_mock.side_effect = lambda start, target, max_nodes=700: [target] if start != target else []
+        find_known_path(agent, start_location_id="loc_0", target_location_id="loc_10")
+        first_calls = bfs_mock.call_count
+        find_known_path(agent, start_location_id="loc_0", target_location_id="loc_10")
+        assert bfs_mock.call_count == first_calls

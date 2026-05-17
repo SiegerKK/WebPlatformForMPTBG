@@ -6239,13 +6239,68 @@ def _passive_location_knowledge_exchange(
             build_location_knowledge_share_packets,
             receive_location_knowledge_packets,
         )
+        from app.games.zone_stalkers.knowledge.location_knowledge import (  # noqa: PLC0415
+            LOCATION_KNOWLEDGE_EXISTS,
+            LOCATION_KNOWLEDGE_ROUTE_ONLY,
+            LOCATION_KNOWLEDGE_SNAPSHOT,
+            LOCATION_KNOWLEDGE_VISITED,
+            get_known_location,
+        )
     except Exception:
         return 0
+
+    LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS = 60
+    LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS = 20
+    _LEVEL_RANK = {
+        LOCATION_KNOWLEDGE_EXISTS: 1,
+        LOCATION_KNOWLEDGE_ROUTE_ONLY: 2,
+        LOCATION_KNOWLEDGE_SNAPSHOT: 3,
+        LOCATION_KNOWLEDGE_VISITED: 4,
+    }
+
+    def _packet_would_improve(packet: dict[str, Any]) -> bool:
+        loc_id = str(packet.get("location_id") or "")
+        if not loc_id:
+            return False
+        existing = get_known_location(agent, loc_id)
+        if not isinstance(existing, dict):
+            return True
+        packet_level = str(packet.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
+        existing_level = str(existing.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
+        if _LEVEL_RANK.get(packet_level, 0) > _LEVEL_RANK.get(existing_level, 0):
+            return True
+        packet_conf = float(packet.get("confidence", 0.0) or 0.0)
+        existing_conf = float(existing.get("confidence", 0.0) or 0.0)
+        if packet_conf > existing_conf + 0.05:
+            return True
+        packet_observed = int(packet.get("observed_turn") or 0)
+        existing_observed = int(existing.get("observed_turn") or 0)
+        if packet_observed > existing_observed and packet_conf >= max(0.0, existing_conf - 0.15):
+            return True
+        if isinstance(packet.get("snapshot"), dict) and not isinstance(existing.get("snapshot"), dict):
+            return True
+        if isinstance(packet.get("edges"), dict):
+            existing_edges = existing.get("edges") if isinstance(existing.get("edges"), dict) else {}
+            if len(packet.get("edges") or {}) > len(existing_edges or {}):
+                return True
+        return False
 
     loc_id = agent.get("location_id", "")
     agents = state.get("agents", {})
     if not loc_id or not agents:
         return 0
+
+    exchange_runtime = agent.get("location_knowledge_exchange_runtime")
+    if not isinstance(exchange_runtime, dict):
+        exchange_runtime = {"last_any_exchange_turn": -10**9, "last_by_source_agent": {}}
+        agent["location_knowledge_exchange_runtime"] = exchange_runtime
+    last_any_exchange_turn = int(exchange_runtime.get("last_any_exchange_turn", -10**9) or -10**9)
+    if world_turn - last_any_exchange_turn < LOCATION_KNOWLEDGE_EXCHANGE_AGENT_COOLDOWN_TURNS:
+        return 0
+    last_by_source = exchange_runtime.get("last_by_source_agent")
+    if not isinstance(last_by_source, dict):
+        last_by_source = {}
+        exchange_runtime["last_by_source_agent"] = last_by_source
 
     for other_id, other in agents.items():
         if other_id == agent_id:
@@ -6256,6 +6311,9 @@ def _passive_location_knowledge_exchange(
             continue
         if other.get("archetype") not in {"stalker_agent"}:
             continue
+        pair_last_turn = int(last_by_source.get(other_id, -10**9) or -10**9)
+        if world_turn - pair_last_turn < LOCATION_KNOWLEDGE_EXCHANGE_PAIR_COOLDOWN_TURNS:
+            continue
         try:
             packets = build_location_knowledge_share_packets(
                 other,
@@ -6264,11 +6322,15 @@ def _passive_location_knowledge_exchange(
                 target_needs_trader=True,
                 target_needs_artifacts=True,
             )
-            if packets:
-                return receive_location_knowledge_packets(agent, packets, world_turn=world_turn)
+            useful_packets = [packet for packet in (packets or []) if isinstance(packet, dict) and _packet_would_improve(packet)]
+            if useful_packets:
+                updated_count = receive_location_knowledge_packets(agent, useful_packets, world_turn=world_turn)
+                if updated_count > 0:
+                    exchange_runtime["last_any_exchange_turn"] = int(world_turn)
+                    last_by_source[other_id] = int(world_turn)
+                    return int(updated_count)
         except Exception:
             pass
-        break
     return 0
 
 

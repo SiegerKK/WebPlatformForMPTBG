@@ -2837,11 +2837,16 @@ def _nearest_trader_location(
         return str(hint["location_id"])
 
     # Use known graph trader locations first (knowledge-first routing)
+    settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
+    location_knowledge_enabled = bool(settings.get("location_knowledge_enabled", True))
+    omniscient_fallback_enabled = bool(settings.get("omniscient_trader_fallback_enabled", False))
+    agent_loc = agent.get("location_id", "")
+    if _location_has_live_trader(state, agent_loc):
+        return str(agent_loc)
     try:
         from app.games.zone_stalkers.knowledge.known_graph import (  # noqa: PLC0415
             get_nearest_known_location_with_feature,
         )
-        agent_loc = agent.get("location_id", "")
         known_trader_loc = get_nearest_known_location_with_feature(
             agent,
             "has_trader",
@@ -2854,9 +2859,13 @@ def _nearest_trader_location(
     except Exception:
         pass
 
+    if location_knowledge_enabled and not omniscient_fallback_enabled:
+        return None
+
     from app.games.zone_stalkers.rules.tick_rules import _find_nearest_trader_location
-    agent_loc = agent.get("location_id", "")
-    return _find_nearest_trader_location(agent_loc, state)
+    if omniscient_fallback_enabled or not location_knowledge_enabled:
+        return _find_nearest_trader_location(agent_loc, state)
+    return None
 
 
 def _location_has_live_trader(state: dict[str, Any], location_id: str | None) -> bool:

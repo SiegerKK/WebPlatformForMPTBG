@@ -1740,22 +1740,15 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
     _explore_frontier_eligible = True
     try:
         from app.games.zone_stalkers.knowledge.known_graph import (  # noqa: PLC0415
-            find_frontier_locations,
-            known_locations_with_feature,
+            get_location_knowledge_planning_summary,
         )
         _agent_obj = ctx.personality
-        _agent_loc = str(_agent_obj.get("location_id") or "")
-        _frontiers = find_frontier_locations(_agent_obj, from_location_id=_agent_loc, limit=5)
-        _has_frontiers = bool(_frontiers)
-        _has_known_trader = bool(
-            known_locations_with_feature(_agent_obj, "has_trader", min_confidence=0.3)
-        )
-        _has_known_shelter = bool(
-            known_locations_with_feature(_agent_obj, "has_shelter", min_confidence=0.3)
-        )
-        _has_known_anomaly = bool(
-            known_locations_with_feature(_agent_obj, "has_anomaly", min_confidence=0.3)
-        )
+        _lk_summary = get_location_knowledge_planning_summary(_agent_obj)
+        _frontier_count = int(_lk_summary.get("frontier_count", 0) or 0)
+        _has_frontiers = _frontier_count > 0
+        _has_known_trader = int(_lk_summary.get("known_trader_count", 0) or 0) > 0
+        _has_known_shelter = int(_lk_summary.get("known_shelter_count", 0) or 0) > 0
+        _has_known_anomaly = int(_lk_summary.get("known_anomaly_count", 0) or 0) > 0
         _knowledge_incomplete = not (_has_known_trader and _has_known_shelter and _has_known_anomaly)
         _explore_frontier_eligible = _has_frontiers and _knowledge_incomplete
     except Exception:
@@ -1787,7 +1780,7 @@ def generate_objectives(ctx: ObjectiveGenerationContext) -> list[Objective]:
                 memory_confidence=0.0,
                 reasons=tuple(_frontier_reasons),
                 source_refs=("knowledge_gap:frontier",),
-                metadata={"is_blocking": False, "frontier_count": len(_frontiers)},  # type: ignore[name-defined]
+                metadata={"is_blocking": False, "frontier_count": int(_frontier_count)},  # type: ignore[name-defined]
             ),
         )
 

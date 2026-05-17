@@ -14,6 +14,7 @@ from app.games.zone_stalkers.knowledge.location_knowledge import (
     summarize_location_knowledge,
     upsert_known_location,
 )
+import app.games.zone_stalkers.knowledge.location_knowledge as location_knowledge_module
 
 
 def _state() -> dict:
@@ -247,3 +248,79 @@ def test_mark_location_visited_1000_locations_600_known_fast():
     summary = summarize_location_knowledge(agent)
     assert summary["known_locations_count"] >= 602
     assert elapsed < 0.25
+
+
+def test_upsert_known_location_under_caps_does_not_scan_all_edges():
+    agent = {"id": "bot_1", "location_id": "loc_a"}
+    upsert_known_location(
+        agent,
+        location_id="loc_a",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_EXISTS,
+        source="rumor",
+        confidence=0.5,
+    )
+    knowledge = ensure_location_knowledge_v1(agent)
+    knowledge["stats"]["known_location_edges_count"] = 0
+    knowledge["stats"]["detailed_known_locations_count"] = 0
+
+    original_edges_count = location_knowledge_module._edges_count
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("_edges_count should not be called under cap limits")
+
+    location_knowledge_module._edges_count = _fail_if_called
+    try:
+        upsert_known_location(
+            agent,
+            location_id="loc_b",
+            world_turn=101,
+            knowledge_level=LOCATION_KNOWLEDGE_EXISTS,
+            source="rumor",
+            confidence=0.5,
+        )
+    finally:
+        location_knowledge_module._edges_count = original_edges_count
+
+
+def test_cap_enforcement_runs_only_when_limits_exceeded():
+    agent = {"id": "bot_1", "location_id": "loc_a"}
+    upsert_known_location(
+        agent,
+        location_id="loc_a",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_EXISTS,
+        source="rumor",
+        confidence=0.5,
+    )
+    knowledge = ensure_location_knowledge_v1(agent)
+    calls = {"n": 0}
+    original_enforce = location_knowledge_module._enforce_location_knowledge_caps
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return original_enforce(*args, **kwargs)
+
+    location_knowledge_module._enforce_location_knowledge_caps = _spy
+    try:
+        upsert_known_location(
+            agent,
+            location_id="loc_b",
+            world_turn=101,
+            knowledge_level=LOCATION_KNOWLEDGE_EXISTS,
+            source="rumor",
+            confidence=0.5,
+        )
+        assert calls["n"] == 0
+        knowledge["stats"]["known_location_edges_count"] = 10**9
+        upsert_known_location(
+            agent,
+            location_id="loc_c",
+            world_turn=102,
+            knowledge_level=LOCATION_KNOWLEDGE_EXISTS,
+            source="rumor",
+            confidence=0.5,
+        )
+        assert calls["n"] >= 1
+    finally:
+        location_knowledge_module._enforce_location_knowledge_caps = original_enforce

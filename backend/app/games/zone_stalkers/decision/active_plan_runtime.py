@@ -83,6 +83,22 @@ def _invalidate_brain_on_request_loan_failure(
     )
 
 
+def _invalidate_brain_on_trade_buy_failure(
+    agent: dict[str, Any],
+    *,
+    world_turn: int,
+) -> None:
+    from app.games.zone_stalkers.decision.brain_runtime import invalidate_brain  # noqa: PLC0415
+
+    invalidate_brain(
+        agent,
+        None,
+        reason="trade_buy_failed",
+        priority="normal",
+        world_turn=world_turn,
+    )
+
+
 def _invalidate_brain_on_active_plan_timeout(
     agent: dict[str, Any],
     *,
@@ -464,8 +480,11 @@ def start_or_continue_active_plan_step(
     if current_step.status not in (STEP_STATUS_PENDING, STEP_STATUS_RUNNING):
         return []
 
-    current_step.status = STEP_STATUS_RUNNING
-    current_step.started_turn = world_turn
+    if current_step.status == STEP_STATUS_PENDING:
+        current_step.status = STEP_STATUS_RUNNING
+        current_step.started_turn = world_turn
+    elif current_step.started_turn is None:
+        current_step.started_turn = world_turn
     active_plan.updated_turn = world_turn
     save_active_plan(agent, active_plan)
     write_active_plan_trace_event(
@@ -575,6 +594,48 @@ def start_or_continue_active_plan_step(
             reason=f"request_loan_failed:{failure_reason}",
         )
         _invalidate_brain_on_request_loan_failure(
+            agent,
+            world_turn=world_turn,
+        )
+        save_active_plan(agent, refreshed_plan)
+        return events
+
+    if (
+        current_step.kind == STEP_TRADE_BUY_ITEM
+        and _executed_payload.get("_trade_buy_failed")
+        and step_plan.current_step_index == 0
+    ):
+        failure_reason = str(
+            _executed_payload.get("_failure_reason") or "trade_buy_failed"
+        )
+        mark_active_plan_step_failed(
+            agent,
+            refreshed_plan,
+            world_turn=world_turn,
+            state=state,
+            add_memory=add_memory,
+            reason=f"trade_buy_failed:{failure_reason}",
+        )
+        survival_episode = agent.get("survival_episode_state")
+        if isinstance(survival_episode, dict):
+            survival_episode["status"] = "failed"
+            survival_episode["failure_reason"] = f"trade_buy_failed:{failure_reason}"
+            survival_episode["failed_turn"] = int(world_turn)
+            events.append({
+                "event_type": "survival_purchase_episode_failed",
+                "payload": {
+                    "survival_episode_id": str(survival_episode.get("last_episode_id") or ""),
+                    "survival_episode_category": str(survival_episode.get("category") or ""),
+                    "expected_item_type": str(survival_episode.get("expected_item_type") or ""),
+                    "required_price": int(survival_episode.get("required_price") or 0),
+                    "status": "failed",
+                    "failure_reason": str(survival_episode.get("failure_reason") or ""),
+                    "world_turn": int(world_turn),
+                },
+            })
+        if isinstance(agent.get("pending_survival_purchase"), dict):
+            agent["pending_survival_purchase"] = None
+        _invalidate_brain_on_trade_buy_failure(
             agent,
             world_turn=world_turn,
         )

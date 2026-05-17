@@ -290,6 +290,7 @@ def receive_location_knowledge_packets(
     Never copies 300-600 locations — only processes what\'s in packets.
     """
     updated = 0
+    receiver_knowledge = ensure_location_knowledge_v1(receiver)
     for packet in packets[:MAX_LOCATION_KNOWLEDGE_SHARED_PER_INTERACTION]:
         loc_id = str(packet.get("location_id") or "")
         if not loc_id:
@@ -303,6 +304,9 @@ def receive_location_knowledge_packets(
         snapshot = packet.get("snapshot") if isinstance(packet.get("snapshot"), dict) else None
         edges = packet.get("edges") if isinstance(packet.get("edges"), dict) else None
 
+        before_revision = int(
+            ((receiver_knowledge.get("stats") or {}).get("known_locations_revision", 0) or 0)
+        )
         upsert_known_location(
             receiver,
             location_id=loc_id,
@@ -316,7 +320,12 @@ def receive_location_knowledge_packets(
             observed_turn=int(observed_turn) if observed_turn is not None else None,
             received_turn=int(received_turn) if received_turn is not None else None,
         )
-        updated += 1
+        receiver_knowledge = ensure_location_knowledge_v1(receiver)
+        after_revision = int(
+            ((receiver_knowledge.get("stats") or {}).get("known_locations_revision", 0) or 0)
+        )
+        if after_revision > before_revision:
+            updated += 1
     return updated
 
 

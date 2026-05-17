@@ -62,6 +62,14 @@ def ensure_location_knowledge_v1(agent: dict[str, Any]) -> dict[str, Any]:
     stats.setdefault("known_corpses_count", len(knowledge.get("known_corpses") or {}))
     stats.setdefault("hunt_evidence_targets_count", len(knowledge.get("hunt_evidence") or {}))
     stats.setdefault("known_locations_count", len(knowledge.get("known_locations") or {}))
+    if "detailed_known_locations_count" not in stats:
+        stats["detailed_known_locations_count"] = sum(
+            1
+            for entry in (knowledge.get("known_locations") or {}).values()
+            if isinstance(entry, dict) and isinstance(entry.get("snapshot"), dict)
+        )
+    if "known_location_edges_count" not in stats:
+        stats["known_location_edges_count"] = _edges_count(knowledge.get("known_locations") or {})
     stats.setdefault("known_locations_revision", 0)
     stats.setdefault("last_location_knowledge_update_turn", 0)
     stats.setdefault("last_update_turn", 0)
@@ -127,8 +135,11 @@ def _location_eviction_score(entry: dict[str, Any]) -> tuple[float, int, int, in
 
 def _enforce_location_knowledge_caps(knowledge: dict[str, Any], world_turn: int) -> None:
     known_locations: dict[str, Any] = knowledge.get("known_locations") or {}
+    stats = knowledge.setdefault("stats", {})
+    detailed_count = int(stats.get("detailed_known_locations_count", 0) or 0)
+    edges_count = int(stats.get("known_location_edges_count", 0) or 0)
 
-    if len(known_locations) > MAX_DETAILED_KNOWN_LOCATIONS_PER_AGENT:
+    if detailed_count > MAX_DETAILED_KNOWN_LOCATIONS_PER_AGENT:
         detailed = [
             (loc_id, entry)
             for loc_id, entry in known_locations.items()
@@ -162,7 +173,7 @@ def _enforce_location_knowledge_caps(knowledge: dict[str, Any], world_turn: int)
         for loc_id, _ in removable[:to_remove]:
             known_locations.pop(loc_id, None)
 
-    if _edges_count(known_locations) > MAX_KNOWN_LOCATION_EDGES_PER_AGENT:
+    if edges_count > MAX_KNOWN_LOCATION_EDGES_PER_AGENT:
         edge_candidates: list[tuple[str, str, tuple[float, int, int, int]]] = []
         for loc_id, entry in known_locations.items():
             if not isinstance(entry, dict):
@@ -189,7 +200,7 @@ def _enforce_location_knowledge_caps(knowledge: dict[str, Any], world_turn: int)
                 )
 
         edge_candidates.sort(key=lambda row: row[2])
-        overflow = _edges_count(known_locations) - MAX_KNOWN_LOCATION_EDGES_PER_AGENT
+        overflow = edges_count - MAX_KNOWN_LOCATION_EDGES_PER_AGENT
         for loc_id, target_id, _ in edge_candidates[:overflow]:
             entry = known_locations.get(loc_id)
             if not isinstance(entry, dict):
@@ -198,8 +209,13 @@ def _enforce_location_knowledge_caps(knowledge: dict[str, Any], world_turn: int)
             if isinstance(edges, dict):
                 edges.pop(target_id, None)
 
-    stats = knowledge.setdefault("stats", {})
     stats["known_locations_count"] = len(known_locations)
+    stats["detailed_known_locations_count"] = sum(
+        1
+        for entry in known_locations.values()
+        if isinstance(entry, dict) and isinstance(entry.get("snapshot"), dict)
+    )
+    stats["known_location_edges_count"] = _edges_count(known_locations)
     stats["last_location_knowledge_update_turn"] = world_turn
 
 
@@ -253,6 +269,11 @@ def upsert_known_location(
 
     existing = known_locations.get(location_id)
     created = not isinstance(existing, dict)
+    prev_edges_count = 0
+    prev_is_detailed = 0
+    if isinstance(existing, dict):
+        prev_edges_count = len(existing.get("edges")) if isinstance(existing.get("edges"), dict) else 0
+        prev_is_detailed = 1 if isinstance(existing.get("snapshot"), dict) else 0
     changed = False
 
     if created:
@@ -366,7 +387,25 @@ def upsert_known_location(
         }
         changed = True
 
-    _enforce_location_knowledge_caps(knowledge, world_turn)
+    knowledge_stats = knowledge.setdefault("stats", {})
+    if created:
+        knowledge_stats["known_locations_count"] = int(knowledge_stats.get("known_locations_count", 0) or 0) + 1
+    new_edges_count = len(existing.get("edges")) if isinstance(existing.get("edges"), dict) else 0
+    new_is_detailed = 1 if isinstance(existing.get("snapshot"), dict) else 0
+    knowledge_stats["known_location_edges_count"] = int(
+        int(knowledge_stats.get("known_location_edges_count", 0) or 0)
+        + (new_edges_count - prev_edges_count)
+    )
+    knowledge_stats["detailed_known_locations_count"] = int(
+        int(knowledge_stats.get("detailed_known_locations_count", 0) or 0)
+        + (new_is_detailed - prev_is_detailed)
+    )
+    if (
+        len(known_locations) > MAX_KNOWN_LOCATIONS_PER_AGENT
+        or int(knowledge_stats.get("detailed_known_locations_count", 0) or 0) > MAX_DETAILED_KNOWN_LOCATIONS_PER_AGENT
+        or int(knowledge_stats.get("known_location_edges_count", 0) or 0) > MAX_KNOWN_LOCATION_EDGES_PER_AGENT
+    ):
+        _enforce_location_knowledge_caps(knowledge, world_turn)
     if changed:
         _touch_location_revision(knowledge, world_turn)
         _update_location_indexes_incremental(knowledge, location_id, existing)

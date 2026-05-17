@@ -270,3 +270,98 @@ def test_known_graph_view_bfs_path_does_not_exceed_max_nodes():
     # Limit to 2 nodes → cannot reach loc_100
     path_too_short = view.bfs_path("loc_0", "loc_100", max_nodes=2)
     assert path_too_short is None
+
+
+def test_known_graph_view_does_not_copy_full_known_locations_table():
+    agent = _make_agent()
+    upsert_known_location(
+        agent,
+        location_id="loc_a",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"known_neighbor_ids": ["loc_b"]},
+    )
+    upsert_known_location(
+        agent,
+        location_id="loc_b",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_EXISTS,
+        source="rumor",
+        confidence=0.6,
+    )
+
+    view = build_known_graph_view(agent)
+    assert view._entries is agent["knowledge_v1"]["known_locations"]
+
+
+def test_known_path_cache_hit_does_not_rebuild_graph_view():
+    import app.games.zone_stalkers.knowledge.known_graph as known_graph_module
+
+    agent = _make_agent()
+    state = _make_state()
+    mark_location_visited(agent, state=state, location_id="loc_a", world_turn=100)
+    mark_neighbor_locations_known(agent, state=state, location_id="loc_a", world_turn=100)
+    mark_location_visited(agent, state=state, location_id="loc_b", world_turn=110)
+    mark_neighbor_locations_known(agent, state=state, location_id="loc_b", world_turn=110)
+
+    calls = {"n": 0}
+    original = known_graph_module.build_known_graph_view
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    known_graph_module.build_known_graph_view = _spy
+    try:
+        find_known_path(agent, start_location_id="loc_a", target_location_id="loc_d")
+        first_calls = calls["n"]
+        find_known_path(agent, start_location_id="loc_a", target_location_id="loc_d")
+    finally:
+        known_graph_module.build_known_graph_view = original
+
+    assert first_calls >= 1
+    assert calls["n"] == first_calls
+
+
+def test_known_locations_with_feature_empty_valid_index_no_full_scan():
+    agent = _make_agent()
+    upsert_known_location(
+        agent,
+        location_id="loc_trader",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"has_trader": True},
+    )
+    knowledge = agent["knowledge_v1"]
+    stats = knowledge["stats"]
+    indexes = knowledge["location_indexes"]
+    indexes["revision"] = int(stats.get("known_locations_revision", 0) or 0)
+    indexes["known_trader_location_ids"] = []
+
+    traders = known_locations_with_feature(agent, "has_trader", min_confidence=0.3)
+    assert traders == []
+
+
+def test_known_locations_with_feature_rebuilds_corrupt_index_once():
+    agent = _make_agent()
+    upsert_known_location(
+        agent,
+        location_id="loc_trader",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"has_trader": True},
+    )
+    knowledge = agent["knowledge_v1"]
+    stats = knowledge["stats"]
+    indexes = knowledge["location_indexes"]
+    indexes["revision"] = int(stats.get("known_locations_revision", 0) or 0)
+    indexes["known_trader_location_ids"] = "corrupt"
+
+    traders = known_locations_with_feature(agent, "has_trader", min_confidence=0.3)
+    assert any(t.get("location_id") == "loc_trader" for t in traders)

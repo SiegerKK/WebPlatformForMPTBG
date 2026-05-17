@@ -23,6 +23,7 @@ from app.games.zone_stalkers.knowledge.location_knowledge import (
     get_known_location,
     ensure_location_knowledge_v1,
 )
+from app.games.zone_stalkers.rules.tick_rules import _passive_location_knowledge_exchange
 
 
 def _agent(agent_id: str = "bot_1", loc_id: str = "loc_a") -> dict[str, Any]:
@@ -269,3 +270,109 @@ def test_direct_visit_overrides_old_shared_rumor():
     assert entry.get("visited") is True
     assert entry.get("knowledge_level") == LOCATION_KNOWLEDGE_VISITED
     assert entry.get("source") == "direct_visit"
+
+
+def test_passive_exchange_pair_cooldown_prevents_every_tick_revision_bump():
+    source = _agent("source_bot", "loc_a")
+    receiver = _agent("receiver_bot", "loc_a")
+    source["archetype"] = "stalker_agent"
+    receiver["archetype"] = "stalker_agent"
+    source["is_alive"] = True
+    receiver["is_alive"] = True
+    upsert_known_location(
+        source,
+        location_id="loc_b",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"has_trader": True},
+    )
+    state = {"agents": {"receiver_bot": receiver, "source_bot": source}}
+
+    first_updated = _passive_location_knowledge_exchange("receiver_bot", receiver, state, 100)
+    first_revision = int(
+        (ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0)
+    )
+    second_updated = _passive_location_knowledge_exchange("receiver_bot", receiver, state, 101)
+    second_revision = int(
+        (ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0)
+    )
+
+    assert first_updated > 0
+    assert second_updated == 0
+    assert second_revision == first_revision
+
+
+def test_passive_exchange_agent_cooldown_limits_hub_churn():
+    source_a = _agent("source_a", "loc_a")
+    source_b = _agent("source_b", "loc_a")
+    receiver = _agent("receiver_bot", "loc_a")
+    for agent in (source_a, source_b, receiver):
+        agent["archetype"] = "stalker_agent"
+        agent["is_alive"] = True
+    upsert_known_location(
+        source_a,
+        location_id="loc_a1",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"has_shelter": True},
+    )
+    upsert_known_location(
+        source_b,
+        location_id="loc_b1",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"has_anomaly": True, "anomaly_risk_estimate": 0.6},
+    )
+    state = {"agents": {"receiver_bot": receiver, "source_a": source_a, "source_b": source_b}}
+
+    first_updated = _passive_location_knowledge_exchange("receiver_bot", receiver, state, 100)
+    rev_after_first = int((ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0))
+    second_updated = _passive_location_knowledge_exchange("receiver_bot", receiver, state, 110)
+    rev_after_second = int((ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0))
+
+    assert first_updated > 0
+    assert second_updated == 0
+    assert rev_after_second == rev_after_first
+
+
+def test_passive_exchange_does_not_bump_revision_when_no_useful_packet():
+    source = _agent("source_bot", "loc_a")
+    receiver = _agent("receiver_bot", "loc_a")
+    source["archetype"] = "stalker_agent"
+    receiver["archetype"] = "stalker_agent"
+    source["is_alive"] = True
+    receiver["is_alive"] = True
+    upsert_known_location(
+        source,
+        location_id="loc_shared",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_SNAPSHOT,
+        source="shared_by_agent",
+        confidence=0.3,
+        snapshot={"name": "Old"},
+    )
+    upsert_known_location(
+        receiver,
+        location_id="loc_shared",
+        world_turn=100,
+        knowledge_level=LOCATION_KNOWLEDGE_VISITED,
+        source="direct_visit",
+        confidence=1.0,
+        snapshot={"name": "New"},
+    )
+    state = {"agents": {"receiver_bot": receiver, "source_bot": source}}
+
+    before_revision = int((ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0))
+    updated = _passive_location_knowledge_exchange("receiver_bot", receiver, state, 120)
+    after_revision = int((ensure_location_knowledge_v1(receiver).get("stats") or {}).get("known_locations_revision", 0))
+    runtime = receiver.get("location_knowledge_exchange_runtime") or {}
+
+    assert updated == 0
+    assert after_revision == before_revision
+    assert int(runtime.get("last_any_exchange_turn", -10**9) or -10**9) < 120
