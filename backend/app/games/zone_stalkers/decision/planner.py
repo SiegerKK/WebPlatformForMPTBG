@@ -694,7 +694,7 @@ def _plan_seek_consumable(
         other_attr = "thirst" if is_food else "hunger"
         other_item = next((i for i in inventory if i.get("type") in other_types), None)
         cross_consume_step: PlanStep | None = None
-        if other_item and int(agent.get(other_attr, 0) or 0) >= _OPPORTUNISTIC_THRESHOLD:
+        if other_item and int(agent.get(other_attr, 0)) >= _OPPORTUNISTIC_THRESHOLD:
             other_category = "drink" if is_food else "food"
             cross_consume_step = PlanStep(
                 kind=STEP_CONSUME_ITEM,

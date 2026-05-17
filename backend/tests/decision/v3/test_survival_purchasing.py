@@ -39,15 +39,15 @@ def _execute_entire_plan(
         if plan.current_step_index < len(plan.steps)
         else None
     )
-    raise AssertionError({
-        "reason": "plan did not complete",
-        "current_step_index": plan.current_step_index,
-        "current_step": current_step.kind if current_step else None,
-        "step_payload": current_step.payload if current_step else None,
-        "agent_money": agent.get("money"),
-        "inventory": agent.get("inventory"),
-        "events_tail": collected_events[-10:],
-    })
+    raise AssertionError(
+        "plan did not complete: "
+        f"current_step_index={plan.current_step_index}, "
+        f"current_step={(current_step.kind if current_step else None)}, "
+        f"step_payload={(current_step.payload if current_step else None)}, "
+        f"agent_money={agent.get('money')}, "
+        f"inventory={agent.get('inventory')}, "
+        f"events_tail={collected_events[-10:]}"
+    )
 
 
 def test_survival_buy_food_prefers_cheapest_affordable_item() -> None:
