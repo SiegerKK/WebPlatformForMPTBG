@@ -505,7 +505,6 @@ def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent
                 return
             except Exception:
                 _runtime_inc_counter("cow_mutation_fallback_errors")
-                pass
     fallback_agent[key] = value
 
 
@@ -2759,7 +2758,8 @@ def _resolve_sleep(
         )
         hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
 
-    max_hp = int(agent.get("max_hp") or 100)
+    raw_max_hp = agent.get("max_hp")
+    max_hp = int(raw_max_hp if raw_max_hp is not None else 100)
     hp = int(agent.get("hp", max_hp))
     agent.setdefault("max_hp", max_hp)
     agent["hp"] = hp
