@@ -504,7 +504,7 @@ def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent
                     runtime.mark_agent_dirty(agent_id)
                 return
             except Exception:
-                return
+                pass
     fallback_agent[key] = value
 
 
@@ -2758,9 +2758,14 @@ def _resolve_sleep(
         )
         hours_slept = max(0.0, turns_slept / _HOUR_IN_TURNS)
 
+    max_hp = int(agent.get("max_hp") or 100)
+    hp = int(agent.get("hp", max_hp))
+    agent.setdefault("max_hp", max_hp)
+    agent["hp"] = hp
+
     # Heal HP / reduce radiation by actual slept time (not planned full duration).
-    hp_regen = min(int(15 * hours_slept), agent["max_hp"] - agent["hp"])
-    agent["hp"] = min(agent["max_hp"], agent["hp"] + hp_regen)
+    hp_regen = min(int(15 * hours_slept), max_hp - hp)
+    agent["hp"] = min(max_hp, hp + hp_regen)
     rad_reduce = int(5 * hours_slept)
     agent["radiation"] = max(0, agent.get("radiation", 0) - rad_reduce)
     # Reset sleepiness to 0 on sleep completion when the agent slept for at least
@@ -4569,7 +4574,10 @@ def _bot_buy_from_trader(
             "value": base_value,
         }
         if _rt_bt is not None:
-            _rt_bt.mutable_agent_inventory(agent_id).append(new_item)
+            try:
+                _rt_bt.mutable_agent_inventory(agent_id).append(new_item)
+            except Exception:
+                agent.setdefault("inventory", []).append(new_item)
         else:
             agent.setdefault("inventory", []).append(new_item)
         _runtime_set_action_used(agent, True)
