@@ -504,6 +504,7 @@ def _runtime_set_agent_field(agent_id: str, key: str, value: Any, fallback_agent
                     runtime.mark_agent_dirty(agent_id)
                 return
             except Exception:
+                _runtime_inc_counter("cow_mutation_fallback_errors")
                 pass
     fallback_agent[key] = value
 
@@ -4577,6 +4578,7 @@ def _bot_buy_from_trader(
             try:
                 _rt_bt.mutable_agent_inventory(agent_id).append(new_item)
             except Exception:
+                _runtime_inc_counter("cow_mutation_fallback_errors")
                 agent.setdefault("inventory", []).append(new_item)
         else:
             agent.setdefault("inventory", []).append(new_item)
