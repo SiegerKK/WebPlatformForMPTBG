@@ -682,54 +682,79 @@ def _update_location_indexes_incremental(
 
     Called after every upsert_known_location so indexes stay current without
     scanning the full known_locations table.
+
+    Uses a per-call transient set cache for O(1) membership checks on each
+    index list.  The sets are built once from the current list contents and
+    kept in sync with list mutations for the duration of this call.  They are
+    NOT stored in the knowledge dict (not persisted to JSON).
     """
     indexes = ensure_location_indexes(knowledge)
     level = str(entry.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
     visited = bool(entry.get("visited") or level == LOCATION_KNOWLEDGE_VISITED)
     snapshot = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
 
+    # Build a transient set cache so membership tests below are O(1) instead
+    # of O(N).  Removal from the *list* is still O(N) (unavoidable for plain
+    # lists), but eliminating the redundant membership pre-check halves the
+    # list scan work for the "remove" path.
+    _index_names = (
+        "visited_ids",
+        "frontier_ids",
+        "known_trader_location_ids",
+        "known_shelter_location_ids",
+        "known_exit_location_ids",
+        "known_anomaly_location_ids",
+    )
+    _sets: dict[str, set[str]] = {}
+    for _n in _index_names:
+        lst = indexes.get(_n)
+        _sets[_n] = set(lst) if isinstance(lst, list) else set()
+
+    def _idx_add(name: str, lid: str) -> None:
+        if lid not in _sets[name]:
+            _sets[name].add(lid)
+            indexes[name].append(lid)
+
+    def _idx_remove(name: str, lid: str) -> None:
+        if lid in _sets[name]:
+            _sets[name].discard(lid)
+            try:
+                indexes[name].remove(lid)
+            except ValueError:
+                pass
+
     # visited_ids
     if visited:
-        if location_id not in indexes["visited_ids"]:
-            indexes["visited_ids"].append(location_id)
+        _idx_add("visited_ids", location_id)
     else:
-        if location_id in indexes["visited_ids"]:
-            indexes["visited_ids"].remove(location_id)
+        _idx_remove("visited_ids", location_id)
 
     # frontier_ids: known but not visited
     if not visited and entry.get("known_exists"):
-        if location_id not in indexes["frontier_ids"]:
-            indexes["frontier_ids"].append(location_id)
+        _idx_add("frontier_ids", location_id)
     else:
-        if location_id in indexes["frontier_ids"]:
-            indexes["frontier_ids"].remove(location_id)
+        _idx_remove("frontier_ids", location_id)
 
     # known_trader_location_ids
     has_trader = bool((snapshot or {}).get("has_trader") or entry.get("has_trader"))
     if has_trader:
-        if location_id not in indexes["known_trader_location_ids"]:
-            indexes["known_trader_location_ids"].append(location_id)
+        _idx_add("known_trader_location_ids", location_id)
     else:
-        if location_id in indexes["known_trader_location_ids"]:
-            indexes["known_trader_location_ids"].remove(location_id)
+        _idx_remove("known_trader_location_ids", location_id)
 
     # known_shelter_location_ids
     has_shelter = bool((snapshot or {}).get("has_shelter") or entry.get("safe_shelter"))
     if has_shelter:
-        if location_id not in indexes["known_shelter_location_ids"]:
-            indexes["known_shelter_location_ids"].append(location_id)
+        _idx_add("known_shelter_location_ids", location_id)
     else:
-        if location_id in indexes["known_shelter_location_ids"]:
-            indexes["known_shelter_location_ids"].remove(location_id)
+        _idx_remove("known_shelter_location_ids", location_id)
 
     # known_exit_location_ids
     has_exit = bool((snapshot or {}).get("has_exit") or entry.get("has_exit"))
     if has_exit:
-        if location_id not in indexes["known_exit_location_ids"]:
-            indexes["known_exit_location_ids"].append(location_id)
+        _idx_add("known_exit_location_ids", location_id)
     else:
-        if location_id in indexes["known_exit_location_ids"]:
-            indexes["known_exit_location_ids"].remove(location_id)
+        _idx_remove("known_exit_location_ids", location_id)
 
     # known_anomaly_location_ids
     anomaly_risk = (snapshot or {}).get("anomaly_risk_estimate")
@@ -738,16 +763,16 @@ def _update_location_indexes_incremental(
         or int(entry.get("anomaly_activity", 0) or 0) > 0
     )
     if has_anomaly:
-        if location_id not in indexes["known_anomaly_location_ids"]:
-            indexes["known_anomaly_location_ids"].append(location_id)
+        _idx_add("known_anomaly_location_ids", location_id)
     else:
-        if location_id in indexes["known_anomaly_location_ids"]:
-            indexes["known_anomaly_location_ids"].remove(location_id)
+        _idx_remove("known_anomaly_location_ids", location_id)
 
-    # recently_updated_ids: keep last 50
+    # recently_updated_ids: keep last 50 (bounded to 50, O(50) remove is trivial)
     ru = indexes["recently_updated_ids"]
-    if location_id in ru:
+    try:
         ru.remove(location_id)
+    except ValueError:
+        pass
     ru.insert(0, location_id)
     if len(ru) > 50:
         indexes["recently_updated_ids"] = ru[:50]

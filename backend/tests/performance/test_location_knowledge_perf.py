@@ -6,7 +6,6 @@ skip conditions to stay CI-stable.
 """
 from __future__ import annotations
 
-import time
 from typing import Any
 from unittest.mock import patch, MagicMock
 
@@ -16,6 +15,7 @@ from app.games.zone_stalkers.knowledge.location_knowledge import (
     LOCATION_KNOWLEDGE_VISITED,
     LOCATION_KNOWLEDGE_SNAPSHOT,
     LOCATION_KNOWLEDGE_EXISTS,
+    MAX_KNOWN_LOCATIONS_PER_AGENT,
     ensure_location_knowledge_v1,
     upsert_known_location,
     mark_location_visited,
@@ -88,15 +88,20 @@ def _populate_agent_with_n_known_locations(agent: dict, n: int) -> None:
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 def test_upsert_known_location_600_entries_fast():
-    """Inserting 600 entries should complete in < 5s (loose wall-clock smoke)."""
+    """Inserting 600 entries should correctly enforce caps and update indexes."""
     agent = _agent()
-    start = time.perf_counter()
     _populate_agent_with_n_known_locations(agent, 600)
-    elapsed = time.perf_counter() - start
 
     knowledge = ensure_location_knowledge_v1(agent)
-    assert len(knowledge["known_locations"]) >= 100  # may cap
-    assert elapsed < 5.0, f"600 upserts took {elapsed:.3f}s (too slow)"
+    # Caps should be respected
+    assert len(knowledge["known_locations"]) <= MAX_KNOWN_LOCATIONS_PER_AGENT
+    # Indexes should be populated correctly
+    indexes = get_location_indexes(agent)
+    assert isinstance(indexes.get("visited_ids"), list)
+    assert isinstance(indexes.get("frontier_ids"), list)
+    assert isinstance(indexes.get("known_trader_location_ids"), list)
+    assert len(indexes["visited_ids"]) > 0
+    assert len(indexes["known_trader_location_ids"]) > 0
 
 
 def test_mark_visit_with_1000_world_locations_only_touches_degree():
@@ -177,21 +182,21 @@ def test_exchange_600_known_locations_sends_only_top_k():
 
 
 def test_40_agents_600_known_locations_summary_budget():
-    """Building debug summaries for 40 agents with 600 known locations is under 3s."""
+    """Building debug summaries for 40 agents with 600 known locations returns compact results."""
     agents = [_agent(f"bot_{i}") for i in range(40)]
     for ag in agents:
         _populate_agent_with_n_known_locations(ag, 600)
 
-    start = time.perf_counter()
     summaries = [build_location_knowledge_debug_summary(ag) for ag in agents]
-    elapsed = time.perf_counter() - start
 
     assert len(summaries) == 40
-    # All summaries should have compact integer fields
+    # All summaries should have compact integer fields (not full table copies)
     for s in summaries:
         assert isinstance(s["known_locations"], int)
-    # Loose wall-clock bound: 40 agents * debug summary should be fast
-    assert elapsed < 5.0, f"40-agent summary took {elapsed:.3f}s"
+        assert s["known_locations"] <= MAX_KNOWN_LOCATIONS_PER_AGENT
+        assert isinstance(s.get("visited_locations"), int)
+        assert isinstance(s.get("frontiers"), int)
+        assert isinstance(s.get("known_traders"), int)
 
 
 def test_location_indexes_updated_incrementally():

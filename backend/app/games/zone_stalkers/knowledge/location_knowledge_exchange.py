@@ -191,12 +191,60 @@ def select_location_knowledge_to_share(
     4. anomaly/artifact locations (if target wants money)
     5. recently visited (high confidence)
     6. high confidence and not too stale
+
+    Uses location indexes to build a bounded candidate pool instead of scanning
+    the full known_locations table.  Candidate pool size is capped at
+    _SHARE_CANDIDATE_POOL_SIZE.
     """
+    from app.games.zone_stalkers.knowledge.location_knowledge import get_location_indexes  # noqa: PLC0415
+
     knowledge = ensure_location_knowledge_v1(source_agent)
     known_locations: dict[str, Any] = knowledge.get("known_locations") or {}
+    indexes = get_location_indexes(source_agent)
 
+    # ── Build a bounded candidate pool from indexes ────────────────────────────
+    # Complexity: O(K) where K = total index entries, not O(N=all known_locations)
+    _SHARE_CANDIDATE_POOL_SIZE = max(max_entries * 12, 60)
+    candidate_ids: set[str] = set()
+
+    # Feature-relevant candidates first (highest potential score boost)
+    if target_needs_shelter:
+        candidate_ids.update(indexes.get("known_shelter_location_ids") or [])
+    if target_needs_trader:
+        candidate_ids.update(indexes.get("known_trader_location_ids") or [])
+    if target_needs_exit:
+        candidate_ids.update(indexes.get("known_exit_location_ids") or [])
+    if target_needs_artifacts:
+        candidate_ids.update(indexes.get("known_anomaly_location_ids") or [])
+
+    # All feature indexes (even when target has no explicit need — they may be
+    # useful to the receiver anyway)
+    for feat_key in (
+        "known_trader_location_ids",
+        "known_shelter_location_ids",
+        "known_exit_location_ids",
+        "known_anomaly_location_ids",
+    ):
+        candidate_ids.update(indexes.get(feat_key) or [])
+        if len(candidate_ids) >= _SHARE_CANDIDATE_POOL_SIZE:
+            break
+
+    # High-quality visited locations
+    for loc_id in (indexes.get("visited_ids") or []):
+        candidate_ids.add(loc_id)
+        if len(candidate_ids) >= _SHARE_CANDIDATE_POOL_SIZE:
+            break
+
+    # Recently updated (fresh rumor / exchange entries)
+    for loc_id in (indexes.get("recently_updated_ids") or []):
+        candidate_ids.add(loc_id)
+        if len(candidate_ids) >= _SHARE_CANDIDATE_POOL_SIZE:
+            break
+
+    # ── Score candidates ───────────────────────────────────────────────────────
     scored: list[tuple[float, dict[str, Any]]] = []
-    for loc_id, entry in known_locations.items():
+    for loc_id in candidate_ids:
+        entry = known_locations.get(loc_id)
         if not isinstance(entry, dict):
             continue
         level = str(entry.get("knowledge_level") or LOCATION_KNOWLEDGE_EXISTS)
